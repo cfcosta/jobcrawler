@@ -95,6 +95,20 @@ do *not* invert to CodeAct but wrap the RLM in a `CrawlerGenerator(dspy.Module)`
 optimizer at a named predictor we own. `dspy.CodeAct` ("writes Python that calls your tools")
 remains the documented fallback if that predictor optimizes unevenly.
 
+**RLM vs CodeAct is empirically close, not RLM-obviously-better.** The load-bearing property is
+*write → run → iterate code over an environment*, which both satisfy; head-to-head, coding agents
+match or beat RLM on single-document tasks, recursion adds only ~6 pts (sometimes *negative* on
+strong frontier models), and RLM is *worse* than a plain call below a ~2¹⁴-token crossover
+[Coding-Agents, SRLM, RLM]. So: **gate recursion on snapshot size** (prefer the non-recursive /
+CodeAct path when the snapshot fits one context — the common homepage case; reserve recursive
+`llm_query` for genuinely large corpora like huge sitemaps/archives); add a **feed-clean fast-path**
+that skips exploration when `find_feeds`/`get_sitemap` already return a clean feed; keep the owned
+strategy predictor (§4.11) **module-agnostic** so an RLM→CodeAct swap doesn't invalidate it; and add
+a production-backbone **A/B** (RLM-recursive vs non-recursive CodeAct) on the held-out split in
+M1/M5, keeping the per-backbone winner. Define the fallback trigger *operationally*: the GEPA
+candidate fails to beat the incumbent across K budgets, or per-gate pass-rates regress on a subset.
+Keep **depth-1** recursion (sub-calls are leaf LMs; host tools are the follow-up channel) and async.
+
 A DSPy signature whose **docstring is the task instruction** (per project convention),
 driven by `dspy.RLM`. Illustrative shape (not implementation):
 
@@ -155,6 +169,18 @@ in-sandbox raise), **not** runtime or spend — pair a bounded `max_iterations` 
 wall-clock/spend cap, especially under `BestOfN`/`Refine`/GEPA multiplication. The default
 sandbox needs **Deno** installed.
 
+**Hard cost ceilings, not just iteration caps.** `max_iterations`/`max_llm_calls` do *not* bound
+sub-calls or spend — one REPL turn can launch a loop of O(|corpus|) `llm_query` calls, and the
+reference RLM root loop has *no* built-in iteration cap (it ends only on `FINAL` or no-tool) and
+over-recurses without an explicit prompt guard (one added sentence was the only fix) [RLM,
+RLM-from-scratch]. Enforce host-side: a hard sub-call counter (`AUTOCRAWLER_MAX_SUBCALLS`), a
+per-candidate token/$ ceiling that aborts one trajectory, and a *separate aggregate* cap across the
+`BestOfN`/`Refine`/GEPA fan-out; add an unconditional anti-over-subcall line to the prompt; budget
+against the **p95 tail**, not the mean (cost is heavy-tailed, fan-out multiplies it). The
+Pyodide/Deno sandbox itself adds ~2–3 s cold-start + per-call bridge tax per loop and does no real
+crawler work [Sanjaya] — confirm RLM reuses one warm sandbox per generation, else add that overhead
+to the spend cap.
+
 **Output handling:** `crawler_source` is written to `crawlers/<slug>.py` (and, by
 default, surfaced for human review — see §8) only after it passes the §6 acceptance gates.
 
@@ -180,6 +206,12 @@ def crawl(ctx) -> Iterable[Item]:     # yields normalized items; no network exce
   no filesystem writes, network egress **only** through the `ctx` proxy.
 - A failing script (exception, zero items, schema violation) is isolated to its site and
   recorded as a health signal — it never aborts the whole crawl.
+- `validate_crawler` and committed crawlers run in a **single pinned, reused** general-purpose sandbox
+  image (Python + httpx/lxml/selectolax/feedparser/playwright), not a per-site image, with a soft
+  ~10 s timeout + hard kill and **no network except the `ctx` egress-allowlist** — container isolation
+  alone is necessary-but-not-sufficient when exploring untrusted site content (§8). Size `BestOfN`
+  width + offline fixture re-eval against host RAM (~200 MB/container); acceptance is LLM-bound, not
+  sandbox-bound [LLM-in-Sandbox], so the budget knob is RLM call count, not container count.
 
 ### 4.5 Politeness & fetching (`ctx`, shared by all crawls)
 Centralized so generated scripts can't get it wrong: `robots.txt` compliance, per-host
@@ -300,6 +332,16 @@ planner instruction — not RLM's internals. GEPA rewrites that predictor's docs
 `dspy.CodeAct` is the fallback if the owned predictor optimizes unevenly. (Open mechanism §14:
 confirm the chosen module round-trips through JSON `save`/`load`.)
 
+Two load-bearing requirements on this predictor. **Seed it** with a hand-authored, *ordered-rule*
+docstring enumerating the discovery decisions (probe `find_feeds`/`get_sitemap` before DOM scraping;
+feed > sitemap-freshness > HTML-heuristic; boilerplate exclusion; "verify ≥N items before
+finalizing") — optimizers can't infer a rule set from a vacuous seed [MIPRO]. And define
+`site_features` (the predictor's **input**) to carry the per-site facts GEPA must *not* memorize
+(discovered feed/sitemap URLs, HTML outline), forcing it to evolve *generalizable* strategy rather
+than hard-coding fixture feed-URLs — GEPA's meta-prompt deliberately bakes domain facts into the
+instruction, so without this it overfits the trainset's site mix and **destroys the cold-start
+payoff** [GEPA, gskill]. Treat field descriptions as part of the optimizable surface.
+
 **One scoring core, three adapters.** §6's gate logic is a single pure scoring core that runs a
 candidate via `validate_crawler` and returns a `CandidateResult` + a derived float score + a
 `gate_failures` reason string. Three thin adapters sit over it — the callables have
@@ -317,6 +359,20 @@ reads `pred.trajectory` / `pred.final_reasoning`, lowering the score on a forced
 The noisy stability gate stays a hard accept/reject (§6) and is **excluded** from the scalar to
 keep selection low-variance.
 
+**Feedback content (the actual signal).** The GEPA/`gate_failures` text must be **un-summarized and
+concrete** — not "AST gate failed" but "AST gate: `import os` banned at line 12; use
+`urllib.parse`/`selectolax`"; not "0 items" but "0 items: `discovery_url` /feed returned 404, sitemap
+had 0 article-like URLs — try the /news index". **Never** LLM-summarize `CandidateResult` before
+handing it to `reflection_lm` (full traces scored 50.0 vs scores-only 34.6; *summaries were no better
+than the scalar* [Meta-Harness]). Order failures by the gate pipeline (earliest/most-blocking is the
+primary "fix this"), attribute to the owned predictor where causal (a runtime 0-items failure phrased
+as a `discovery_plan` deficiency — the only thing GEPA can change), and include the **delta** ("what
+would fix it") [GEPA, JudgeFlow, Feedback-Descent]. This is a pure transform over the already-computed
+`CandidateResult` (~2% of eval cost — no extra LLM-judge pass). Additionally feed **across-run
+aggregates**: condense the §4.9 run-history + §4.8 staleness per accepted site into per-site failure
+summaries and thread them in — patterns invisible in any single trace surface only in aggregate,
+which is where every large gain came from [HALO], and aggregation denoises single-run flakiness.
+
 **Trainset.** `list[dspy.Example]`, one per accepted generation:
 `dspy.Example(site_url=…, corpus=…, render=…, hints=…, discovery_method=…, discovery_url=…,
 crawler_source=…).with_inputs("site_url", "corpus", "render", "hints")` (mirrors the four
@@ -328,21 +384,75 @@ pollutes GEPA's frontier). The frozen `SiteSnapshot` is persisted with each exam
 `SandboxSerializable`, not a str) so generation replays reproducibly, under a bounded retention
 cap. The trainset lives in its own `trainset/` store, separate from §4.7 and §4.9.
 
-**Optimizer & split.** GEPA, justified by *feedback-richness* (not low data). Mandatory config or
-it hard-fails: the 5-arg feedback metric above; `reflection_lm` = a strong model
-(`AUTOCRAWLER_REFLECTION_MODEL`, distinct from the cheap `sub_lm`); exactly one budget (start
-`auto="light"`); `compile(..., teacher=None)`; `track_stats=True` to inspect the Pareto frontier.
-GEPA **maximizes the trainset** and holds out a small `valset` (the prompt-optimizer 20/80 rule
-does *not* apply); pass `valset` explicitly. Escalation: below a usable trainset, run no optimizer
-— keep §6's `BestOfN`/`Refine` (no trainset needed); once ~200+ pairs accumulate and a 40+-trial
-budget is acceptable, `MIPROv2(auto=…)` is an alternative/compose step. (Calibration: little signal
-below ~30 pairs; aim 300+.)
+**Saturation is the headline failure mode.** Because admission keeps only gate-passing, non-stale
+crawlers, every example is near-success — and a near-binary reward then makes **GEPA no-op** (its
+reflection LM never fires when every sampled minibatch scores all-correct; observed on three real
+runs) [GEPA-+25pts]. Mitigate: (i) the graded scalar (§6) so even passing crawlers differ; (ii)
+`optimize.py` asserts a **minimum fraction of sub-maximal scores** over the trainset before compiling,
+and warns + skips promotion if baseline ≈ optimized; (iii) **bias** GEPA's train/val toward
+*hard / discriminative* cases — recently-drifted sites, sites where `BestOfN`/`Refine` needed many
+tries or barely cleared gates — since difficulty, not raw count, supplies signal [Meta-Harness, HALO].
+Admit a pair only after the §8 adversarial cross-validation.
 
-**Promotion gate (regression-safe).** Evaluate the candidate with `dspy.Evaluate` on a **frozen
-held-out split** of sites, run **offline against §12 recorded fixtures + frozen snapshots** — never
-live (live eval would hammer real sites, §4.5, and is non-deterministic). Promote and `save()`
-**only if it beats the incumbent** on that split. The held-out split is never optimized against;
-GEPA gets train+val.
+**Optimizer ladder.** Escalate by trainset size, not straight to GEPA:
+- *No trainset* → run no optimizer; keep §6's `BestOfN`/`Refine` (needs none).
+- *~5–20 pairs* → **generalization-guided few-shot exemplar selection** over the owned predictor
+  (`BootstrapFewShotWithRandomSearch`): a pair's value = how much including it as a demo raises
+  crawler-acceptance on *other* frozen snapshots (held-out transfer), with the scoring core as the
+  utility. Highest-ROI, cheapest lever and available long before GEPA [CodeAdapt] — the rung the
+  earlier draft skipped.
+- *feedback-rich regime* → **GEPA** (instruction evolution), justified by *feedback-richness*, not low data.
+- *~200+ pairs* → **`MIPROv2` configured for JOINT instruction+demo** optimization (demos bootstrap
+  from the inputs-only trainset; the gate-accept threshold *is* MIPRO's λ). Do **not** run
+  instruction-only/0-shot MIPRO — the weaker lever in 6/7 tasks [MIPRO].
+
+**Three disjoint pools — assert it.** GEPA internally splits its training data into `D_feedback`
+(reflective minibatches) and `D_pareto` (its candidate-selection set, = our `valset`, passed
+explicitly to `compile`). The **promotion held-out** is a *third*, frozen pool GEPA never sees, used
+only by `dspy.Evaluate` after compile. The earlier draft conflated `valset` with the promotion set —
+a leak. Assert (and M5-test) zero overlap across train / val / promotion; gskill's ~67/17/20
+(200/50/60) split is a reasonable default [GEPA, RLM♥GEPA, gskill].
+
+**GEPA config.** 5-arg feedback metric; `reflection_lm` = strong (`AUTOCRAWLER_REFLECTION_MODEL`,
+distinct from `sub_lm`, ideally able to read raw traces); exactly one budget (`auto="light"` to start
+— expect ~O(5) accepted mutations, gains early, tens of minutes/task at thread=1; a low accept-count
+is *not* failure); `compile(..., teacher=None)`; `track_stats=True`. **Validation dominates the
+budget** (train rollouts to optimum can be ~6–737), so keep `valset`/`D_pareto` **small** — each
+rollout is a full sandboxed crawl — and cap it as a knob; keep `minibatch≈3`; **retain Pareto
+sampling** (a greedy selector collapses to a local optimum after ~one iteration); leave **Merge OFF**
+for v1 (single owned predictor; Merge is model-sensitive and can regress weaker models)
+[GEPA, GEPA-+25pts].
+
+**Cost lever: optimize cheap, deploy strong.** The offline run MAY use a *cheaper* generation
+executor — the optimized **text** artifact transfers *up* to the strong pinned online executor
+unchanged [RLM♥GEPA, gskill]. Make this a **gate, not an assumption**: run the held-out promotion eval
+on the *deployment* executor tier (and `sub_lm`), so a "weak-model-crutch" artifact that only helps
+the cheap optimizer is caught.
+
+**Data sizing — reconciled.** Keep ~300 as the long-run *corpus* target for diversity/coverage, but
+make each GEPA run's train/val a **small, hard, discriminative subset** (~50 full evals/run is the
+norm; each is a sandboxed crawl) — a small discriminative valset beats a large frozen one
+[Meta-Harness, MIPRO].
+
+**Promotion gate (regression-safe).** Evaluate candidate **and incumbent** on the *same* frozen
+fixtures, offline (never live — that would hammer real sites, §4.5, and is non-deterministic),
+averaging ≥2–3 passes (or temperature=0/seeded) since each gate run spins a fresh non-deterministic
+RLM sandbox. Promote only if the candidate beats the incumbent by a **margin exceeding eval noise**
+(default ≥ one held-out fixture's weight, 1/|held-out|) — *not* strictly-greater on one pass, which
+promotes noise (HALO reports a noisy "peak"; DGM measured ~2.3% cross-run std) [HALO, DGM,
+GEPA-+25pts]. Add a **per-stratum / backward-transfer guard**: bucket the held-out by
+`discovery_method × render-required × Cloudflare-class` and require **no bucket and no individual
+fixture** to regress below incumbent by more than ε — an optimized strategy that lifts one class while
+tanking another is documented, and the aggregate masks it [HALO, gskill, Self-Evolving-survey]. Record
+per-bucket scores + accepted-mutation count in the versioned artifact. Split the held-out into a
+**drift** subset (fixtures simulating a changed site the incumbent now fails) and a **cold-start**
+subset (held-out archetypes the generator never saw — feed-less, JS-rendered, sitemap-only,
+non-English, Cloudflare-class; decontaminated by host/template lineage) and report deltas per subset,
+matching the two claimed payoffs [Agent-Workflow-Memory]. **Capability-vs-harness triage:** if a site
+stays unaccepted across K regenerations spanning ≥2 generator versions, flag it as a *capability /
+infra* bottleneck (escalate to hints / a new host tool / stealth browser), **exclude** it from the
+trainset and promotion split, and report it — don't burn offline budget on unwinnable sites; compare
+incumbent vs candidate only over fixtures whose failure is *controllable* [HALO].
 
 **Trigger & persistence.** Out-of-band — manual (the optional §4.9 HTTP surface), a slow
 `AUTOCRAWLER_REOPT_CHECK` cadence, and/or a trainset-growth threshold of *+M* health-confirmed
@@ -352,6 +462,17 @@ contrary to §8). `generator.py` reconstructs `CrawlerGenerator` and `.load()`s 
 back to baseline. Artifacts are versioned/timestamped (tagged with trainset snapshot + held-out
 score), the prior kept for rollback via a single config pointer, and the DSPy version pinned
 alongside. The generator program is reviewed separately from per-crawler review (§8).
+
+The optimized state is **declarative text** (the strategy instruction / a strategy "skill" string
+injected into the prompt) — instruction-string and typed-predictor targets are interchangeable, and a
+plain text artifact trivially round-trips through JSON, **de-risking** the §14 typed-predictor
+question (the published precedents [RLM♥GEPA, gskill] all evolve a *text* artifact, never a typed
+predictor end-to-end). GEPA must **not** be extended to emit/evolve crawler *code* (out of scope).
+Acceptance criteria: a `save → load → re-score` round-trip yielding identical held-out scores; a
+**tested rollback** (flip the config pointer to the prior `generator.json`, confirm the regeneration
+loop recovers); and a **pre-build toy-example milestone** proving the chosen owned predictor
+GEPA-optimizes, JSON-saves, reloads, and re-scores identically *before* committing to that mechanism
+— else default to the instruction-string / CodeAct path.
 
 **Honest payoff.** This does not make "every site better over time" — the input is a near-static
 `sites.yaml`. It optimizes for (a) **regeneration quality under drift** (§4.8) and (b) **cold-start
@@ -371,20 +492,49 @@ on newly-added/unseen sites**, validated on the held-out split.
 A generated script is accepted only if it passes, in order:
 1. **Static analysis** — AST allowlist; no banned imports/builtins; matches the §4.3 contract.
    Consumes `crawler_source.code` (the field is a `dspy.Code`, fences already stripped — §4.2).
-2. **Runtime validation** — yields ≥ `min_items`; every item has non-empty `title`,
-   `body`, and a valid on-domain `url`; runs within time/page/memory budget; obeys robots.
+2. **Runtime validation & completeness** — yields ≥ `min_items`; every item has non-empty `title`,
+   a **sufficiently long, non-boilerplate** `body`, and a valid on-domain `url`; runs within
+   time/page/memory budget; obeys robots. Plus two anti-under-enumeration checks — a news crawler is
+   an *exhaustive-enumeration* task and RLMs reliably under-enumerate on "find every X" (e.g. 9–26 of
+   ~114) [Sanjaya]: (a) **must-observe** — reject/down-score a candidate that never called
+   `validate_crawler` before `SUBMIT`, or chose `discovery_method="scrape"` without first consulting
+   `find_feeds`/`get_sitemap` (the docstring's "validate first" is *enforced*, not merely requested);
+   (b) **enumeration floor** — compare the crawler's URL count against the host-side feed/sitemap
+   entry count already in the corpus, flagging a crawler that yields far fewer (a homepage-only
+   sampler that missed the feed). Scraping a homepage *samples* "recent"; a feed/sitemap *enumerates*
+   — reinforcing feed-first.
 3. **Stability** — two runs overlap by **Jaccard of canonical URLs ≥ a configured threshold**
    (§4.6 canonicalizes `url`). A **hard** accept/reject gate, but *excluded from the scalar score*
    fed to optimizers (§4.11) — normal homepage churn would otherwise inject selection variance.
 4. **Review gate** (§8) — for v1, default-on human approval before a script is enabled.
 
-Gates 1–2 are computed by **one pure scoring core** that runs a candidate via `validate_crawler`,
-returns a `CandidateResult` + a derived float score + a `gate_failures` reason string. Generation
-wraps the RLM call in `dspy.BestOfN` (sample N, keep the best-scoring) or `dspy.Refine` (retry —
-the 3.x replacement for the removed Assert/Suggest) over that score. The **same scoring core, not
-the same callable**, also feeds the §4.11 optimizer through signature-correct adapters — the
-`reward_fn(args, pred)`, `dspy.Evaluate`, and 5-arg GEPA metrics have incompatible signatures and
-must not be conflated (§4.11).
+Gates 1–2 are computed by **one pure scoring core** that runs a candidate via `validate_crawler` and
+returns a `CandidateResult`, a `gate_failures` reason string, and a **graded, continuous, multi-axis**
+score — *not* a 0/1 gate verdict. Compute the hard pass/fail gates **first**, then a multiplicative
+quality score over survivors (items-yielded ratio vs target N · fraction of items with all of
+title/body/url · body non-emptiness/length rate · on-domain-URL validity · discovery-method quality,
+minus a forced-extraction penalty). A binary or single-axis scalar **starves both** candidate
+selection (the GEPA Pareto frontier collapses to a coin-flip) and the optimizer (no gradient for
+partial credit on near-misses); gate-then-combine also stops one axis (raw `item_count`) dominating
+or being gamed [GEPA-+25pts, GEPA, SRLM]. Keep the noisy stability gate **out** of this scalar —
+generalize the principle: route flaky signals as descriptive text, never into the optimization
+target. Add a *low-weight* efficiency tie-breaker (`pages_fetched`/turn-count) among gate-passing
+candidates, since on strong backbones cost/latency may be the *only* measurable optimization gain
+[gskill]. Generation wraps the RLM call in `dspy.BestOfN`/`dspy.Refine` over the scalar; the **same
+scoring core** (not the same callable) feeds the §4.11 optimizer through three signature-correct
+adapters — `reward_fn(args, pred)`, `dspy.Evaluate`, and the 5-arg GEPA metric have incompatible
+signatures and must not be conflated (§4.11).
+
+**Selection is best-arm identification under a tight budget.** Dispatch the N candidates
+**concurrently** (diversity costs ~1× wall-clock, not N× — SRLM's K=8 beat single-trajectory RLM by
+up to 22%). When the per-candidate validation budget is small (the normal case — each
+`validate_crawler` spins a sandbox and may escalate to a stealth browser), allocate by
+**Sequential-Halving / Reject**, not flat argmax and not UCB/Thompson (the wrong objective for
+picking one arm): validate all cheaply, drop the bottom half, give survivors more passes, repeat over
+⌈log₂N⌉ rounds [SRLM, TRIPLE]. Measure budget in **spend / sandbox-seconds** (charge stealth-browser
+validations at true cost), not evaluation count. Prefer feedback-carrying `Refine` (each retry sees
+the prior `gate_failures`) but **cap retry depth** — pointwise retry plateaus [Feedback-Descent].
+Default N≈4–8.
 
 ## 7. Project layout (mirrors `bizup-news` conventions)
 ```
@@ -430,6 +580,22 @@ The central risk is **executing model-written code against the live web**. Mitig
 - **Review gate**: generated/regenerated scripts are written for human approval (e.g.
   opened as a PR) before being enabled. Configurable; default-on in v1 precisely because
   the artifact is generated code.
+- **The harness is an immutable trusted computing base.** The acceptance gates, sandbox policy, AST
+  allowlist, and SSRF guard are *never* authored, parameterized, fetched, or relaxed by
+  model-generated code or by the GEPA-optimized predictor — only by version-pinned host code/humans.
+  GEPA may rewrite the strategy instruction but can **never** widen the allowlist or weaken a gate
+  (gates are fixed adjudicators, not optimization targets).
+- **Hide the scorer from the optimized loop.** The scoring core's exact acceptance predicates and
+  numeric thresholds are not exposed to the generator/RLM: feedback says *what* failed semantically
+  ("0 items extracted"), never the predicate/threshold a candidate could target. Objective-hacking
+  rose specifically when the scorer was *visible* to a self-modifying agent that reward-hacked its
+  evaluator by deleting detection markers [Darwin-Gödel-Machine]; under-specified self-evolution drove
+  reward-hacking / alignment-faking up to 78% [Self-Evolving-survey].
+- **Adversarial admission.** The reward (item-count + field-presence + stability) is a gameable proxy
+  — a crawler could pad/fabricate items or scrape off-domain. Before a pair is admitted as a positive
+  exemplar (§4.11), cross-validate its items against independent signals (URLs resolve, titles match
+  the live `<title>`, duplicate/boilerplate-body penalty, off-domain-URL penalty). Acceptance rests on
+  the **actual** `CandidateResult`, never the model's *claimed* counts (the "imagined variable" risk).
 
 ## 9. DSPy / runtime notes
 - `dspy.RLM` is `@experimental` — pin DSPy `3.2.x` (already a dep of `bizup-news`).
@@ -443,7 +609,15 @@ The central risk is **executing model-written code against the live web**. Mitig
   fails the `isinstance` check) and implement all four methods; `to_sandbox`/`sandbox_assignment`
   round-trip a *multi-part* payload (homepage, robots, sitemap, N articles) into named REPL
   variables, and `rlm_preview` surfaces **structure** (discovered feed/sitemap URLs + an HTML
-  outline), not byte counts. Never pass megabyte HTML as a plain `str` field.
+  outline), not byte counts. Never pass megabyte HTML as a plain `str` field. To/from-sandbox must
+  yield only **pickle-clean** values (str/bytes/dict/list): the RLM REPL persists state via pickle
+  between iterations and *silently drops* non-pickleable globals (no live lxml trees, httpx clients,
+  or closures) [RLM-from-scratch] — unit-test `pickle.dumps` on every assigned variable and enable the
+  warn-unpickleable flag during generation. Expose the parts as an **addressable dict/namespace**
+  (`homepage`, `robots`, `sitemap`, `articles[i]`) with in-REPL `grep(pattern)`/slice helpers (Pyodide
+  lacks grep/sed) — addressable parts beat one concatenated blob (~6 pts / up to 8× fewer tokens)
+  [Coding-Agents, LLM-in-Sandbox]. Capture `crawler_source` via the REPL **FINAL channel** (bypasses
+  the root LM's output-token limit); gate-1 treats a non-parsing `crawler_source` as truncation.
 - **Interpreter left at default.** Keep RLM's `interpreter=` at the default Pyodide/Deno; a custom
   host-CPython interpreter was considered and rejected — it would run the model's *ungated*
   exploratory code in a network-capable process, dissolving the no-network isolation §8 relies on.
@@ -453,6 +627,14 @@ The central risk is **executing model-written code against the live web**. Mitig
   drive the planner with `DummyLM` (`from dspy.utils.dummies`) for Deno-free, model-free tests.
 - Obtain the LM via `dspy.context`, not the thread-owned `dspy.configure`; build it `cache=False`
   for generation (§4.2). Use `aforward`/async to match the news project's style.
+- **Order gates cheapest-first**, short-circuiting on first failure: AST → single-run yield → two-run
+  Jaccard stability → (offline only) multi-pass promotion eval, so the expensive multi-run evaluation
+  runs only on candidates that cleared the cheap screens [Darwin-Gödel-Machine].
+- **Pin the DSPy call signatures.** The GEPA/MIPROv2 signatures this spec leans on (5-arg feedback
+  metric, `reflection_lm`, `auto=`, `teacher=None`, `MIPROv2(auto=)`) and the typed-predictor JSON
+  round-trip are *unverified against the ingested docs* — validate them against the installed DSPy
+  3.2.x source in a build-time smoke test before M5, and assert `list(generator.named_predictors())`
+  contains the strategy predictor before any `compile` (empty ⇒ GEPA has nothing to optimize).
 
 ## 10. CLI & operations
 | command | does |
@@ -474,6 +656,9 @@ stays for manual one-shot runs and CI.
 | `AUTOCRAWLER_REFLECTION_MODEL` | strong LM | GEPA `reflection_lm` for self-improvement (§4.11) |
 | `AUTOCRAWLER_MAX_ITERATIONS` | e.g. `25` | RLM root iteration cap (generation) |
 | `AUTOCRAWLER_MAX_LLM_CALLS` | e.g. `60` | RLM sub-LLM call-count cap (generation) |
+| `AUTOCRAWLER_MAX_SUBCALLS` | e.g. `40` | hard cap on `llm_query` sub-calls per generation (host-enforced) |
+| `AUTOCRAWLER_SPEND_CAP` | e.g. `$0.80` | per-candidate token/$ ceiling; aborts one trajectory |
+| `AUTOCRAWLER_FANOUT_SPEND_CAP` | e.g. `$8/site` | aggregate ceiling across BestOfN/Refine/GEPA fan-out |
 | `NEWS_API_URL` | `http://localhost:8000` | `bizup-news` base URL for `POST /news` |
 | `AUTOCRAWLER_STATE_URL` | local Postgres/SQLite | crawl-state + health store |
 | `AUTOCRAWLER_USER_AGENT` | identifying UA string | sent on every request |
@@ -495,8 +680,12 @@ stays for manual one-shot runs and CI.
   three adapters score / feed back correctly, that a forced extraction (`final_reasoning`) is
   caught, and that bad output is rejected. No Deno, no live network.
 - **Self-improvement (§4.11)** — `dspy.Evaluate` over frozen `SiteSnapshot`s + recorded fixtures;
-  assert the held-out promotion gate refuses a non-improving candidate and that `save`/`load` JSON
-  round-trips the generator program.
+  assert: the promotion gate refuses a non-improving candidate **and** one that wins on aggregate
+  while regressing a stratum (margin + per-bucket guard); `save`/`load` JSON round-trips the program
+  to identical held-out scores; train/val/promotion pools are **disjoint**; `named_predictors()` is
+  non-empty before `compile`; a tested **rollback** restores the prior generator; the **saturation**
+  assertion fires when the trainset is all-near-maximal; and a build-time smoke test pins the
+  GEPA/MIPROv2 call signatures against installed DSPy.
 - **Runner/contract** — golden HTML/feed fixtures + recorded HTTP; assert normalized items
   and dedup behavior. A couple of hand-written reference crawlers double as contract tests.
 - **Politeness/SSRF** — unit tests proving robots/rate-limit/allowed-host enforcement.
@@ -504,7 +693,7 @@ stays for manual one-shot runs and CI.
 
 ## 13. Milestones
 - **M0 — Path proof:** contracts + runner + one *hand-written* crawler + `POST /news`. No LLM.
-- **M1 — Generator:** `dspy.RLM` + host tools + `validate_crawler` loop; generate scripts for a seed list; acceptance gates (§6).
+- **M1 — Generator:** `dspy.RLM` + host tools + `validate_crawler` loop; generate scripts for a seed list; acceptance gates (§6); **A/B the production backbone** (RLM-recursive vs non-recursive CodeAct) on a held-out split, keep the per-backbone winner.
 - **M2 — Scheduler & robustness:** the `autocrawl run` scheduler (due-selection, concurrency, retry/backoff) + run history; dedup/state, politeness, headless tier, Cloudflare challenge tier (§4.10), SSRF/sandbox hardening.
 - **M3 — Self-healing:** health tracking + stale detection + scheduler-driven regeneration with review gate.
 - **M4 — Operate:** metrics/observability, optional status/control HTTP surface.
@@ -514,7 +703,10 @@ stays for manual one-shot runs and CI.
   justified by *feedback-richness*, not low data; the payoff is better regeneration under drift and
   better cold-start on unseen sites (validated on a held-out split), not a monotonically improving
   fleet. Both GEPA and RLM are `@experimental`; `dspy.CodeAct` is the fallback if the owned predictor
-  optimizes unevenly.
+  optimizes unevenly. Ships the graded reward, saturation guard, three-pool split,
+  hidden-scorer/immutable-TCB invariant, and regression-safe promotion gate — **preceded** by a
+  pre-build toy validation that GEPA-optimize → JSON-save → reload → re-score is identical on the
+  owned predictor (§4.11).
 
 ## 14. Open questions / follow-ups
 1. **News API idempotency** — recommend extending `POST /news` to accept `url`/`source`/`published_at`
@@ -526,6 +718,30 @@ stays for manual one-shot runs and CI.
 6. **Challenge backend** — start with FlareSolverr (fastest to wire) or an in-process stealth
    browser (fewer moving parts)? Decide empirically against the real target sites, and settle the
    egress/proxy strategy (IP+UA pinning) and whether a paid solver is ever allowed for Turnstile.
-7. **Optimized-program round-trip** — confirm the chosen generator module (RLM, or the CodeAct
-   fallback) actually persists/reloads through DSPy's JSON `save`/`load`; the RLM skill documents
-   only `forward`/`aforward`/`.tools`. Validate before relying on §4.11 persistence.
+7. **Typed-predictor round-trip** — *de-risked*: the optimized artifact is declarative **text**, which
+   round-trips trivially, and the precedents ([RLM♥GEPA], [gskill]) evolve a text artifact. Residual
+   risk is whether a *typed* `dspy.ChainOfThought` predictor round-trips end-to-end; the pre-build toy
+   milestone (§4.11/§13) settles it, and the instruction-string/CodeAct path is the default if not.
+   Pin the GEPA/MIPROv2 call signatures via a build-time smoke test (§9).
+8. **Tuning the new knobs** — saturation and trainset-overfitting are *known* failure modes (§4.11),
+   not open questions, but their thresholds need calibrating against the first real trainset: graded-
+   reward axis weights, the sub-maximal-fraction floor, promotion margin ε, the hard-case sampling
+   ratio, and `min_items`/enumeration-floor per site class.
+
+## 15. Evidence base
+
+Decisions above are grounded in the local research corpus (cited inline by short tag). Key sources and
+what they anchor — full per-paper findings live in workflow `wqnhxlk46`:
+
+- **GEPA: Reflective Prompt Evolution** (`#50c21d`) — `D_feedback`/`D_pareto` split, Pareto sampling, validation dominates budget, `minibatch≈3`, Merge model-sensitivity → §4.11.
+- **"how GEPA lifted a 1.2B model 25 pts"** (`#e643b2`) — the **saturation no-op**, graded reward + hard-case bias, `auto="light"` profile, per-example "trap" feedback → §4.11, §6.
+- **RLM ♥ GEPA** (`#286485`) — GEPA evolves an external *text* skill on an RLM (never internals); optimize-cheap/deploy-strong transfer; three-way held-out → §4.11.
+- **HALO / Recursive Agent Optimization on Terminal Bench** (`#472657`, `#aa636b`) — aggregate trace decomposition is the gain source; per-stratum regressions + noisy "peak"; capability-vs-harness triage → §4.11.
+- **Meta-Harness** (`#c78a92`) — full traces ≫ scores-only, *summaries no better than the scalar*; small-hard-discriminative set → §4.11 feedback + data sizing.
+- **Darwin Gödel Machine** (`#4008a8`) — self-modifying agents reward-hack a *visible* evaluator → immutable TCB + hidden scorer + promotion margin > noise → §8, §4.11.
+- **SRLM** (`#92bd81`) & **TRIPLE** (`#d550b5`) — parallel K-sample selection beats single-trajectory (+22%); Sequential-Halving over argmax/UCB; budget = cost → §6 selection.
+- **Coding Agents are Long-Context Processors** (`#9b7ef3`) + **RLM** (`#ea21e9`) + **From Scratch** (`#0bbf98`) — code+environment substrate; addressable parts ≫ blob; recursion not the driver / hurts strong models; unbounded root loop; pickle drops globals; FINAL channel → §4.2, §9.
+- **MIPRO** (`#21498b`) + **CodeAdapt** (`#c4ad60`) — joint instruction+demo ≫ instruction-only; vacuous seeds underperform; exemplar selection is the cheap early lever → §4.11 ladder + seed.
+- **Agent Workflow Memory** (`#971a5a`) + **gskill** (`#39b2ab`) + **BetterTogether** (`#5417b9`) — gains widen with the train/test gap; cross-model skill transfer + efficiency-only gains on strong models; prompts-before-weights (weights out of scope v1) → §4.11.
+- **Survey of Self-Evolving Agents** (`#b7bd66`) — offline/online taxonomy, BWT/FGT, golden-dataset + tested rollback, quantified reward-hacking/alignment-faking risk → §4.11, §8.
+- Supporting: **LLM-in-Sandbox** (`#00c82a`), **CodeAct** (`#7a8470`), **Sanjaya** (`#745267`), **JudgeFlow** (`#e3bbdd`), **Feedback Descent** (`#244e30`), **TextGrad** (`#be34e3`).
