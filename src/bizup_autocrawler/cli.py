@@ -113,7 +113,13 @@ def crawl_one(site: Site, *, store: StateStore, news: NewsClient) -> CrawlSummar
     site_url, crawl_fn = load_crawler(module)
     ctx = Ctx({normalize_host(site_url)})
     return crawl_site(
-        site.slug, crawl_fn, ctx, store, news, first_crawl_cap=config.first_crawl_cap()
+        site.slug,
+        crawl_fn,
+        ctx,
+        store,
+        news,
+        first_crawl_cap=config.first_crawl_cap(),
+        min_body_chars=config.min_body_chars(),  # only ingest complete (§4.6)
     )
 
 
@@ -158,7 +164,8 @@ def cmd_crawl(args: argparse.Namespace) -> int:
             summary = crawl_one(site, store=store, news=news)
             print(
                 f"{summary.site}: found={summary.items_found} "
-                f"new={summary.new_items} errors={summary.errors}"
+                f"new={summary.new_items} incomplete={summary.incomplete} "
+                f"errors={summary.errors}"
             )
     finally:
         store.close()

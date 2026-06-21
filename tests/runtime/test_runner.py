@@ -183,6 +183,63 @@ def test_dict_yield_is_validated_and_ingested() -> None:
     store.close()
 
 
+def test_incomplete_bodies_are_not_ingested() -> None:
+    # "Only ingest complete" (§4.6): a paywall teaser / truncated body is dropped
+    # host-side before ingest, whatever the (untrusted, generated) crawler yields.
+    def crawl(ctx: CtxProtocol) -> Iterable[Item]:
+        yield _one("https://example.com/teaser", body="a short teaser paragraph")
+        yield _one("https://example.com/full", body="x" * 600)
+
+    store = StateStore(":memory:")
+    posts, news = _recording_news()
+
+    summary = crawl_site("s", crawl, _ctx(), store, news, min_body_chars=400)
+
+    assert summary.new_items == 1  # only the complete article ingested
+    assert summary.incomplete == 1  # the teaser, surfaced for visibility
+    assert [p["body"] for p in posts] == ["x" * 600]
+    store.close()
+
+
+def test_incomplete_item_stays_unseen_for_re_evaluation() -> None:
+    # A teaser is not marked seen, so once the page carries the full body (the
+    # article is un-paywalled / fixed) the next crawl ingests it — no permanent drop.
+    served = {"body": "still just a teaser"}
+
+    def crawl(ctx: CtxProtocol) -> Iterable[Item]:
+        yield _one("https://example.com/a", body=served["body"])
+
+    store = StateStore(":memory:")
+    canon = canonicalize_url("https://example.com/a")
+    posts, news = _recording_news()
+
+    first = crawl_site("s", crawl, _ctx(), store, news, min_body_chars=400)
+    assert (first.new_items, first.incomplete) == (0, 1)
+    assert not store.is_seen("s", canon)  # left unseen for re-evaluation
+
+    served["body"] = "x" * 600  # the page now serves the full article
+    second = crawl_site("s", crawl, _ctx(), store, news, min_body_chars=400)
+    assert second.new_items == 1
+    assert [p["body"] for p in posts] == ["x" * 600]
+    store.close()
+
+
+def test_no_floor_preserves_prior_ingest_behavior() -> None:
+    # Default (min_body_chars=0) is off: short bodies still ingest, so the runner's
+    # existing callers and the M0 path are unchanged unless completeness is wired.
+    def crawl(ctx: CtxProtocol) -> Iterable[Item]:
+        yield _one("https://example.com/a", body="x")
+
+    store = StateStore(":memory:")
+    posts, news = _recording_news()
+
+    summary = crawl_site("s", crawl, _ctx(), store, news)
+
+    assert (summary.new_items, summary.incomplete) == (1, 0)
+    assert len(posts) == 1
+    store.close()
+
+
 def test_terminal_ingest_marks_seen_and_is_not_retried() -> None:
     def crawl(ctx: CtxProtocol) -> Iterable[Item]:
         yield _one("https://example.com/a")

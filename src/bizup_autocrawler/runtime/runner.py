@@ -11,6 +11,12 @@ and writes a §5 Run record. Two policies live here (the state store is dumb):
     RETRY (pre-insert failure) → leave the URL unseen so the next crawl retries;
     TERMINAL (5xx / after-send) → mark seen so it is never re-sent (a re-send is
     duplicate server-side LLM spend, not just a duplicate row).
+  * **Only ingest complete (§4.6).** An item whose body is below ``min_body_chars``
+    is a paywall teaser / truncated extraction; it is dropped before ingest and
+    left *unseen* (so a later, complete fetch can still be picked up). The floor is
+    a host-side guarantee — independent of what the untrusted generated crawler
+    decides to yield. It is opt-in (default 0 = off) and wired to ``config`` by the
+    CLI, so the runner's other callers keep their prior behavior.
 
 On a site's *first* crawl an optional newest-K cap (``AUTOCRAWLER_FIRST_CRAWL_CAP``)
 ingests only the freshest items and marks the historical tail seen, so a large
@@ -41,6 +47,7 @@ class CrawlSummary:
     new_items: int
     errors: int
     pages_fetched: int
+    incomplete: int = 0  # yielded but dropped as below the completeness floor (§4.6)
 
 
 def crawl_site(
@@ -52,6 +59,7 @@ def crawl_site(
     *,
     first_crawl_cap: int | None = None,
     governor: RateGovernor | None = None,
+    min_body_chars: int = 0,
 ) -> CrawlSummary:
     harden_xml()  # XXE / billion-laughs off before the crawler parses feeds (§8)
     is_first = store.last_run(slug) is None
@@ -63,7 +71,10 @@ def crawl_site(
     governor = governor or RateGovernor(config.ingest_rate())
 
     items, errors = _collect(crawl_fn, ctx)
-    fresh, historical = _apply_first_crawl_cap(items, is_first, first_crawl_cap)
+    # Only ingest complete (§4.6): teasers/truncated bodies are dropped here, never
+    # marked seen — a later complete fetch of the same URL can still be ingested.
+    complete = _complete_items(items, min_body_chars)
+    fresh, historical = _apply_first_crawl_cap(complete, is_first, first_crawl_cap)
 
     # The operator's denylist (§11) is load-bearing on the dedup key (§4.6): two
     # URLs differing only on a tracking param must collapse to one.
@@ -96,7 +107,14 @@ def crawl_site(
         errors=errors,
         pages_fetched=ctx.pages_fetched,
     )
-    return CrawlSummary(slug, len(items), new_items, errors, ctx.pages_fetched)
+    return CrawlSummary(
+        slug,
+        len(items),
+        new_items,
+        errors,
+        ctx.pages_fetched,
+        len(items) - len(complete),
+    )
 
 
 def _collect(crawl_fn: CrawlFn, ctx: Ctx) -> tuple[list[Item], int]:
@@ -119,6 +137,18 @@ def _collect(crawl_fn: CrawlFn, ctx: Ctx) -> tuple[list[Item], int]:
     except Exception:  # untrusted generated code — never abort the fleet
         errors += 1
     return items, errors
+
+
+def _complete_items(items: list[Item], min_body_chars: int) -> list[Item]:
+    """Keep only items whose body clears the completeness floor (§4.6).
+
+    ``min_body_chars <= 0`` disables the filter (the default, so non-CLI callers
+    are unchanged). A dropped item is simply omitted — the runner never marks it
+    seen, so a later complete fetch of the same URL is still ingestable.
+    """
+    if min_body_chars <= 0:
+        return items
+    return [item for item in items if len(item.body.strip()) >= min_body_chars]
 
 
 def _apply_first_crawl_cap(
