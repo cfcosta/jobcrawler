@@ -91,6 +91,19 @@ def max_tokens() -> int:
     return _int("AUTOCRAWLER_MAX_TOKENS", 16000)
 
 
+def corpus_homepage_chars() -> int:
+    """Cap on homepage HTML kept in the §9 snapshot. Raw pages run to 100s of KB;
+    unbounded, the corpus blows past the model's context and a reasoning LM burns
+    its whole token budget (empty output). Link discovery still uses the full page."""
+    return _int("AUTOCRAWLER_CORPUS_HOMEPAGE_CHARS", 60000)
+
+
+def corpus_article_chars() -> int:
+    """Cap on each article sample kept in the snapshot (enough to learn the body
+    selector; a content-heavy page is otherwise 100s of KB of cruft)."""
+    return _int("AUTOCRAWLER_CORPUS_ARTICLE_CHARS", 20000)
+
+
 # --- ingest / news (§4.7) --------------------------------------------------
 
 

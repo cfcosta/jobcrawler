@@ -175,6 +175,37 @@ def test_prefetch_corpus_assembles_from_ctx() -> None:
     assert corpus["feeds"] == ["https://x.com/feed.xml"]  # feed-first discovery
 
 
+def test_prefetch_clips_oversized_content_but_discovers_from_the_full_page() -> None:
+    # Raw pages run to 100s of KB; the snapshot must bound them (§9) or a reasoning
+    # LM burns its whole token budget. Link discovery still uses the full homepage,
+    # so a clip that drops late links doesn't cost article samples.
+    homepage = '<a href="/a1">A1</a>' + "x" * 200_000  # link is early, body is huge
+    pages = {
+        "/": homepage,
+        "/robots.txt": "",
+        "/sitemap.xml": "",
+        "/a1": "y" * 200_000,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=pages.get(request.url.path, ""))
+
+    ctx = Ctx(
+        {"x.com"},
+        client=httpx.Client(
+            transport=httpx.MockTransport(handler), follow_redirects=False
+        ),
+    )
+    corpus = prefetch_corpus(
+        "https://x.com/", ctx, homepage_chars=1000, article_chars=500
+    )
+
+    assert len(str(corpus["homepage"])) == 1000  # clipped
+    articles = cast("list[dict[str, str]]", corpus["articles"])
+    assert articles  # still discovered the link from the full page
+    assert all(len(a["text"]) <= 500 for a in articles)  # each sample clipped
+
+
 def test_prefetch_discovers_news_sitemap_and_counts_expected_articles() -> None:
     # robots advertises a news sitemap; prefetch fetches it (not the generic
     # /sitemap.xml) and counts its <loc> entries as the enumeration target (§6).

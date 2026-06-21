@@ -21,6 +21,7 @@ from html.parser import HTMLParser
 from typing import TYPE_CHECKING
 from urllib.parse import urljoin
 
+from bizup_autocrawler import config
 from bizup_autocrawler.urls import normalize_host, valid_on_domain_url
 
 if TYPE_CHECKING:
@@ -150,15 +151,28 @@ def on_domain_links(html: str, base_url: str) -> list[str]:
 
 
 def prefetch_corpus(
-    site_url: str, ctx: Ctx, *, max_articles: int = 5
+    site_url: str,
+    ctx: Ctx,
+    *,
+    max_articles: int = 5,
+    homepage_chars: int | None = None,
+    article_chars: int | None = None,
 ) -> dict[str, object]:
     """Fetch a site's snapshot through ``ctx`` into the addressable corpus (§4.2).
 
     The homepage drives discovery; robots/sitemap are best-effort (missing ones
     become empty). A few on-domain links are pulled as article samples. All
-    fetching goes through ``ctx`` so SSRF + politeness apply.
+    fetching goes through ``ctx`` so SSRF + politeness apply. Fetched HTML is
+    **clipped** (§9) — raw pages run to 100s of KB, and an unbounded corpus blows
+    past the model's context so a reasoning LM exhausts its tokens on nothing.
+    Link discovery uses the *full* homepage, so clipping never costs a sample.
     """
     from bizup_autocrawler.generate.tools import find_feeds_in  # avoid an import cycle
+
+    hp_cap = (
+        config.corpus_homepage_chars() if homepage_chars is None else homepage_chars
+    )
+    art_cap = config.corpus_article_chars() if article_chars is None else article_chars
 
     homepage = ctx.fetch(site_url)
     robots = _try_fetch(ctx, urljoin(site_url, "/robots.txt"))
@@ -167,18 +181,23 @@ def prefetch_corpus(
     sitemaps = sitemaps_from_robots(robots)
     sitemap_url = pick_news_sitemap(sitemaps) or urljoin(site_url, "/sitemap.xml")
     sitemap = _try_fetch(ctx, sitemap_url)
-    links = on_domain_links(homepage, site_url)[:max_articles]
+    links = on_domain_links(homepage, site_url)[:max_articles]  # discover from full
     return build_corpus(
-        homepage=homepage,
+        homepage=_clip(homepage, hp_cap),
         robots=robots,
         sitemap=sitemap,
         sitemaps=sitemaps or ([sitemap_url] if sitemap else []),
         expected_recent=count_sitemap_urls(sitemap),
         articles=[
-            {"url": url, "title": "", "text": _try_fetch(ctx, url)} for url in links
+            {"url": url, "title": "", "text": _clip(_try_fetch(ctx, url), art_cap)}
+            for url in links
         ],
         feeds=find_feeds_in(homepage, site_url),  # feed-first discovery (§4.2)
     )
+
+
+def _clip(text: str, limit: int) -> str:
+    return text if limit <= 0 or len(text) <= limit else text[:limit]
 
 
 def _try_fetch(ctx: Ctx, url: str) -> str:
