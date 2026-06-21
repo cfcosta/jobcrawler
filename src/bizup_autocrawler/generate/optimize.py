@@ -67,7 +67,7 @@ def build_gepa(
     explicit ``-> GEPA`` annotation nor ``isinstance(x, GEPA)`` type-checks.)
     """
     return GEPA(
-        metric=metric,  # ty: ignore[invalid-argument-type]
+        metric=metric,
         reflection_lm=reflection_lm,
         auto=auto,
         track_stats=track_stats,

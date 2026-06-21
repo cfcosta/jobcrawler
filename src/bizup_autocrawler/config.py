@@ -85,6 +85,10 @@ def news_api_url() -> str:
     return _str("NEWS_API_URL", "http://localhost:8000")
 
 
+def sites_path() -> str:
+    return _str("AUTOCRAWLER_SITES", "sites.yaml")
+
+
 def first_crawl_cap() -> int:
     return _int("AUTOCRAWLER_FIRST_CRAWL_CAP", 30)
 

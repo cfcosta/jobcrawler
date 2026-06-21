@@ -16,6 +16,14 @@ navigation functions the generator prompt tells the model are available.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from html.parser import HTMLParser
+from typing import TYPE_CHECKING
+from urllib.parse import urljoin
+
+from bizup_autocrawler.urls import normalize_host, valid_on_domain_url
+
+if TYPE_CHECKING:
+    from bizup_autocrawler.runtime.contract import Ctx
 
 _JSON_SCALARS = (str, int, float, bool, type(None))
 
@@ -66,6 +74,59 @@ def ensure_json_primitive(value: object) -> None:
             ensure_json_primitive(item)
         return
     raise ValueError(f"corpus holds a non-JSON type: {type(value).__name__}")
+
+
+class _LinkParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.hrefs: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "a":
+            self.hrefs.extend(v for k, v in attrs if k == "href" and v)
+
+
+def on_domain_links(html: str, base_url: str) -> list[str]:
+    """On-domain absolute article-ish links from ``html`` (deduped, base excluded)."""
+    allowed = {normalize_host(base_url)}
+    parser = _LinkParser()
+    parser.feed(html)
+    out: list[str] = []
+    seen: set[str] = set()
+    for href in parser.hrefs:
+        url = urljoin(base_url, href)
+        if url != base_url and url not in seen and valid_on_domain_url(url, allowed):
+            seen.add(url)
+            out.append(url)
+    return out
+
+
+def prefetch_corpus(
+    site_url: str, ctx: Ctx, *, max_articles: int = 5
+) -> dict[str, object]:
+    """Fetch a site's snapshot through ``ctx`` into the addressable corpus (§4.2).
+
+    The homepage drives discovery; robots/sitemap are best-effort (missing ones
+    become empty). A few on-domain links are pulled as article samples. All
+    fetching goes through ``ctx`` so SSRF + politeness apply.
+    """
+    homepage = ctx.fetch(site_url)
+    links = on_domain_links(homepage, site_url)[:max_articles]
+    return build_corpus(
+        homepage=homepage,
+        robots=_try_fetch(ctx, urljoin(site_url, "/robots.txt")),
+        sitemap=_try_fetch(ctx, urljoin(site_url, "/sitemap.xml")),
+        articles=[
+            {"url": url, "title": "", "text": _try_fetch(ctx, url)} for url in links
+        ],
+    )
+
+
+def _try_fetch(ctx: Ctx, url: str) -> str:
+    try:
+        return ctx.fetch(url)
+    except Exception:
+        return ""  # robots/sitemap/article fetch is best-effort
 
 
 # Navigation helpers the generator prompt advertises (Pyodide lacks grep/sed).
