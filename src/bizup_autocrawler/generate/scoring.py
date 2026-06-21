@@ -17,7 +17,15 @@ flat product on the held-out.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Collection, Mapping, Sequence
+from typing import TYPE_CHECKING
+
 from pydantic import BaseModel, ConfigDict, Field
+
+from bizup_autocrawler.urls import normalize_host, valid_on_domain_url
+
+if TYPE_CHECKING:  # heavy (litellm/tokenizers); only the metric needs it, lazily
+    import dspy
 
 
 class ExceptionInfo(BaseModel):
@@ -89,3 +97,224 @@ def graded_score(
         + weights.discovery * axes.discovery_quality
     )
     return veto * graded
+
+
+# A forced RLM extraction (hit max_iterations, §4.2) yields this sentinel as
+# final_reasoning. It scores slightly below a deliberate SUBMIT — a tie-breaker
+# (§6), never a veto: a forced extraction can still be a perfectly good crawler.
+FORCED_FINAL_REASONING = "Extract forced final output"
+FORCED_EXTRACTION_PENALTY = 0.05
+
+
+def compute_axes(
+    result: CandidateResult,
+    *,
+    target_n: int,
+    allowed_hosts: Collection[str],
+    min_body_chars: int,
+    discovery_method: str,
+    max_replacement_ratio: float = 0.02,
+) -> QualityAxes:
+    """Measure the five bounded [0,1] axes from a ``CandidateResult`` (§6).
+
+    The veto axes (field presence, url validity) and the body axis are sampled
+    rates over ``result.samples``; no samples means they are 0 (the veto fires).
+    """
+    samples = result.samples
+    n = len(samples)
+    if n == 0:
+        field_presence = body_quality = url_validity = 0.0
+    else:
+        field_presence = sum(1 for s in samples if _has_fields(s)) / n
+        body_quality = (
+            sum(
+                1
+                for s in samples
+                if _good_body(s, min_body_chars, max_replacement_ratio)
+            )
+            / n
+        )
+        url_validity = sum(1 for s in samples if _valid_url(s, allowed_hosts)) / n
+    return QualityAxes(
+        items_ratio=items_axis(result.item_count, target_n),
+        field_presence=field_presence,
+        body_quality=body_quality,
+        url_validity=url_validity,
+        discovery_quality=DISCOVERY_QUALITY.get(discovery_method, 0.0),
+    )
+
+
+def score_candidate(
+    result: CandidateResult,
+    *,
+    target_n: int,
+    allowed_hosts: Collection[str],
+    min_body_chars: int,
+    discovery_method: str,
+    forced: bool = False,
+    weights: GradedWeights = DEFAULT_WEIGHTS,
+) -> float:
+    """The graded scalar for one candidate, minus the forced-extraction tie-breaker."""
+    axes = compute_axes(
+        result,
+        target_n=target_n,
+        allowed_hosts=allowed_hosts,
+        min_body_chars=min_body_chars,
+        discovery_method=discovery_method,
+    )
+    score = graded_score(axes, weights=weights)
+    if forced:
+        score -= FORCED_EXTRACTION_PENALTY
+    return max(0.0, score)
+
+
+def _has_fields(sample: Mapping[str, object]) -> bool:
+    return all(str(sample.get(k) or "").strip() for k in ("url", "title", "body"))
+
+
+def _good_body(
+    sample: Mapping[str, object], min_body_chars: int, max_replacement_ratio: float
+) -> bool:
+    body = str(sample.get("body") or "").strip()
+    if len(body) < min_body_chars:
+        return False
+    return body.count("�") / max(len(body), 1) <= max_replacement_ratio
+
+
+def _valid_url(sample: Mapping[str, object], allowed_hosts: Collection[str]) -> bool:
+    return valid_on_domain_url(str(sample.get("url") or ""), allowed_hosts)
+
+
+def build_feedback(
+    *,
+    gate_failures: Sequence[str],
+    stability_note: str | None = None,
+    max_foreground: int = 2,
+) -> str:
+    """The §4.11 feedback transform: concrete, severity-capped, across-run-aware.
+
+    ``gate_failures`` arrive in pipeline-severity order (AST → completeness); we
+    surface only the top ``max_foreground`` (many co-equal directives degrade
+    compliance — later retries surface the next as gates clear). The stability
+    verdict is appended as an across-run aggregate, never folded into the scalar.
+    A pure transform over already-computed facts: no extra LLM-judge pass.
+    """
+    lines = list(gate_failures[:max_foreground])
+    if stability_note:
+        lines.append(stability_note)
+    return "; ".join(lines)
+
+
+# -- the three dspy adapters over one scoring core (§4.11) --------------------
+#
+# The core runs one candidate through validate_crawler against a replay-backed
+# ctx and returns the CandidateResult. It is *injected* so the deterministic
+# scoring/feedback wiring is testable without a live sandbox. Both adapters read
+# the same host-computed facts — never the model's self-narrated counts (§8).
+
+ScoringCore = Callable[[str, object], CandidateResult]
+
+
+def make_reward_fn(
+    core: ScoringCore,
+    *,
+    target_n: int,
+    min_body_chars: int,
+    weights: GradedWeights = DEFAULT_WEIGHTS,
+) -> Callable[[Mapping[str, object], object], float]:
+    """The BestOfN/Refine adapter (the outlier): ``reward_fn(kwargs, pred) -> float``."""
+
+    def reward_fn(kwargs: Mapping[str, object], pred: object) -> float:
+        result = core(_source_text(pred), kwargs)
+        return score_candidate(
+            result,
+            target_n=target_n,
+            allowed_hosts=_hosts(kwargs),
+            min_body_chars=min_body_chars,
+            discovery_method=_discovery(pred),
+            forced=_forced(pred),
+            weights=weights,
+        )
+
+    return reward_fn
+
+
+def make_metric(
+    core: ScoringCore,
+    *,
+    target_n: int,
+    min_items: int,
+    min_body_chars: int,
+    weights: GradedWeights = DEFAULT_WEIGHTS,
+) -> Callable[..., dspy.Prediction]:
+    """The unified Evaluate/GEPA metric (signature-compatible — verified in 3.2.1).
+
+    Returns ``Prediction(score, feedback)``: GEPA reads it as ScoreWithFeedback,
+    Evaluate sums it via ``Prediction.__float__`` (reads ``.score``). Gates run
+    cheapest-first (AST short-circuits before the core ever runs the candidate);
+    feedback names *what* failed, never the threshold (§8).
+    """
+
+    def metric(
+        gold: object,
+        pred: object,
+        trace: object = None,
+        pred_name: str | None = None,
+        pred_trace: object = None,
+    ) -> dspy.Prediction:
+        import dspy  # lazy: heavy import, and only the metric constructs Prediction
+        from bizup_autocrawler.generate import gates  # lazy: break the import cycle
+
+        source = _source_text(pred)
+        ast_result = gates.check_ast(source)
+        if not ast_result.passed:
+            return dspy.Prediction(
+                score=0.0, feedback=build_feedback(gate_failures=ast_result.failures)
+            )
+
+        hosts = _hosts(gold)
+        result = core(source, gold)
+        completeness = gates.check_completeness(
+            result,
+            min_items=min_items,
+            min_body_chars=min_body_chars,
+            allowed_hosts=hosts,
+        )
+        score = score_candidate(
+            result,
+            target_n=target_n,
+            allowed_hosts=hosts,
+            min_body_chars=min_body_chars,
+            discovery_method=_discovery(pred),
+            forced=_forced(pred),
+            weights=weights,
+        )
+        return dspy.Prediction(
+            score=score, feedback=build_feedback(gate_failures=completeness.failures)
+        )
+
+    return metric
+
+
+def _field(carrier: object, name: str, default: object = None) -> object:
+    if isinstance(carrier, Mapping):
+        return carrier.get(name, default)
+    return getattr(carrier, name, default)
+
+
+def _source_text(pred: object) -> str:
+    src = _field(pred, "crawler_source", "")
+    code = getattr(src, "code", None)  # dspy.Code carries the string on .code
+    return code if isinstance(code, str) else str(src)
+
+
+def _discovery(pred: object) -> str:
+    return str(_field(pred, "discovery_method", "scrape"))
+
+
+def _forced(pred: object) -> bool:
+    return _field(pred, "final_reasoning", "") == FORCED_FINAL_REASONING
+
+
+def _hosts(carrier: object) -> set[str]:
+    return {normalize_host(str(_field(carrier, "site_url", "")))}
