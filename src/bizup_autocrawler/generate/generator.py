@@ -9,9 +9,9 @@ blast-radius control. RLM's interpreter is injectable: ``None`` in production
 (the default Pyodide/Deno sandbox), a deterministic ``CodeInterpreter`` in tests.
 Construction is Deno-free; only ``aforward`` with the default interpreter needs it.
 
-The §6 N-candidate selection (BestOfN/Refine over the scoring core) lives in
-``select.py`` — it depends on ``validate_crawler`` running a candidate, which is
-the §4.4 sandbox. This module is just the one-candidate generation primitive.
+``aforward`` is the one-candidate primitive; the §6 N-candidate selection over
+the graded scalar is ``best_of_n`` (async, for this aforward-only module) and
+``select_best`` (stock sync ``BestOfN``) below, scored via the §4.4 sandbox.
 """
 
 from __future__ import annotations
@@ -118,8 +118,14 @@ async def best_of_n(
     best: object = None
     best_reward = float("-inf")
     for i in range(n):
-        pred = await make_attempt(i)
-        value = reward(pred)
+        try:
+            pred = await make_attempt(i)
+            value = reward(pred)
+        except Exception as exc:  # one bad rollout must not abort selection (§4.4)
+            print(
+                f"[best_of_n] candidate {i} failed: {type(exc).__name__}: {str(exc)[:140]}"
+            )
+            continue
         if value > best_reward:
             best, best_reward = pred, value
         if value >= threshold:

@@ -78,6 +78,19 @@ def fanout_spend_cap() -> str:
     return _str("AUTOCRAWLER_FANOUT_SPEND_CAP", "$8/site")
 
 
+def fanout_n() -> int:
+    """Number of candidates the §6 best-of-N generates (default N≈4–8)."""
+    return _int("AUTOCRAWLER_FANOUT_N", 4)
+
+
+def max_tokens() -> int:
+    """LM output-token cap. Generous by default so a reasoning model has room for
+    both its thinking and the answer on the long RLM action prompt — too low and
+    a reasoning model spends the whole budget thinking and returns empty content.
+    """
+    return _int("AUTOCRAWLER_MAX_TOKENS", 16000)
+
+
 # --- ingest / news (§4.7) --------------------------------------------------
 
 

@@ -45,7 +45,6 @@ from bizup_autocrawler.sites import find_site, load_sites
 from bizup_autocrawler.urls import normalize_host
 
 _CRAWLERS_DIR = Path(__file__).parent / "crawlers"
-_N_CANDIDATES = 4  # §6 default N≈4–8
 _TARGET_ITEMS = 30  # items-axis saturation for the graded scalar
 
 
@@ -68,9 +67,10 @@ def _select(sites: list[Site], args: argparse.Namespace) -> list[Site]:
 
 
 async def _run(targets: list[Site]) -> int:
-    root_lm = dspy.LM(config.model())
+    max_tokens = config.max_tokens()
+    root_lm = dspy.LM(config.model(), max_tokens=max_tokens)
     # Explicit sub_lm — never None, which dspy silently bills at root rates (§4.2).
-    sub_lm = dspy.LM(config.sub_model() or config.model())
+    sub_lm = dspy.LM(config.sub_model() or config.model(), max_tokens=max_tokens)
     failures = 0
     for site in targets:
         if not await _generate_one(site, root_lm, sub_lm):
@@ -115,7 +115,7 @@ async def _generate_one(site: Site, root_lm: dspy.LM, sub_lm: dspy.LM) -> bool:
     best, score = await best_of_n(
         make_attempt,
         reward=lambda pred: reward_fn(inputs, pred),
-        n=_N_CANDIDATES,
+        n=config.fanout_n(),
         threshold=1.0,
     )
     if best is None:

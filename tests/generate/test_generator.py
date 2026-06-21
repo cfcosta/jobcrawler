@@ -141,3 +141,13 @@ async def test_best_of_n_early_breaks_on_threshold() -> None:
     best, value = await best_of_n(make_attempt, reward=_reward_int, n=5, threshold=1.0)
     assert best == 1 and value == 1.0
     assert seen == [0, 1]  # stopped the moment one cleared the threshold
+
+
+async def test_best_of_n_skips_a_failing_attempt() -> None:
+    async def make_attempt(i: int) -> object:
+        if i == 0:
+            raise RuntimeError("rollout 0 blew up")
+        return i
+
+    best, value = await best_of_n(make_attempt, reward=_reward_int, n=3, threshold=99.0)
+    assert best == 2 and value == 2.0  # the failed attempt is skipped, not fatal
