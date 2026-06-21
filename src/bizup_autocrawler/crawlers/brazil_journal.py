@@ -1,37 +1,67 @@
-import html
+"""
+Crawler for braziljournal.com using the WordPress REST API.
+"""
+
 import json
 import re
+import html
+from urllib.parse import urlparse
 
 SITE = "https://braziljournal.com/"
+
 API_URL = "https://braziljournal.com/wp-json/wp/v2/posts"
-PER_PAGE = 100
-MAX_PAGES = 3  # 3 paginated requests -> up to 300 recent posts, full bodies
 
-_TAG_RE = re.compile(r"<[^>]+>")
-_WS_RE = re.compile(r"\s+")
+MAX_PAGES = 2
 
 
-def _strip_html(text):
-    text = _TAG_RE.sub(" ", text)
-    text = html.unescape(text)
-    return _WS_RE.sub(" ", text).strip()
+def _strip_html(s: str) -> str:
+    if not s:
+        return ""
+    s = html.unescape(s)
+    s = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", "", s)
+    s = re.sub(
+        r"(?i)</?(p|div|br|h[1-6]|li|ul|ol|blockquote|tr|td|th|hr)[^>]*>", "\n", s
+    )
+    s = re.sub(r"<[^>]+>", "", s)
+    s = re.sub(r"\n{2,}", "\n", s)
+    s = re.sub(r"[ \t]{2,}", " ", s)
+    return s.strip()
+
+
+def _is_on_domain(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.netloc == "braziljournal.com" or parsed.netloc.endswith(
+        ".braziljournal.com"
+    )
 
 
 def crawl(ctx):
-    # WordPress REST API: structured JSON, 100 posts/request, content.rendered is
-    # the full article body (no scraping, no paywall here). Paginate until a page
-    # comes back empty or errors (past the last page).
-    for page in range(1, MAX_PAGES + 1):
-        url = f"{API_URL}?per_page={PER_PAGE}&page={page}&_fields=link,title,content"
+    page = 1
+    per_page = 20
+    seen = set()
+    while page <= MAX_PAGES:
+        url = f"{API_URL}?per_page={per_page}&page={page}"
+        resp = ctx.fetch(url)
         try:
-            posts = json.loads(ctx.fetch(url))
+            posts = json.loads(resp)
         except Exception:
             break
-        if not isinstance(posts, list) or not posts:
+        if not posts:
             break
         for post in posts:
-            link = post.get("link") or ""
-            title = _strip_html((post.get("title") or {}).get("rendered") or "")
-            body = _strip_html((post.get("content") or {}).get("rendered") or "")
-            if link and title and body:
-                yield {"url": link, "title": title, "body": body, "source": SITE}
+            link = post.get("link", "")
+            if not link or not _is_on_domain(link):
+                continue
+            if link in seen:
+                continue
+            seen.add(link)
+            title = _strip_html(post.get("title", {}).get("rendered", ""))
+            body = _strip_html(post.get("content", {}).get("rendered", ""))
+            if title and body:
+                yield {
+                    "url": link,
+                    "title": title,
+                    "body": body,
+                    "source": "braziljournal.com",
+                }
+        page += 1
