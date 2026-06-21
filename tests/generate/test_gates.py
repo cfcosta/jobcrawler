@@ -59,6 +59,18 @@ def test_parsers_and_future_are_allowed() -> None:
     assert check_ast(src).passed
 
 
+def test_stdlib_xml_is_allowed_because_it_is_hardened() -> None:
+    # stdlib xml.etree/xml.dom/xml.sax are permitted parsers — the §8 hardening
+    # (runtime/hardening.py) defuses XXE/entity-expansion before any crawler runs.
+    for imp in (
+        "import xml.etree.ElementTree as ET",
+        "from xml.dom import minidom",
+        "import xml.sax",
+    ):
+        src = f'{imp}\nSITE = "https://x.com"\ndef crawl(ctx):\n    yield None\n'
+        assert check_ast(src).passed, imp
+
+
 def test_banned_import_os() -> None:
     res = check_ast('import os\nSITE="https://x.com"\ndef crawl(ctx):\n    yield 1\n')
     assert not res.passed

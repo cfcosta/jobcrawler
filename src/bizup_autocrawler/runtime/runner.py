@@ -27,6 +27,7 @@ from bizup_autocrawler.governor import RateGovernor
 from bizup_autocrawler.ingest import IngestOutcome, NewsClient
 from bizup_autocrawler.runtime.contract import CrawlFn, Item
 from bizup_autocrawler.runtime.ctx import Ctx
+from bizup_autocrawler.runtime.hardening import harden_xml
 from bizup_autocrawler.state import StateStore
 from bizup_autocrawler.urls import canonicalize_url
 
@@ -52,6 +53,7 @@ def crawl_site(
     first_crawl_cap: int | None = None,
     governor: RateGovernor | None = None,
 ) -> CrawlSummary:
+    harden_xml()  # XXE / billion-laughs off before the crawler parses feeds (§8)
     is_first = store.last_run(slug) is None
     run_id = store.start_run(slug)
 

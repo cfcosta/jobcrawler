@@ -82,6 +82,69 @@ def crawl(ctx):
     assert result.exception.type == "SsrfError"
 
 
+def test_sandbox_hardens_xxe_in_generated_xml_parsing() -> None:
+    # A crawler that parses an attacker-controlled feed with a SYSTEM entity. The
+    # sandbox entry hardens XML (§8) before exec, so defusedxml refuses the entity
+    # rather than reading file:///etc/passwd — captured as an exception, not a hang.
+    xxe = """
+import xml.etree.ElementTree as ET
+SITE = "https://example.com"
+def crawl(ctx):
+    doc = ctx.fetch(SITE + "/feed")
+    root = ET.fromstring(doc)
+    yield None
+"""
+    replay = {
+        "https://example.com/feed": {
+            "status": 200,
+            "text": (
+                '<?xml version="1.0"?>'
+                '<!DOCTYPE r [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>'
+                "<r>&xxe;</r>"
+            ),
+        }
+    }
+    result = validate_crawler(
+        xxe, allowed_hosts={"example.com"}, replay=replay, timeout=20.0
+    )
+    assert result.exception is not None
+    assert result.exception.type == "EntitiesForbidden"
+
+
+def test_sandbox_allows_benign_stdlib_xml_parsing() -> None:
+    # The flip side: stdlib xml is a *permitted* parser now that it is defused, so
+    # a well-formed feed parses and yields normally.
+    good = """
+import xml.etree.ElementTree as ET
+from bizup_autocrawler.runtime.contract import Item
+SITE = "https://example.com"
+def crawl(ctx):
+    doc = ctx.fetch(SITE + "/feed")
+    root = ET.fromstring(doc)
+    for item in root.findall("channel/item"):
+        title = item.findtext("title") or ""
+        link = item.findtext("link") or ""
+        yield Item(url=link, title=title, body="x" * 500, source="example")
+"""
+    replay = {
+        "https://example.com/feed": {
+            "status": 200,
+            "text": (
+                "<rss><channel>"
+                "<item><title>Alpha</title><link>https://example.com/a</link></item>"
+                "<item><title>Beta</title><link>https://example.com/b</link></item>"
+                "</channel></rss>"
+            ),
+        }
+    }
+    result = validate_crawler(
+        good, allowed_hosts={"example.com"}, replay=replay, timeout=20.0
+    )
+    assert result.exception is None
+    assert result.item_count == 2
+    assert {s["title"] for s in result.samples} == {"Alpha", "Beta"}
+
+
 def test_wall_clock_timeout_hard_stops_a_hang() -> None:
     hang = "SITE='https://x.com'\ndef crawl(ctx):\n    while True:\n        pass\n    yield None\n"
     result = validate_crawler(hang, allowed_hosts={"x.com"}, timeout=1.0)

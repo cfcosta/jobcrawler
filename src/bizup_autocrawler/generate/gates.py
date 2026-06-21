@@ -65,7 +65,10 @@ _ALLOWED_EXACT = frozenset(
     }
 )
 # Parser packages: the package and any submodule (lxml.etree, selectolax.parser).
-_ALLOWED_PREFIXES = ("selectolax", "lxml", "feedparser")
+# stdlib ``xml`` (xml.etree/xml.dom/xml.sax) is permitted because the §8
+# hardening (runtime/hardening.py, applied before any crawler runs) defuses XXE /
+# entity-expansion in every execution path — so it is a safe feed/sitemap parser.
+_ALLOWED_PREFIXES = ("selectolax", "lxml", "feedparser", "xml")
 # Builtins that grant filesystem/eval/introspection escape.
 _BANNED_NAMES = frozenset(
     {

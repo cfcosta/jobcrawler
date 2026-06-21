@@ -20,6 +20,7 @@ import httpx
 
 from bizup_autocrawler.runtime.contract import Item
 from bizup_autocrawler.runtime.ctx import Ctx
+from bizup_autocrawler.runtime.hardening import harden_xml
 
 _SAMPLE_CAP = 5
 _BODY_PREVIEW = 600
@@ -49,6 +50,7 @@ def _build_ctx(
 
 
 def main() -> None:
+    harden_xml()  # XXE / billion-laughs off before any candidate XML parse (§8)
     data = json.loads(sys.stdin.read())
     ctx = _build_ctx(set(data["allowed_hosts"]), data.get("replay"))
     result: dict[str, object] = {

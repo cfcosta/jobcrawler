@@ -260,6 +260,40 @@ def test_runaway_crawler_is_bounded_by_the_page_budget() -> None:
     store.close()
 
 
+_XXE_FEED = (
+    '<?xml version="1.0"?>\n'
+    '<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>\n'
+    "<rss><channel><item><title>&xxe;</title></item></channel></rss>"
+)
+
+
+def test_crawl_site_hardens_untrusted_xml(monkeypatch: MonkeyPatch) -> None:
+    # A crawler that parses an attacker-controlled feed with an XXE entity. The
+    # runner hardens XML (§8) before running it, so the parse raises and the
+    # failure is isolated as a health signal — no item, no exfiltration.
+    import bizup_autocrawler.runtime.hardening as hardening
+
+    monkeypatch.setattr(hardening, "_hardened", False)  # force a fresh defuse
+
+    def crawl(ctx: CtxProtocol) -> Iterable[Item]:
+        import xml.etree.ElementTree as ET
+
+        root = ET.fromstring(_XXE_FEED)  # must raise after harden_xml()
+        title = root.find("channel/item/title")
+        yield _one(
+            "https://example.com/a", title=title.text if title is not None else ""
+        )
+
+    store = StateStore(":memory:")
+    posts, news = _recording_news()
+    summary = crawl_site("s", crawl, _ctx(), store, news)
+
+    assert summary.items_found == 0  # the malicious parse was blocked
+    assert summary.errors == 1  # isolated, not a fleet-aborting crash
+    assert posts == []
+    store.close()
+
+
 class _GovClock:
     """A fake clock whose ``sleep`` advances it, recording the durations."""
 
