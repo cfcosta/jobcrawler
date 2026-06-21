@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import re
 from pathlib import Path
 
 import dspy
@@ -34,6 +35,7 @@ from bizup_autocrawler.generate.gates import (
     must_observe_failure,
     stability_verdict,
 )
+from bizup_autocrawler.generate.adversarial import cross_validate
 from bizup_autocrawler.generate.generator import best_of_n, load_generator
 from bizup_autocrawler.generate.scoring import CandidateResult, make_reward_fn
 from bizup_autocrawler.generate.snapshot import prefetch_corpus
@@ -42,7 +44,10 @@ from bizup_autocrawler.runtime.ctx import Ctx
 from bizup_autocrawler.runtime.sandbox import validate_crawler
 from bizup_autocrawler.schedule import Site
 from bizup_autocrawler.sites import find_site, load_sites
+from bizup_autocrawler.trainset import append_record, make_example
 from bizup_autocrawler.urls import normalize_host
+
+_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 
 _CRAWLERS_DIR = Path(__file__).parent / "crawlers"
 _TARGET_ITEMS = 30  # items-axis saturation for the graded scalar
@@ -140,6 +145,7 @@ async def _generate_one(site: Site, root_lm: dspy.LM, sub_lm: dspy.LM) -> bool:
     print(
         f"OK {site.slug}: wrote crawlers/{site.slug}.py (score {score:.2f}) for review"
     )
+    _record_for_trainset(site, ctx, corpus, best, source, hosts)
     return True
 
 
@@ -203,3 +209,56 @@ def _source_text(pred: object) -> str:
     src = getattr(pred, "crawler_source", "")
     code = getattr(src, "code", None)
     return code if isinstance(code, str) else str(src)
+
+
+def _record_for_trainset(
+    site: Site,
+    ctx: Ctx,
+    corpus: dict[str, object],
+    pred: object,
+    source: str,
+    hosts: set[str],
+) -> None:
+    """Append an admitted example to the §4.11 trainset — only if the §8 adversarial
+    cross-validation over the *actual* items also passes (the §6 gates already did).
+    The per-site stability admission is applied later, at optimize time.
+    """
+    result = validate_crawler(source, allowed_hosts=hosts)
+    verdict = cross_validate(
+        result.samples,
+        live_titles=_live_titles(ctx, result.samples),
+        allowed_hosts=hosts,
+    )
+    if not verdict.passed:
+        print(f"  not recorded for trainset: adversarial failed ({verdict.reason})")
+        return
+    append_record(
+        config.trainset_path(),
+        slug=site.slug,
+        example=make_example(
+            site_url=site.url,
+            corpus=corpus,
+            render=site.render,
+            hints=site.hints,
+            discovery_method=_discovery(pred),
+            discovery_url=str(getattr(pred, "discovery_url", "") or ""),
+            crawler_source=source,
+        ),
+    )
+    print(f"  recorded for §4.11 trainset -> {config.trainset_path()}")
+
+
+def _live_titles(ctx: Ctx, samples: list[dict]) -> dict[str, str]:
+    """Best-effort live ``<title>`` per sample url, for the §8 title-match check."""
+    titles: dict[str, str] = {}
+    for sample in samples:
+        url = str(sample.get("url") or "")
+        if not url:
+            continue
+        try:
+            match = _TITLE_RE.search(ctx.fetch(url))
+        except Exception:
+            continue
+        if match:
+            titles[url] = re.sub(r"\s+", " ", match.group(1)).strip()
+    return titles

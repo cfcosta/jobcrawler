@@ -89,6 +89,30 @@ def test_site_features_flags_a_structured_content_api() -> None:
     assert "structured_content_api: True" in features
 
 
+def test_forward_bridges_to_aforward_for_the_optimizers() -> None:
+    # dspy optimizers call modules synchronously; forward must run the same RLM loop
+    # as aforward (off the event loop) and return the typed prediction (§4.11).
+    interp = MockInterpreter([_final()])
+    gen = CrawlerGenerator(interpreter=interp, max_iterations=5, max_llm_calls=5)
+    lm = DummyLM(
+        [
+            {"reasoning": "a feed exists", "discovery_plan": "use the /feed"},
+            {"reasoning": "submit", "code": "SUBMIT('done')"},
+        ]
+    )
+
+    with dspy.context(lm=lm):
+        pred = gen(
+            site_url="https://example.com",
+            corpus=build_corpus(homepage="<html/>"),
+            render="auto",
+            hints="",
+        )
+
+    assert pred.discovery_method == "feed"
+    assert pred.discovery_url == "https://example.com/feed"
+
+
 async def test_aforward_generates_candidate_and_drives_interpreter() -> None:
     interp = MockInterpreter([_final()])
     gen = CrawlerGenerator(interpreter=interp, max_iterations=5, max_llm_calls=5)

@@ -210,6 +210,14 @@ def cmd_generate(args: argparse.Namespace) -> int:
     return generate_command(args)
 
 
+def cmd_optimize(args: argparse.Namespace) -> int:
+    # The offline §4.11 self-improvement job (build trainset → optimize → promote);
+    # its deps (dspy + the sandbox) are heavy, so import lazily.
+    from bizup_autocrawler.cli_optimize import optimize_command
+
+    return optimize_command(args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="autocrawl", description="RLM autocrawler")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -236,6 +244,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("list", help="show sites, script presence, health").set_defaults(
         func=cmd_list
     )
+
+    sub.add_parser(
+        "optimize",
+        help="offline §4.11 self-improvement: build trainset, optimize, promote",
+    ).set_defaults(func=cmd_optimize)
     return parser
 
 

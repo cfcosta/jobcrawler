@@ -70,6 +70,23 @@ class CrawlerGenerator(dspy.Module):
             hints=_steer(hints, plan.discovery_plan),
         )
 
+    def forward(
+        self,
+        *,
+        site_url: str,
+        corpus: Mapping[str, object],
+        render: str = "auto",
+        hints: str = "",
+    ) -> dspy.Prediction:
+        """Sync entry point for the dspy optimizers (§4.11): BootstrapFewShot/GEPA
+        call modules synchronously, so bridge to ``aforward``. The offline optimize
+        job runs outside any event loop, so ``asyncio.run`` is safe here; the §4.9
+        scheduler and §6 best-of-N drive ``aforward`` directly.
+        """
+        return asyncio.run(
+            self.aforward(site_url=site_url, corpus=corpus, render=render, hints=hints)
+        )
+
 
 async def select_best(
     module: dspy.Module,

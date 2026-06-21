@@ -226,6 +226,17 @@ def trainset_stable_runs() -> int:
     return _int("AUTOCRAWLER_TRAINSET_STABLE_RUNS", 3)
 
 
+def trainset_path() -> str:
+    """The §4.11 trainset records store (one JSONL row per accepted generation)."""
+    return _str("AUTOCRAWLER_TRAINSET_PATH", "trainset.jsonl")
+
+
+def generator_dir() -> str:
+    """Where `autocrawl optimize` writes versioned, promoted ``generator-N.json``
+    artifacts; the operator points ``AUTOCRAWLER_GENERATOR_PATH`` at one to deploy."""
+    return _str("AUTOCRAWLER_GENERATOR_DIR", "generators")
+
+
 def generator_path() -> str | None:
     """The single §4.11 config pointer to the active ``generator.json``; flipping it
     to a prior artifact is the rollback. Unset ⇒ boot from the baseline generator."""
