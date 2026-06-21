@@ -415,10 +415,14 @@ concrete** — not "AST gate failed" but "AST gate: `import os` banned at line 1
 `urllib.parse`/`selectolax`"; not "0 items" but "0 items: `discovery_url` /feed returned 404, sitemap
 had 0 article-like URLs — try the /news index". **Never** LLM-summarize `CandidateResult` before
 handing it to `reflection_lm` (full traces scored 50.0 vs scores-only 34.6; *summaries were no better
-than the scalar* [Meta-Harness]). Order failures by the gate pipeline (earliest/most-blocking is the
-primary "fix this"), attribute to the owned predictor where causal (a runtime 0-items failure phrased
-as a `discovery_plan` deficiency — the only thing GEPA can change), and include the **delta** ("what
-would fix it") [GEPA, JudgeFlow, Feedback-Descent]. This is a pure transform over the already-computed
+than the scalar* [Meta-Harness]). Order by **severity within the pipeline** (not raw authoring order)
+and **cap the foreground to the single most-blocking failure** (top ~1–2; later retries surface the
+next as gates clear — many co-equal directives degrade compliance [TextGrad, JudgeFlow]). Attribute by
+**counterfactual**, not temporal order — phrase the failure as the upstream `discovery_plan` decision
+that, *if changed, clears the downstream gate* ("discovery_plan chose scrape; a feed existed at /feed —
+feed would have yielded items"), the only thing GEPA can change [JudgeFlow] — and include the **delta**
+("what would fix it") [GEPA, Feedback-Descent]. Mis-attributed feedback scores *below none*
+[Feedback-Descent], so this is correctness-critical, not style. This is a pure transform over the already-computed
 `CandidateResult` (~2% of eval cost — no extra LLM-judge pass). Additionally feed **across-run
 aggregates**: condense the §4.9 run-history + §4.8 staleness per accepted site into per-site failure
 summaries and thread them in — patterns invisible in any single trace surface only in aggregate,
@@ -443,12 +447,18 @@ state-store backend in v1; the disjoint train/val/promotion *pools* are row-leve
 **Saturation is the headline failure mode.** Because admission keeps only gate-passing, non-stale
 crawlers, every example is near-success — and a near-binary reward then makes **GEPA no-op** (its
 reflection LM never fires when every sampled minibatch scores all-correct; observed on three real
-runs) [GEPA-+25pts]. Mitigate: (i) the graded scalar (§6) so even passing crawlers differ; (ii)
-`optimize.py` asserts a **minimum fraction of sub-maximal scores** over the trainset before compiling,
-and warns + skips promotion if baseline ≈ optimized; (iii) **bias** GEPA's train/val toward
-*hard / discriminative* cases — recently-drifted sites, sites where `BestOfN`/`Refine` needed many
-tries or barely cleared gates — since difficulty, not raw count, supplies signal [Meta-Harness, HALO].
-Admit a pair only after the §8 adversarial cross-validation.
+runs) [GEPA-+25pts]. The graded scalar is a **precondition, not the guard** — a *graded* 3-axis metric
+still no-opped on a perfect valset at iteration 1 [GEPA-+25pts]. Mitigate: (i) graded scalar (§6) so
+passing crawlers *can* differ; (ii — load-bearing) `optimize.py` asserts a **minimum fraction of
+sub-maximal scores in the sampled minibatches at compile time** (not just the trainset mean), and on
+`baseline ≈ optimized` emits the three-way remedy — re-bias/harden the trainset, run on a *cheaper*
+optimizer executor to manufacture failure signal (promotion still re-scores on the deployment tier), or
+accept saturation and defer; (iii — load-bearing) **bias** GEPA's train/val toward *hard /
+discriminative* cases (recently-drifted, many-retry, barely-passing) — difficulty, not count, supplies
+signal [Meta-Harness, HALO]. Also assert **per-instance spread**: GEPA's Pareto sampling consumes
+per-site score *variance*, so a scalar high-variance across the trainset but flat per-site still
+collapses sampling to uniform [GEPA, TRIPLE]. Admit a pair only after the §8 adversarial
+cross-validation.
 
 **Optimizer ladder.** Escalate by trainset size, not straight to GEPA:
 - *No trainset* → run no optimizer; keep §6's `BestOfN`/`Refine` (needs none).
@@ -456,7 +466,11 @@ Admit a pair only after the §8 adversarial cross-validation.
   (`BootstrapFewShotWithRandomSearch`): a pair's value = how much including it as a demo raises
   crawler-acceptance on *other* frozen snapshots (held-out transfer), with the scoring core as the
   utility. Highest-ROI, cheapest lever and available long before GEPA [CodeAdapt] — the rung the
-  earlier draft skipped.
+  earlier draft skipped. Select by held-out transfer **with a diversity step** (cluster candidate
+  exemplars by `site_features` and take the best-transfer one per cluster, not top-K by raw transfer);
+  the chosen demo set must beat the **zero-demo** baseline by the §4.11 margin, since few-shot can
+  *degrade* strong backbones; use the *graded* scalar as utility — a binary one collapses the ranking
+  [TRIPLE, R1, BetterTogether].
 - *feedback-rich regime* → **GEPA** (instruction evolution), justified by *feedback-richness*, not low data.
 - *~200+ pairs* → **`MIPROv2` configured for JOINT instruction+demo** optimization (demos bootstrap
   from the inputs-only trainset; the gate-accept threshold *is* MIPRO's λ). Do **not** run
@@ -498,7 +512,15 @@ averaging ≥2–3 passes (or temperature=0/seeded) since each gate run spins a 
 RLM sandbox. Promote only if the candidate beats the incumbent by a **margin exceeding eval noise**
 (default ≥ one held-out fixture's weight, 1/|held-out|) — *not* strictly-greater on one pass, which
 promotes noise (HALO reports a noisy "peak"; DGM measured ~2.3% cross-run std) [HALO, DGM,
-GEPA-+25pts]. Record the per-fixture scores + accepted-mutation count in the versioned artifact for observability.
+GEPA-+25pts]. **Co-gate on an independent true-quality signal:** the candidate must *also* beat the
+incumbent on the §8 adversarial cross-validation pass-rate over the promotion fixtures (titles match the
+live `<title>`, URLs resolve, low boilerplate/duplicate/off-domain) plus HALO drift/staleness — promote
+only if **both** the §6 proxy *and* this independent signal improve. If the proxy rises while adversarial
+quality is flat/down, **reject as over-optimization** (proxy fit doesn't track true quality — it's
+hump-shaped and starts early [`#acb2cc`, R1 `#494c25`]); log the proxy-vs-true divergence as a standing
+tripwire, and record the **public-vs-private gap** (optimizer-facing `valset` score vs frozen promotion
+score) as a memorization/overfit alarm [ShinkaEvolve `#f3ea65`]. Record the per-fixture scores +
+accepted-mutation count in the versioned artifact for observability.
 *(Post-v1, once the held-out is large enough to populate buckets — a sub-60 held-out can't fill a 3-D
 `discovery_method × render × Cloudflare-class` stratification: add a hard per-stratum / backward-
 transfer guard (no bucket or fixture regresses below incumbent by >ε), split drift vs cold-start
@@ -570,13 +592,30 @@ A generated script is accepted only if it passes, in order:
 
 Gates 1–2 are computed by **one pure scoring core** that runs a candidate via `validate_crawler` and
 returns a `CandidateResult`, a `gate_failures` reason string, and a **graded, continuous, multi-axis**
-score — *not* a 0/1 gate verdict. Compute the hard pass/fail gates **first**, then a multiplicative
-quality score over survivors (items-yielded ratio vs target N · fraction of items with all of
-title/body/url · body non-emptiness/length rate · on-domain-URL validity · discovery-method quality,
-minus a forced-extraction penalty). A binary or single-axis scalar **starves both** candidate
-selection (the GEPA Pareto frontier collapses to a coin-flip) and the optimizer (no gradient for
-partial credit on near-misses); gate-then-combine also stops one axis (raw `item_count`) dominating
-or being gamed [GEPA-+25pts, GEPA, SRLM]. Keep the noisy stability gate **out** of this scalar —
+score — *not* a 0/1 gate verdict. Compute the hard pass/fail gates **first**, then combine the quality
+axes over survivors by **shape-by-necessity**, *not* a flat 5-way product: a **min/AND** veto only for
+the true veto axes where near-zero means worthless (on-domain-URL validity; arguably field-presence),
+and a **bounded weighted sum** for the graded axes (items-yielded ratio, body-length rate,
+discovery-method quality), minus a small forced-extraction tie-breaker. Every axis is **bounded to
+[0,1]** before it enters the scalar — the items axis is `min(item_count/N, 1)`, *clamped*, never raw
+count (exceeding N buys nothing and removes the unbounded-push incentive). This keeps the benefit the
+spec wants — `item_count` can't buy back an empty-body or off-domain crawler — without a single
+weak-but-acceptable graded axis cratering an otherwise-good one (a product has unbounded local
+sensitivity as any axis → 0, so a near-zero *noisy* axis swings it hard). **Every working precedent
+that collapsed quality axes used additive/weighted-sum — including this spec's own cited source
+`#e643b2`, verified weighted-additive (0.55/0.30/0.15); pure-multiplicative count is 0** [Netflix
+`#77d24b`, R1 `#494c25`, ReSeek `#fe1014`, retrieval-fusion `#dd2c1f`]. **Axis weights** are seeded
+*non-uniformly* (heaviest on the items-yielded + body-length "real-articles" core, lightest on
+discovery-method — the `#e643b2` prior), with the **fewest free weights** (~2–3 groups, not 5 knobs)
+and **precision** axes (on-domain, body-non-boilerplate) above the **recall** axis [ReSeek];
+calibrate by regressing axes against a downstream label (non-stale tenure) [Netflix].
+**Discovery-method-quality is a distraction risk** — a low-signal axis can hurt more than mis-weighting
+[Sotopia-RL `#bdb383`] (a feed crawler that under-enumerates is worse than a scrape crawler that
+enumerates) — so run a **leave-one-axis-out** ablation before freezing it and **demote** it to feedback
+text if it doesn't improve the composite's correlation with adversarial-cross-val pass-rate (feed-first
+is already a hard gate-2 precondition). A binary or single-axis scalar **starves both** selection and
+the optimizer (no partial-credit gradient); the combine form is **A/B'd vs the flat product on the
+frozen held-out** (§14 Q8). Keep the noisy stability gate **out** of this scalar —
 generalize the principle: route flaky signals as descriptive text, never into the optimization
 target. *(M5b: add a low-weight efficiency tie-breaker — `pages_fetched`/turn-count — among gate-passing
 candidates; on strong backbones cost/latency may be the only measurable optimization gain [gskill]. At
@@ -665,6 +704,15 @@ The central risk is **executing model-written code against the live web**. Mitig
   off) to block XXE / billion-laughs. The parser libs (`lxml`/`selectolax`/`feedparser`/`httpx`) are
   part of the **pinned-image TCB** — a parser CVE is fixed by re-pinning the image, not regenerating a
   crawler. (The §4.4 ~10 s timeout + memory cap already backstop regex backtracking / RAM exhaustion.)
+- **No LLM scores its own output; protect what the scorer reads.** No axis of the §6 scalar may be
+  produced by an LLM judging generated output — the deterministic host core sets the score, and
+  `reflection_lm` only edits the *instruction* from host-computed `CandidateResult` facts, never the
+  generator's self-narrated transcript (on-policy self-assessment is biased, worst exactly on
+  low-quality cases [Self-Attribution-Bias]); prefer a `reflection_lm` of a *different model family*
+  from the generator. Hidden thresholds are necessary but not sufficient — DGM's hack deleted the
+  markers the scorer *reads* — so every signal the scorer consumes is host code the optimized loop
+  can't touch, and feedback names *what* failed but never a field/marker a candidate could blank out
+  [Darwin-Gödel-Machine].
 
 ## 9. DSPy / runtime notes
 - `dspy.RLM` is `@experimental` — pin DSPy `3.2.x` (already a dep of `bizup-news`).
@@ -817,10 +865,16 @@ stays for manual one-shot runs and CI.
    risk is whether a *typed* `dspy.ChainOfThought` predictor round-trips end-to-end; the pre-build toy
    milestone (§4.11/§13) settles it, and the instruction-string/CodeAct path is the default if not.
    Pin the GEPA/MIPROv2 call signatures via a build-time smoke test (§9).
-8. **Tuning the new knobs** — saturation and trainset-overfitting are *known* failure modes (§4.11),
-   not open questions, but their thresholds need calibrating against the first real trainset: graded-
-   reward axis weights, the sub-maximal-fraction floor, promotion margin ε, the hard-case sampling
-   ratio, and `min_items`/enumeration-floor per site class.
+8. **Metric calibration (a protocol, not guesses)** — the scalar's *combine form* (shape-by-necessity
+   vs flat product), the axis weights, and the numeric thresholds (`min_items`, body chars, Jaccard,
+   `ENUM_FLOOR_RATIO`) are *calibrated*, not asserted: (a) **A/B the combine form** on the frozen
+   held-out by argmax-matches-human-preference + per-instance spread [retrieval-fusion]; (b) **sweep
+   each threshold** to maximize score spread between known-good and hand-broken
+   (off-domain/boilerplate-padded) fixtures, take the robust *plateau* (distrust knife-edge optima),
+   then ~50-example human-agreement rounds [ReSeek, Netflix]; (c) **seed weights** from the `#e643b2`
+   prior with the fewest free weights and regress against a downstream label (non-stale tenure)
+   [Netflix]. All thresholds stay host-side in the immutable TCB. Saturation/overfitting remain *known*
+   failure modes (§4.11), not open questions.
 
 ## 15. Evidence base
 
@@ -839,3 +893,4 @@ what they anchor — full per-paper findings live in workflow `wqnhxlk46`:
 - **Agent Workflow Memory** (`#971a5a`) + **gskill** (`#39b2ab`) + **BetterTogether** (`#5417b9`) — gains widen with the train/test gap; cross-model skill transfer + efficiency-only gains on strong models; prompts-before-weights (weights out of scope v1) → §4.11.
 - **Survey of Self-Evolving Agents** (`#b7bd66`) — offline/online taxonomy, BWT/FGT, golden-dataset + tested rollback, quantified reward-hacking/alignment-faking risk → §4.11, §8.
 - Supporting: **LLM-in-Sandbox** (`#00c82a`), **CodeAct** (`#7a8470`), **Sanjaya** (`#745267`), **JudgeFlow** (`#e3bbdd`), **Feedback Descent** (`#244e30`), **TextGrad** (`#be34e3`).
+- **Metric design** (§6 scalar / §4.11 / §8) — additive/weighted-sum over multiplicative for collapsing quality axes, bounded sub-scores, gate-then-combine, calibration, over-optimization & off-policy reward: **Netflix** (`#77d24b`), **retrieval-fusion** (`#dd2c1f`), **ReSeek** (`#fe1014`), **R1** (`#494c25`), **Sotopia-RL** (`#bdb383`), **iStar/over-optimization** (`#acb2cc`), **ShinkaEvolve** (`#f3ea65`), **Self-Attribution-Bias** (`#5622de`). Full findings: workflow `w0iga2kgj`.
