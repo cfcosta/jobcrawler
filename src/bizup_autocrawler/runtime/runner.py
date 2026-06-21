@@ -61,6 +61,8 @@ def crawl_site(
     governor: RateGovernor | None = None,
     min_body_chars: int = 0,
     paywall_markers: tuple[str, ...] = (),
+    crawler_name: str = "",
+    crawler_url: str = "",
 ) -> CrawlSummary:
     harden_xml()  # XXE / billion-laughs off before the crawler parses feeds (§8)
     is_first = store.last_run(slug) is None
@@ -91,7 +93,11 @@ def crawl_site(
         if store.is_seen(slug, canon):
             continue
         governor.wait()  # throttle to AUTOCRAWLER_INGEST_RATE before the POST
-        outcome = news.post_item(item.title, item.body)
+        outcome = news.post_item(
+            item.title,
+            item.body,
+            crawler={"slug": slug, "name": crawler_name, "url": crawler_url},
+        )
         if outcome is IngestOutcome.INGESTED:
             store.mark_ingested(slug, canon)
             new_items += 1

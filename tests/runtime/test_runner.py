@@ -179,7 +179,38 @@ def test_dict_yield_is_validated_and_ingested() -> None:
     summary = crawl_site("s", crawl, _ctx(), store, news)
 
     assert (summary.items_found, summary.new_items, summary.errors) == (1, 1, 0)
-    assert posts[0] == {"title": "Headline", "body": "x" * 50}
+    assert posts[0] == {
+        "title": "Headline",
+        "body": "x" * 50,
+        "crawler": {"slug": "s", "name": "", "url": ""},
+    }
+    store.close()
+
+
+def test_post_carries_the_crawler_identity() -> None:
+    # Every ingested item records its source crawler (slug + name + url) so the news
+    # store can attribute and filter by crawler.
+    def crawl(ctx: CtxProtocol) -> Iterable[Item]:
+        yield _one("https://example.com/a")
+
+    store = StateStore(":memory:")
+    posts, news = _recording_news()
+
+    crawl_site(
+        "brazil_journal",
+        crawl,
+        _ctx(),
+        store,
+        news,
+        crawler_name="Brazil Journal",
+        crawler_url="https://braziljournal.com/",
+    )
+
+    assert posts[0]["crawler"] == {
+        "slug": "brazil_journal",
+        "name": "Brazil Journal",
+        "url": "https://braziljournal.com/",
+    }
     store.close()
 
 

@@ -19,6 +19,7 @@ bookkeeping and whether the item is re-attempted later.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import Enum
 
 import httpx
@@ -43,12 +44,19 @@ class NewsClient:
         self._base = (base_url or config.news_api_url()).rstrip("/")
         self._client = client or httpx.Client(timeout=timeout)
 
-    def post_item(self, title: str, body: str) -> IngestOutcome:
-        """POST one item to ``/news`` and classify the outcome (see module doc)."""
+    def post_item(
+        self, title: str, body: str, *, crawler: Mapping[str, str] | None = None
+    ) -> IngestOutcome:
+        """POST one item to ``/news`` and classify the outcome (see module doc).
+
+        ``crawler`` (``{slug, name, url}``) records which crawler produced the item,
+        so the news store can attribute and filter by source; omitted when unset.
+        """
+        payload: dict[str, object] = {"title": title, "body": body}
+        if crawler is not None:
+            payload["crawler"] = dict(crawler)
         try:
-            resp = self._client.post(
-                f"{self._base}/news", json={"title": title, "body": body}
-            )
+            resp = self._client.post(f"{self._base}/news", json=payload)
         except (httpx.ConnectError, httpx.ConnectTimeout):
             return IngestOutcome.RETRY  # never reached the server: pre-insert
         except httpx.TransportError:

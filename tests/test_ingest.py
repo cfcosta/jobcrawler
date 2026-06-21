@@ -36,6 +36,34 @@ def test_posts_title_and_body_to_news_endpoint() -> None:
     assert seen["json"] == {"title": "T", "body": "B"}
 
 
+def test_post_includes_the_crawler_when_given() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["json"] = json.loads(request.content)
+        return httpx.Response(201)
+
+    _client(handler).post_item(
+        "T",
+        "B",
+        crawler={
+            "slug": "brazil_journal",
+            "name": "Brazil Journal",
+            "url": "https://braziljournal.com/",
+        },
+    )
+
+    assert seen["json"] == {
+        "title": "T",
+        "body": "B",
+        "crawler": {
+            "slug": "brazil_journal",
+            "name": "Brazil Journal",
+            "url": "https://braziljournal.com/",
+        },
+    }
+
+
 def test_2xx_is_ingested() -> None:
     out = _client(lambda r: httpx.Response(200)).post_item("T", "B")
     assert out is IngestOutcome.INGESTED
