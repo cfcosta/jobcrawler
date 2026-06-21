@@ -152,7 +152,7 @@ these handle *follow-up* fetches — pagination, a deeper article, a discovered 
 | `render(url)` | headless GET → rendered HTML (Playwright) |
 | `find_feeds(url)` | discover `<link rel="alternate">` RSS/Atom/JSON feeds |
 | `get_sitemap(url)` | fetch & parse `sitemap.xml` (and robots-declared sitemaps) |
-| `validate_crawler(source)` | fence-strip, then run the candidate in the execution sandbox (§4.4) **through `ctx`** — against the live site during generation, or in the offline loop against the persisted `corpus` + recorded HTTP via a replay-backed `ctx` (§4.11), *never the network*. Returns a **size-bounded** `CandidateResult` (capped `samples`, condensed `schema_errors`, `exception` = type+message+traceback *tail*) so it survives the REPL's 10k head+tail truncation, crossing the bridge as JSON the model parses in-REPL. |
+| `validate_crawler(source)` | fence-strip, then run the candidate in the execution sandbox (§4.4) **through `ctx`** — against the live site during generation, or in the offline loop against the persisted `corpus` + recorded HTTP via a replay-backed `ctx` (§4.11), *never the network*. Returns a **size-bounded** `CandidateResult` (capped `samples`, condensed `schema_errors`, `exception` = type+message+traceback *tail*) so it survives RLM's output truncation (a **10k-char total** budget when output exceeds 10k — 5k head + 5k tail; keep load-bearing fields in the head), crossing the bridge as JSON the model parses in-REPL. |
 
 `validate_crawler` runs the candidate **on the host**, and that's mandatory, not just
 convenient: RLM's Pyodide sandbox has no network and none of the crawler's libraries
@@ -164,9 +164,12 @@ fix before `SUBMIT`.
 answers in-sandbox `llm_query` calls — pass it explicitly as a concrete LM (an unset `sub_lm`
 silently falls back to the *root* LM, billing every `llm_query` at planner rates). Scope the LM
 per call with `with dspy.context(lm=root_lm): await gen.acall(...)`, never a process-global
-`dspy.configure` (it is thread-owned and raises from the scheduler's worker tasks — §9). Build
-the generation LM with `cache=False` so each (re)generation re-reasons and `BestOfN`/`Refine`/GEPA
-sample distinct candidates. Set both RLM caps explicitly (`AUTOCRAWLER_MAX_ITERATIONS`,
+`dspy.configure` (it is thread-owned and raises from the scheduler's worker tasks — §9). Candidate **distinctness does not come from `cache=False`**: `BestOfN`/`Refine` run the module N times
+each with a distinct **`rollout_id` at temperature=1.0** (`lm.copy(rollout_id=…, temperature=1.0)`), and
+`rollout_id` *is* part of the cache key — so attempts re-reason and miss the cache even with caching
+**on**; GEPA instead samples by mutating the instruction via the reflection LM. The real lever for
+stochastic re-sampling is **temperature > 0** (at temperature 0 `rollout_id` is inert). `cache=False`
+only forces identical-prompt calls back to the API; it is not required for candidate distinctness. Set both RLM caps explicitly (`AUTOCRAWLER_MAX_ITERATIONS`,
 `AUTOCRAWLER_MAX_LLM_CALLS`): `max_llm_calls` raises a *recoverable* in-sandbox error at its limit
 (the model can catch it and keep going), so it is a **soft** cap, not a hard runtime/spend bound —
 pair a bounded `max_iterations` with the host-side ceilings below, especially under
@@ -174,8 +177,9 @@ pair a bounded `max_iterations` with the host-side ceilings below, especially un
 
 **Hard cost ceilings (host-side backstops).** The installed RLM is bounded *both* ways — the root loop
 is `for _ in range(max_iterations)` (default 20) with an extract-fallback on exhaustion, and
-`max_llm_calls` caps sub-calls — so `AUTOCRAWLER_MAX_ITERATIONS`/`MAX_LLM_CALLS` are pass-through values
-to `dspy.RLM(...)`, not separate host caps. Two real gaps remain: `max_llm_calls` is **soft** (a
+`max_llm_calls` caps sub-calls — so `AUTOCRAWLER_MAX_ITERATIONS`/`MAX_LLM_CALLS` map to `dspy.RLM(max_iterations=…, max_llm_calls=…)`,
+which RLM enforces **internally** as hard caps (root loop `range(max_iterations)`; an in-process counter
+raises `RuntimeError` past `max_llm_calls`) — not a *separate* host layer (only `MAX_SUBCALLS` is). Two real gaps remain: `max_llm_calls` is **soft** (a
 recoverable error the model can catch and loop past, so it doesn't *hard*-bound sub-calls), and
 **fan-out** multiplies whole generations, which no single RLM cap bounds. So the host adds an
 **unconditional** sub-call kill (`AUTOCRAWLER_MAX_SUBCALLS`, set ≥ `max_llm_calls`) that aborts the
@@ -395,14 +399,16 @@ one `validate_crawler` run → `CandidateResult` + a graded float score + a `gat
 runs the candidate through `ctx`; the **offline** metric injects a replay-backed `ctx` (persisted
 `corpus` + recorded HTTP) so it never hits the network. The **gate-3** stability verdict is computed by
 the harness comparing *two* core invocations and **appended to the GEPA feedback text** (like the
-across-run aggregates below), never entering the scalar. Three thin adapters sit over the core — the
-callables have **incompatible signatures and must not be conflated**:
+across-run aggregates below), never entering the scalar. Adapters sit over the core — but only one is a genuine outlier (verified against source): the **GEPA
+5-arg metric and the `dspy.Evaluate` metric are signature-*compatible*** (one callable with defaulted
+`trace`/`pred_name`/`pred_trace` serves both; GEPA reuses its metric through `Evaluate`), so expose them
+as *one* example-based metric. Only `BestOfN`'s reward is structurally different:
 
-| consumer | signature | returns |
+| consumer | signature | note |
 |---|---|---|
-| `BestOfN`/`Refine` (§6) | `reward_fn(args, pred) -> float` | score |
-| `dspy.Evaluate` / scalar optimizers | `metric(example, pred, trace=None)` | score |
-| **GEPA** | `metric(gold, pred, trace=None, pred_name=None, pred_trace=None)` | `dspy.Prediction(score=, feedback=<text>)` |
+| `BestOfN`/`Refine` (§6) — **the outlier** | `reward_fn(kwargs, pred) -> float` | 1st arg is the module **kwargs dict**, returns a bare float |
+| `dspy.Evaluate` | `metric(example, pred)` | Evaluate passes **no** `trace` |
+| **GEPA** (same callable) | `metric(gold, pred, trace=None, pred_name=None, pred_trace=None) -> Prediction(score, feedback)` | optimizers pass `trace` |
 
 GEPA's **per-gate textual feedback** ("AST gate: banned import `os`", "0 items: feed URL 404",
 "unstable across two runs") — not the scalar — is the whole reason it is chosen. The reward_fn also
@@ -476,22 +482,27 @@ cross-validation.
   from the inputs-only trainset; the gate-accept threshold *is* MIPRO's λ). Do **not** run
   instruction-only/0-shot MIPRO — the weaker lever in 6/7 tasks [MIPRO]. *v1 documents but does **not**
   build this rung — 200+ accepted pairs is multi-month-to-never for a near-static list; keep only its
-  `MIPROv2(auto=)` signature smoke test.*
+  `MIPROv2(auto=)` signature pinned in `DSPY_ASSUMPTIONS.md` (§9).*
 
-**Three disjoint pools — assert it.** GEPA internally splits its training data into `D_feedback`
-(reflective minibatches) and `D_pareto` (its candidate-selection set, = our `valset`, passed
-explicitly to `compile`). The **promotion held-out** is a *third*, frozen pool GEPA never sees, used
-only by `dspy.Evaluate` after compile. The earlier draft conflated `valset` with the promotion set —
+**Three disjoint pools — assert it.** GEPA takes two *separate* caller-supplied sets (not an internal
+split): `trainset` (sources the reflective minibatches) and `valset` (the candidate-selection / Pareto
+scoring set, scored by GEPA's internal `dspy.Evaluate`); if `valset` is omitted it **reuses `trainset`
+for both** (`valset = valset or trainset`) — *not* guaranteed disjoint, which is exactly why we pass a
+distinct `valset`. The **promotion held-out** is a *third*, frozen pool GEPA never sees, used only by
+`dspy.Evaluate` after compile. (`D_feedback`/`D_pareto` are paper terms, not code names.) The earlier draft conflated `valset` with the promotion set —
 a leak. Assert (and M5-test) zero overlap across train / val / promotion; gskill's ~67/17/20
 (200/50/60) split is a reasonable default [GEPA, RLM♥GEPA, gskill].
 
-**GEPA config.** 5-arg feedback metric; `reflection_lm` = strong (`AUTOCRAWLER_REFLECTION_MODEL`,
-distinct from `sub_lm`, ideally able to read raw traces); exactly one budget (`auto="light"` to start
+**GEPA config.** 5-arg feedback metric; `reflection_lm` = strong model (`AUTOCRAWLER_REFLECTION_MODEL`), passed to `dspy.GEPA(reflection_lm=…)`
+— it reflects over a *trace-derived* reflective dataset, not the raw trace tuple; make it a different,
+stronger family than the cheap RLM `sub_lm` (which is an RLM-only param, not GEPA's); exactly one budget (`auto="light"` to start
 — expect ~O(5) accepted mutations, gains early, tens of minutes/task at thread=1; a low accept-count
 is *not* failure); `compile(..., teacher=None)`; `track_stats=True`. **Validation dominates the
 budget** (train rollouts to optimum can be ~6–737), so keep `valset`/`D_pareto` **small** — each
 rollout is a full sandboxed crawl — and cap it as a knob; keep `minibatch≈3`; **retain Pareto
-sampling** (a greedy selector collapses to a local optimum after ~one iteration); leave **Merge OFF**
+sampling** (`candidate_selection_strategy="pareto"`, the default) over greedy `"current_best"`, which
+mutates only the single top candidate and loses the frontier's per-instance specialists (it keeps
+hill-climbing, just without diversity); leave **Merge OFF**
 for v1 (single owned predictor; Merge is model-sensitive and can regress weaker models)
 [GEPA, GEPA-+25pts].
 
@@ -531,8 +542,9 @@ above.)*
 **Trigger & persistence.** Out-of-band — manual (the optional §4.9 HTTP surface), a slow
 `AUTOCRAWLER_REOPT_CHECK` cadence, and/or a trainset-growth threshold of *+M* health-confirmed
 pairs. The optimized program persists as **JSON state** (`generator.save("generator.json")`,
-`save_program=False`) — **never** cloudpickle (`save_program=True` is arbitrary-code-exec on load,
-contrary to §8). `generator.py` reconstructs `CrawlerGenerator` and `.load()`s on boot, else falls
+`save_program=False`) — **never** cloudpickle. (`save()` dispatches on *suffix*: a `.json` path writes
+JSON; a `.pkl` path cloudpickles *even with* `save_program=False`, so the `.json` suffix is what makes it
+safe; `save_program=True` would be arbitrary-code-exec on load, contrary to §8.) `generator.py` reconstructs `CrawlerGenerator` and `.load()`s on boot, else falls
 back to baseline. Artifacts are versioned/timestamped (tagged with trainset snapshot + held-out
 score), the prior kept for rollback via a single config pointer, and the DSPy version pinned
 alongside. The generator program is reviewed separately from per-crawler review (§8).
@@ -621,9 +633,9 @@ target. *(M5b: add a low-weight efficiency tie-breaker — `pages_fetched`/turn-
 candidates; on strong backbones cost/latency may be the only measurable optimization gain [gskill]. At
 N≈4–8 it rarely changes the v1 argmax, so it's deferred.)* Generation runs the RLM through the §6
 selection loop over the scalar; the **same
-scoring core** (not the same callable) feeds the §4.11 optimizer through three signature-correct
-adapters — `reward_fn(args, pred)`, `dspy.Evaluate`, and the 5-arg GEPA metric have incompatible
-signatures and must not be conflated (§4.11).
+scoring core** feeds the §4.11 optimizer through adapters: *one* example-based metric serves both
+`dspy.Evaluate` and GEPA (compatible signatures), with a **separate** `reward_fn(kwargs, pred) -> float`
+adapter for `BestOfN`/`Refine` (the genuine outlier) (§4.11).
 
 **Candidate selection.** Generate N candidates and take the **argmax over the graded scalar**. They run
 **sequentially** — stock `dspy.BestOfN`/`dspy.Refine` are sequential for-loops over rollouts with an
@@ -632,7 +644,9 @@ early break (verified in installed 3.2.1), *not* concurrent — so N costs ~N× 
 candidate passes), not parallelism. SRLM's +22% is a selection-**quality** result, not free concurrency.
 For feedback-carrying retries use a **small custom loop**, not stock `dspy.Refine`: its hint comes from
 `inspect.getsource(reward_fn)` + the scalar via an internal `OfferFeedback` predictor — it never sees our
-`gate_failures` string (and `getsource` on a lambda/partial adapter throws). Add a `prior_feedback: str`
+`gate_failures` string. (A *lambda* adapter actually works; a `functools.partial` breaks `Refine` at
+construction — `getsource(partial)` raises `TypeError` which is caught, but the fallback
+`getsource(partial.__class__)` raises an *uncaught* `OSError`.) Add a `prior_feedback: str`
 `InputField` to `GenerateCrawler` and re-invoke generation with the prior `CandidateResult.gate_failures`
 injected (preserving the per-retry-feedback property [Feedback-Descent, Meta-Harness]); cap retry depth.
 Plain best-of-N argmax (no extra feedback LM call) is the cheaper no-feedback fallback. Default N≈4–8.
@@ -742,22 +756,23 @@ The central risk is **executing model-written code against the live web**. Mitig
 - **No importable `MockInterpreter`.** DSPy ships none on the wheel; author one satisfying the
   `CodeInterpreter` protocol (copy/adapt `bizup-news`'s `tests/reports/_mock_interpreter.py`), and
   drive the planner with `DummyLM` (`from dspy.utils.dummies`) for Deno-free, model-free tests.
-- Obtain the LM via `dspy.context`, not the thread-owned `dspy.configure`; build it `cache=False`
-  for generation (§4.2). Use `aforward`/async to match the news project's style.
+- Obtain the LM via `dspy.context`, not the thread-owned `dspy.configure`. Candidate distinctness comes
+  from `rollout_id` + temperature, **not** `cache=False` (§4.2). Use `aforward`/async to match the news
+  project's style.
 - **Order gates cheapest-first**, short-circuiting on first failure: AST → single-run yield → two-run
   Jaccard stability → (offline only) multi-pass promotion eval, so the expensive multi-run evaluation
   runs only on candidates that cleared the cheap screens [Darwin-Gödel-Machine].
-- **Pin every DSPy seam in a build-time smoke test — before M1.** Multiple spec claims already proved
-  wrong against installed 3.2.1 (the nonexistent `SandboxSerializable`; an "unbounded root loop"; stock
-  `Refine` carrying feedback), so one early CI smoke test asserts against the *installed* dspy: the
-  **corpus-injection seam** — `PythonInterpreter._inject_variables(code, {"corpus": d})` accepts a
-  well-formed dict and **raises `CodeInterpreterError` on a poisoned one** (non-JSON value / set of
-  dicts) — *not* `serialize_for_json`, which falls back to `str(value)` and never raises (so the obvious
-  test can't fire); the **async entrypoint** — `CrawlerGenerator.aforward` resolves and does *not*
-  delegate into a missing `BestOfN`/`Refine` `aforward` (they implement only sync `forward`); the
-  GEPA/MIPROv2 signatures (5-arg feedback metric, `reflection_lm`, `auto=`, `teacher=None`,
-  `MIPROv2(auto=)`); `named_predictors()` non-empty before any `compile`; JSON `save`/`load` round-trip;
-  and FINAL-channel `crawler_source` capture. Each speculative claim becomes a fast failing test.
+- **Every DSPy-internal claim is source-pinned, not smoke-tested.** Each load-bearing dspy assumption is
+  recorded in the checked-in `DSPY_ASSUMPTIONS.md` with the dspy version (3.2.1), the `file:line` in the
+  dspy package, and a one-line quote of what the code does (`rollout_id` in the cache key →
+  `cache.py:233`; `_serialize_value` set→sorted-list, raises only on types *outside* the JSON set →
+  `python_interpreter.py:469-478`; `Evaluate` metric is 2-arg → `evaluate.py:172`; `valset = valset or
+  trainset` → `gepa.py:508`; 5k+5k truncation → `repl_types.py:112-119`; no `SandboxSerializable` → grep
+  0). Inline spec claims carry `file:line` citations so the spec self-checks on read. **No runtime smoke
+  test** (per project preference) — instead re-run the source audit (workflow `wfh296hq1`) on any dspy
+  version bump, gated by a CI check that the pinned dspy version still matches `DSPY_ASSUMPTIONS.md` (no
+  import, no Deno). Note: `news/.claude/skills/dspy-rlm/SKILL.md` is **not** a source of truth — it
+  invents the nonexistent `SandboxSerializable`/`to_sandbox`/`rlm_preview`.
 
 ## 10. CLI & operations
 | command | does |
@@ -815,10 +830,10 @@ stays for manual one-shot runs and CI.
   to identical held-out scores; train/val/promotion pools are **disjoint**; `named_predictors()` is
   non-empty before `compile`; a tested **rollback** restores the prior generator; the **saturation**
   assertion fires when the trainset is all-near-maximal; that `_inject_variables` injects a well-formed
-  `corpus` and **raises `CodeInterpreterError`** on a poisoned one (the real REPL guard —
-  `serialize_for_json` never raises); that `CrawlerGenerator.aforward` resolves without delegating into a
-  missing wrapper `aforward`; and a build-time smoke test pins the GEPA/MIPROv2 call signatures against
-  installed DSPy.
+  `corpus` and **raises `CodeInterpreterError`** on a non-JSON-typed value (e.g. `bytes`/`complex`/an
+  object — a `set` is *coerced*, not rejected); and that `CrawlerGenerator.aforward` resolves without
+  delegating into a missing wrapper `aforward`. (DSPy-internal *behaviors* are pinned by source citation
+  in `DSPY_ASSUMPTIONS.md` + a version tripwire, not a runtime smoke test — §9.)
 - **Runner/contract** — golden HTML/feed fixtures + recorded HTTP; assert normalized items
   and dedup behavior. A couple of hand-written reference crawlers double as contract tests.
 - **Politeness/SSRF** — unit tests proving robots/rate-limit/allowed-host enforcement.
@@ -864,7 +879,7 @@ stays for manual one-shot runs and CI.
    round-trips trivially, and the precedents ([RLM♥GEPA], [gskill]) evolve a text artifact. Residual
    risk is whether a *typed* `dspy.ChainOfThought` predictor round-trips end-to-end; the pre-build toy
    milestone (§4.11/§13) settles it, and the instruction-string/CodeAct path is the default if not.
-   Pin the GEPA/MIPROv2 call signatures via a build-time smoke test (§9).
+   The GEPA/MIPROv2 call signatures are pinned in `DSPY_ASSUMPTIONS.md` (§9).
 8. **Metric calibration (a protocol, not guesses)** — the scalar's *combine form* (shape-by-necessity
    vs flat product), the axis weights, and the numeric thresholds (`min_items`, body chars, Jaccard,
    `ENUM_FLOOR_RATIO`) are *calibrated*, not asserted: (a) **A/B the combine form** on the frozen
@@ -881,7 +896,7 @@ stays for manual one-shot runs and CI.
 Decisions above are grounded in the local research corpus (cited inline by short tag). Key sources and
 what they anchor — full per-paper findings live in workflow `wqnhxlk46`:
 
-- **GEPA: Reflective Prompt Evolution** (`#50c21d`) — `D_feedback`/`D_pareto` split, Pareto sampling, validation dominates budget, `minibatch≈3`, Merge model-sensitivity → §4.11.
+- **GEPA: Reflective Prompt Evolution** (`#50c21d`) — separate `trainset`/`valset` (paper's D_feedback/D_pareto), Pareto sampling, validation dominates budget, `minibatch≈3`, Merge model-sensitivity → §4.11.
 - **"how GEPA lifted a 1.2B model 25 pts"** (`#e643b2`) — the **saturation no-op**, graded reward + hard-case bias, `auto="light"` profile, per-example "trap" feedback → §4.11, §6.
 - **RLM ♥ GEPA** (`#286485`) — GEPA evolves an external *text* skill on an RLM (never internals); optimize-cheap/deploy-strong transfer; three-way held-out → §4.11.
 - **HALO / Recursive Agent Optimization on Terminal Bench** (`#472657`, `#aa636b`) — aggregate trace decomposition is the gain source; per-stratum regressions + noisy "peak"; capability-vs-harness triage → §4.11.
