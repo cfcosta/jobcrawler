@@ -13,7 +13,11 @@ import dspy
 from dspy.primitives import FinalOutput
 from dspy.utils import DummyLM
 
-from bizup_autocrawler.generate.generator import CrawlerGenerator, site_features
+from bizup_autocrawler.generate.generator import (
+    CrawlerGenerator,
+    select_best,
+    site_features,
+)
 from bizup_autocrawler.generate.snapshot import build_corpus
 from tests.generate._mock_interpreter import MockInterpreter
 
@@ -37,14 +41,17 @@ def test_strategy_predictor_is_gepa_visible() -> None:
 
 def test_save_load_round_trips_the_strategy_instruction(tmp_path: object) -> None:
     gen = CrawlerGenerator()
-    optimized = gen.strategy.predict.signature.with_instructions("OPTIMIZED RULES")
-    gen.strategy.predict.signature = optimized
+    sig = gen.strategy.predict.signature
+    assert sig is not None
+    gen.strategy.predict.signature = sig.with_instructions("OPTIMIZED RULES")
     path = f"{tmp_path}/generator.json"  # type: ignore[str-bytes-safe]
 
     gen.save(path, save_program=False)
     reloaded = CrawlerGenerator()
     reloaded.load(path)
-    assert "OPTIMIZED RULES" in reloaded.strategy.predict.signature.instructions
+    reloaded_sig = reloaded.strategy.predict.signature
+    assert reloaded_sig is not None
+    assert "OPTIMIZED RULES" in reloaded_sig.instructions
 
 
 def test_site_features_summarizes_without_leaking_feed_urls() -> None:
@@ -84,3 +91,27 @@ async def test_aforward_generates_candidate_and_drives_interpreter() -> None:
     assert len(interp.call_history) == 1
     assert "SUBMIT" in interp.call_history[0][0]
     assert "llm_query" in interp.tools
+
+
+async def test_select_best_returns_argmax_over_reward() -> None:
+    # A stub module that returns a prediction keyed on the rollout_id BestOfN sets,
+    # so reward_fn can prefer one specific attempt. Proves the argmax wiring +
+    # async offload without a real LM.
+    class _Stub(dspy.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.predict = dspy.Predict("x -> y")  # a predictor to carry the rollout LM
+
+        def forward(self, **kwargs: object) -> dspy.Prediction:
+            lm = self.predict.lm
+            rid = (lm.kwargs.get("rollout_id", 0) if lm else 0) or 0
+            return dspy.Prediction(candidate=f"c{rid}", rid=rid)
+
+    def reward_fn(kwargs: object, pred: dspy.Prediction) -> float:
+        return float(pred.rid)  # prefers the highest rollout_id
+
+    with dspy.context(lm=DummyLM([{"x": "y"}])):
+        best = await select_best(
+            _Stub(), {"site_url": "u"}, reward_fn=reward_fn, n=3, threshold=99.0
+        )
+    assert best.rid == 2  # best of rollout_ids 0,1,2 under an unreachable threshold

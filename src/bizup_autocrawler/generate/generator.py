@@ -16,6 +16,7 @@ the §4.4 sandbox. This module is just the one-candidate generation primitive.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Mapping
 
 import dspy
@@ -66,6 +67,37 @@ class CrawlerGenerator(dspy.Module):
             render=render,
             hints=_steer(hints, plan.discovery_plan),
         )
+
+
+async def select_best(
+    module: dspy.Module,
+    inputs: Mapping[str, object],
+    *,
+    reward_fn: Callable[[Mapping[str, object], dspy.Prediction], float],
+    n: int,
+    threshold: float = 1.0,
+) -> dspy.Prediction:
+    """§6 candidate selection: argmax over the graded scalar, early-breaking.
+
+    Runs ``module`` up to ``n`` times with distinct ``rollout_id`` at
+    temperature=1.0 (the real distinctness lever — not ``cache=False``), keeping
+    the best by ``reward_fn`` and breaking the moment one clears ``threshold``
+    (the win is the early break, not parallelism — BestOfN is a sequential
+    for-loop). BestOfN is sync-only (§4.11), so it runs off the event loop to
+    avoid blocking the §4.9 single-process scheduler. dspy's LM context does not
+    cross into the executor thread, so the active LM is captured here and
+    re-established inside the worker.
+    """
+    lm = dspy.settings.lm
+
+    def run() -> dspy.Prediction:
+        chooser = dspy.BestOfN(
+            module=module, N=n, reward_fn=reward_fn, threshold=threshold
+        )
+        with dspy.context(lm=lm):
+            return chooser(**inputs)
+
+    return await asyncio.to_thread(run)
 
 
 def _steer(hints: str, discovery_plan: str) -> str:
