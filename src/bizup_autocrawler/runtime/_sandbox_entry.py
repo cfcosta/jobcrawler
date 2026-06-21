@@ -13,7 +13,8 @@ from __future__ import annotations
 import json
 import sys
 import traceback
-from collections.abc import Mapping
+from collections.abc import Callable, Iterable, Mapping
+from typing import cast
 
 import httpx
 
@@ -35,8 +36,10 @@ def _build_ctx(
         record = replay.get(str(request.url))
         if record is None:
             return httpx.Response(404)
+        status = record.get("status", 200)
         return httpx.Response(
-            int(record.get("status", 200)), text=str(record.get("text", ""))
+            status if isinstance(status, int) else 200,
+            text=str(record.get("text", "")),
         )
 
     client = httpx.Client(
@@ -58,11 +61,11 @@ def main() -> None:
     try:
         namespace: dict[str, object] = {}
         exec(compile(data["source"], "<candidate>", "exec"), namespace)  # noqa: S102
-        crawl = namespace["crawl"]
+        crawl = cast("Callable[[Ctx], Iterable[object]]", namespace["crawl"])
         count = 0
         samples: list[dict[str, str]] = []
         errors: list[str] = []
-        for obj in crawl(ctx):  # type: ignore[operator]
+        for obj in crawl(ctx):
             item = obj if isinstance(obj, Item) else None
             if item is None:
                 try:

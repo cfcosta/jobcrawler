@@ -12,8 +12,16 @@ from collections.abc import Callable
 import httpx
 import pytest
 
+from datetime import timedelta
+
 from bizup_autocrawler.runtime.contract import Ctx as CtxProtocol
 from bizup_autocrawler.runtime.ctx import Ctx
+from bizup_autocrawler.runtime.solver import (
+    ChallengeError,
+    ChallengeSolver,
+    Clearance,
+    ClearanceCache,
+)
 from bizup_autocrawler.runtime.ssrf import SsrfError
 
 Handler = Callable[[httpx.Request], httpx.Response]
@@ -25,6 +33,20 @@ def _ctx(handler: Handler, allowed: set[str] | None = None) -> Ctx:
         follow_redirects=False,
     )
     return Ctx(allowed or {"example.com"}, client=client)
+
+
+class _FakeSolver:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def solve(self, url: str) -> Clearance:
+        self.calls += 1
+        return Clearance(cookies={"cf_clearance": "x"}, user_agent="StealthUA")
+
+
+class _ExplodingSolver:
+    def solve(self, url: str) -> Clearance:
+        raise AssertionError("solver must not be called when clearance is cached")
 
 
 def test_satisfies_ctx_protocol() -> None:
@@ -93,3 +115,53 @@ def test_fetch_raises_for_status_errors() -> None:
 def test_render_not_implemented_yet() -> None:
     with pytest.raises(NotImplementedError):
         _ctx(lambda r: httpx.Response(200)).render("https://example.com/a")
+
+
+# -- §4.10 Cloudflare challenge escalation -----------------------------------
+
+
+def _challenge_then_clear(request: httpx.Request) -> httpx.Response:
+    if "cf_clearance" in request.headers.get("cookie", ""):
+        return httpx.Response(200, text="CLEARED")
+    return httpx.Response(403, headers={"cf-mitigated": "challenge"})
+
+
+def _with_client(
+    handler: Handler,
+    *,
+    solver: ChallengeSolver | None = None,
+    clearance: ClearanceCache | None = None,
+) -> Ctx:
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler), follow_redirects=False
+    )
+    return Ctx({"example.com"}, client=client, solver=solver, clearance=clearance)
+
+
+def test_fetch_solves_challenge_and_retries() -> None:
+    solver = _FakeSolver()
+    ctx = _with_client(_challenge_then_clear, solver=solver)
+    assert ctx.fetch("https://example.com/a") == "CLEARED"
+    assert solver.calls == 1
+
+
+def test_fetch_raises_when_still_challenged_after_solve() -> None:
+    always = lambda r: httpx.Response(403, headers={"cf-mitigated": "challenge"})  # noqa: E731
+    ctx = _with_client(always, solver=_FakeSolver())
+    with pytest.raises(ChallengeError):
+        ctx.fetch("https://example.com/a")
+
+
+def test_cached_clearance_replayed_without_solving() -> None:
+    cache = ClearanceCache(ttl=timedelta(minutes=30))
+    cache.put("example.com", Clearance(cookies={"cf_clearance": "x"}, user_agent="UA"))
+    ctx = _with_client(
+        _challenge_then_clear, solver=_ExplodingSolver(), clearance=cache
+    )
+    assert ctx.fetch("https://example.com/a") == "CLEARED"  # cookie from cache
+
+
+def test_no_solver_means_no_escalation() -> None:
+    challenge = lambda r: httpx.Response(403, headers={"cf-mitigated": "challenge"})  # noqa: E731
+    with pytest.raises(httpx.HTTPStatusError):
+        _ctx(challenge).fetch("https://example.com/a")
