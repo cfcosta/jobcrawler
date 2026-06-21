@@ -18,6 +18,7 @@ import httpx
 from pytest import MonkeyPatch
 
 from bizup_autocrawler.crawlers import example
+from bizup_autocrawler.governor import RateGovernor
 from bizup_autocrawler.ingest import NewsClient
 from bizup_autocrawler.runtime.contract import Ctx as CtxProtocol
 from bizup_autocrawler.runtime.contract import Item, load_crawler
@@ -256,6 +257,57 @@ def test_runaway_crawler_is_bounded_by_the_page_budget() -> None:
 
     assert summary.items_found == 3  # only what was yielded before the budget tripped
     assert summary.errors == 1  # PageLimitError isolated to this site
+    store.close()
+
+
+class _GovClock:
+    """A fake clock whose ``sleep`` advances it, recording the durations."""
+
+    def __init__(self) -> None:
+        self.t = 0.0
+        self.sleeps: list[float] = []
+
+    def now(self) -> float:
+        return self.t
+
+    def sleep(self, d: float) -> None:
+        self.sleeps.append(d)
+        self.t += d
+
+
+def test_ingest_is_paced_by_the_rate_governor() -> None:
+    def crawl(ctx: CtxProtocol) -> Iterable[Item]:
+        yield _one("https://example.com/a")
+        yield _one("https://example.com/b")
+
+    store = StateStore(":memory:")
+    posts, news = _recording_news()
+    clock = _GovClock()
+    gov = RateGovernor("2/s", clock=clock.now, sleep=clock.sleep)  # 0.5s apart
+
+    summary = crawl_site("s", crawl, _ctx(), store, news, governor=gov)
+
+    assert summary.new_items == 2
+    assert clock.sleeps == [0.5]  # first POST is free, the second is paced
+    store.close()
+
+
+def test_governor_paces_only_real_posts_not_skipped_items() -> None:
+    # 'a' is already seen, so only 'b' is POSTed — a single POST never sleeps.
+    def crawl(ctx: CtxProtocol) -> Iterable[Item]:
+        yield _one("https://example.com/a")
+        yield _one("https://example.com/b")
+
+    store = StateStore(":memory:")
+    store.mark_ingested("s", canonicalize_url("https://example.com/a"))
+    posts, news = _recording_news()
+    clock = _GovClock()
+    gov = RateGovernor("2/s", clock=clock.now, sleep=clock.sleep)
+
+    summary = crawl_site("s", crawl, _ctx(), store, news, governor=gov)
+
+    assert summary.new_items == 1  # only 'b'
+    assert clock.sleeps == []  # one POST → the dedup-skipped 'a' costs no budget
     store.close()
 
 

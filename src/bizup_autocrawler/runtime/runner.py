@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from datetime import timezone
 
 from bizup_autocrawler import config
+from bizup_autocrawler.governor import RateGovernor
 from bizup_autocrawler.ingest import IngestOutcome, NewsClient
 from bizup_autocrawler.runtime.contract import CrawlFn, Item
 from bizup_autocrawler.runtime.ctx import Ctx
@@ -49,9 +50,15 @@ def crawl_site(
     news: NewsClient,
     *,
     first_crawl_cap: int | None = None,
+    governor: RateGovernor | None = None,
 ) -> CrawlSummary:
     is_first = store.last_run(slug) is None
     run_id = store.start_run(slug)
+
+    # Pace ingestion to the news-API LLM capacity (§4.7) — distinct from the §4.5
+    # per-host *fetch* cap. Each POST drives 2–3 server-side LLM calls, so a burst
+    # (a first crawl, several sites finishing at once) would overrun enrichment.
+    governor = governor or RateGovernor(config.ingest_rate())
 
     items, errors = _collect(crawl_fn, ctx)
     fresh, historical = _apply_first_crawl_cap(items, is_first, first_crawl_cap)
@@ -69,6 +76,7 @@ def crawl_site(
         canon = canonicalize_url(item.url, drop_params=drop)
         if store.is_seen(slug, canon):
             continue
+        governor.wait()  # throttle to AUTOCRAWLER_INGEST_RATE before the POST
         outcome = news.post_item(item.title, item.body)
         if outcome is IngestOutcome.INGESTED:
             store.mark_ingested(slug, canon)
