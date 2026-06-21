@@ -15,7 +15,7 @@ import pytest
 from datetime import timedelta
 
 from bizup_autocrawler.runtime.contract import Ctx as CtxProtocol
-from bizup_autocrawler.runtime.ctx import Ctx
+from bizup_autocrawler.runtime.ctx import Ctx, PageLimitError
 from bizup_autocrawler.runtime.solver import (
     ChallengeError,
     ChallengeSolver,
@@ -180,3 +180,15 @@ def test_get_never_follows_a_redirect_to_an_internal_target() -> None:
     resp = _with_client(handler).get("https://example.com/x", follow_redirects=True)
     assert resp.status_code == 302  # not followed
     assert "INTERNAL" not in resp.text
+
+
+def test_fetch_enforces_the_page_budget() -> None:
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, text="ok")),
+        follow_redirects=False,
+    )
+    ctx = Ctx({"example.com"}, client=client, max_pages=2)
+    ctx.fetch("https://example.com/1")
+    ctx.fetch("https://example.com/2")
+    with pytest.raises(PageLimitError):
+        ctx.fetch("https://example.com/3")

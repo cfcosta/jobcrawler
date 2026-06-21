@@ -28,6 +28,10 @@ from bizup_autocrawler.urls import normalize_host
 _REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
 
 
+class PageLimitError(RuntimeError):
+    """The crawl exceeded its per-run page budget (``AUTOCRAWLER_MAX_PAGES``)."""
+
+
 class Ctx:
     def __init__(
         self,
@@ -38,9 +42,11 @@ class Ctx:
         timeout: float = 20.0,
         solver: ChallengeSolver | None = None,
         clearance: ClearanceCache | None = None,
+        max_pages: int | None = None,
     ) -> None:
         self._allowed = set(allowed_hosts)
         self._pages = 0
+        self._max_pages = config.max_pages() if max_pages is None else max_pages
         self._solver = solver
         self._clearance = clearance
         self._client = client or httpx.Client(
@@ -54,6 +60,14 @@ class Ctx:
         """Logical pages fetched this run (one per fetch/get), for the run record."""
         return self._pages
 
+    def _charge_page(self) -> None:
+        # The committed-crawl resource bound that actually interrupts a runaway
+        # crawler in-process (§4.4): the next fetch past the cap raises, and the
+        # runner isolates it. Full subprocess isolation of reviewed crawls is M2.
+        if self._max_pages is not None and self._pages >= self._max_pages:
+            raise PageLimitError(f"page budget exhausted ({self._max_pages} pages)")
+        self._pages += 1
+
     def fetch(self, url: str, *, max_redirects: int = 5) -> str:
         """GET ``url`` (SSRF-checked per hop) and return decoded UTF-8 text.
 
@@ -61,7 +75,7 @@ class Ctx:
         the solver tier and replays the cached clearance (§4.10) — crawler code
         stays oblivious.
         """
-        self._pages += 1
+        self._charge_page()
         current = url
         for _ in range(max_redirects + 1):
             check_url(current, self._allowed)
@@ -90,7 +104,7 @@ class Ctx:
 
     def get(self, url: str, **kwargs: Any) -> httpx.Response:
         check_url(url, self._allowed)
-        self._pages += 1
+        self._charge_page()
         # Never auto-follow: a redirect target is unchecked, so following one
         # (e.g. 302 → 169.254.169.254) would bypass the SSRF guard. The caller
         # re-fetches the Location through ctx, which re-checks it.

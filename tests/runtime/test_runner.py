@@ -195,6 +195,27 @@ def test_retry_ingest_stays_unseen_and_is_reattempted() -> None:
     store.close()
 
 
+def test_runaway_crawler_is_bounded_by_the_page_budget() -> None:
+    def crawl(ctx: CtxProtocol) -> Iterable[Item]:
+        for i in range(100):
+            ctx.fetch(f"https://example.com/{i}")
+            yield _one(f"https://example.com/{i}")
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, text="ok")),
+        follow_redirects=False,
+    )
+    ctx = Ctx({"example.com"}, client=client, max_pages=3)
+    store = StateStore(":memory:")
+    _posts, news = _recording_news()
+
+    summary = crawl_site("s", crawl, ctx, store, news)
+
+    assert summary.items_found == 3  # only what was yielded before the budget tripped
+    assert summary.errors == 1  # PageLimitError isolated to this site
+    store.close()
+
+
 def test_first_crawl_cap_keeps_newest_and_skips_backlog() -> None:
     def crawl(ctx: CtxProtocol) -> Iterable[Item]:
         for i in range(5):
