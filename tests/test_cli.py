@@ -67,8 +67,10 @@ def test_render_list_shows_script_presence_and_last_items(tmp_path: Path) -> Non
     lines = render_list(sites, store, crawlers_dir=tmp_path)
 
     assert "techcrunch" in lines[0]
-    assert "script" in lines[0] and "last_items=7" in lines[0]
+    assert "script" in lines[0] and "last_items=" in lines[0] and "7" in lines[0]
+    assert "health=ok" in lines[0]  # found items → not stale
     assert "no-script" in lines[1] and " off " in f" {lines[1]} "
+    assert "health=new" in lines[1]  # never run
     store.close()
 
 

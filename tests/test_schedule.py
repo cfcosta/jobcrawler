@@ -11,6 +11,9 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 
+import pytest
+from pydantic import ValidationError
+
 from bizup_autocrawler.runtime.runner import CrawlSummary
 from bizup_autocrawler.schedule import Scheduler, Site
 from bizup_autocrawler.state import StateStore
@@ -25,6 +28,20 @@ def _summary(slug: str) -> CrawlSummary:
 
 async def _ok_crawl(site: Site) -> CrawlSummary:
     return _summary(site.slug)
+
+
+def test_render_must_be_a_known_tier() -> None:
+    with pytest.raises(ValidationError):
+        Site.model_validate({"slug": "s", "url": "https://x.com", "render": "borwser"})
+
+
+def test_cron_schedule_is_rejected_until_supported() -> None:
+    with pytest.raises(ValidationError):
+        Site(slug="s", url="https://x.com", schedule="0 6 * * *")
+
+
+def test_duration_schedule_is_accepted() -> None:
+    assert Site(slug="s", url="https://x.com", schedule="6h").schedule == "6h"
 
 
 def _store_with_finished_run(slug: str, at: datetime) -> StateStore:

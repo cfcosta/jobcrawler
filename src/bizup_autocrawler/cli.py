@@ -15,11 +15,13 @@ import argparse
 import ast
 import asyncio
 import importlib
+import signal
 from collections.abc import Sequence
 from pathlib import Path
 
 from bizup_autocrawler import config
 from bizup_autocrawler.generate.scoring import CandidateResult
+from bizup_autocrawler.health import staleness_candidate
 from bizup_autocrawler.ingest import NewsClient
 from bizup_autocrawler.runtime.contract import load_crawler
 from bizup_autocrawler.runtime.ctx import Ctx
@@ -64,11 +66,14 @@ def render_list(
     rows: list[str] = []
     for site in sites:
         has_script = _crawler_file(site.slug, crawlers_dir).exists()
-        last = store.last_run(site.slug)
+        history = store.runs_for(site.slug)
+        last = history[0] if history else None
         items = str(last.items_found) if last is not None else "-"
+        health = "stale" if staleness_candidate(history) else ("ok" if last else "new")
         rows.append(
             f"{site.slug:24} {'on' if site.enabled else 'off':3} "
-            f"{'script' if has_script else 'no-script':9} last_items={items}"
+            f"{'script' if has_script else 'no-script':9} "
+            f"last_items={items:>4} health={health}"
         )
     return rows
 
@@ -155,7 +160,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     scheduler = Scheduler(sites, store=store, crawl=crawl)
 
     async def serve() -> None:
-        await scheduler.run(stop=asyncio.Event())
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, stop.set)  # graceful drain (§4.9)
+            except NotImplementedError:
+                pass  # signal handlers unavailable (e.g. non-Unix); Ctrl-C still works
+        await scheduler.run(stop=stop)
 
     try:
         asyncio.run(serve())

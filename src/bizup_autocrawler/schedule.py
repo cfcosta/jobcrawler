@@ -27,8 +27,9 @@ import asyncio
 import random
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from bizup_autocrawler import config
 from bizup_autocrawler.durations import parse_duration
@@ -42,10 +43,26 @@ class Site(BaseModel):
     slug: str
     url: str
     name: str = ""
-    render: str = "auto"
+    render: Literal["auto", "static", "browser", "solver"] = "auto"
     hints: str = ""
     schedule: str | None = None
     enabled: bool = True
+
+    @field_validator("schedule")
+    @classmethod
+    def _duration_only(cls, value: str | None) -> str | None:
+        # Reject a cron expr loudly rather than silently downgrading it to the
+        # default cadence — cron is deferred until the §4.9 scheduler grows it.
+        if value is None:
+            return value
+        try:
+            parse_duration(value)
+        except ValueError as exc:
+            raise ValueError(
+                f"schedule {value!r}: cron is not supported yet (§4.9); "
+                "use a duration like 30m, 6h, 1d"
+            ) from exc
+        return value
 
 
 def _utcnow() -> datetime:

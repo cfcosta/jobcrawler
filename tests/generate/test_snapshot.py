@@ -76,6 +76,20 @@ def test_repl_helpers_are_valid_python_defining_grep() -> None:
     assert "grep" in defined
 
 
+def test_dspy_serializer_rejects_non_json_corpus() -> None:
+    # §9/§12 substitute-for-smoke-test: dspy's corpus injection raises on a
+    # non-JSON type — the behavior ensure_json_primitive mirrors, verified live.
+    from dspy.primitives.python_interpreter import (
+        CodeInterpreterError,
+        PythonInterpreter,
+    )
+
+    class _Weird: ...
+
+    with pytest.raises(CodeInterpreterError):
+        PythonInterpreter()._to_json_compatible(_Weird())
+
+
 def test_on_domain_links_filters_and_dedupes() -> None:
     html = (
         '<a href="/a1">A1</a> <a href="/a2">A2</a> <a href="/a1">dup</a>'
