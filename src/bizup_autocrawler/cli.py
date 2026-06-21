@@ -21,7 +21,7 @@ from pathlib import Path
 
 from bizup_autocrawler import config
 from bizup_autocrawler.generate.scoring import CandidateResult
-from bizup_autocrawler.health import staleness_candidate
+from bizup_autocrawler.health import HealthState, staleness_candidate
 from bizup_autocrawler.ingest import NewsClient
 from bizup_autocrawler.runtime.contract import load_crawler
 from bizup_autocrawler.runtime.ctx import Ctx
@@ -29,7 +29,7 @@ from bizup_autocrawler.runtime.runner import CrawlSummary, crawl_site
 from bizup_autocrawler.runtime.sandbox import validate_crawler
 from bizup_autocrawler.schedule import Scheduler, Site
 from bizup_autocrawler.sites import find_site, load_sites
-from bizup_autocrawler.state import StateStore
+from bizup_autocrawler.state import RunRecord, StateStore
 from bizup_autocrawler.urls import normalize_host
 
 _CRAWLERS_DIR = Path(__file__).parent / "crawlers"
@@ -59,6 +59,22 @@ def _db_path() -> str:
 # -- list --------------------------------------------------------------------
 
 
+def _health_label(
+    store: StateStore, slug: str, history: Sequence[RunRecord], has_run: bool
+) -> str:
+    """The health column: persisted generation-failed wins over a re-derived stale.
+
+    A generation-failed site still *looks* like a staleness candidate from its run
+    history, so re-deriving would mislabel it "stale" (implying it self-heals); the
+    persisted state (§4.8) is authoritative for that terminal case.
+    """
+    if store.get_health(slug) == HealthState.GENERATION_FAILED.value:
+        return "gen-failed"
+    if staleness_candidate(list(history)):
+        return "stale"
+    return "ok" if has_run else "new"
+
+
 def render_list(
     sites: Sequence[Site], store: StateStore, *, crawlers_dir: Path = _CRAWLERS_DIR
 ) -> list[str]:
@@ -69,7 +85,7 @@ def render_list(
         history = store.runs_for(site.slug)
         last = history[0] if history else None
         items = str(last.items_found) if last is not None else "-"
-        health = "stale" if staleness_candidate(history) else ("ok" if last else "new")
+        health = _health_label(store, site.slug, history, last is not None)
         rows.append(
             f"{site.slug:24} {'on' if site.enabled else 'off':3} "
             f"{'script' if has_script else 'no-script':9} "

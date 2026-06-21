@@ -74,6 +74,25 @@ def test_render_list_shows_script_presence_and_last_items(tmp_path: Path) -> Non
     store.close()
 
 
+def test_render_list_surfaces_persisted_generation_failed(tmp_path: Path) -> None:
+    # A generation-failed site still looks like a staleness candidate from its run
+    # history, so `list` must read the *persisted* state to surface it distinctly
+    # (§4.8) rather than re-deriving "stale" and implying it will self-heal.
+    store = StateStore(":memory:")
+    baseline = store.start_run("techcrunch")
+    store.finish_run(baseline, items_found=8, new_items=8, errors=0, pages_fetched=2)
+    latest = store.start_run("techcrunch")
+    store.finish_run(latest, items_found=0, new_items=0, errors=1, pages_fetched=1)
+    store.set_health("techcrunch", "generation_failed")
+
+    lines = render_list(
+        [Site(slug="techcrunch", url="https://t.com")], store, crawlers_dir=tmp_path
+    )
+
+    assert "health=gen-failed" in lines[0]
+    store.close()
+
+
 def test_validate_one_runs_the_sandbox(tmp_path: Path) -> None:
     (tmp_path / "good.py").write_text(
         "from bizup_autocrawler.runtime.contract import Item\n"

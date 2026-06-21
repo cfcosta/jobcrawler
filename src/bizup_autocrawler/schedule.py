@@ -27,14 +27,21 @@ import asyncio
 import random
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime, timedelta, timezone
-from typing import Literal
+from typing import Literal, Protocol
 
 from pydantic import BaseModel, field_validator
 
 from bizup_autocrawler import config
 from bizup_autocrawler.durations import parse_duration
+from bizup_autocrawler.health import HealthState
 from bizup_autocrawler.runtime.runner import CrawlSummary
 from bizup_autocrawler.state import StateStore
+
+
+class Healer(Protocol):
+    """The §4.8 self-healing seam the scheduler drives on its regen timer."""
+
+    async def assess(self, slug: str) -> HealthState: ...
 
 
 class Site(BaseModel):
@@ -85,6 +92,16 @@ CrawlFn = Callable[[Site], Awaitable[CrawlSummary]]
 Sleep = Callable[[float], Awaitable[None]]
 
 
+def _regen_interval(raw: str) -> timedelta | None:
+    """Parse ``AUTOCRAWLER_REGEN_CHECK``; ``off`` (or unparseable) disables it."""
+    if raw.strip().lower() == "off":
+        return None
+    try:
+        return parse_duration(raw)
+    except ValueError:
+        return None
+
+
 class Scheduler:
     def __init__(
         self,
@@ -99,6 +116,8 @@ class Scheduler:
         max_retries: int = 2,
         backoff_base: float = 1.0,
         jitter: Callable[[], float] | None = None,
+        healer: Healer | None = None,
+        regen_check: str | None = None,
     ) -> None:
         self._sites = list(sites)
         self._store = store
@@ -111,6 +130,11 @@ class Scheduler:
         self._backoff_base = backoff_base
         self._jitter = jitter or (lambda: random.uniform(0, 0.5))
         self._inflight: set[str] = set()
+        self._healer = healer
+        self._regen_interval = _regen_interval(
+            config.regen_check() if regen_check is None else regen_check
+        )
+        self._next_regen: datetime | None = None
 
     def due_sites(self) -> list[Site]:
         return [
@@ -142,10 +166,44 @@ class Scheduler:
         )
         return [r for r in results if isinstance(r, CrawlSummary)]
 
+    def regen_due(self, now: datetime) -> bool:
+        """True if a §4.8 staleness sweep is due (per ``AUTOCRAWLER_REGEN_CHECK``)."""
+        if self._healer is None or self._regen_interval is None:
+            return False
+        return self._next_regen is None or now >= self._next_regen
+
+    def mark_regen(self, now: datetime) -> None:
+        """Record that a sweep ran at ``now``; the next is one interval later."""
+        if self._regen_interval is not None:
+            self._next_regen = now + self._regen_interval
+
+    async def regen_tick(self) -> dict[str, HealthState]:
+        """Assess every enabled site for staleness, regenerating the stale (§4.8).
+
+        One orchestrator drives both crawling and regeneration; the healer persists
+        each resulting state (so ``list`` can surface it and a generation-failed
+        site is not re-enqueued into the same failing generation).
+        """
+        if self._healer is None:
+            return {}
+        states: dict[str, HealthState] = {}
+        for site in self._sites:
+            if site.enabled:
+                states[site.slug] = await self._healer.assess(site.slug)
+        return states
+
     async def run(self, *, stop: asyncio.Event, interval: float = 60.0) -> None:
-        """Loop ticks until ``stop`` is set; each tick drains before the next."""
+        """Loop ticks until ``stop`` is set; each tick drains before the next.
+
+        The slow §4.8 regeneration sweep hangs off the same loop on its own cadence
+        — never ``.compile()`` in-band (that offline GEPA work is §4.11's hand-off).
+        """
         while not stop.is_set():
             await self.tick()
+            now = self._clock()
+            if self.regen_due(now):
+                await self.regen_tick()
+                self.mark_regen(now)
             try:
                 await asyncio.wait_for(stop.wait(), timeout=interval)
             except asyncio.TimeoutError:

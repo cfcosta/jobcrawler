@@ -62,6 +62,11 @@ CREATE TABLE IF NOT EXISTS runs (
     pages_fetched INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS runs_by_site ON runs (site, id DESC);
+CREATE TABLE IF NOT EXISTS site_health (
+    site       TEXT PRIMARY KEY,
+    state      TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -163,6 +168,31 @@ class StateStore:
             (site, limit),
         ).fetchall()
         return [_to_record(r) for r in rows]
+
+    # -- per-site health (§4.8) ----------------------------------------------
+
+    def get_health(self, site: str) -> str | None:
+        """The persisted health state for ``site`` (a ``HealthState`` value), or None.
+
+        Persistence only: the string is owned by §4.8's ``HealthState`` enum; the
+        store deliberately does not import it (the runner/healer translate), so the
+        ``health`` module can keep depending on this one.
+        """
+        row = self._conn.execute(
+            "SELECT state FROM site_health WHERE site = ?", (site,)
+        ).fetchone()
+        return row["state"] if row is not None else None
+
+    def set_health(self, site: str, state: str) -> None:
+        """Upsert ``site``'s health state (overwrites any prior state)."""
+        now = self._clock().isoformat()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO site_health (site, state, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT (site) DO UPDATE SET state = ?, updated_at = ?",
+                (site, state, now, state, now),
+            )
+            self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()

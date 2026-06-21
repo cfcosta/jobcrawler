@@ -60,9 +60,21 @@ class SelfHealer:
         self._regenerate = regenerate  # async (slug) -> produced a gate-passing crawler
 
     async def assess(self, slug: str) -> HealthState:
-        """Detect → confirm → regenerate, returning the resulting health state."""
+        """Detect → confirm → regenerate, persisting and returning the new state."""
         if not staleness_candidate(self._store.runs_for(slug)):
-            return HealthState.HEALTHY
+            # Not a candidate (incl. a previously generation-failed site now finding
+            # items again) → healthy, which also clears any stuck failed state.
+            return self._record(slug, HealthState.HEALTHY)
+        if self._store.get_health(slug) == HealthState.GENERATION_FAILED.value:
+            # Already failed generation against this drift; do not re-enqueue the same
+            # failing generation (it would spin, §4.8) — surface it until it recovers.
+            return HealthState.GENERATION_FAILED
         if await self._reprobe(slug) > 0:
-            return HealthState.HEALTHY  # the re-probe re-parsed items: a tolerated blip
-        return regeneration_state(gate_passed=await self._regenerate(slug))
+            return self._record(slug, HealthState.HEALTHY)  # re-parsed: tolerated blip
+        return self._record(
+            slug, regeneration_state(gate_passed=await self._regenerate(slug))
+        )
+
+    def _record(self, slug: str, state: HealthState) -> HealthState:
+        self._store.set_health(slug, state.value)
+        return state

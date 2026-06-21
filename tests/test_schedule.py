@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from pydantic import ValidationError
 
+from bizup_autocrawler.health import HealthState, SelfHealer
 from bizup_autocrawler.runtime.runner import CrawlSummary
 from bizup_autocrawler.schedule import Scheduler, Site
 from bizup_autocrawler.state import StateStore
@@ -188,3 +189,114 @@ async def test_gives_up_after_max_retries() -> None:
     )
     results = await sched.tick()
     assert results == []  # dropped after retries; a §4.8 health signal, not a stall
+
+
+# -- §4.8/§4.9 regeneration timer --------------------------------------------
+
+
+def _stale_store(slug: str = "s0") -> StateStore:
+    # A baseline run that found items, then a zero-items run: a staleness candidate.
+    store = StateStore(":memory:", clock=lambda: T0)
+    baseline = store.start_run(slug)
+    store.finish_run(baseline, items_found=8, new_items=8, errors=0, pages_fetched=2)
+    latest = store.start_run(slug)
+    store.finish_run(latest, items_found=0, new_items=0, errors=1, pages_fetched=1)
+    return store
+
+
+def _healer(store: StateStore, *, reprobe_items: int, regen_passes: bool) -> SelfHealer:
+    async def reprobe(slug: str) -> int:
+        return reprobe_items
+
+    async def regenerate(slug: str) -> bool:
+        return regen_passes
+
+    return SelfHealer(store, reprobe=reprobe, regenerate=regenerate)
+
+
+def _sched(
+    store: StateStore, *, healer: SelfHealer | None, regen_check: str | None = None
+) -> Scheduler:
+    return Scheduler(
+        [Site(slug="s0", url="https://x.com")],
+        store=store,
+        crawl=_ok_crawl,
+        healer=healer,
+        clock=lambda: T0,
+        regen_check=regen_check,
+    )
+
+
+async def test_regen_tick_assesses_and_persists_health() -> None:
+    store = _stale_store()
+    sched = _sched(store, healer=_healer(store, reprobe_items=0, regen_passes=False))
+    states = await sched.regen_tick()
+    assert states["s0"] is HealthState.GENERATION_FAILED
+    assert store.get_health("s0") == "generation_failed"  # persisted for `list`
+
+
+async def test_regen_tick_is_a_noop_without_a_healer() -> None:
+    sched = _sched(StateStore(":memory:"), healer=None)
+    assert await sched.regen_tick() == {}
+
+
+async def test_regen_tick_skips_disabled_sites() -> None:
+    store = _stale_store("s0")
+
+    async def regenerate(slug: str) -> bool:
+        raise AssertionError("a disabled site must not be regenerated")
+
+    async def reprobe(slug: str) -> int:
+        return 0
+
+    sched = Scheduler(
+        [Site(slug="s0", url="https://x.com", enabled=False)],
+        store=store,
+        crawl=_ok_crawl,
+        healer=SelfHealer(store, reprobe=reprobe, regenerate=regenerate),
+        clock=lambda: T0,
+    )
+    assert await sched.regen_tick() == {}
+
+
+def test_regen_due_respects_the_cadence() -> None:
+    store = _stale_store()
+    sched = _sched(
+        store,
+        healer=_healer(store, reprobe_items=1, regen_passes=True),
+        regen_check="6h",
+    )
+    assert sched.regen_due(T0) is True  # never checked yet → due immediately
+    sched.mark_regen(T0)
+    assert sched.regen_due(T0 + timedelta(hours=1)) is False
+    assert sched.regen_due(T0 + timedelta(hours=7)) is True
+
+
+def test_regen_off_is_never_due() -> None:
+    store = _stale_store()
+    sched = _sched(
+        store,
+        healer=_healer(store, reprobe_items=1, regen_passes=True),
+        regen_check="off",
+    )
+    assert sched.regen_due(T0) is False
+
+
+def test_regen_disabled_without_a_healer() -> None:
+    sched = _sched(StateStore(":memory:"), healer=None, regen_check="6h")
+    assert sched.regen_due(T0) is False
+
+
+async def test_run_invokes_regen_at_least_once() -> None:
+    store = _stale_store()
+    healer = _healer(store, reprobe_items=0, regen_passes=False)
+    sched = _sched(store, healer=healer, regen_check="6h")
+    stop = asyncio.Event()
+
+    async def stopper() -> None:
+        await asyncio.sleep(0.02)
+        stop.set()
+
+    await asyncio.gather(sched.run(stop=stop, interval=0.005), stopper())
+    # The frozen clock makes regen due exactly once; it should have run and persisted.
+    assert store.get_health("s0") == "generation_failed"

@@ -116,3 +116,53 @@ async def test_confirmed_stale_regenerates_and_recovers() -> None:
 async def test_regeneration_exhaustion_is_generation_failed() -> None:
     healer = await _healer(_stale_store(), reprobe_items=0, regen_passes=False)
     assert await healer.assess("s") is HealthState.GENERATION_FAILED
+
+
+# -- persistence & no-spin (§4.8) --------------------------------------------
+
+
+async def test_assess_persists_the_resulting_state() -> None:
+    store = _stale_store()
+    healer = await _healer(store, reprobe_items=0, regen_passes=False)
+    await healer.assess("s")
+    assert store.get_health("s") == HealthState.GENERATION_FAILED.value
+
+
+async def test_generation_failed_site_is_not_re_regenerated() -> None:
+    # The "not silently re-enqueued into the same failing generation" rule: once a
+    # stale site has failed generation, a later assessment must surface the failed
+    # state without driving the (expensive) generator again — otherwise it spins.
+    store = _stale_store()
+    regen_calls = 0
+
+    async def reprobe(slug: str) -> int:
+        return 0
+
+    async def regenerate(slug: str) -> bool:
+        nonlocal regen_calls
+        regen_calls += 1
+        return False
+
+    healer = SelfHealer(store, reprobe=reprobe, regenerate=regenerate)
+    assert await healer.assess("s") is HealthState.GENERATION_FAILED
+    assert await healer.assess("s") is HealthState.GENERATION_FAILED
+    assert regen_calls == 1
+
+
+async def test_recovered_site_clears_generation_failed() -> None:
+    # A previously generation-failed site that starts finding items again is healthy
+    # (its latest run isn't a staleness candidate); the stuck state must not persist.
+    store = _stale_store()
+    store.set_health("s", HealthState.GENERATION_FAILED.value)
+    recovered = store.start_run("s")
+    store.finish_run(recovered, items_found=6, new_items=6, errors=0, pages_fetched=1)
+
+    async def reprobe(slug: str) -> int:
+        raise AssertionError("a recovered site must not be re-probed")
+
+    async def regenerate(slug: str) -> bool:
+        raise AssertionError("a recovered site must not be regenerated")
+
+    healer = SelfHealer(store, reprobe=reprobe, regenerate=regenerate)
+    assert await healer.assess("s") is HealthState.HEALTHY
+    assert store.get_health("s") == HealthState.HEALTHY.value

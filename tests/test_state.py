@@ -118,3 +118,32 @@ def test_state_persists_across_reopen(tmp_path: object) -> None:
     s2 = StateStore(db)
     assert s2.is_ingested("acme", "https://acme.test/a")
     s2.close()
+
+
+# -- per-site health state (§4.8 persistence) --------------------------------
+
+
+def test_health_is_none_until_set(store: StateStore) -> None:
+    assert store.get_health("acme") is None
+
+
+def test_set_then_get_health(store: StateStore) -> None:
+    store.set_health("acme", "stale")
+    assert store.get_health("acme") == "stale"
+
+
+def test_set_health_overwrites_prior_state(store: StateStore) -> None:
+    store.set_health("acme", "stale")
+    store.set_health("acme", "generation_failed")
+    assert store.get_health("acme") == "generation_failed"
+
+
+def test_health_persists_across_reopen(tmp_path: object) -> None:
+    db = f"{tmp_path}/state.db"  # type: ignore[str-bytes-safe]
+    s1 = StateStore(db)
+    s1.set_health("acme", "generation_failed")
+    s1.close()
+
+    s2 = StateStore(db)
+    assert s2.get_health("acme") == "generation_failed"
+    s2.close()
