@@ -123,6 +123,14 @@ def ingest_rate() -> str:
     return _str("AUTOCRAWLER_INGEST_RATE", "2/s")
 
 
+def ingest_timeout() -> float:
+    """POST /news client timeout. Each ingest drives server-side LLM summarization +
+    tagging, which on a long body runs to tens of seconds — too tight a timeout
+    spuriously trips the TERMINAL path (the row often lands server-side anyway), so
+    default generously. Lower it only if the news API is fast."""
+    return _float("AUTOCRAWLER_INGEST_TIMEOUT", 120.0)
+
+
 # Substrings (case-insensitive) that mark a body as a paywall teaser, not a
 # complete article. A teaser (standfirst + one paragraph + a "subscribe" pitch)
 # can exceed min_body_chars, so the length floor alone misses it (§4.6). Confirmed

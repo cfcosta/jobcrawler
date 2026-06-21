@@ -159,7 +159,7 @@ def _crawl_targets(args: argparse.Namespace) -> list[Site]:
 
 def cmd_crawl(args: argparse.Namespace) -> int:
     store = StateStore(_db_path())
-    news = NewsClient()
+    news = NewsClient(timeout=config.ingest_timeout())
     try:
         for site in _crawl_targets(args):
             summary = crawl_one(site, store=store, news=news)
@@ -175,7 +175,7 @@ def cmd_crawl(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     store = StateStore(_db_path())
-    news = NewsClient()
+    news = NewsClient(timeout=config.ingest_timeout())
     sites = load_sites(config.sites_path())
 
     async def crawl(site: Site) -> CrawlSummary:
