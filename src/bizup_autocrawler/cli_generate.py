@@ -125,13 +125,14 @@ async def _generate_one(site: Site, root_lm: dspy.LM, sub_lm: dspy.LM) -> bool:
         return False
 
     source = _source_text(best)
-    expected = corpus.get("expected_recent")
-    ok, reason = gate_winner(
-        best,
-        source,
-        hosts,
-        expected_items=expected if isinstance(expected, int) and expected else None,
-    )
+    # The enumeration *count* floor is NOT applied here: the 10s validation sandbox
+    # fetches only a handful of pages, far fewer than a site's full recent set, so a
+    # count gate would reject every candidate (and can't tell feed-only from a
+    # sitemap crawler — both fetch ~the same few in the window). The generator is
+    # instead steered toward full enumeration by site_features (it sees
+    # expected_recent) and the must-observe "consult the sitemap" gate; the
+    # count-based floor belongs at runtime, over a full crawl.
+    ok, reason = gate_winner(best, source, hosts)
     if not ok:
         print(f"FAIL {site.slug}: {reason}")
         return False
