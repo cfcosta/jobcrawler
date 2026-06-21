@@ -78,3 +78,24 @@ def canonicalize_url(
 def normalize_host(url: str) -> str:
     """Lowercased host without port — the SSRF on-domain primitive (§8)."""
     return (urlsplit(url.strip()).hostname or "").lower()
+
+
+def host_on_domain(host: str, allowed: Collection[str]) -> bool:
+    """True if ``host`` equals or is a subdomain of one of ``allowed`` (§8).
+
+    The host-only on-domain primitive shared by the SSRF guard (§8) and the
+    gate / scoring URL checks (§6). Suffix-attack safe: ``example.com.evil.com``
+    is not on ``example.com``.
+    """
+    host = host.lower()
+    return any(
+        host == a or host.endswith("." + a) for a in (x.lower() for x in allowed)
+    )
+
+
+def valid_on_domain_url(url: str, allowed: Collection[str]) -> bool:
+    """True if ``url`` is an http(s) URL whose host is on-domain (§6/§8)."""
+    parts = urlsplit(url.strip())
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return False
+    return host_on_domain(parts.hostname, allowed)

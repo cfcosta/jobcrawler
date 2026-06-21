@@ -10,7 +10,12 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
-from bizup_autocrawler.urls import canonicalize_url, normalize_host
+from bizup_autocrawler.urls import (
+    canonicalize_url,
+    host_on_domain,
+    normalize_host,
+    valid_on_domain_url,
+)
 
 
 def test_lowercases_scheme_and_host() -> None:
@@ -103,3 +108,20 @@ def test_ipv6_literal_default_port_stripped() -> None:
 def test_normalize_host_returns_bracketless_ipv6() -> None:
     # the SSRF primitive feeds ipaddress.ip_address(), which wants no brackets.
     assert normalize_host("https://[::1]:8443/x") == "::1"
+
+
+def test_host_on_domain_exact_and_subdomain() -> None:
+    assert host_on_domain("example.com", {"example.com"})
+    assert host_on_domain("news.example.com", {"example.com"})
+
+
+def test_host_on_domain_is_suffix_attack_safe() -> None:
+    assert not host_on_domain("example.com.evil.com", {"example.com"})
+    assert not host_on_domain("notexample.com", {"example.com"})
+
+
+def test_valid_on_domain_url() -> None:
+    assert valid_on_domain_url("https://news.example.com/story", {"example.com"})
+    assert not valid_on_domain_url("https://evil.com/x", {"example.com"})
+    assert not valid_on_domain_url("ftp://example.com/x", {"example.com"})
+    assert not valid_on_domain_url("not a url", {"example.com"})

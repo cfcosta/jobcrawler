@@ -26,11 +26,9 @@ import ast
 from collections.abc import Collection
 from dataclasses import dataclass
 from enum import Enum
-from urllib.parse import urlsplit
 
 from bizup_autocrawler.generate.scoring import CandidateResult
-from bizup_autocrawler.runtime.ssrf import is_on_domain
-from bizup_autocrawler.urls import canonicalize_url, normalize_host
+from bizup_autocrawler.urls import canonicalize_url, valid_on_domain_url
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,7 +188,7 @@ def check_completeness(
             failures.append(f"sample {i}: body too short ({len(body)} chars)")
         elif _replacement_ratio(body) > max_replacement_ratio:
             failures.append(f"sample {i}: high U+FFFD ratio (mojibake)")
-        if not _valid_on_domain(url, allowed_hosts):
+        if not valid_on_domain_url(url, allowed_hosts):
             failures.append(f"sample {i}: invalid/off-domain url {url!r}")
 
     return GateResult(not failures, tuple(failures))
@@ -198,13 +196,6 @@ def check_completeness(
 
 def _replacement_ratio(text: str) -> float:
     return text.count("�") / max(len(text), 1)
-
-
-def _valid_on_domain(url: str, allowed_hosts: Collection[str]) -> bool:
-    parts = urlsplit(url)
-    if parts.scheme not in ("http", "https") or not parts.hostname:
-        return False
-    return is_on_domain(normalize_host(url), allowed_hosts)
 
 
 def must_observe_failure(

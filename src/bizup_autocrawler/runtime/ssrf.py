@@ -13,7 +13,10 @@ from __future__ import annotations
 import ipaddress
 from collections.abc import Collection
 
+from bizup_autocrawler.urls import host_on_domain as is_on_domain
 from bizup_autocrawler.urls import normalize_host
+
+__all__ = ["SsrfError", "check_url", "is_on_domain"]
 
 # Hostnames that resolve to cloud-metadata services (the IP forms are caught by
 # the link-local check below).
@@ -36,14 +39,6 @@ def _is_blocked_ip(host: str) -> bool:
         or ip.is_reserved
         or ip.is_multicast
         or ip.is_unspecified
-    )
-
-
-def is_on_domain(host: str, allowed: Collection[str]) -> bool:
-    """True if ``host`` equals or is a subdomain of one of ``allowed``."""
-    host = host.lower()
-    return any(
-        host == a or host.endswith("." + a) for a in (x.lower() for x in allowed)
     )
 
 
