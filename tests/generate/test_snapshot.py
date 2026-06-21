@@ -19,9 +19,12 @@ import pytest
 from bizup_autocrawler.generate.snapshot import (
     REPL_HELPERS,
     build_corpus,
+    count_sitemap_urls,
     ensure_json_primitive,
     on_domain_links,
+    pick_news_sitemap,
     prefetch_corpus,
+    sitemaps_from_robots,
 )
 from bizup_autocrawler.runtime.ctx import Ctx
 
@@ -33,7 +36,15 @@ def test_corpus_has_addressable_shape() -> None:
         sitemap="<urlset/>",
         articles=[{"url": "https://x.com/a", "title": "A", "text": "body"}],
     )
-    assert set(corpus) == {"homepage", "robots", "sitemap", "articles", "feeds"}
+    assert set(corpus) == {
+        "homepage",
+        "robots",
+        "sitemap",
+        "sitemaps",
+        "expected_recent",
+        "articles",
+        "feeds",
+    }
     articles = corpus["articles"]
     assert isinstance(articles, list)
     assert articles[0] == {"url": "https://x.com/a", "title": "A", "text": "body"}
@@ -59,6 +70,38 @@ def test_defaults_are_empty_strings_and_list() -> None:
     assert corpus["robots"] == ""
     assert corpus["sitemap"] == ""
     assert corpus["articles"] == []
+    assert corpus["sitemaps"] == []
+    assert corpus["expected_recent"] == 0
+
+
+def test_sitemaps_from_robots_parses_sitemap_lines() -> None:
+    robots = (
+        "User-agent: *\nDisallow: /x\n"
+        "Sitemap: https://x.com/news.xml\n"
+        "sitemap: https://x.com/sitemap.xml\n"  # case-insensitive key
+    )
+    assert sitemaps_from_robots(robots) == [
+        "https://x.com/news.xml",
+        "https://x.com/sitemap.xml",
+    ]
+
+
+def test_pick_news_sitemap_prefers_the_news_one() -> None:
+    assert (
+        pick_news_sitemap(["https://x.com/sitemap.xml", "https://x.com/news.xml"])
+        == "https://x.com/news.xml"
+    )
+    assert (
+        pick_news_sitemap(["https://x.com/sitemap.xml"]) == "https://x.com/sitemap.xml"
+    )
+    assert pick_news_sitemap([]) is None
+
+
+def test_count_sitemap_urls_counts_locs_but_not_indexes() -> None:
+    flat = "<urlset><url><loc>a</loc></url><url><loc>b</loc></url></urlset>"
+    assert count_sitemap_urls(flat) == 2
+    index = "<sitemapindex><sitemap><loc>child.xml</loc></sitemap></sitemapindex>"
+    assert count_sitemap_urls(index) == 0  # an index counts no articles
 
 
 def test_ensure_json_primitive_accepts_nested_primitives() -> None:
@@ -130,3 +173,39 @@ def test_prefetch_corpus_assembles_from_ctx() -> None:
     assert {a["url"] for a in articles} == {"https://x.com/a1", "https://x.com/a2"}
     assert {a["text"] for a in articles} == {"Body of A1", "Body of A2"}
     assert corpus["feeds"] == ["https://x.com/feed.xml"]  # feed-first discovery
+
+
+def test_prefetch_discovers_news_sitemap_and_counts_expected_articles() -> None:
+    # robots advertises a news sitemap; prefetch fetches it (not the generic
+    # /sitemap.xml) and counts its <loc> entries as the enumeration target (§6).
+    news_xml = (
+        "<urlset>"
+        + "".join(f"<url><loc>https://x.com/n/{i}.html</loc></url>" for i in range(40))
+        + "</urlset>"
+    )
+    pages = {
+        "/": "<a href='/a1'>A1</a>",
+        "/robots.txt": (
+            "User-agent: *\n"
+            "Sitemap: https://x.com/news.xml\n"
+            "Sitemap: https://x.com/sitemap.xml\n"
+        ),
+        "/news.xml": news_xml,
+        "/a1": "Body",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=pages.get(request.url.path, ""))
+
+    ctx = Ctx(
+        {"x.com"},
+        client=httpx.Client(
+            transport=httpx.MockTransport(handler), follow_redirects=False
+        ),
+    )
+    corpus = prefetch_corpus("https://x.com/", ctx)
+
+    assert corpus["expected_recent"] == 40  # the news sitemap's article count
+    assert corpus["sitemap"] == news_xml  # the news sitemap text, for the RLM to use
+    sitemaps = cast("list[str]", corpus["sitemaps"])
+    assert "https://x.com/news.xml" in sitemaps

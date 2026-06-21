@@ -125,7 +125,13 @@ async def _generate_one(site: Site, root_lm: dspy.LM, sub_lm: dspy.LM) -> bool:
         return False
 
     source = _source_text(best)
-    ok, reason = gate_winner(best, source, hosts)
+    expected = corpus.get("expected_recent")
+    ok, reason = gate_winner(
+        best,
+        source,
+        hosts,
+        expected_items=expected if isinstance(expected, int) and expected else None,
+    )
     if not ok:
         print(f"FAIL {site.slug}: {reason}")
         return False
@@ -136,8 +142,15 @@ async def _generate_one(site: Site, root_lm: dspy.LM, sub_lm: dspy.LM) -> bool:
     return True
 
 
-def gate_winner(pred: object, source: str, hosts: set[str]) -> tuple[bool, str]:
-    """The full §6 gate set on the selected winner; returns (passed, reason)."""
+def gate_winner(
+    pred: object, source: str, hosts: set[str], *, expected_items: int | None = None
+) -> tuple[bool, str]:
+    """The full §6 gate set on the selected winner; returns (passed, reason).
+
+    ``expected_items`` (the site's recent-article count, from its news sitemap)
+    activates the enumeration floor — a feed-sized sample of a far larger site is
+    rejected as under-enumeration (§6).
+    """
     ast_result = check_ast(source)
     if not ast_result.passed:
         return False, f"AST gate: {ast_result.reason}"
@@ -156,6 +169,8 @@ def gate_winner(pred: object, source: str, hosts: set[str]) -> tuple[bool, str]:
         min_items=config.min_items(),
         min_body_chars=config.min_body_chars(),
         allowed_hosts=hosts,
+        expected_items=expected_items,
+        enum_floor_ratio=config.enum_floor_ratio(),
     )
     if not completeness.passed:
         return False, f"completeness: {completeness.reason}"

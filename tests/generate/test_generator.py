@@ -73,6 +73,13 @@ def test_site_features_summarizes_without_leaking_feed_urls() -> None:
     assert "has_sitemap: True" in features
 
 
+def test_site_features_surfaces_the_enumeration_target() -> None:
+    # The generator is told how many recent articles the site has, so it reasons
+    # toward enumerating them instead of settling for a feed-sized sample (§6).
+    features = site_features(build_corpus(homepage="h", expected_recent=42))
+    assert "expected_recent_articles: 42" in features
+
+
 async def test_aforward_generates_candidate_and_drives_interpreter() -> None:
     interp = MockInterpreter([_final()])
     gen = CrawlerGenerator(interpreter=interp, max_iterations=5, max_llm_calls=5)

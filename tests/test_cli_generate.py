@@ -56,6 +56,13 @@ def test_scrape_without_consulting_feeds_fails() -> None:
     assert not ok and "must-observe" in reason
 
 
+def test_under_enumeration_fails_when_expected_count_known() -> None:
+    # _GOOD yields 8 items; a site with ~40 recent articles → 8 < ceil(0.5 * 40) = 20,
+    # so the enumeration floor rejects the feed-sized sample (§6).
+    ok, reason = gate_winner(_pred(), _GOOD, _HOSTS, expected_items=40)
+    assert not ok and "completeness" in reason
+
+
 def test_too_few_items_fails_completeness() -> None:
     few = (
         "from bizup_autocrawler.runtime.contract import Item\n"

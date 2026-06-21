@@ -148,9 +148,13 @@ def site_features(corpus: Mapping[str, object]) -> str:
     """
     articles = corpus.get("articles") or []
     feeds = corpus.get("feeds") or []
+    expected = corpus.get("expected_recent")
     lines = [
         f"articles_in_corpus: {len(articles) if isinstance(articles, list) else 0}",
         f"feeds_found: {len(feeds) if isinstance(feeds, list) else 0}",
+        # The enumeration target: the plan must reach most of these, not a feed-sized
+        # sample — a feed/homepage that surfaces far fewer is under-enumerating (§6).
+        f"expected_recent_articles: {expected if isinstance(expected, int) else 0}",
         f"has_sitemap: {bool(corpus.get('sitemap'))}",
         f"robots_present: {bool(corpus.get('robots'))}",
     ]
