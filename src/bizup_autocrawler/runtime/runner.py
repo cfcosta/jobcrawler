@@ -2,7 +2,7 @@
 
 One runner executes any crawler. It calls ``crawl(ctx)``, validates + dedups the
 yielded items against crawl-state, ingests new ones per-item via ``POST /news``,
-and writes a §5 Run record. Two policies live here (the state store is dumb):
+and writes a §5 Run record. These policies live here (the state store is dumb):
 
   * **Failure isolation (§4.4).** A script that raises, yields a non-Item, or
     finds nothing is recorded as a health signal on *this* site — partial items
