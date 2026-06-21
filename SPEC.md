@@ -123,7 +123,7 @@ class GenerateCrawler(dspy.Signature):
     body, and URL."""
 
     site_url: str          = dspy.InputField(desc="site root / section URL")
-    corpus: SiteSnapshot   = dspy.InputField(desc="prefetched homepage, robots.txt, sitemap, sample articles")
+    corpus: dict           = dspy.InputField(desc="prefetched {homepage, robots, sitemap, articles:[{url,title,text}]} — JSON-able")
     render: str            = dspy.InputField(desc="static | browser | solver | auto")
     hints: str             = dspy.InputField(desc="optional operator guidance")
     discovery_method: Literal["feed", "sitemap", "scrape"] = dspy.OutputField(desc="how articles are discovered")
@@ -131,9 +131,9 @@ class GenerateCrawler(dspy.Signature):
     crawler_source: dspy.Code = dspy.OutputField(desc="Python module implementing the contract")
 
 # crawler_source is a dspy.Code (markdown fences auto-stripped); gate-1 and the write step
-# consume crawler_source.code. SiteSnapshot is a dspy.SandboxSerializable (§9): the large,
-# multi-part HTML rides into the REPL as a real object — the model sees only a structured
-# preview. Never pass megabytes as a plain str field.
+# consume crawler_source.code. corpus is a plain JSON-able dict (§9): dspy injects it into the
+# REPL as a real variable (the model sees a truncated preview, reads full parts via code).
+# Keep every part JSON-primitive — no live lxml trees / httpx clients / closures.
 #
 # The signature is wrapped in CrawlerGenerator(dspy.Module) (§4.11) so its predictors are
 # visible to the optimizer and to save/load; the scheduler/CLI call it via .acall(...).
@@ -149,7 +149,7 @@ these handle *follow-up* fetches — pagination, a deeper article, a discovered 
 | `render(url)` | headless GET → rendered HTML (Playwright) |
 | `find_feeds(url)` | discover `<link rel="alternate">` RSS/Atom/JSON feeds |
 | `get_sitemap(url)` | fetch & parse `sitemap.xml` (and robots-declared sitemaps) |
-| `validate_crawler(source)` | fence-strip, then run the candidate in the execution sandbox (§4.4) against the live site; return a **size-bounded** `CandidateResult` (capped `samples`, condensed `schema_errors`, exception = type+message+traceback *tail*) so it survives the REPL's 10k head+tail truncation. Crosses the bridge as JSON the model parses in-REPL. |
+| `validate_crawler(source)` | fence-strip, then run the candidate in the execution sandbox (§4.4) **through `ctx`** — against the live site during generation, or in the offline loop against the persisted `corpus` + recorded HTTP via a replay-backed `ctx` (§4.11), *never the network*. Returns a **size-bounded** `CandidateResult` (capped `samples`, condensed `schema_errors`, `exception` = type+message+traceback *tail*) so it survives the REPL's 10k head+tail truncation, crossing the bridge as JSON the model parses in-REPL. |
 
 `validate_crawler` runs the candidate **on the host**, and that's mandatory, not just
 convenient: RLM's Pyodide sandbox has no network and none of the crawler's libraries
@@ -164,19 +164,19 @@ per call with `with dspy.context(lm=root_lm): await gen.acall(...)`, never a pro
 `dspy.configure` (it is thread-owned and raises from the scheduler's worker tasks — §9). Build
 the generation LM with `cache=False` so each (re)generation re-reasons and `BestOfN`/`Refine`/GEPA
 sample distinct candidates. Set both RLM caps explicitly (`AUTOCRAWLER_MAX_ITERATIONS`,
-`AUTOCRAWLER_MAX_LLM_CALLS`): `max_llm_calls` caps the *count* of sub-LLM calls (a recoverable
-in-sandbox raise), **not** runtime or spend — pair a bounded `max_iterations` with an outer
-wall-clock/spend cap, especially under `BestOfN`/`Refine`/GEPA multiplication. The default
-sandbox needs **Deno** installed.
+`AUTOCRAWLER_MAX_LLM_CALLS`): `max_llm_calls` raises a *recoverable* in-sandbox error at its limit
+(the model can catch it and keep going), so it is a **soft** cap, not a hard runtime/spend bound —
+pair a bounded `max_iterations` with the host-side ceilings below, especially under
+`BestOfN`/`Refine`/GEPA multiplication. The default sandbox needs **Deno** installed.
 
-**Hard cost ceilings, not just iteration caps.** `max_iterations`/`max_llm_calls` do *not* bound
-sub-calls or spend — one REPL turn can launch a loop of O(|corpus|) `llm_query` calls, and the
+**Hard cost ceilings (host-side backstops).** Because `max_llm_calls` is *soft* (recoverable) and the
 reference RLM root loop has *no* built-in iteration cap (it ends only on `FINAL` or no-tool) and
 over-recurses without an explicit prompt guard (one added sentence was the only fix) [RLM,
-RLM-from-scratch]. Enforce host-side: a hard sub-call counter (`AUTOCRAWLER_MAX_SUBCALLS`), a
-per-candidate token/$ ceiling that aborts one trajectory, and a *separate aggregate* cap across the
-`BestOfN`/`Refine`/GEPA fan-out; add an unconditional anti-over-subcall line to the prompt; budget
-against the **p95 tail**, not the mean (cost is heavy-tailed, fan-out multiplies it). The
+RLM-from-scratch], the host enforces the real ceilings: an **unconditional** sub-call kill
+(`AUTOCRAWLER_MAX_SUBCALLS`, set ≥ `max_llm_calls` so it's a true outer backstop), a per-candidate
+token/$ ceiling that aborts one trajectory, and a *separate aggregate* cap across the
+`BestOfN`/`Refine`/GEPA fan-out; plus an unconditional anti-over-subcall line in the prompt. (Size the
+$ caps against the **p95 tail**, not the mean — cost is heavy-tailed and fan-out multiplies it.) The
 Pyodide/Deno sandbox itself adds ~2–3 s cold-start + per-call bridge tax per loop and does no real
 crawler work [Sanjaya] — confirm RLM reuses one warm sandbox per generation, else add that overhead
 to the spend cap.
@@ -194,11 +194,16 @@ def crawl(ctx) -> Iterable[Item]:     # yields normalized items; no network exce
     ...
 ```
 
-- `ctx` provides `ctx.fetch(url)`, `ctx.render(url)`, `ctx.get(url, **kw)`, `ctx.log(...)`,
-  and parsing helpers. **All fetching goes through `ctx`** so limits are enforced.
+- `ctx` provides `ctx.fetch(url)`, `ctx.render(url)`, `ctx.get(url, **kw)`, `ctx.log(...)`.
+  **All fetching goes through `ctx`** so limits are enforced (parsing is the module's own — via the
+  allowlist below — not a `ctx` concern).
 - The module may `import` only from an allowlist (parsers like `selectolax`/`lxml`,
   `feedparser`, stdlib `re`/`json`/`datetime`/`urllib.parse`). No `os`, `subprocess`,
   `open`, `socket`, `eval`/`exec` (enforced by AST check, §8).
+- **Body extraction is the crawler's job**, via the allowlisted parsers with per-site selectors (their
+  brittleness is what §4.8 drift-detection + regeneration handles). The `fetch` tool's markitdown is
+  whole-page cleanup for the *generator's* exploration, **not** an article-body extractor; an optional
+  `ctx.extract_article(html)` (trafilatura/readability) may back it later.
 
 ### 4.4 Runner & execution sandbox
 - Imports `crawlers/<slug>.py`, calls `crawl(ctx)`, and consumes the yielded items.
@@ -219,7 +224,9 @@ rate limiting + concurrency caps, retries with backoff, conditional GET (ETag /
 Last-Modified), request timeouts, and an identifying `User-Agent`. `ctx.fetch`/`render`
 restrict requests to the site's host(s) and on-domain article links (SSRF guard, §8). On a
 detected Cloudflare challenge, `ctx.fetch` transparently escalates to the browser/solver tier
-and caches the clearance cookie (§4.10) — scripts stay oblivious.
+and caches the clearance cookie (§4.10) — scripts stay oblivious. `ctx.fetch`/`render` also **resolve
+text encoding** (HTTP charset → meta charset/BOM → `charset-normalizer` fallback) and hand the crawler
+UTF-8 `str`, so per-site code never guesses charset.
 
 ### 4.6 Normalization & `Item` model
 Items yielded by scripts are validated against a Pydantic model:
@@ -236,16 +243,28 @@ Items yielded by scripts are validated against a Pydantic model:
 `url`/`published_at`/`source` in crawler state. (Follow-up §13: extend the news API with
 `url` + an idempotency key so re-ingestion is safe server-side.)
 
+**URL canonicalization** is one shared runtime helper used by the dedup key (§4.7), the gate-3 Jaccard
+(§6), and — via its host-only primitive — the SSRF on-domain check (§8): lowercase scheme+host, strip
+default port, drop fragment, drop tracking params (`AUTOCRAWLER_TRACKING_PARAM_DENYLIST` — `utm_*`,
+`fbclid`, …), sort remaining query params, normalize trailing slash + percent-encoding case. It is
+**load-bearing**: two runs differing only on `?utm_source=…` must not lower the Jaccard, fail gate-3,
+and get a correct crawler rejected. Do **not** auto-honor an attacker-controlled `<link rel=canonical>`
+for the dedup key in v1.
+
 ### 4.7 Dedup & crawl state
 The autocrawler owns its own small state store (decoupled from the news DB): a set of
 seen canonical URLs (and/or content hashes) per site, plus per-run health counters.
-Postgres fits the existing stack; SQLite is acceptable for v1. Only **unseen** items are
-ingested.
+Postgres fits the existing stack; SQLite is acceptable for v1. Two per-item states: **seen** (set at
+dedup; prevents re-extraction) and **ingested** (set only after a 2xx from `POST /news`). A failed /
+non-2xx POST leaves the item *seen-but-not-ingested*; the next scheduled crawl re-attempts un-ingested
+items — no separate retry daemon. Ingest **per-item** (not batched) so there's no partial-batch
+ambiguity, and count failures into the §4.8 `errors` signal. The crash-window double-send is an
+accepted v1 limitation until the §14 idempotency key lands.
 
 ### 4.8 Health & self-healing regeneration
-Each crawl records `items_found`, `new_items`, `errors`, `pages_fetched` per site. A site
-is flagged **stale** when it yields zero items for *K* consecutive runs or its error rate
-crosses a threshold. Stale sites are re-entered into §4.2 generation; the new script is
+Each crawl records `items_found`, `new_items`, `errors`, `pages_fetched` per site. A site is flagged **stale** on a *single* zero-item run against a baseline that previously yielded
+items (confirmed by a short re-probe to rule out a transient), or when its error rate crosses a
+threshold — cutting detection lag versus waiting *K* consecutive runs. Stale sites are re-entered into §4.2 generation; the new script is
 validated and proposed to replace the old one (review gate per §8). This is the
 "regenerate when the site changes" loop made automatic.
 
@@ -254,6 +273,10 @@ gate-passing crawler — including a forced RLM extraction (`final_reasoning == 
 final output"`, §4.2) — the site enters a distinct **generation-failed** state, surfaced
 separately in `autocrawl list` and *not* silently re-enqueued into the same failing generation
 (which would spin). Improving the generator itself is the separate offline loop in §4.11.
+
+Track a **drift-MTTR** target — the median time from a previously-healthy site going dark to a
+gate-passing replacement being *enabled* (= detection + regeneration + the review gate). It is an **M3
+exit criterion**; the §14 review-gate tier (Q2) trades directly against it.
 
 ### 4.9 Scheduler / orchestrator (owns the run loop)
 `bizup-autocrawler` runs as a **long-running service** — `autocrawl run` starts an async
@@ -272,8 +295,8 @@ scheduler that operates the whole crawl loop itself, rather than relying on an e
   in-band (a multi-hour GEPA run, hundreds of metric calls each spinning a fresh RLM sandbox, would
   violate the never-stall guarantee). It hands off to an out-of-band job and later adopts the new
   versioned generator program.
-- **Run history.** Each run records `{site, started, finished, items_found, new_items, errors}` to the
-  state store, for observability and the staleness math.
+- **Run history.** Each run records the canonical Run record (§5) — `{site, started, finished,
+  items_found, new_items, errors, pages_fetched}` — for observability and the staleness math.
 - **Lifecycle.** Graceful shutdown drains in-flight crawls; state lives in the store, so the loop is
   crash-safe and restart-idempotent.
 
@@ -342,10 +365,13 @@ than hard-coding fixture feed-URLs — GEPA's meta-prompt deliberately bakes dom
 instruction, so without this it overfits the trainset's site mix and **destroys the cold-start
 payoff** [GEPA, gskill]. Treat field descriptions as part of the optimizable surface.
 
-**One scoring core, three adapters.** §6's gate logic is a single pure scoring core that runs a
-candidate via `validate_crawler` and returns a `CandidateResult` + a derived float score + a
-`gate_failures` reason string. Three thin adapters sit over it — the callables have
-**incompatible signatures and must not be conflated**:
+**One scoring core, three adapters.** §6's **gates 1–2** are computed by a single pure scoring core:
+one `validate_crawler` run → `CandidateResult` + a graded float score + a `gate_failures` string. It
+runs the candidate through `ctx`; the **offline** metric injects a replay-backed `ctx` (persisted
+`corpus` + recorded HTTP) so it never hits the network. The **gate-3** stability verdict is computed by
+the harness comparing *two* core invocations and **appended to the GEPA feedback text** (like the
+across-run aggregates below), never entering the scalar. Three thin adapters sit over the core — the
+callables have **incompatible signatures and must not be conflated**:
 
 | consumer | signature | returns |
 |---|---|---|
@@ -378,11 +404,12 @@ which is where every large gain came from [HALO], and aggregation denoises singl
 crawler_source=…).with_inputs("site_url", "corpus", "render", "hints")` (mirrors the four
 `GenerateCrawler` inputs; `.with_inputs` is mandatory). It is **inputs-only / reference-free** —
 the metric scores by *running a fresh crawler*, so the recorded `discovery_*`/`crawler_source` are
-provenance, not labels. **Admission rule:** admit a pair only once its generation passed all four
-§6 gates *and* stayed non-stale (§4.8) for *N* runs (a stale site yields a misleading reward and
-pollutes GEPA's frontier). The frozen `SiteSnapshot` is persisted with each example (it is a
-`SandboxSerializable`, not a str) so generation replays reproducibly, under a bounded retention
-cap. The trainset lives in its own `trainset/` store, separate from §4.7 and §4.9.
+provenance, not labels. **Admission rule:** admit a `(site, corpus)` pair **iff** §6 **gates 1–3** pass, the §8 adversarial
+cross-validation passes, and the site stayed non-stale (§4.8) for *N* runs (a stale site yields a
+misleading reward and pollutes GEPA's frontier). §6 **gate-4** (human approval) is **not** a
+precondition — it gates *enabling a script on the crawl path*, a separate concern; the §4.11 loop is
+offline and automatic. The frozen `corpus` dict is persisted with each example (plain JSON) so generation replays
+reproducibly, under a bounded retention cap. The trainset lives in its own `trainset/` store, separate from §4.7 and §4.9.
 
 **Saturation is the headline failure mode.** Because admission keeps only gate-passing, non-stale
 crawlers, every example is near-success — and a near-binary reward then makes **GEPA no-op** (its
@@ -440,19 +467,13 @@ averaging ≥2–3 passes (or temperature=0/seeded) since each gate run spins a 
 RLM sandbox. Promote only if the candidate beats the incumbent by a **margin exceeding eval noise**
 (default ≥ one held-out fixture's weight, 1/|held-out|) — *not* strictly-greater on one pass, which
 promotes noise (HALO reports a noisy "peak"; DGM measured ~2.3% cross-run std) [HALO, DGM,
-GEPA-+25pts]. Add a **per-stratum / backward-transfer guard**: bucket the held-out by
-`discovery_method × render-required × Cloudflare-class` and require **no bucket and no individual
-fixture** to regress below incumbent by more than ε — an optimized strategy that lifts one class while
-tanking another is documented, and the aggregate masks it [HALO, gskill, Self-Evolving-survey]. Record
-per-bucket scores + accepted-mutation count in the versioned artifact. Split the held-out into a
-**drift** subset (fixtures simulating a changed site the incumbent now fails) and a **cold-start**
-subset (held-out archetypes the generator never saw — feed-less, JS-rendered, sitemap-only,
-non-English, Cloudflare-class; decontaminated by host/template lineage) and report deltas per subset,
-matching the two claimed payoffs [Agent-Workflow-Memory]. **Capability-vs-harness triage:** if a site
-stays unaccepted across K regenerations spanning ≥2 generator versions, flag it as a *capability /
-infra* bottleneck (escalate to hints / a new host tool / stealth browser), **exclude** it from the
-trainset and promotion split, and report it — don't burn offline budget on unwinnable sites; compare
-incumbent vs candidate only over fixtures whose failure is *controllable* [HALO].
+GEPA-+25pts]. Record the per-fixture scores + accepted-mutation count in the versioned artifact for observability.
+*(Post-v1, once the held-out is large enough to populate buckets — a sub-60 held-out can't fill a 3-D
+`discovery_method × render × Cloudflare-class` stratification: add a hard per-stratum / backward-
+transfer guard (no bucket or fixture regresses below incumbent by >ε), split drift vs cold-start
+subsets with per-subset deltas [HALO, gskill, AWM], and capability-vs-harness triage that excludes
+sites unaccepted across K regenerations from the trainset/split [HALO]. v1 ships only the margin gate
+above.)*
 
 **Trigger & persistence.** Out-of-band — manual (the optional §4.9 HTTP surface), a slow
 `AUTOCRAWLER_REOPT_CHECK` cadence, and/or a trainset-growth threshold of *+M* health-confirmed
@@ -470,9 +491,12 @@ question (the published precedents [RLM♥GEPA, gskill] all evolve a *text* arti
 predictor end-to-end). GEPA must **not** be extended to emit/evolve crawler *code* (out of scope).
 Acceptance criteria: a `save → load → re-score` round-trip yielding identical held-out scores; a
 **tested rollback** (flip the config pointer to the prior `generator.json`, confirm the regeneration
-loop recovers); and a **pre-build toy-example milestone** proving the chosen owned predictor
-GEPA-optimizes, JSON-saves, reloads, and re-scores identically *before* committing to that mechanism
-— else default to the instruction-string / CodeAct path.
+loop recovers); a **predictor-is-load-bearing** check (perturb the strategy instruction to two
+deliberately-divergent texts and assert measurable behavioral divergence in generation outcomes — a
+no-op-but-round-trips predictor passes the identity test yet fails this, so pin *where* `discovery_plan`
+enters the `GenerateCrawler` prompt and exercise that wiring); and a **pre-build toy-example milestone**
+proving the chosen owned predictor GEPA-optimizes, JSON-saves, reloads, and re-scores identically
+*before* committing to that mechanism — else default to the instruction-string / CodeAct path.
 
 **Honest payoff.** This does not make "every site better over time" — the input is a near-static
 `sites.yaml`. It optimizes for (a) **regeneration quality under drift** (§4.8) and (b) **cold-start
@@ -484,8 +508,8 @@ on newly-added/unseen sites**, validated on the held-out split.
 - **Generated module** — `SITE: str`, `crawl(ctx) -> Iterable[Item]`; allowlisted imports only (§4.3).
 - **`ctx`** — `fetch`, `render`, `get`, `log`; enforces robots/rate-limit/timeouts/allowed-hosts.
 - **`Item`** — §4.6; maps to `POST /news {title, body}`.
-- **Run record** — `{site, started, finished, items_found, new_items, errors}` in the state store (§4.9).
-- **`CandidateResult`** — `{item_count, samples, schema_errors, exceptions, pages_fetched}` from the §6 scoring core (§4.11).
+- **Run record** (canonical) — `{site, started, finished, items_found, new_items, errors, pages_fetched}` in the state store; §4.8/§4.9 reference this, not re-list fields.
+- **`CandidateResult`** — frozen Pydantic model (`scoring.py`): `item_count:int`, `samples:list[dict]` (capped), `schema_errors:list[str]`, `pages_fetched:int`, `exception:{type,message,traceback_tail}|None`. The §6 scoring-core output; all three §4.11 adapters + the feedback transform + §8 admission read these exact fields.
 - **Trainset example** — `dspy.Example(site_url, corpus, render, hints, discovery_*, crawler_source).with_inputs("site_url","corpus","render","hints")`; inputs-only (§4.11).
 
 ## 6. Generation acceptance gates
@@ -493,7 +517,8 @@ A generated script is accepted only if it passes, in order:
 1. **Static analysis** — AST allowlist; no banned imports/builtins; matches the §4.3 contract.
    Consumes `crawler_source.code` (the field is a `dspy.Code`, fences already stripped — §4.2).
 2. **Runtime validation & completeness** — yields ≥ `min_items`; every item has non-empty `title`,
-   a **sufficiently long, non-boilerplate** `body`, and a valid on-domain `url`; runs within
+   a **sufficiently long, non-boilerplate** `body` (and reject bodies above a small U+FFFD
+   replacement-char ratio — mojibake from mis-detected encoding), and a valid on-domain `url`; runs within
    time/page/memory budget; obeys robots. Plus two anti-under-enumeration checks — a news crawler is
    an *exhaustive-enumeration* task and RLMs reliably under-enumerate on "find every X" (e.g. 9–26 of
    ~114) [Sanjaya]: (a) **must-observe** — reject/down-score a candidate that never called
@@ -525,16 +550,14 @@ scoring core** (not the same callable) feeds the §4.11 optimizer through three 
 adapters — `reward_fn(args, pred)`, `dspy.Evaluate`, and the 5-arg GEPA metric have incompatible
 signatures and must not be conflated (§4.11).
 
-**Selection is best-arm identification under a tight budget.** Dispatch the N candidates
-**concurrently** (diversity costs ~1× wall-clock, not N× — SRLM's K=8 beat single-trajectory RLM by
-up to 22%). When the per-candidate validation budget is small (the normal case — each
-`validate_crawler` spins a sandbox and may escalate to a stealth browser), allocate by
-**Sequential-Halving / Reject**, not flat argmax and not UCB/Thompson (the wrong objective for
-picking one arm): validate all cheaply, drop the bottom half, give survivors more passes, repeat over
-⌈log₂N⌉ rounds [SRLM, TRIPLE]. Measure budget in **spend / sandbox-seconds** (charge stealth-browser
-validations at true cost), not evaluation count. Prefer feedback-carrying `Refine` (each retry sees
-the prior `gate_failures`) but **cap retry depth** — pointwise retry plateaus [Feedback-Descent].
-Default N≈4–8.
+**Candidate selection.** Run N candidates **concurrently** (diversity costs ~1× wall-clock, not N× —
+SRLM's K=8 beat single-trajectory RLM by up to 22%) and take the **argmax over the graded scalar** —
+what `dspy.BestOfN` already does. Prefer feedback-carrying `dspy.Refine` (each retry sees the prior
+`gate_failures`) but **cap retry depth** — pointwise retry plateaus [Feedback-Descent]. Default N≈4–8.
+*(Post-v1: at large N a Sequential-Halving / Reject best-arm allocator beats flat argmax under a tight
+validation budget, with budget measured in spend not eval count [TRIPLE] — deferred; at N≈4–8 the gain
+over "validate all, take argmax" is small, and sandbox-second accounting would contradict §4.4's
+LLM-bound budget.)*
 
 ## 7. Project layout (mirrors `bizup-news` conventions)
 ```
@@ -548,7 +571,7 @@ autocrawler/
     generate/               # generation + self-improvement
       signatures.py         #   GenerateCrawler (+ owned strategy sub-signature, §4.11)
       tools.py              #   fetch/render/find_feeds/get_sitemap/validate_crawler
-      snapshot.py           #   SiteSnapshot(SandboxSerializable) (§9)
+      snapshot.py           #   build the prefetched corpus dict: homepage/robots/sitemap/articles (§9)
       generator.py          #   CrawlerGenerator(dspy.Module): RLM + BestOfN/Refine; save/load (§4.11)
       scoring.py            #   one scoring core + reward_fn / Evaluate / GEPA adapters (§6, §4.11)
       optimize.py           #   offline GEPA job: trainset → compile → held-out promote (§4.11)
@@ -596,6 +619,12 @@ The central risk is **executing model-written code against the live web**. Mitig
   exemplar (§4.11), cross-validate its items against independent signals (URLs resolve, titles match
   the live `<title>`, duplicate/boilerplate-body penalty, off-domain-URL penalty). Acceptance rests on
   the **actual** `CandidateResult`, never the model's *claimed* counts (the "imagined variable" risk).
+- **Untrusted-XML hardening (hot path).** Feed/sitemap parsing (`feedparser`, `lxml`, `get_sitemap`)
+  consumes attacker-influenced XML on *every committed crawl*. Disable external-entity resolution and
+  entity expansion (`defusedxml`, or `lxml`/`feedparser` with `resolve_entities=False` / `huge_tree`
+  off) to block XXE / billion-laughs. The parser libs (`lxml`/`selectolax`/`feedparser`/`httpx`) are
+  part of the **pinned-image TCB** — a parser CVE is fixed by re-pinning the image, not regenerating a
+  crawler. (The §4.4 ~10 s timeout + memory cap already backstop regex backtracking / RAM exhaustion.)
 
 ## 9. DSPy / runtime notes
 - `dspy.RLM` is `@experimental` — pin DSPy `3.2.x` (already a dep of `bizup-news`).
@@ -605,19 +634,19 @@ The central risk is **executing model-written code against the live web**. Mitig
 - **Two distinct sandboxes:** RLM's Pyodide REPL (where the model *reasons and drafts*) and the
   host execution sandbox (§4.4, where candidate and committed crawlers actually *run*). They
   never share a process; `validate_crawler` (§4.2) is the bridge.
-- **`SiteSnapshot` contract:** subclass `dspy.SandboxSerializable` (nominal ABC — duck typing
-  fails the `isinstance` check) and implement all four methods; `to_sandbox`/`sandbox_assignment`
-  round-trip a *multi-part* payload (homepage, robots, sitemap, N articles) into named REPL
-  variables, and `rlm_preview` surfaces **structure** (discovered feed/sitemap URLs + an HTML
-  outline), not byte counts. Never pass megabyte HTML as a plain `str` field. To/from-sandbox must
-  yield only **pickle-clean** values (str/bytes/dict/list): the RLM REPL persists state via pickle
-  between iterations and *silently drops* non-pickleable globals (no live lxml trees, httpx clients,
-  or closures) [RLM-from-scratch] — unit-test `pickle.dumps` on every assigned variable and enable the
-  warn-unpickleable flag during generation. Expose the parts as an **addressable dict/namespace**
-  (`homepage`, `robots`, `sitemap`, `articles[i]`) with in-REPL `grep(pattern)`/slice helpers (Pyodide
-  lacks grep/sed) — addressable parts beat one concatenated blob (~6 pts / up to 8× fewer tokens)
-  [Coding-Agents, LLM-in-Sandbox]. Capture `crawler_source` via the REPL **FINAL channel** (bypasses
-  the root LM's output-token limit); gate-1 treats a non-parsing `crawler_source` as truncation.
+- **`corpus` injection (the real dspy 3.2.1 mechanism — verify before M1).** `corpus` is a plain
+  **JSON-able dict** passed as an RLM input. dspy's `PythonInterpreter._serialize_value` injects it as
+  a Python literal and **raises `CodeInterpreterError` on any non-JSON type** (only
+  None/str/bool/int/float/list/tuple/dict; tuples/sets → lists); values over `LARGE_VAR_THRESHOLD`
+  (100 MB) spill to `/tmp/dspy_vars/{k}.json` and are `json.loads`-ed in-sandbox. There is **no**
+  `SandboxSerializable`, no `to_sandbox`/`rlm_preview`, and **no pickle** in the installed 3.2.1 RLM
+  path — the dspy-rlm *skill* describes an API that does not exist here (confirmed by grepping the
+  pinned `bizup-news/.venv`). So shape `corpus` as an **addressable dict**
+  (`{homepage, robots, sitemap, articles:[{url,title,text}]}`) of JSON primitives — addressable parts
+  beat one blob (~6 pts / up to 8× fewer tokens [Coding-Agents, LLM-in-Sandbox]) — and define in-REPL
+  `grep`/slice helpers as plain functions the prompt provides (Pyodide lacks grep/sed). Capture
+  `crawler_source` via the REPL **FINAL channel** (bypasses the root LM's output-token limit); gate-1
+  treats a non-parsing `crawler_source` as truncation.
 - **Interpreter left at default.** Keep RLM's `interpreter=` at the default Pyodide/Deno; a custom
   host-CPython interpreter was considered and rejected — it would run the model's *ungated*
   exploratory code in a network-capable process, dissolving the no-network isolation §8 relies on.
@@ -630,11 +659,14 @@ The central risk is **executing model-written code against the live web**. Mitig
 - **Order gates cheapest-first**, short-circuiting on first failure: AST → single-run yield → two-run
   Jaccard stability → (offline only) multi-pass promotion eval, so the expensive multi-run evaluation
   runs only on candidates that cleared the cheap screens [Darwin-Gödel-Machine].
-- **Pin the DSPy call signatures.** The GEPA/MIPROv2 signatures this spec leans on (5-arg feedback
-  metric, `reflection_lm`, `auto=`, `teacher=None`, `MIPROv2(auto=)`) and the typed-predictor JSON
-  round-trip are *unverified against the ingested docs* — validate them against the installed DSPy
-  3.2.x source in a build-time smoke test before M5, and assert `list(generator.named_predictors())`
-  contains the strategy predictor before any `compile` (empty ⇒ GEPA has nothing to optimize).
+- **Pin every DSPy seam in a build-time smoke test — before M1, not M5.** The IMPL-1 gap (the
+  `SandboxSerializable` API the skill described does *not* exist in installed 3.2.1) is the canary: the
+  spec's other DSPy-internal claims may have the same drift. One smoke test, run early and in CI,
+  asserts against the *installed* dspy: the `corpus`-injection seam (`serialize_for_json` round-trips
+  every part; non-JSON raises `CodeInterpreterError`); the GEPA/MIPROv2 signatures (5-arg feedback
+  metric, `reflection_lm`, `auto=`, `teacher=None`, `MIPROv2(auto=)`); `list(generator.named_predictors())`
+  non-empty before any `compile`; the JSON `save`/`load` round-trip; and `crawler_source` capture via the
+  FINAL channel. Each speculative claim becomes a fast failing test, not an M5 surprise.
 
 ## 10. CLI & operations
 | command | does |
@@ -664,6 +696,11 @@ stays for manual one-shot runs and CI.
 | `AUTOCRAWLER_USER_AGENT` | identifying UA string | sent on every request |
 | `AUTOCRAWLER_RATE_LIMIT` | e.g. `1/s/host` | politeness cap |
 | `AUTOCRAWLER_MAX_PAGES` | e.g. `200` | per-crawl page budget |
+| `AUTOCRAWLER_MIN_ITEMS` | e.g. `5` | gate-2 min items (M1 placeholder; calibrate per §14 Q8) |
+| `AUTOCRAWLER_MIN_BODY_CHARS` | e.g. `400` | gate-2 min stripped body length (M1 placeholder) |
+| `AUTOCRAWLER_STABILITY_JACCARD` | e.g. `0.6` | gate-3 URL-overlap threshold (M1 placeholder) |
+| `AUTOCRAWLER_ENUM_FLOOR_RATIO` | e.g. `0.5` | gate-2 enumeration floor vs feed/sitemap count (M1 placeholder) |
+| `AUTOCRAWLER_TRACKING_PARAM_DENYLIST` | `utm_*,fbclid,gclid,…` | query params stripped in URL canonicalization (§4.6) |
 | `AUTOCRAWLER_DEFAULT_SCHEDULE` | e.g. `30m` | crawl cadence for sites that set none |
 | `AUTOCRAWLER_CONCURRENCY` | e.g. `4` | max sites crawled concurrently |
 | `AUTOCRAWLER_REGEN_CHECK` | e.g. `24h` | how often the scheduler evaluates staleness |
@@ -679,13 +716,14 @@ stays for manual one-shot runs and CI.
   importable; queued REPL responses) + `DummyLM`; assert tool wiring, that the scoring core and its
   three adapters score / feed back correctly, that a forced extraction (`final_reasoning`) is
   caught, and that bad output is rejected. No Deno, no live network.
-- **Self-improvement (§4.11)** — `dspy.Evaluate` over frozen `SiteSnapshot`s + recorded fixtures;
+- **Self-improvement (§4.11)** — `dspy.Evaluate` over frozen corpus snapshots + recorded fixtures;
   assert: the promotion gate refuses a non-improving candidate **and** one that wins on aggregate
   while regressing a stratum (margin + per-bucket guard); `save`/`load` JSON round-trips the program
   to identical held-out scores; train/val/promotion pools are **disjoint**; `named_predictors()` is
   non-empty before `compile`; a tested **rollback** restores the prior generator; the **saturation**
-  assertion fires when the trainset is all-near-maximal; and a build-time smoke test pins the
-  GEPA/MIPROv2 call signatures against installed DSPy.
+  assertion fires when the trainset is all-near-maximal; that `serialize_for_json` round-trips every
+  corpus part (no non-JSON types); and a build-time smoke test pins the GEPA/MIPROv2 call signatures
+  against installed DSPy.
 - **Runner/contract** — golden HTML/feed fixtures + recorded HTTP; assert normalized items
   and dedup behavior. A couple of hand-written reference crawlers double as contract tests.
 - **Politeness/SSRF** — unit tests proving robots/rate-limit/allowed-host enforcement.
@@ -695,7 +733,7 @@ stays for manual one-shot runs and CI.
 - **M0 — Path proof:** contracts + runner + one *hand-written* crawler + `POST /news`. No LLM.
 - **M1 — Generator:** `dspy.RLM` + host tools + `validate_crawler` loop; generate scripts for a seed list; acceptance gates (§6); **A/B the production backbone** (RLM-recursive vs non-recursive CodeAct) on a held-out split, keep the per-backbone winner.
 - **M2 — Scheduler & robustness:** the `autocrawl run` scheduler (due-selection, concurrency, retry/backoff) + run history; dedup/state, politeness, headless tier, Cloudflare challenge tier (§4.10), SSRF/sandbox hardening.
-- **M3 — Self-healing:** health tracking + stale detection + scheduler-driven regeneration with review gate.
+- **M3 — Self-healing:** health tracking + single-run stale detection + scheduler-driven regeneration with review gate; **exit criterion: a drift-MTTR target met** (§4.8).
 - **M4 — Operate:** metrics/observability, optional status/control HTTP surface.
 - **M5 — Self-improving generator (§4.11), core:** the offline GEPA loop — `CrawlerGenerator(dspy.Module)`,
   the scoring-core adapters, the inputs-only trainset, the held-out promotion gate, and JSON save/load.
@@ -706,7 +744,9 @@ stays for manual one-shot runs and CI.
   optimizes unevenly. Ships the graded reward, saturation guard, three-pool split,
   hidden-scorer/immutable-TCB invariant, and regression-safe promotion gate — **preceded** by a
   pre-build toy validation that GEPA-optimize → JSON-save → reload → re-score is identical on the
-  owned predictor (§4.11).
+  owned predictor (§4.11). **Build-effort gate:** stand up only the cheap ladder rungs until the live
+  trainset crosses a difficulty bar (~15 examples with sub-maximal graded scores + a few drift/cold-start
+  cases); the heavy GEPA/promotion machinery is built only once there is something hard to optimize.
 
 ## 14. Open questions / follow-ups
 1. **News API idempotency** — recommend extending `POST /news` to accept `url`/`source`/`published_at`
@@ -740,7 +780,7 @@ what they anchor — full per-paper findings live in workflow `wqnhxlk46`:
 - **Meta-Harness** (`#c78a92`) — full traces ≫ scores-only, *summaries no better than the scalar*; small-hard-discriminative set → §4.11 feedback + data sizing.
 - **Darwin Gödel Machine** (`#4008a8`) — self-modifying agents reward-hack a *visible* evaluator → immutable TCB + hidden scorer + promotion margin > noise → §8, §4.11.
 - **SRLM** (`#92bd81`) & **TRIPLE** (`#d550b5`) — parallel K-sample selection beats single-trajectory (+22%); Sequential-Halving over argmax/UCB; budget = cost → §6 selection.
-- **Coding Agents are Long-Context Processors** (`#9b7ef3`) + **RLM** (`#ea21e9`) + **From Scratch** (`#0bbf98`) — code+environment substrate; addressable parts ≫ blob; recursion not the driver / hurts strong models; unbounded root loop; pickle drops globals; FINAL channel → §4.2, §9.
+- **Coding Agents are Long-Context Processors** (`#9b7ef3`) + **RLM** (`#ea21e9`) + **From Scratch** (`#0bbf98`) — code+environment substrate; addressable parts ≫ blob; recursion not the driver / hurts strong models; unbounded root loop; JSON-literal variable injection (no pickle / no SandboxSerializable); FINAL channel → §4.2, §9.
 - **MIPRO** (`#21498b`) + **CodeAdapt** (`#c4ad60`) — joint instruction+demo ≫ instruction-only; vacuous seeds underperform; exemplar selection is the cheap early lever → §4.11 ladder + seed.
 - **Agent Workflow Memory** (`#971a5a`) + **gskill** (`#39b2ab`) + **BetterTogether** (`#5417b9`) — gains widen with the train/test gap; cross-model skill transfer + efficiency-only gains on strong models; prompts-before-weights (weights out of scope v1) → §4.11.
 - **Survey of Self-Evolving Agents** (`#b7bd66`) — offline/online taxonomy, BWT/FGT, golden-dataset + tested rollback, quantified reward-hacking/alignment-faking risk → §4.11, §8.
