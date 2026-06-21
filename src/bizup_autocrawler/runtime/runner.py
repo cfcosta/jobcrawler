@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import timezone
 
+from bizup_autocrawler import config
 from bizup_autocrawler.ingest import IngestOutcome, NewsClient
 from bizup_autocrawler.runtime.contract import CrawlFn, Item
 from bizup_autocrawler.runtime.ctx import Ctx
@@ -55,13 +56,17 @@ def crawl_site(
     items, errors = _collect(crawl_fn, ctx)
     fresh, historical = _apply_first_crawl_cap(items, is_first, first_crawl_cap)
 
+    # The operator's denylist (§11) is load-bearing on the dedup key (§4.6): two
+    # URLs differing only on a tracking param must collapse to one.
+    drop = config.tracking_param_denylist()
+
     # capped-out back-catalog: mark seen so it neither ingests now nor backfills later.
     for item in historical:
-        store.mark_seen(slug, canonicalize_url(item.url))
+        store.mark_seen(slug, canonicalize_url(item.url, drop_params=drop))
 
     new_items = 0
     for item in fresh:
-        canon = canonicalize_url(item.url)
+        canon = canonicalize_url(item.url, drop_params=drop)
         if store.is_seen(slug, canon):
             continue
         outcome = news.post_item(item.title, item.body)

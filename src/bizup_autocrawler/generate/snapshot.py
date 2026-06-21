@@ -34,13 +34,19 @@ def build_corpus(
     robots: str = "",
     sitemap: str = "",
     articles: Iterable[Mapping[str, object]] | None = None,
+    feeds: Iterable[str] | None = None,
 ) -> dict[str, object]:
-    """Assemble the prefetched snapshot as an addressable, JSON-able dict (§9)."""
+    """Assemble the prefetched snapshot as an addressable, JSON-able dict (§9).
+
+    ``feeds`` carries the discovered RSS/Atom/JSON feed URLs — the feed-first
+    signal the strategy reasons over — so the model needn't rediscover them.
+    """
     corpus: dict[str, object] = {
         "homepage": homepage,
         "robots": robots,
         "sitemap": sitemap,
         "articles": [_article(a) for a in (articles or [])],
+        "feeds": [str(f) for f in (feeds or [])],
     }
     ensure_json_primitive(corpus)
     return corpus
@@ -110,6 +116,8 @@ def prefetch_corpus(
     become empty). A few on-domain links are pulled as article samples. All
     fetching goes through ``ctx`` so SSRF + politeness apply.
     """
+    from bizup_autocrawler.generate.tools import find_feeds_in  # avoid an import cycle
+
     homepage = ctx.fetch(site_url)
     links = on_domain_links(homepage, site_url)[:max_articles]
     return build_corpus(
@@ -119,6 +127,7 @@ def prefetch_corpus(
         articles=[
             {"url": url, "title": "", "text": _try_fetch(ctx, url)} for url in links
         ],
+        feeds=find_feeds_in(homepage, site_url),  # feed-first discovery (§4.2)
     )
 
 

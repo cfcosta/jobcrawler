@@ -139,8 +139,10 @@ def site_features(corpus: Mapping[str, object]) -> str:
     evolves generalizable strategy instead of hard-coding this site's endpoints.
     """
     articles = corpus.get("articles") or []
+    feeds = corpus.get("feeds") or []
     lines = [
         f"articles_in_corpus: {len(articles) if isinstance(articles, list) else 0}",
+        f"feeds_found: {len(feeds) if isinstance(feeds, list) else 0}",
         f"has_sitemap: {bool(corpus.get('sitemap'))}",
         f"robots_present: {bool(corpus.get('robots'))}",
     ]

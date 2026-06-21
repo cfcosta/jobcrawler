@@ -33,7 +33,7 @@ def test_corpus_has_addressable_shape() -> None:
         sitemap="<urlset/>",
         articles=[{"url": "https://x.com/a", "title": "A", "text": "body"}],
     )
-    assert set(corpus) == {"homepage", "robots", "sitemap", "articles"}
+    assert set(corpus) == {"homepage", "robots", "sitemap", "articles", "feeds"}
     articles = corpus["articles"]
     assert isinstance(articles, list)
     assert articles[0] == {"url": "https://x.com/a", "title": "A", "text": "body"}
@@ -103,7 +103,10 @@ def test_on_domain_links_filters_and_dedupes() -> None:
 
 def test_prefetch_corpus_assembles_from_ctx() -> None:
     pages = {
-        "/": '<a href="/a1">A1</a><a href="/a2">A2</a>',
+        "/": (
+            '<link rel="alternate" type="application/rss+xml" href="/feed.xml">'
+            '<a href="/a1">A1</a><a href="/a2">A2</a>'
+        ),
         "/robots.txt": "User-agent: *",
         "/sitemap.xml": "<urlset/>",
         "/a1": "Body of A1",
@@ -126,3 +129,4 @@ def test_prefetch_corpus_assembles_from_ctx() -> None:
     articles = cast("list[dict[str, str]]", corpus["articles"])
     assert {a["url"] for a in articles} == {"https://x.com/a1", "https://x.com/a2"}
     assert {a["text"] for a in articles} == {"Body of A1", "Body of A2"}
+    assert corpus["feeds"] == ["https://x.com/feed.xml"]  # feed-first discovery

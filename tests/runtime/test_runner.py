@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import cast
 
 import httpx
+from pytest import MonkeyPatch
 
 from bizup_autocrawler.crawlers import example
 from bizup_autocrawler.ingest import NewsClient
@@ -191,6 +192,24 @@ def test_retry_ingest_stays_unseen_and_is_reattempted() -> None:
     posts, ok_news = _recording_news()
     second = crawl_site("s", crawl, _ctx(), store, ok_news)
     assert second.new_items == 1  # re-attempted and ingested once news recovered
+    assert len(posts) == 1
+    store.close()
+
+
+def test_dedup_honors_the_tracking_param_denylist(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTOCRAWLER_TRACKING_PARAM_DENYLIST", "ref")
+
+    def crawl(ctx: CtxProtocol) -> Iterable[Item]:
+        yield _one("https://example.com/a?ref=1")
+        yield _one("https://example.com/a?ref=2")  # same article, different tracking
+
+    store = StateStore(":memory:")
+    posts, news = _recording_news()
+
+    summary = crawl_site("s", crawl, _ctx(), store, news)
+
+    assert summary.items_found == 2
+    assert summary.new_items == 1  # both collapse to one canonical url
     assert len(posts) == 1
     store.close()
 
