@@ -29,11 +29,9 @@ def test_corpus_has_addressable_shape() -> None:
         articles=[{"url": "https://x.com/a", "title": "A", "text": "body"}],
     )
     assert set(corpus) == {"homepage", "robots", "sitemap", "articles"}
-    assert corpus["articles"][0] == {
-        "url": "https://x.com/a",
-        "title": "A",
-        "text": "body",
-    }
+    articles = corpus["articles"]
+    assert isinstance(articles, list)
+    assert articles[0] == {"url": "https://x.com/a", "title": "A", "text": "body"}
 
 
 def test_corpus_is_json_serializable() -> None:
@@ -46,8 +44,9 @@ def test_corpus_is_json_serializable() -> None:
 
 def test_articles_coerced_to_primitive_fields() -> None:
     corpus = build_corpus(homepage="h", articles=[{"url": 123, "title": None}])
-    art = corpus["articles"][0]
-    assert art == {"url": "123", "title": "", "text": ""}
+    articles = corpus["articles"]
+    assert isinstance(articles, list)
+    assert articles[0] == {"url": "123", "title": "", "text": ""}
 
 
 def test_defaults_are_empty_strings_and_list() -> None:
