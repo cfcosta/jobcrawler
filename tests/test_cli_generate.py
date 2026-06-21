@@ -16,7 +16,8 @@ _GOOD = (
     'SITE = "https://example.com"\n'
     "def crawl(ctx):\n"
     "    for i in range(8):\n"
-    '        yield Item(url=f"{SITE}/a{i}", title=f"T{i}", body="x"*500, source="s")\n'
+    '        body = f"Article {i}. " + "x" * 500  # distinct per article\n'
+    '        yield Item(url=f"{SITE}/a{i}", title=f"T{i}", body=body, source="s")\n'
 )
 
 _HOSTS = {"example.com"}

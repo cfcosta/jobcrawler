@@ -194,6 +194,76 @@ def test_off_domain_sample_fails() -> None:
     )
 
 
+def test_under_enumeration_fails_against_expected_count() -> None:
+    # The site has ~40 recent articles; yielding 8 under-enumerates even though 8
+    # clears the absolute floor — the crawler must consult the fuller source (§6).
+    gate = check_completeness(
+        _result(item_count=8, samples=[_good_sample()]),
+        min_items=5,
+        min_body_chars=400,
+        allowed_hosts=_HOSTS,
+        expected_items=40,
+    )
+    assert not gate.passed
+    assert any("of ~40" in f for f in gate.failures)
+
+
+def test_enumeration_floor_passes_when_close_enough() -> None:
+    # 25 >= ceil(0.5 * 40) = 20 → enough of the recent set enumerated.
+    assert check_completeness(
+        _result(item_count=25, samples=[_good_sample()]),
+        min_items=5,
+        min_body_chars=400,
+        allowed_hosts=_HOSTS,
+        expected_items=40,
+    ).passed
+
+
+def test_no_expected_count_keeps_the_enumeration_floor_dormant() -> None:
+    # Without a known expected count the relative floor cannot fire (only min_items).
+    assert check_completeness(
+        _result(item_count=8, samples=[_good_sample()]),
+        min_items=5,
+        min_body_chars=400,
+        allowed_hosts=_HOSTS,
+    ).passed
+
+
+def test_shared_body_block_across_samples_fails() -> None:
+    # Two different articles whose bodies share a trailing block = a related-links /
+    # most-read rail scraped as body (the live Valor contamination). Reject it (§6).
+    rail = "Leia também: " + "uma manchete de bloco relacionado repetida " * 3
+    a = {
+        "url": "https://example.com/a",
+        "title": "A",
+        "body": "Corpo A real.\n\n" + rail,
+    }
+    b = {
+        "url": "https://example.com/b",
+        "title": "B",
+        "body": "Corpo B outro.\n\n" + rail,
+    }
+    gate = check_completeness(
+        _result(item_count=9, samples=[a, b]),
+        min_items=5,
+        min_body_chars=10,
+        allowed_hosts=_HOSTS,
+    )
+    assert not gate.passed
+    assert any("boilerplate" in f for f in gate.failures)
+
+
+def test_distinct_bodies_pass_the_boilerplate_check() -> None:
+    a = _good_sample("https://example.com/a")
+    b = {"url": "https://example.com/b", "title": "B real headline", "body": "y" * 600}
+    assert check_completeness(
+        _result(item_count=9, samples=[a, b]),
+        min_items=5,
+        min_body_chars=400,
+        allowed_hosts=_HOSTS,
+    ).passed
+
+
 # -- gate 3: two-run Jaccard stability ---------------------------------------
 
 

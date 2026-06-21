@@ -23,6 +23,7 @@ failed, never the predicate/threshold a candidate could target), and are run
 from __future__ import annotations
 
 import ast
+import math
 from collections.abc import Collection
 from dataclasses import dataclass
 from enum import Enum
@@ -166,9 +167,18 @@ def check_completeness(
     min_items: int,
     min_body_chars: int,
     allowed_hosts: Collection[str],
+    expected_items: int | None = None,
+    enum_floor_ratio: float = 0.5,
     max_replacement_ratio: float = 0.02,
 ) -> GateResult:
-    """Gate 2: item floor + per-sample title/body/url validity (§6)."""
+    """Gate 2: item floor + enumeration floor + per-sample validity (§6).
+
+    ``expected_items`` is the host-estimated count of recent articles the site
+    actually publishes (e.g. from its news sitemap). When known, the crawler must
+    enumerate at least ``enum_floor_ratio`` of it — the anti-under-enumeration
+    discipline [Sanjaya]: clearing the small absolute ``min_items`` floor is not
+    enough if the site has far more. Dormant when ``expected_items`` is None.
+    """
     failures: list[str] = []
     if result.exception is not None:
         failures.append(
@@ -176,9 +186,20 @@ def check_completeness(
         )
     if result.item_count < min_items:
         failures.append(f"yielded {result.item_count} items, need >= {min_items}")
+    elif expected_items is not None and expected_items > 0:
+        floor = math.ceil(enum_floor_ratio * expected_items)
+        if result.item_count < floor:
+            failures.append(
+                f"enumerated {result.item_count} of ~{expected_items} recent articles"
+            )
     if result.schema_errors:
         failures.append(
             f"{len(result.schema_errors)} schema errors (e.g. {result.schema_errors[0]})"
+        )
+    shared = _shared_body_block(result.samples)
+    if shared is not None:
+        failures.append(
+            f"samples share a repeated body block (boilerplate): {shared[:60]!r}"
         )
 
     for i, sample in enumerate(result.samples):
@@ -199,6 +220,30 @@ def check_completeness(
 
 def _replacement_ratio(text: str) -> float:
     return text.count("�") / max(len(text), 1)
+
+
+def _shared_body_block(samples: list[dict], *, min_block_chars: int = 80) -> str | None:
+    """A substantial body block shared by >= 2 samples — a related-links / most-read
+    rail scraped as article body (§6 low-boilerplate). Returns the first such block.
+
+    Bodies are split on blank lines; only blocks of ``min_block_chars`` or more are
+    considered, so legitimately-shared short strings (datelines, "read more") don't
+    trip it. Real article paragraphs are effectively unique across articles.
+    """
+    counts: dict[str, int] = {}
+    for sample in samples:
+        body = str(sample.get("body") or "")
+        blocks = {
+            stripped
+            for block in body.split("\n\n")
+            if len(stripped := block.strip()) >= min_block_chars
+        }
+        for block in blocks:
+            counts[block] = counts.get(block, 0) + 1
+    for block, count in counts.items():
+        if count >= 2:
+            return block
+    return None
 
 
 def must_observe_failure(
