@@ -25,6 +25,7 @@ from bizup_autocrawler.generate.snapshot import (
     pick_news_sitemap,
     prefetch_corpus,
     sitemaps_from_robots,
+    wordpress_posts_api,
 )
 from bizup_autocrawler.runtime.ctx import Ctx
 
@@ -42,6 +43,7 @@ def test_corpus_has_addressable_shape() -> None:
         "sitemap",
         "sitemaps",
         "expected_recent",
+        "apis",
         "articles",
         "feeds",
     }
@@ -72,6 +74,27 @@ def test_defaults_are_empty_strings_and_list() -> None:
     assert corpus["articles"] == []
     assert corpus["sitemaps"] == []
     assert corpus["expected_recent"] == 0
+    assert corpus["apis"] == []
+
+
+def test_wordpress_posts_api_detected_from_the_wp_json_link() -> None:
+    home = '<link rel="https://api.w.org/" href="https://x.com/wp-json/" />'
+    assert (
+        wordpress_posts_api(home, "https://x.com/")
+        == "https://x.com/wp-json/wp/v2/posts"
+    )
+
+
+def test_wordpress_posts_api_detected_from_wp_content_assets() -> None:
+    home = '<script src="/wp-content/themes/x/app.js"></script>'
+    assert (
+        wordpress_posts_api(home, "https://x.com/")
+        == "https://x.com/wp-json/wp/v2/posts"
+    )
+
+
+def test_wordpress_posts_api_absent_on_non_wordpress() -> None:
+    assert wordpress_posts_api("<html><body>hi</body></html>", "https://x.com/") is None
 
 
 def test_sitemaps_from_robots_parses_sitemap_lines() -> None:
@@ -240,3 +263,64 @@ def test_prefetch_discovers_news_sitemap_and_counts_expected_articles() -> None:
     assert corpus["sitemap"] == news_xml  # the news sitemap text, for the RLM to use
     sitemaps = cast("list[str]", corpus["sitemaps"])
     assert "https://x.com/news.xml" in sitemaps
+
+
+def test_prefetch_samples_articles_from_the_wp_rest_api() -> None:
+    # A WordPress site: surface the REST API and take real article samples from it
+    # (full content.rendered), not guessed homepage links (§4.2).
+    home = '<link rel="https://api.w.org/" href="https://x.com/wp-json/" />'
+    posts = [
+        {
+            "link": "https://x.com/a-real-post",
+            "title": {"rendered": "Headline"},
+            "content": {"rendered": "<p>The full article body lives here.</p>"},
+        }
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/wp-json/wp/v2/posts" in str(request.url):
+            return httpx.Response(200, json=posts)
+        return httpx.Response(200, text=home if request.url.path == "/" else "")
+
+    ctx = Ctx(
+        {"x.com"},
+        client=httpx.Client(
+            transport=httpx.MockTransport(handler), follow_redirects=False
+        ),
+    )
+    corpus = prefetch_corpus("https://x.com/", ctx)
+
+    assert corpus["apis"] == ["https://x.com/wp-json/wp/v2/posts"]
+    articles = cast("list[dict[str, str]]", corpus["articles"])
+    assert articles[0]["url"] == "https://x.com/a-real-post"
+    assert "full article body" in articles[0]["text"]
+
+
+def test_prefetch_non_wp_samples_exclude_nav_pages() -> None:
+    # Non-WordPress: fall back to homepage links, keeping article slugs and dropping
+    # tag/category/nav pages (those confuse the generator about the body location).
+    home = (
+        '<a href="/tag/economia">tag</a><a href="/category/news">cat</a>'
+        '<a href="/uma-noticia-real">article</a>'
+    )
+    pages = {
+        "/": home,
+        "/robots.txt": "",
+        "/sitemap.xml": "",
+        "/uma-noticia-real": "body",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=pages.get(request.url.path, ""))
+
+    ctx = Ctx(
+        {"x.com"},
+        client=httpx.Client(
+            transport=httpx.MockTransport(handler), follow_redirects=False
+        ),
+    )
+    corpus = prefetch_corpus("https://x.com/", ctx)
+
+    assert corpus["apis"] == []
+    articles = cast("list[dict[str, str]]", corpus["articles"])
+    assert {a["url"] for a in articles} == {"https://x.com/uma-noticia-real"}

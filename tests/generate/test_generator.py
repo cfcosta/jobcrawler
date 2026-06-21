@@ -80,6 +80,15 @@ def test_site_features_surfaces_the_enumeration_target() -> None:
     assert "expected_recent_articles: 42" in features
 
 
+def test_site_features_flags_a_structured_content_api() -> None:
+    # A WordPress REST API (full bodies, paginated) is the best source — the strategy
+    # is told it exists so it prefers it over feed/sitemap/scrape (§4.2).
+    features = site_features(
+        build_corpus(homepage="h", apis=["https://x.com/wp-json/wp/v2/posts"])
+    )
+    assert "structured_content_api: True" in features
+
+
 async def test_aforward_generates_candidate_and_drives_interpreter() -> None:
     interp = MockInterpreter([_final()])
     gen = CrawlerGenerator(interpreter=interp, max_iterations=5, max_llm_calls=5)

@@ -15,11 +15,12 @@ navigation functions the generator prompt tells the model are available.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterable, Mapping
 from html.parser import HTMLParser
 from typing import TYPE_CHECKING
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from bizup_autocrawler import config
 from bizup_autocrawler.urls import normalize_host, valid_on_domain_url
@@ -29,6 +30,17 @@ if TYPE_CHECKING:
 
 _JSON_SCALARS = (str, int, float, bool, type(None))
 _LOC_RE = re.compile(r"<loc\b", re.IGNORECASE)
+# A link whose href is the WordPress REST base (…/wp-json/) — the api.w.org rel
+# link declares it; failing that, any /wp-json/ href on the page does.
+_WP_JSON_HREF = re.compile(r'href=["\']([^"\']*/wp-json/)["\']', re.IGNORECASE)
+# Path segments that are never an article (nav, taxonomy, WP plumbing) — excluded
+# from the article samples so the generator isn't shown tag/category pages.
+_NON_ARTICLE = re.compile(
+    r"/(tag|category|categoria|topico|topics?|author|autor|page|feed|wp-json|"
+    r"wp-admin|wp-content|wp-includes|comments?|search|busca|newsletter|assine|"
+    r"sobre|about|contato|contact|privacidade|termos)(/|$|\?)",
+    re.IGNORECASE,
+)
 
 
 def build_corpus(
@@ -40,15 +52,18 @@ def build_corpus(
     expected_recent: int = 0,
     articles: Iterable[Mapping[str, object]] | None = None,
     feeds: Iterable[str] | None = None,
+    apis: Iterable[str] | None = None,
 ) -> dict[str, object]:
     """Assemble the prefetched snapshot as an addressable, JSON-able dict (§9).
 
     ``feeds`` carries the discovered RSS/Atom/JSON feed URLs — the feed-first
     signal the strategy reasons over — so the model needn't rediscover them.
-    ``sitemaps`` are the sitemap URLs advertised in robots (the news sitemap first)
-    and ``expected_recent`` is the host's estimate of how many recent articles the
-    site publishes (from that sitemap) — the enumeration target the generator
-    reasons toward so it doesn't settle for a feed-sized sample (§4.2, §6).
+    ``apis`` carries discovered structured content APIs (e.g. the WordPress REST
+    ``/wp-json/wp/v2/posts``) that return *full* article bodies as paginated JSON —
+    the best source when present. ``sitemaps`` are the sitemap URLs advertised in
+    robots (the news sitemap first) and ``expected_recent`` is the host's estimate
+    of how many recent articles the site publishes — the enumeration target the
+    generator reasons toward so it doesn't settle for a feed-sized sample (§4.2, §6).
     """
     corpus: dict[str, object] = {
         "homepage": homepage,
@@ -56,11 +71,81 @@ def build_corpus(
         "sitemap": sitemap,
         "sitemaps": [str(s) for s in (sitemaps or [])],
         "expected_recent": int(expected_recent),
+        "apis": [str(a) for a in (apis or [])],
         "articles": [_article(a) for a in (articles or [])],
         "feeds": [str(f) for f in (feeds or [])],
     }
     ensure_json_primitive(corpus)
     return corpus
+
+
+def wordpress_posts_api(homepage: str, base_url: str) -> str | None:
+    """The WordPress REST posts endpoint if ``homepage`` is WordPress, else None.
+
+    WordPress exposes every post — with the **full** ``content.rendered`` body — as
+    paginated JSON at ``/wp-json/wp/v2/posts?per_page=100``, a far better source
+    than scraping or a 10-item RSS. Detected from the ``…/wp-json/`` link the page
+    advertises, or failing that the ``/wp-content/`` asset path / generator meta.
+    """
+    match = _WP_JSON_HREF.search(homepage)
+    if match:
+        wp_json = urljoin(base_url, match.group(1))
+    elif _looks_like_wordpress(homepage):
+        wp_json = urljoin(base_url, "/wp-json/")
+    else:
+        return None
+    return urljoin(wp_json, "wp/v2/posts")
+
+
+def _looks_like_wordpress(homepage: str) -> bool:
+    low = homepage.lower()
+    return "/wp-content/" in low or "/wp-json/" in low or 'content="wordpress' in low
+
+
+def _looks_like_article(url: str) -> bool:
+    """A homepage link that plausibly points at an article (not nav/taxonomy).
+
+    Excludes WP/taxonomy plumbing, then keeps only links whose final path segment
+    reads like an article *slug* — multi-word/hyphenated, dated, or long — so a bare
+    section landing page (``/economia/``, ``/play/``) is not sampled as an article.
+    """
+    if _NON_ARTICLE.search(url):
+        return False
+    slug = urlparse(url).path.strip("/").rsplit("/", 1)[-1]
+    if not slug:
+        return False
+    return "-" in slug or len(slug) > 20 or any(ch.isdigit() for ch in slug)
+
+
+def _wp_article_samples(
+    ctx: Ctx, posts_api: str, count: int, clip_chars: int
+) -> list[dict[str, str]]:
+    """Real article samples straight from the WP REST API — full ``content.rendered``
+    bodies, so the generator sees genuine articles (not guessed homepage links) and
+    that the API itself works."""
+    raw = _try_fetch(ctx, f"{posts_api}?per_page={count}&_fields=link,title,content")
+    try:
+        posts = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    out: list[dict[str, str]] = []
+    for post in posts if isinstance(posts, list) else []:
+        if not isinstance(post, Mapping):
+            continue
+        title = post.get("title")
+        content = post.get("content")
+        text = content.get("rendered") if isinstance(content, Mapping) else ""
+        if str(post.get("link") or "") and str(text or ""):
+            out.append(
+                {
+                    "url": str(post.get("link")),
+                    "title": str(title.get("rendered") or "")
+                    if isinstance(title, Mapping)
+                    else "",
+                    "text": _clip(str(text), clip_chars),
+                }
+            )
+    return out
 
 
 def sitemaps_from_robots(robots: str) -> list[str]:
@@ -181,17 +266,30 @@ def prefetch_corpus(
     sitemaps = sitemaps_from_robots(robots)
     sitemap_url = pick_news_sitemap(sitemaps) or urljoin(site_url, "/sitemap.xml")
     sitemap = _try_fetch(ctx, sitemap_url)
-    links = on_domain_links(homepage, site_url)[:max_articles]  # discover from full
+    # Article samples: from the WP REST API when present (real articles, full body),
+    # else on-domain links that look like article slugs (not tag/category/nav pages,
+    # which confuse the generator about where the body lives).
+    wp_api = wordpress_posts_api(homepage, site_url)
+    if wp_api:
+        articles = _wp_article_samples(ctx, wp_api, max_articles, art_cap)
+    else:
+        links = [
+            url
+            for url in on_domain_links(homepage, site_url)
+            if _looks_like_article(url)
+        ][:max_articles]
+        articles = [
+            {"url": url, "title": "", "text": _clip(_try_fetch(ctx, url), art_cap)}
+            for url in links
+        ]
     return build_corpus(
         homepage=_clip(homepage, hp_cap),
         robots=robots,
         sitemap=sitemap,
         sitemaps=sitemaps or ([sitemap_url] if sitemap else []),
         expected_recent=count_sitemap_urls(sitemap),
-        articles=[
-            {"url": url, "title": "", "text": _clip(_try_fetch(ctx, url), art_cap)}
-            for url in links
-        ],
+        apis=[wp_api] if wp_api else [],
+        articles=articles,
         feeds=find_feeds_in(homepage, site_url),  # feed-first discovery (§4.2)
     )
 

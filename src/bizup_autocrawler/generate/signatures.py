@@ -51,12 +51,16 @@ class GenerateCrawler(dspy.Signature):
 class DiscoveryStrategy(dspy.Signature):
     """Decide how to discover article URLs for a news site, as an ordered rule set.
 
-    1. Probe find_feeds and get_sitemap BEFORE scraping the DOM — a feed or
-       sitemap enumerates articles, whereas a homepage scrape only samples
+    1. Probe for a structured content API, feeds, and the sitemap BEFORE scraping
+       the DOM — they enumerate articles, whereas a homepage scrape only samples
        "recent".
-    2. Prefer sources in order: RSS/Atom/JSON feed > freshest sitemap > HTML
-       index heuristics. If a feed exists, use it.
-    3. Choose scrape only when neither a feed nor a sitemap is available.
+    2. Prefer the source that returns the FULL article body, in order: a structured
+       content API (e.g. a WordPress REST API at /wp-json/wp/v2/posts — full
+       content.rendered, paginated with per_page + page) > a full-content feed (RSS
+       content:encoded, NOT a short description/excerpt) > freshest sitemap > HTML
+       index. A source that returns only an excerpt/summary is not enough — get the
+       complete body, paginating where the source supports it.
+    3. Choose scrape only when no API, feed, or sitemap is available.
     4. Exclude boilerplate (nav, footer, related-links, share widgets) from
        article bodies.
     5. Verify at least several real items before finalizing — never finalize a

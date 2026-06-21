@@ -148,10 +148,14 @@ def site_features(corpus: Mapping[str, object]) -> str:
     """
     articles = corpus.get("articles") or []
     feeds = corpus.get("feeds") or []
+    apis = corpus.get("apis") or []
     expected = corpus.get("expected_recent")
     lines = [
         f"articles_in_corpus: {len(articles) if isinstance(articles, list) else 0}",
         f"feeds_found: {len(feeds) if isinstance(feeds, list) else 0}",
+        # A structured content API (e.g. WordPress REST) returns full bodies as
+        # paginated JSON — the best source; prefer it over feed/sitemap/scrape (§4.2).
+        f"structured_content_api: {bool(apis)}",
         # The enumeration target: the plan must reach most of these, not a feed-sized
         # sample — a feed/homepage that surfaces far fewer is under-enumerating (§6).
         f"expected_recent_articles: {expected if isinstance(expected, int) else 0}",
