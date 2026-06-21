@@ -17,7 +17,7 @@ the §4.4 sandbox. This module is just the one-candidate generation primitive.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 
 import dspy
 from dspy.primitives import CodeInterpreter
@@ -98,6 +98,33 @@ async def select_best(
             return chooser(**inputs)
 
     return await asyncio.to_thread(run)
+
+
+async def best_of_n(
+    make_attempt: Callable[[int], "Awaitable[object]"],
+    *,
+    reward: Callable[[object], float],
+    n: int,
+    threshold: float = 1.0,
+) -> tuple[object, float]:
+    """§6 sequential best-of-N for the async generator: argmax over the scalar.
+
+    ``make_attempt(i)`` produces candidate *i* (the caller varies the rollout_id
+    at temperature=1.0, the real distinctness lever — §4.2). Keeps the best by
+    ``reward`` and early-breaks the moment one clears ``threshold`` (the win is
+    the break, not parallelism). Unlike ``select_best`` (stock sync ``BestOfN``),
+    this drives an ``aforward``-only module directly — the §4.11 async caveat.
+    """
+    best: object = None
+    best_reward = float("-inf")
+    for i in range(n):
+        pred = await make_attempt(i)
+        value = reward(pred)
+        if value > best_reward:
+            best, best_reward = pred, value
+        if value >= threshold:
+            break
+    return best, best_reward
 
 
 def _steer(hints: str, discovery_plan: str) -> str:

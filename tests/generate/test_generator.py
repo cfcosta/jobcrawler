@@ -15,6 +15,7 @@ from dspy.utils import DummyLM
 
 from bizup_autocrawler.generate.generator import (
     CrawlerGenerator,
+    best_of_n,
     select_best,
     site_features,
 )
@@ -115,3 +116,28 @@ async def test_select_best_returns_argmax_over_reward() -> None:
             _Stub(), {"site_url": "u"}, reward_fn=reward_fn, n=3, threshold=99.0
         )
     assert best.rid == 2  # best of rollout_ids 0,1,2 under an unreachable threshold
+
+
+def _reward_int(pred: object) -> float:
+    assert isinstance(pred, int)
+    return float(pred)
+
+
+async def test_best_of_n_picks_highest_reward() -> None:
+    async def make_attempt(i: int) -> object:
+        return i
+
+    best, value = await best_of_n(make_attempt, reward=_reward_int, n=3, threshold=99.0)
+    assert best == 2 and value == 2.0  # unreachable threshold → argmax over all 3
+
+
+async def test_best_of_n_early_breaks_on_threshold() -> None:
+    seen: list[int] = []
+
+    async def make_attempt(i: int) -> object:
+        seen.append(i)
+        return i
+
+    best, value = await best_of_n(make_attempt, reward=_reward_int, n=5, threshold=1.0)
+    assert best == 1 and value == 1.0
+    assert seen == [0, 1]  # stopped the moment one cleared the threshold
