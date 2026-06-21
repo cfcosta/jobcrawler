@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime, timezone
+from typing import cast
 
 import httpx
 
@@ -144,7 +145,7 @@ def test_script_exception_is_isolated() -> None:
 def test_non_item_yield_counts_as_error() -> None:
     def crawl(ctx: CtxProtocol) -> Iterator[Item]:
         yield _one("https://example.com/a")
-        yield "not an item"  # type: ignore[misc]
+        yield cast(Item, "not an item")  # runtime non-Item exercises the guard
 
     store = StateStore(":memory:")
     _, news = _recording_news()
