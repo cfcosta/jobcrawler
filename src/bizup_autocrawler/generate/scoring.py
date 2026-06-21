@@ -17,6 +17,7 @@ flat product on the held-out.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Collection, Mapping, Sequence
 from typing import TYPE_CHECKING
 
@@ -197,12 +198,23 @@ def build_feedback(
     surface only the top ``max_foreground`` (many co-equal directives degrade
     compliance — later retries surface the next as gates clear). The stability
     verdict is appended as an across-run aggregate, never folded into the scalar.
-    A pure transform over already-computed facts: no extra LLM-judge pass.
+    Numeric **thresholds are scrubbed** so the hidden-scorer rule (§8) holds — the
+    optimized loop sees *what* failed, never a target it could blank out. A pure
+    transform over already-computed facts: no extra LLM-judge pass.
     """
-    lines = list(gate_failures[:max_foreground])
+    lines = [_scrub_thresholds(line) for line in gate_failures[:max_foreground]]
     if stability_note:
-        lines.append(stability_note)
+        lines.append(_scrub_thresholds(stability_note))
     return "; ".join(lines)
+
+
+# Strip scorer thresholds a candidate could target ("need >= 5", ">= 0.6") while
+# keeping the candidate's own counts. §8: feedback names what failed, not the bar.
+_THRESHOLD = re.compile(r",?\s*(?:need|require[ds]?)?\s*[<>]=?\s*\d+(?:\.\d+)?")
+
+
+def _scrub_thresholds(text: str) -> str:
+    return _THRESHOLD.sub("", text).strip()
 
 
 # -- the three dspy adapters over one scoring core (§4.11) --------------------

@@ -165,3 +165,18 @@ def test_no_solver_means_no_escalation() -> None:
     challenge = lambda r: httpx.Response(403, headers={"cf-mitigated": "challenge"})  # noqa: E731
     with pytest.raises(httpx.HTTPStatusError):
         _ctx(challenge).fetch("https://example.com/a")
+
+
+def test_get_never_follows_a_redirect_to_an_internal_target() -> None:
+    # SSRF: a crawler could pass follow_redirects=True; ctx.get must refuse so a
+    # 302 to a metadata IP is never auto-fetched (the Location is unchecked).
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "example.com":
+            return httpx.Response(
+                302, headers={"location": "http://169.254.169.254/meta"}
+            )
+        return httpx.Response(200, text="INTERNAL SECRET")
+
+    resp = _with_client(handler).get("https://example.com/x", follow_redirects=True)
+    assert resp.status_code == 302  # not followed
+    assert "INTERNAL" not in resp.text

@@ -91,6 +91,10 @@ class Ctx:
     def get(self, url: str, **kwargs: Any) -> httpx.Response:
         check_url(url, self._allowed)
         self._pages += 1
+        # Never auto-follow: a redirect target is unchecked, so following one
+        # (e.g. 302 → 169.254.169.254) would bypass the SSRF guard. The caller
+        # re-fetches the Location through ctx, which re-checks it.
+        kwargs["follow_redirects"] = False
         return self._client.get(url, **kwargs)
 
     def render(self, url: str) -> str:

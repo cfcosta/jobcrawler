@@ -241,3 +241,18 @@ def test_feedback_appends_stability_note() -> None:
 
 def test_feedback_empty_when_nothing_failed() -> None:
     assert build_feedback(gate_failures=[]) == ""
+
+
+def test_feedback_scrubs_scorer_thresholds() -> None:
+    # §8 hidden-scorer: the candidate's own count survives, the threshold does not.
+    fb = build_feedback(gate_failures=["yielded 2 items, need >= 5"])
+    assert "items" in fb
+    assert "need" not in fb and ">=" not in fb and "5" not in fb
+
+
+def test_feedback_scrubs_stability_threshold() -> None:
+    fb = build_feedback(
+        gate_failures=["0 items"], stability_note="unstable: jaccard >= 0.6"
+    )
+    assert "unstable" in fb
+    assert "0.6" not in fb and ">=" not in fb

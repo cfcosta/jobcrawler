@@ -71,4 +71,5 @@ def build_gepa(
         reflection_lm=reflection_lm,
         auto=auto,
         track_stats=track_stats,
+        use_merge=False,  # §4.11: Merge is OFF for v1 (dspy defaults it on)
     )

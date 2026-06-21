@@ -51,6 +51,7 @@ def test_build_gepa_constructs_without_compiling() -> None:
     reflection_lm = cast(dspy.LM, DummyLM([{"x": "y"}]))  # DummyLM is-a LM at runtime
     gepa = build_gepa(metric, reflection_lm=reflection_lm)
     assert type(gepa).__name__ == "GEPA"  # ty models GEPA as a value, not a class
+    assert gepa.use_merge is False  # §4.11: Merge OFF for v1
 
 
 def test_evaluate_generator_returns_mean_score() -> None:
