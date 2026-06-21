@@ -20,6 +20,19 @@
   hints: Brazilian financial news; articles live under sections like /financas, /empresas, /brasil.
   enabled: true
 
+- slug: brazil_journal
+  name: Brazil Journal
+  url: https://braziljournal.com/
+  render: auto
+  hints: >-
+    WordPress site, no paywall. Use the WordPress REST API ONLY — do NOT parse RSS.
+    GET https://braziljournal.com/wp-json/wp/v2/posts?per_page=100&page=N as JSON
+    for N=1,2,3 (stop early when a page returns an empty list or errors). Parse with
+    json. For each post object: url = post["link"], title = post["title"]["rendered"],
+    body = post["content"]["rendered"] with HTML tags stripped to plain text.
+    content.rendered is the FULL article body (not an excerpt).
+  enabled: true
+
 # Add real seed sites here (the M1 step-0 list, ~15–20 sites). e.g.:
 # - slug: techcrunch
 #   name: TechCrunch
