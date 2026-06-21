@@ -5,15 +5,36 @@ from __future__ import annotations
 from typing import cast
 
 import dspy
+import pytest
 from dspy.utils import DummyLM
 
 from bizup_autocrawler.generate.evaluate import evaluate_generator
 from bizup_autocrawler.generate.optimize import (
+    SATURATION_REMEDY,
     build_gepa,
     has_optimization_signal,
+    has_per_instance_spread,
+    promotion_margin,
+    run_optimization,
     select_optimizer,
     should_promote,
 )
+
+
+def _ex(site: str) -> dspy.Example:
+    return dspy.Example(
+        site_url=f"https://{site}.com",
+        corpus={},
+        render="auto",
+        hints="",
+        discovery_method="feed",
+        discovery_url="",
+        crawler_source="x",
+    ).with_inputs("site_url", "corpus", "render", "hints")
+
+
+def _holdout(n: int) -> list[dspy.Example]:
+    return [_ex(f"h{i}") for i in range(n)]
 
 
 def test_optimizer_ladder_escalates_by_size() -> None:
@@ -68,3 +89,86 @@ def test_evaluate_generator_returns_mean_score() -> None:
     with dspy.context(lm=DummyLM([{"answer": "ok"}])):
         score = evaluate_generator(_Prog(), devset=devset, metric=metric)
     assert score == 100.0  # dspy.Evaluate scores as a 0–100 percentage
+
+
+# -- offline optimization orchestration --------------------------------------
+
+
+def test_promotion_margin_is_the_noise_floor() -> None:
+    assert promotion_margin(10) == 10.0
+    assert promotion_margin(0) == 100.0  # an empty held-out can never promote
+
+
+def test_per_instance_spread_needs_a_discriminating_site() -> None:
+    assert has_per_instance_spread({"a": [1.0, 0.5]})
+    assert not has_per_instance_spread({"a": [1.0, 1.0], "b": [0.5, 0.5]})
+
+
+def _winning_eval(prog: object, *, devset: object, metric: object) -> float:
+    return 95.0 if prog == "OPT" else 80.0
+
+
+def test_run_optimization_promotes_a_clear_winner() -> None:
+    out = run_optimization(
+        baseline="BASE",
+        optimized_factory=lambda: "OPT",
+        trainset=[_ex("a")],
+        valset=[_ex("b")],
+        holdout=_holdout(10),  # margin 10; +15 clears it
+        metric=lambda *a: 0,
+        minibatch_scores=[1.0, 0.5, 1.0],
+        eval_fn=_winning_eval,
+    )
+    assert out["promoted"] is True
+    assert out["optimized_program"] == "OPT"
+
+
+def test_run_optimization_short_circuits_on_saturation() -> None:
+    def no_compile() -> object:
+        raise AssertionError("must not compile when saturated")
+
+    out = run_optimization(
+        baseline="BASE",
+        optimized_factory=no_compile,
+        trainset=[_ex("a")],
+        valset=[_ex("b")],
+        holdout=[_ex("c")],
+        metric=lambda *a: 0,
+        minibatch_scores=[1.0, 1.0, 1.0],  # all maximal → no GEPA signal
+        eval_fn=lambda *a, **k: 0.0,
+    )
+    assert out["promoted"] is False
+    assert "saturat" in str(out["reason"])
+    assert out["remedy"] == SATURATION_REMEDY
+
+
+def test_run_optimization_rejects_a_pool_leak() -> None:
+    with pytest.raises(ValueError):
+        run_optimization(
+            baseline="BASE",
+            optimized_factory=lambda: "OPT",
+            trainset=[_ex("a")],
+            valset=[_ex("b")],
+            holdout=[_ex("a")],  # same site as trainset = leak
+            metric=lambda *a: 0,
+            minibatch_scores=[0.5],
+            eval_fn=lambda *a, **k: 0.0,
+        )
+
+
+def test_run_optimization_holds_when_gain_is_within_noise() -> None:
+    def narrow_eval(prog: object, *, devset: object, metric: object) -> float:
+        return 85.0 if prog == "OPT" else 80.0  # +5 < margin 10
+
+    out = run_optimization(
+        baseline="BASE",
+        optimized_factory=lambda: "OPT",
+        trainset=[_ex("a")],
+        valset=[_ex("b")],
+        holdout=_holdout(10),
+        metric=lambda *a: 0,
+        minibatch_scores=[1.0, 0.5],
+        eval_fn=narrow_eval,
+    )
+    assert out["promoted"] is False
+    assert out["optimized_program"] is None
