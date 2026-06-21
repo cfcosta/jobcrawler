@@ -48,6 +48,18 @@ class Site(BaseModel):
     schedule: str | None = None
     enabled: bool = True
 
+    @field_validator("slug")
+    @classmethod
+    def _import_safe_slug(cls, value: str) -> str:
+        # The slug names crawlers/<slug>.py, which the runner imports as a module,
+        # so it must be a valid Python identifier — underscores, never hyphens.
+        if not value.isidentifier():
+            raise ValueError(
+                f"slug {value!r} must be a valid Python identifier "
+                "(it names crawlers/<slug>.py); use underscores, not hyphens"
+            )
+        return value
+
     @field_validator("schedule")
     @classmethod
     def _duration_only(cls, value: str | None) -> str | None:

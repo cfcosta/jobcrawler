@@ -30,6 +30,12 @@ async def _ok_crawl(site: Site) -> CrawlSummary:
     return _summary(site.slug)
 
 
+def test_slug_must_be_import_safe() -> None:
+    with pytest.raises(ValidationError):
+        Site(slug="valor-globo", url="https://x.com")  # hyphen is not a module name
+    assert Site(slug="valor_globo", url="https://x.com").slug == "valor_globo"
+
+
 def test_render_must_be_a_known_tier() -> None:
     with pytest.raises(ValidationError):
         Site.model_validate({"slug": "s", "url": "https://x.com", "render": "borwser"})

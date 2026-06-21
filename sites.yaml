@@ -13,6 +13,13 @@
   render: auto
   enabled: true
 
+- slug: valor_globo
+  name: Valor — Globo
+  url: https://valor.globo.com/
+  render: auto
+  hints: Brazilian financial news; articles live under sections like /financas, /empresas, /brasil.
+  enabled: true
+
 # Add real seed sites here (the M1 step-0 list, ~15–20 sites). e.g.:
 # - slug: techcrunch
 #   name: TechCrunch
