@@ -103,6 +103,49 @@ async def test_healthy_site_is_not_probed_or_regenerated() -> None:
     assert not probed
 
 
+async def test_confirmed_failure_invokes_the_capture_hook() -> None:
+    # A confirmed real failure (re-probe re-parses nothing) is captured for the §4.11
+    # optimizer — the failure signal — before self-healing runs.
+    store = _stale_store()
+    captured: list[str] = []
+
+    async def reprobe(slug: str) -> int:
+        return 0  # re-probe confirms: not a transient outage
+
+    async def regenerate(slug: str) -> bool:
+        return False
+
+    healer = SelfHealer(
+        store,
+        reprobe=reprobe,
+        regenerate=regenerate,
+        on_confirmed_failure=captured.append,
+    )
+    await healer.assess("s")
+    assert captured == ["s"]
+
+
+async def test_a_blip_does_not_invoke_the_capture_hook() -> None:
+    # A transient outage (re-probe re-parses items) is NOT a learning signal.
+    store = _stale_store()
+    captured: list[str] = []
+
+    async def reprobe(slug: str) -> int:
+        return 2  # re-parsed → tolerated blip
+
+    async def regenerate(slug: str) -> bool:
+        raise AssertionError("a blip must not regenerate")
+
+    healer = SelfHealer(
+        store,
+        reprobe=reprobe,
+        regenerate=regenerate,
+        on_confirmed_failure=captured.append,
+    )
+    assert await healer.assess("s") is HealthState.HEALTHY
+    assert captured == []
+
+
 async def test_reprobe_clears_a_blip() -> None:
     healer = await _healer(_stale_store(), reprobe_items=3, regen_passes=False)
     assert await healer.assess("s") is HealthState.HEALTHY

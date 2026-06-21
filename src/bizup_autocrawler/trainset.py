@@ -95,14 +95,47 @@ def _jsonable(value: object, field: str) -> object:
 
 
 def append_record(path: str, *, slug: str, example: dspy.Example) -> None:
-    """Append one accepted generation to the JSONL records store (§4.11).
+    """Append one **accepted** generation to the JSONL records store (§4.11).
 
     Written only after the §6 gates and the §8 adversarial cross-validation pass;
     the per-site *stability* admission depends on later runs, so it is applied at
-    optimize time (:func:`admitted_examples`), not here. JSONL so concurrent-safe
+    optimize time (:func:`optimization_pool`), not here. JSONL so concurrent-safe
     appends never read-modify-write the whole file.
     """
-    row = {"slug": slug, **{f: _jsonable(example.get(f), f) for f in _ALL_FIELDS}}
+    row: dict[str, object] = {
+        "slug": slug,
+        "kind": "accepted",
+        **{field: _jsonable(example.get(field), field) for field in _ALL_FIELDS},
+    }
+    _append(path, row)
+
+
+def record_failure(
+    path: str, *, slug: str, site_url: str, render: str = "auto", hints: str = ""
+) -> None:
+    """Record a confirmed real failure (a drifted / generation-failed site) as a
+    **hard case** for the optimizer (§4.11).
+
+    Hard cases are the discriminative, sub-maximal signal GEPA learns from — the
+    ``SATURATION_REMEDY``'s "recently-drifted / barely-passing" bias made concrete.
+    Only the *site identity* is stored; the corpus is re-prefetched fresh at optimize
+    time, so the strategy is scored against the site's CURRENT (drifted) state rather
+    than a stale snapshot. The caller must already have confirmed the failure is real
+    (the §4.8 re-probe), not a transient outage.
+    """
+    _append(
+        path,
+        {
+            "slug": slug,
+            "kind": "hard",
+            "site_url": site_url,
+            "render": render,
+            "hints": hints,
+        },
+    )
+
+
+def _append(path: str, row: dict[str, object]) -> None:
     with Path(path).open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row) + "\n")
 
@@ -160,6 +193,46 @@ def _example_from_row(row: Mapping[str, object]) -> dspy.Example:
         discovery_url=str(row.get("discovery_url", "")),
         crawler_source=str(row.get("crawler_source", "")),
     )
+
+
+def optimization_pool(
+    records: Sequence[Mapping[str, object]],
+    *,
+    stable_runs: Callable[[str], int],
+    required_stable: int,
+    prefetch: Callable[[str], dict[str, object]],
+) -> list[dspy.Example]:
+    """The optimizer's trainset: stable accepted exemplars **plus** hard failures.
+
+    Accepted records are admitted once their site clears the stability bar and keep
+    their frozen corpus; hard cases (confirmed failures) are always included and have
+    their corpus **re-prefetched** via ``prefetch`` so the strategy is scored on the
+    site's current (drifted) state. The failures supply the sub-maximal spread that a
+    success-only pool lacks — without them the optimizer saturates and no-ops (§4.11).
+    """
+    out: list[dspy.Example] = []
+    for row in records:
+        if row.get("kind") == "hard":
+            site_url = str(row.get("site_url", ""))
+            out.append(
+                make_example(
+                    site_url=site_url,
+                    corpus=prefetch(site_url),
+                    render=str(row.get("render", "auto") or "auto"),
+                    hints=str(row.get("hints", "")),
+                    discovery_method="",
+                    discovery_url="",
+                    crawler_source="",
+                )
+            )
+        elif admit(
+            gates_passed=True,
+            adversarial_passed=True,
+            stable_runs=stable_runs(str(row.get("slug", ""))),
+            required_stable=required_stable,
+        ):
+            out.append(_example_from_row(row))
+    return out
 
 
 def split_by_site(

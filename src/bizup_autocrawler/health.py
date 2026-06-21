@@ -54,10 +54,14 @@ class SelfHealer:
         *,
         reprobe: Callable[[str], Awaitable[int]],
         regenerate: Callable[[str], Awaitable[bool]],
+        on_confirmed_failure: Callable[[str], None] | None = None,
     ) -> None:
         self._store = store
         self._reprobe = reprobe  # async (slug) -> items re-parsed
         self._regenerate = regenerate  # async (slug) -> produced a gate-passing crawler
+        # Called once a failure is confirmed real (re-probe ruled out a transient
+        # outage) — the §4.11 hook that captures the site as a hard optimizer case.
+        self._on_confirmed_failure = on_confirmed_failure
 
     async def assess(self, slug: str) -> HealthState:
         """Detect → confirm → regenerate, persisting and returning the new state."""
@@ -71,6 +75,10 @@ class SelfHealer:
             return HealthState.GENERATION_FAILED
         if await self._reprobe(slug) > 0:
             return self._record(slug, HealthState.HEALTHY)  # re-parsed: tolerated blip
+        # Staleness confirmed: a real failure, not a transient outage. Capture it as a
+        # §4.11 hard case (the optimizer learns from failures) before self-healing.
+        if self._on_confirmed_failure is not None:
+            self._on_confirmed_failure(slug)
         return self._record(
             slug, regeneration_state(gate_passed=await self._regenerate(slug))
         )

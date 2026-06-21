@@ -11,6 +11,8 @@ from bizup_autocrawler.trainset import (
     load_records,
     load_trainset,
     make_example,
+    optimization_pool,
+    record_failure,
     save_trainset,
     split_by_site,
 )
@@ -115,6 +117,45 @@ def test_split_by_site_is_disjoint() -> None:
 
     assert_disjoint(train, val, holdout)  # no leak across pools
     assert (len(train), len(val), len(holdout)) == (2, 1, 1)
+
+
+def test_optimization_pool_includes_failures_as_signal(tmp_path: object) -> None:
+    # A stable success AND a confirmed failure both enter the pool; the failure is the
+    # sub-maximal signal the optimizer needs, scored on a freshly re-prefetched corpus.
+    path = f"{tmp_path}/records.jsonl"  # type: ignore[str-bytes-safe]
+    append_record(path, slug="good", example=_example("https://good.com"))
+    record_failure(path, slug="drifted", site_url="https://drifted.com", hints="h")
+
+    pool = optimization_pool(
+        load_records(path),
+        stable_runs=lambda s: 3 if s == "good" else 0,
+        required_stable=3,
+        prefetch=lambda url: {"homepage": f"fresh:{url}"},
+    )
+
+    by_site = {ex.site_url: ex for ex in pool}
+    assert set(by_site) == {"https://good.com", "https://drifted.com"}
+    assert by_site["https://drifted.com"].corpus == {
+        "homepage": "fresh:https://drifted.com"
+    }
+
+
+def test_optimization_pool_holds_unstable_accepts_but_keeps_failures(
+    tmp_path: object,
+) -> None:
+    path = f"{tmp_path}/records.jsonl"  # type: ignore[str-bytes-safe]
+    append_record(path, slug="fresh", example=_example("https://fresh.com"))
+    record_failure(path, slug="broken", site_url="https://broken.com")
+
+    pool = optimization_pool(
+        load_records(path),
+        stable_runs=lambda s: 1,  # below the bar → the accept is held back
+        required_stable=3,
+        prefetch=lambda url: {"homepage": "x"},
+    )
+
+    # The unstable accept is held back, but the failure stays — failures are the point.
+    assert [ex.site_url for ex in pool] == ["https://broken.com"]
 
 
 def test_split_by_site_keeps_a_site_whole() -> None:

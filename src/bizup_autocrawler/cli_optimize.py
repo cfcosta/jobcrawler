@@ -35,9 +35,11 @@ from bizup_autocrawler.generate.scoring import (
     make_bootstrap_metric,
     make_metric,
 )
+from bizup_autocrawler.generate.snapshot import prefetch_corpus
+from bizup_autocrawler.runtime.ctx import Ctx
 from bizup_autocrawler.runtime.sandbox import validate_crawler
 from bizup_autocrawler.state import StateStore
-from bizup_autocrawler.trainset import admitted_examples, load_records, split_by_site
+from bizup_autocrawler.trainset import load_records, optimization_pool, split_by_site
 from bizup_autocrawler.urls import normalize_host
 
 _TARGET_ITEMS = 30  # the items-axis saturation target (mirrors cli_generate)
@@ -49,10 +51,11 @@ def optimize_command(args: argparse.Namespace) -> int:
 
     store = StateStore(_db_path())
     try:
-        examples = admitted_examples(
+        examples = optimization_pool(
             load_records(config.trainset_path()),
             stable_runs=lambda slug: _stable_runs(store, slug),
             required_stable=config.trainset_stable_runs(),
+            prefetch=_prefetch_corpus,  # hard cases scored on the site's current state
         )
     finally:
         store.close()
@@ -135,6 +138,13 @@ def _optimize(
             metric=eval_metric,
             minibatch_scores=minibatch_scores,
         )
+
+
+def _prefetch_corpus(site_url: str) -> dict[str, object]:
+    """Re-prefetch a hard case's corpus fresh, so the optimizer scores the strategy
+    against the site's *current* (drifted) state (§4.11)."""
+    host = normalize_host(site_url)
+    return prefetch_corpus(site_url, Ctx({host} if host else set()))
 
 
 def _stable_runs(store: StateStore, slug: str) -> int:
