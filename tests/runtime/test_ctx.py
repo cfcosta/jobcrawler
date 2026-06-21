@@ -69,6 +69,19 @@ def test_fetch_resolves_declared_charset() -> None:
     assert ctx_text(_ctx(handler)) == "café"
 
 
+def test_fetch_resolves_encoding_when_no_charset_header() -> None:
+    # No HTTP charset: the §4.5 ladder must fall through to the document's <meta>
+    # so a legacy page is handed over decoded, not as mojibake.
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content='<meta charset="iso-8859-1"><p>Café</p>'.encode("latin-1"),
+            headers={"content-type": "text/html"},  # charset absent on purpose
+        )
+
+    assert ctx_text(_ctx(handler)) == '<meta charset="iso-8859-1"><p>Café</p>'
+
+
 def ctx_text(ctx: Ctx) -> str:
     return ctx.fetch("https://example.com/a")
 

@@ -16,6 +16,10 @@ from urllib.parse import urljoin
 import httpx
 
 from bizup_autocrawler import config
+from bizup_autocrawler.runtime.encoding import (
+    http_charset_from_content_type,
+    resolve_text,
+)
 from bizup_autocrawler.runtime.solver import (
     ChallengeError,
     ChallengeSolver,
@@ -84,8 +88,18 @@ class Ctx:
                 current = urljoin(current, resp.headers["location"])
                 continue
             resp.raise_for_status()
-            return resp.text
+            return self._decode(resp)
         raise SsrfError(f"too many redirects from {url!r}")
+
+    @staticmethod
+    def _decode(resp: httpx.Response) -> str:
+        # The §4.5 ladder, not httpx's bare ``.text`` (which only honors the HTTP
+        # charset and otherwise assumes UTF-8): fall through to BOM, <meta>, then
+        # statistical detection so legacy pages don't come back as mojibake.
+        return resolve_text(
+            resp.content,
+            http_charset_from_content_type(resp.headers.get("content-type")),
+        )
 
     def _challenge_aware_get(self, url: str) -> httpx.Response:
         host = normalize_host(url)
