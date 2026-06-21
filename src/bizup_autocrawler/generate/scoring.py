@@ -17,7 +17,33 @@ flat product on the held-out.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class ExceptionInfo(BaseModel):
+    """A candidate's exception, trimmed to its diagnostic tail (§4.2)."""
+
+    type: str
+    message: str
+    traceback_tail: str
+
+
+class CandidateResult(BaseModel):
+    """The size-bounded result of running one candidate crawler (§5).
+
+    Frozen — the §4.11 adapters, the gate_failures feedback transform, and the
+    §8 adversarial admission all read these exact fields, never the model's
+    self-reported counts.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    item_count: int = Field(ge=0)
+    samples: list[dict] = Field(default_factory=list)
+    schema_errors: list[str] = Field(default_factory=list)
+    pages_fetched: int = Field(ge=0)
+    exception: ExceptionInfo | None = None
+
 
 # Discovery-method quality (feed > sitemap > scrape): a feed/sitemap enumerates,
 # a homepage scrape only samples "recent".
