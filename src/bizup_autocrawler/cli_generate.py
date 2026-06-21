@@ -34,7 +34,7 @@ from bizup_autocrawler.generate.gates import (
     must_observe_failure,
     stability_verdict,
 )
-from bizup_autocrawler.generate.generator import CrawlerGenerator, best_of_n
+from bizup_autocrawler.generate.generator import best_of_n, load_generator
 from bizup_autocrawler.generate.scoring import CandidateResult, make_reward_fn
 from bizup_autocrawler.generate.snapshot import prefetch_corpus
 from bizup_autocrawler.generate.tools import make_host_tools
@@ -82,7 +82,9 @@ async def _generate_one(site: Site, root_lm: dspy.LM, sub_lm: dspy.LM) -> bool:
     hosts = {normalize_host(site.url)}
     ctx = Ctx(hosts)
     corpus = prefetch_corpus(site.url, ctx)
-    generator = CrawlerGenerator(
+    # Boot-load the §4.11-optimized strategy if one is pinned, else baseline; the
+    # live tools/sub_lm/caps are rebuilt fresh and only the strategy state reloads.
+    generator = load_generator(
         tools=make_host_tools(ctx, hosts),
         sub_lm=sub_lm,
         max_iterations=config.max_iterations(),

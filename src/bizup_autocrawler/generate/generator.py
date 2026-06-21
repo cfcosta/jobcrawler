@@ -17,7 +17,9 @@ the graded scalar is ``best_of_n`` (async, for this aforward-only module) and
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable, Mapping
+from pathlib import Path
 
 import dspy
 from dspy.primitives import CodeInterpreter
@@ -159,3 +161,103 @@ def site_features(corpus: Mapping[str, object]) -> str:
             if isinstance(a, Mapping)
         )
     return "\n".join(lines)
+
+
+# -- §4.11 persistence: JSON save / boot-load / rollback ---------------------
+
+
+def _meta_path(path: Path) -> Path:
+    return path.with_name(f"{path.stem}.meta.json")
+
+
+def save_generator(
+    generator: CrawlerGenerator,
+    path: str | Path,
+    *,
+    trainset_snapshot: int = 0,
+    heldout_score: float | None = None,
+    created_at: str | None = None,
+) -> Path:
+    """Persist the optimized strategy as **JSON state** (§4.11), plus a provenance
+    sidecar (``<name>.meta.json``) tagging the trainset snapshot and held-out score.
+
+    Enforces the ``.json`` suffix: ``save()`` dispatches on suffix, so a ``.pkl``
+    cloudpickles *even with* ``save_program=False`` — arbitrary-code-exec on load,
+    contrary to §8. ``save_program=True`` is never passed, for the same reason. The
+    DSPy/python versions are already pinned inside the artifact's own metadata; the
+    caller owns versioning by choosing a ``generator-<version>.json`` name and
+    keeping the prior file for rollback (a single config pointer selects the active).
+    """
+    p = Path(path)
+    if p.suffix != ".json":
+        raise ValueError(
+            f"generator artifact must be a .json path (got {p.name!r}); a .pkl would "
+            "cloudpickle even with save_program=False — §8 forbids that on load"
+        )
+    generator.save(str(p), save_program=False)
+    _meta_path(p).write_text(
+        json.dumps(
+            {
+                "trainset_snapshot": trainset_snapshot,
+                "heldout_score": heldout_score,
+                "created_at": created_at,
+            },
+            indent=2,
+        )
+    )
+    return p
+
+
+def read_generator_meta(path: str | Path) -> dict[str, object]:
+    """Read the provenance sidecar from :func:`save_generator` (``{}`` if absent)."""
+    meta = _meta_path(Path(path))
+    if not meta.exists():
+        return {}
+    try:
+        data = json.loads(meta.read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def load_generator(
+    path: str | Path | None = None,
+    *,
+    tools: list[Callable[..., object]] | None = None,
+    interpreter: CodeInterpreter | None = None,
+    sub_lm: dspy.LM | None = None,
+    max_iterations: int | None = None,
+    max_llm_calls: int | None = None,
+) -> CrawlerGenerator:
+    """Reconstruct ``CrawlerGenerator`` and ``.load()`` the optimized JSON state on
+    boot (§4.11); fall back to a fresh **baseline** when the artifact is absent or
+    unreadable, so the service always boots.
+
+    ``path`` defaults to the single config pointer ``AUTOCRAWLER_GENERATOR_PATH`` —
+    flipping that pointer to a prior ``generator.json`` *is* the rollback. The live
+    wiring (tools / sub_lm / interpreter / caps) is passed through to the rebuilt
+    module; only the declarative strategy *state* comes from the artifact.
+    """
+
+    def _build() -> CrawlerGenerator:
+        return CrawlerGenerator(
+            tools=tools,
+            interpreter=interpreter,
+            sub_lm=sub_lm,
+            max_iterations=max_iterations,
+            max_llm_calls=max_llm_calls,
+        )
+
+    target = config.generator_path() if path is None else str(path)
+    generator = _build()
+    if not target or not Path(target).exists():
+        return generator  # cold start — no optimized artifact pinned yet
+    try:
+        generator.load(target)
+    except Exception as exc:  # corrupt/incompatible artifact must not stop boot
+        print(
+            f"[load_generator] ignoring unreadable {target!r}: "
+            f"{type(exc).__name__}: {str(exc)[:140]} — using baseline"
+        )
+        return _build()
+    return generator

@@ -9,13 +9,20 @@ and aforward drives the injected interpreter and returns the typed outputs.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import dspy
+import pytest
 from dspy.primitives import FinalOutput
 from dspy.utils import DummyLM
+from pytest import MonkeyPatch
 
 from bizup_autocrawler.generate.generator import (
     CrawlerGenerator,
     best_of_n,
+    load_generator,
+    read_generator_meta,
+    save_generator,
     select_best,
     site_features,
 )
@@ -151,3 +158,129 @@ async def test_best_of_n_skips_a_failing_attempt() -> None:
 
     best, value = await best_of_n(make_attempt, reward=_reward_int, n=3, threshold=99.0)
     assert best == 2 and value == 2.0  # the failed attempt is skipped, not fatal
+
+
+# -- §4.11 persistence: save / boot-load / rollback --------------------------
+
+_OPTIMIZED = "OPTIMIZED DISCOVERY RULES"
+
+
+def _optimized_generator(instruction: str) -> CrawlerGenerator:
+    gen = CrawlerGenerator()
+    sig = gen.strategy.predict.signature
+    assert sig is not None
+    gen.strategy.predict.signature = sig.with_instructions(instruction)
+    return gen
+
+
+def _instruction_of(gen: CrawlerGenerator) -> str:
+    sig = gen.strategy.predict.signature
+    assert sig is not None
+    return sig.instructions
+
+
+def test_save_generator_round_trips_the_optimized_instruction(tmp_path: Path) -> None:
+    path = tmp_path / "generator.json"
+    save_generator(_optimized_generator(_OPTIMIZED), path)
+
+    reloaded = load_generator(path)
+
+    # Identical program state ⇒ identical held-out score under any deterministic
+    # re-score; the instruction is the strategy predictor's whole optimized payload.
+    assert _OPTIMIZED in _instruction_of(reloaded)
+
+
+def test_save_generator_refuses_a_non_json_suffix(tmp_path: Path) -> None:
+    # save() dispatches on suffix: a .pkl cloudpickles even with save_program=False,
+    # which is arbitrary-code-exec on load (§8). The helper refuses it outright.
+    with pytest.raises(ValueError, match="json"):
+        save_generator(CrawlerGenerator(), tmp_path / "generator.pkl")
+
+
+def test_save_generator_writes_a_provenance_sidecar(tmp_path: Path) -> None:
+    path = tmp_path / "generator.json"
+    save_generator(
+        _optimized_generator(_OPTIMIZED),
+        path,
+        trainset_snapshot=7,
+        heldout_score=0.83,
+    )
+
+    meta = read_generator_meta(path)
+    assert meta["trainset_snapshot"] == 7
+    assert meta["heldout_score"] == 0.83
+
+
+def test_load_generator_falls_back_to_baseline_when_absent(tmp_path: Path) -> None:
+    gen = load_generator(tmp_path / "missing.json")
+
+    # A real, usable baseline — GEPA-visible predictor, default (un-optimized) rules.
+    assert "strategy.predict" in {name for name, _ in gen.named_predictors()}
+    assert _OPTIMIZED not in _instruction_of(gen)
+
+
+def test_load_generator_recovers_from_a_corrupt_artifact(tmp_path: Path) -> None:
+    path = tmp_path / "generator.json"
+    path.write_text("{ not valid json")
+
+    gen = load_generator(path)  # must not raise — the service has to boot
+
+    assert _OPTIMIZED not in _instruction_of(gen)  # degraded to baseline
+
+
+def test_rollback_flips_the_config_pointer_to_the_prior_artifact(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    prior = tmp_path / "generator-1.json"
+    current = tmp_path / "generator-2.json"
+    save_generator(_optimized_generator("PRIOR RULES"), prior)
+    save_generator(_optimized_generator("REGRESSED RULES"), current)
+
+    # The single config pointer selects the active artifact (§4.11)...
+    monkeypatch.setenv("AUTOCRAWLER_GENERATOR_PATH", str(current))
+    assert "REGRESSED RULES" in _instruction_of(load_generator())
+
+    # ...and rollback is just flipping it back to the kept prior generator.json.
+    monkeypatch.setenv("AUTOCRAWLER_GENERATOR_PATH", str(prior))
+    assert "PRIOR RULES" in _instruction_of(load_generator())
+
+
+class _RecordingRLM:
+    """Stand-in for the RLM that records the hints it was steered with."""
+
+    def __init__(self) -> None:
+        self.hints: str | None = None
+
+    async def acall(self, **kwargs: object) -> dspy.Prediction:
+        hints = kwargs.get("hints")
+        self.hints = hints if isinstance(hints, str) else None
+        return dspy.Prediction(
+            discovery_method="feed", discovery_url="u", crawler_source=_CRAWLER
+        )
+
+
+async def _hints_for_plan(plan_text: str, monkeypatch: MonkeyPatch) -> str:
+    gen = CrawlerGenerator()
+    recorder = _RecordingRLM()
+    monkeypatch.setattr(gen, "rlm", recorder)
+    with dspy.context(lm=DummyLM([{"reasoning": "r", "discovery_plan": plan_text}])):
+        await gen.aforward(
+            site_url="https://example.com",
+            corpus=build_corpus(homepage="<html/>"),
+            render="auto",
+            hints="",
+        )
+    assert recorder.hints is not None
+    return recorder.hints
+
+
+async def test_strategy_output_is_load_bearing_in_generation(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    # The §4.11 predictor-is-load-bearing guarantee: a no-op predictor would round-
+    # trip through JSON yet steer nothing. Pin *where* discovery_plan enters the
+    # GenerateCrawler prompt — divergent plans must produce divergent RLM hints.
+    alpha = await _hints_for_plan("PLAN-ALPHA", monkeypatch)
+    beta = await _hints_for_plan("PLAN-BETA", monkeypatch)
+    assert "PLAN-ALPHA" in alpha and "PLAN-BETA" in beta
+    assert alpha != beta

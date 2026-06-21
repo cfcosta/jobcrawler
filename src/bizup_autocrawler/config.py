@@ -178,6 +178,12 @@ def trainset_stable_runs() -> int:
     return _int("AUTOCRAWLER_TRAINSET_STABLE_RUNS", 3)
 
 
+def generator_path() -> str | None:
+    """The single §4.11 config pointer to the active ``generator.json``; flipping it
+    to a prior artifact is the rollback. Unset ⇒ boot from the baseline generator."""
+    return _opt("AUTOCRAWLER_GENERATOR_PATH")
+
+
 # --- Cloudflare / solver (§4.10) -------------------------------------------
 
 
