@@ -10,7 +10,9 @@ title or body is never valid (the §6 gates apply the stricter length checks).
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from datetime import datetime
+from typing import Protocol, cast, runtime_checkable
 
 from pydantic import BaseModel, Field
 
@@ -21,3 +23,32 @@ class Item(BaseModel):
     body: str = Field(min_length=1)
     published_at: datetime | None = None
     source: str = Field(min_length=1)
+
+
+@runtime_checkable
+class Ctx(Protocol):
+    """The single fetch boundary a crawler is handed (§4.5).
+
+    All network access goes through ``ctx`` so the runner enforces robots,
+    rate-limit, timeouts, the SSRF guard, and encoding centrally — the script
+    declares *what* to fetch, not *how*.
+    """
+
+    def fetch(self, url: str) -> str: ...
+    def render(self, url: str) -> str: ...
+    def get(self, url: str, **kwargs: object) -> object: ...
+    def log(self, *args: object, **kwargs: object) -> None: ...
+
+
+CrawlFn = Callable[[Ctx], Iterable[Item]]
+
+
+def load_crawler(module: object) -> tuple[str, CrawlFn]:
+    """Return ``(SITE, crawl)`` from a validated crawler module (§4.3)."""
+    site = getattr(module, "SITE", None)
+    crawl = getattr(module, "crawl", None)
+    if not isinstance(site, str) or not site:
+        raise TypeError("crawler module must define a non-empty SITE: str")
+    if not callable(crawl):
+        raise TypeError("crawler module must define crawl(ctx)")
+    return site, cast(CrawlFn, crawl)
