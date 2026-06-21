@@ -169,6 +169,7 @@ def check_completeness(
     allowed_hosts: Collection[str],
     expected_items: int | None = None,
     enum_floor_ratio: float = 0.5,
+    min_body_quality: float = 0.6,
     max_replacement_ratio: float = 0.02,
 ) -> GateResult:
     """Gate 2: item floor + enumeration floor + per-sample validity (§6).
@@ -202,6 +203,7 @@ def check_completeness(
             f"samples share a repeated body block (boilerplate): {shared[:60]!r}"
         )
 
+    short = 0
     for i, sample in enumerate(result.samples):
         title = str(sample.get("title") or "").strip()
         body = str(sample.get("body") or "").strip()
@@ -209,11 +211,18 @@ def check_completeness(
         if not title:
             failures.append(f"sample {i}: empty title")
         if len(body) < min_body_chars:
-            failures.append(f"sample {i}: body too short ({len(body)} chars)")
+            short += 1  # body length is graded by fraction below, not per-sample
         elif _replacement_ratio(body) > max_replacement_ratio:
             failures.append(f"sample {i}: high U+FFFD ratio (mojibake)")
         if not valid_on_domain_url(url, allowed_hosts):
             failures.append(f"sample {i}: invalid/off-domain url {url!r}")
+
+    # Body completeness is a fraction, not all-or-nothing: a minority of short posts
+    # (a news brief) is fine — the runtime filter drops them (§4.6), so generation
+    # isn't stricter than runtime. A mostly-summary crawler still fails.
+    n = len(result.samples)
+    if n and (n - short) / n < min_body_quality:
+        failures.append(f"{short} of {n} sample bodies too short (mostly incomplete)")
 
     return GateResult(not failures, tuple(failures))
 

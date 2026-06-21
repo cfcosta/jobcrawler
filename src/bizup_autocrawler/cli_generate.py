@@ -172,6 +172,7 @@ def gate_winner(
         allowed_hosts=hosts,
         expected_items=expected_items,
         enum_floor_ratio=config.enum_floor_ratio(),
+        min_body_quality=config.min_body_quality(),
     )
     if not completeness.passed:
         return False, f"completeness: {completeness.reason}"

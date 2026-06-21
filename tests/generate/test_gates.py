@@ -182,6 +182,42 @@ def test_short_body_sample_fails() -> None:
     assert not _complete(_result(item_count=9, samples=[s]))
 
 
+def test_a_minority_of_short_bodies_still_passes() -> None:
+    # 4 of 5 full, 1 short (a news brief): the runtime filter drops the short one,
+    # so the gate must not reject the whole crawler over it (§6 aligns with §4.6).
+    # Bodies are distinct so the boilerplate check doesn't fire on the filler.
+    samples: list[dict[str, str]] = [
+        {
+            "url": f"https://example.com/a{i}",
+            "title": "H",
+            "body": f"Body {i}. " + "x" * 600,
+        }
+        for i in range(4)
+    ]
+    samples.append(
+        {"url": "https://example.com/b", "title": "H", "body": "one-line brief"}
+    )
+    assert _complete(_result(item_count=9, samples=samples))
+
+
+def test_mostly_short_bodies_fails() -> None:
+    # 3 of 5 short → the crawler mostly yields incomplete bodies (e.g. RSS excerpts);
+    # below the 0.6 quality floor, so reject it.
+    full = [
+        {
+            "url": f"https://example.com/f{i}",
+            "title": "H",
+            "body": f"Full {i}. " + "x" * 600,
+        }
+        for i in range(2)
+    ]
+    shorts = [
+        {"url": f"https://example.com/s{i}", "title": "H", "body": f"excerpt {i}"}
+        for i in range(3)
+    ]
+    assert not _complete(_result(item_count=9, samples=full + shorts))
+
+
 def test_mojibake_body_fails() -> None:
     s = _good_sample()
     s["body"] = "�" * 600

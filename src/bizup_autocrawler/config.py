@@ -160,6 +160,14 @@ def min_body_chars() -> int:
     return _int("AUTOCRAWLER_MIN_BODY_CHARS", 400)
 
 
+def min_body_quality() -> float:
+    """Fraction of sampled bodies that must clear ``min_body_chars`` for the §6
+    completeness gate to pass. < 1.0 tolerates a minority of genuinely-short posts
+    (a news brief), which the runtime completeness filter drops at ingest anyway —
+    so generation isn't stricter than runtime. A mostly-summary crawler still fails."""
+    return _float("AUTOCRAWLER_MIN_BODY_QUALITY", 0.6)
+
+
 def stability_jaccard() -> float:
     return _float("AUTOCRAWLER_STABILITY_JACCARD", 0.6)
 
