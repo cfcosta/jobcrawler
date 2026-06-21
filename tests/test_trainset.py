@@ -5,10 +5,14 @@ from __future__ import annotations
 from bizup_autocrawler.trainset import (
     INPUT_FIELDS,
     admit,
+    admitted_examples,
+    append_record,
     assert_disjoint,
+    load_records,
     load_trainset,
     make_example,
     save_trainset,
+    split_by_site,
 )
 
 
@@ -71,3 +75,59 @@ def test_save_load_round_trip(tmp_path: object) -> None:
     assert [ex.site_url for ex in loaded] == ["https://a.com", "https://b.com"]
     assert set(loaded[0].inputs().keys()) == set(INPUT_FIELDS)
     assert loaded[0].corpus == {"homepage": "h", "articles": []}
+
+
+def test_append_and_load_records(tmp_path: object) -> None:
+    path = f"{tmp_path}/records.jsonl"  # type: ignore[str-bytes-safe]
+    append_record(path, slug="valor", example=_example("https://valor.com"))
+    append_record(path, slug="bj", example=_example("https://bj.com"))
+
+    records = load_records(path)
+
+    assert [r["slug"] for r in records] == ["valor", "bj"]
+    assert records[0]["corpus"] == {"homepage": "h", "articles": []}
+
+
+def test_load_records_absent_is_empty(tmp_path: object) -> None:
+    assert load_records(f"{tmp_path}/nope.jsonl") == []  # type: ignore[str-bytes-safe]
+
+
+def test_admitted_examples_filters_by_stable_runs(tmp_path: object) -> None:
+    # Records are written on §6+§8 pass; admission here is the per-site stability
+    # condition — a site below the required stable-run count is held back (§4.11).
+    path = f"{tmp_path}/records.jsonl"  # type: ignore[str-bytes-safe]
+    append_record(path, slug="ready", example=_example("https://ready.com"))
+    append_record(path, slug="fresh", example=_example("https://fresh.com"))
+    stable = {"ready": 3, "fresh": 1}
+
+    admitted = admitted_examples(
+        load_records(path), stable_runs=lambda s: stable.get(s, 0), required_stable=3
+    )
+
+    assert [ex.site_url for ex in admitted] == ["https://ready.com"]
+    assert set(admitted[0].inputs().keys()) == set(INPUT_FIELDS)
+
+
+def test_split_by_site_is_disjoint() -> None:
+    examples = [_example(f"https://s{i}.com") for i in range(4)]
+
+    train, val, holdout = split_by_site(examples, holdout=1, val=1)
+
+    assert_disjoint(train, val, holdout)  # no leak across pools
+    assert (len(train), len(val), len(holdout)) == (2, 1, 1)
+
+
+def test_split_by_site_keeps_a_site_whole() -> None:
+    # Two examples for the same site must land in the SAME pool (a site split across
+    # pools is the train/val leak assert_disjoint rejects).
+    examples = [
+        _example("https://a.com"),
+        _example("https://a.com"),
+        _example("https://b.com"),
+    ]
+
+    train, val, holdout = split_by_site(examples, holdout=1, val=0)
+
+    assert_disjoint(train, holdout)
+    assert {ex.site_url for ex in holdout} <= {"https://a.com", "https://b.com"}
+    assert len(train) + len(holdout) == 3
