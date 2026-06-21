@@ -1,0 +1,219 @@
+"""Tests for the crawl runner (§4.4) — the M0 path proof, no LLM.
+
+Drives the real import → crawl → normalize → dedup → ingest path with the
+hand-written reference crawler and inline crawlers, using httpx MockTransport
+for both the site (ctx) and the news API (ingest). Asserts the run-record
+counters, cross-run dedup, §4.4 failure isolation, the §4.7 failure-class
+re-attempt policy, and the first-crawl newest-K cap.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Callable, Iterable, Iterator
+from datetime import datetime, timezone
+
+import httpx
+
+from bizup_autocrawler.crawlers import example
+from bizup_autocrawler.ingest import NewsClient
+from bizup_autocrawler.runtime.contract import Ctx as CtxProtocol
+from bizup_autocrawler.runtime.contract import Item, load_crawler
+from bizup_autocrawler.runtime.ctx import Ctx
+from bizup_autocrawler.runtime.runner import crawl_site
+from bizup_autocrawler.state import StateStore
+from bizup_autocrawler.urls import canonicalize_url
+
+UTC = timezone.utc
+
+Handler = Callable[[httpx.Request], httpx.Response]
+
+
+def _ctx(handler: Handler | None = None) -> Ctx:
+    handler = handler or (lambda r: httpx.Response(404))
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler),
+        follow_redirects=False,
+    )
+    return Ctx({"example.com"}, client=client)
+
+
+def _news(handler: Handler) -> NewsClient:
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    return NewsClient(base_url="http://news.test", client=client)
+
+
+def _recording_news(status: int = 201) -> tuple[list[dict[str, str]], NewsClient]:
+    posts: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posts.append(json.loads(request.content))
+        return httpx.Response(status)
+
+    return posts, _news(handler)
+
+
+_INDEX = '<a href="/news/a">Alpha</a> <a href="/news/b">Beta</a>'
+
+
+def _site_handler(request: httpx.Request) -> httpx.Response:
+    path = request.url.path
+    if path == "/news":
+        return httpx.Response(200, text=_INDEX)
+    if path.startswith("/news/"):
+        return httpx.Response(200, text=f"<p>Body of {path[-1].upper()}</p>")
+    return httpx.Response(404)
+
+
+def _one(url: str = "https://example.com/a", **kw: object) -> Item:
+    fields: dict[str, object] = {
+        "url": url,
+        "title": "A",
+        "body": "x",
+        "source": "s",
+    }
+    fields.update(kw)
+    return Item.model_validate(fields)
+
+
+def test_example_crawler_satisfies_contract() -> None:
+    site, _ = load_crawler(example)
+    assert site == "https://example.com"
+    assert isinstance(_ctx(), CtxProtocol)
+
+
+def test_happy_path_ingests_each_item() -> None:
+    _, crawl = load_crawler(example)
+    store = StateStore(":memory:")
+    posts, news = _recording_news()
+
+    summary = crawl_site("example", crawl, _ctx(_site_handler), store, news)
+
+    assert (summary.items_found, summary.new_items, summary.errors) == (2, 2, 0)
+    assert summary.pages_fetched == 3  # index + 2 articles
+    assert {p["title"] for p in posts} == {"Alpha", "Beta"}
+    assert {p["body"] for p in posts} == {"Body of A", "Body of B"}
+    store.close()
+
+
+def test_second_run_dedups_nothing_new() -> None:
+    _, crawl = load_crawler(example)
+    store = StateStore(":memory:")
+    posts, news = _recording_news()
+
+    crawl_site("example", crawl, _ctx(_site_handler), store, news)
+    second = crawl_site("example", crawl, _ctx(_site_handler), store, news)
+
+    assert second.items_found == 2  # still found on the site
+    assert second.new_items == 0  # but nothing newly ingested
+    assert len(posts) == 2  # no second round of POSTs
+    store.close()
+
+
+def test_run_history_is_recorded() -> None:
+    _, crawl = load_crawler(example)
+    store = StateStore(":memory:")
+    _, news = _recording_news()
+
+    crawl_site("example", crawl, _ctx(_site_handler), store, news)
+    rec = store.last_run("example")
+
+    assert rec is not None
+    assert rec.finished is not None
+    assert (rec.items_found, rec.new_items, rec.pages_fetched) == (2, 2, 3)
+    store.close()
+
+
+def test_script_exception_is_isolated() -> None:
+    def crawl(ctx: CtxProtocol) -> Iterable[Item]:
+        yield _one("https://example.com/a")
+        raise RuntimeError("boom after one item")
+
+    store = StateStore(":memory:")
+    posts, news = _recording_news()
+
+    summary = crawl_site("s", crawl, _ctx(), store, news)
+
+    assert summary.items_found == 1  # the item yielded before the raise
+    assert summary.new_items == 1  # was still ingested
+    assert summary.errors == 1  # the exception counted as a health signal
+    assert len(posts) == 1
+    store.close()
+
+
+def test_non_item_yield_counts_as_error() -> None:
+    def crawl(ctx: CtxProtocol) -> Iterator[Item]:
+        yield _one("https://example.com/a")
+        yield "not an item"  # type: ignore[misc]
+
+    store = StateStore(":memory:")
+    _, news = _recording_news()
+
+    summary = crawl_site("s", crawl, _ctx(), store, news)
+
+    assert summary.items_found == 1
+    assert summary.errors == 1
+    store.close()
+
+
+def test_terminal_ingest_marks_seen_and_is_not_retried() -> None:
+    def crawl(ctx: CtxProtocol) -> Iterable[Item]:
+        yield _one("https://example.com/a")
+
+    store = StateStore(":memory:")
+    canon = canonicalize_url("https://example.com/a")
+
+    first = crawl_site("s", crawl, _ctx(), store, _news(lambda r: httpx.Response(500)))
+    assert first.new_items == 0
+    assert first.errors == 1
+    assert store.is_seen("s", canon)  # terminal-for-cycle → seen, never re-sent
+
+    posts, ok_news = _recording_news()
+    second = crawl_site("s", crawl, _ctx(), store, ok_news)
+    assert second.new_items == 0  # still skipped even though news is healthy now
+    assert posts == []
+    store.close()
+
+
+def test_retry_ingest_stays_unseen_and_is_reattempted() -> None:
+    def crawl(ctx: CtxProtocol) -> Iterable[Item]:
+        yield _one("https://example.com/a")
+
+    store = StateStore(":memory:")
+    canon = canonicalize_url("https://example.com/a")
+
+    first = crawl_site("s", crawl, _ctx(), store, _news(lambda r: httpx.Response(400)))
+    assert first.new_items == 0
+    assert first.errors == 1
+    assert not store.is_seen("s", canon)  # pre-insert failure → re-attempt next crawl
+
+    posts, ok_news = _recording_news()
+    second = crawl_site("s", crawl, _ctx(), store, ok_news)
+    assert second.new_items == 1  # re-attempted and ingested once news recovered
+    assert len(posts) == 1
+    store.close()
+
+
+def test_first_crawl_cap_keeps_newest_and_skips_backlog() -> None:
+    def crawl(ctx: CtxProtocol) -> Iterable[Item]:
+        for i in range(5):
+            yield _one(
+                f"https://example.com/{i}",
+                title=f"T{i}",
+                published_at=datetime(2026, 1, 1 + i, tzinfo=UTC),
+            )
+
+    store = StateStore(":memory:")
+    posts, news = _recording_news()
+
+    summary = crawl_site("s", crawl, _ctx(), store, news, first_crawl_cap=2)
+
+    assert summary.items_found == 5
+    assert summary.new_items == 2  # only the newest 2 ingested
+    assert {p["title"] for p in posts} == {"T4", "T3"}
+    # the older 3 are marked seen, so a second crawl backfills nothing.
+    posts2, news2 = _recording_news()
+    second = crawl_site("s", crawl, _ctx(), store, news2)
+    assert second.new_items == 0
+    assert posts2 == []
+    store.close()

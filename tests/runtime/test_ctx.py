@@ -7,6 +7,8 @@ no real network.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import httpx
 import pytest
 
@@ -14,10 +16,12 @@ from bizup_autocrawler.runtime.contract import Ctx as CtxProtocol
 from bizup_autocrawler.runtime.ctx import Ctx
 from bizup_autocrawler.runtime.ssrf import SsrfError
 
+Handler = Callable[[httpx.Request], httpx.Response]
 
-def _ctx(handler: object, allowed: set[str] | None = None) -> Ctx:
+
+def _ctx(handler: Handler, allowed: set[str] | None = None) -> Ctx:
     client = httpx.Client(
-        transport=httpx.MockTransport(handler),  # type: ignore[arg-type]
+        transport=httpx.MockTransport(handler),
         follow_redirects=False,
     )
     return Ctx(allowed or {"example.com"}, client=client)

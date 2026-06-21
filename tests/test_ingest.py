@@ -9,14 +9,17 @@ already exist, so re-POST would duplicate spend). Driven by MockTransport.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 
 import httpx
 
 from bizup_autocrawler.ingest import IngestOutcome, NewsClient
 
+Handler = Callable[[httpx.Request], httpx.Response]
 
-def _client(handler: object) -> NewsClient:
-    c = httpx.Client(transport=httpx.MockTransport(handler))  # type: ignore[arg-type]
+
+def _client(handler: Handler) -> NewsClient:
+    c = httpx.Client(transport=httpx.MockTransport(handler))
     return NewsClient(base_url="http://news.test", client=c)
 
 
