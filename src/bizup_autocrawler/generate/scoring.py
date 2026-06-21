@@ -308,6 +308,44 @@ def make_metric(
     return metric
 
 
+def make_bootstrap_metric(
+    core: ScoringCore,
+    *,
+    target_n: int,
+    min_body_chars: int,
+    weights: GradedWeights = DEFAULT_WEIGHTS,
+) -> Callable[..., float]:
+    """The BootstrapFewShot adapter (§4.11 / M5a): a bare **float** score.
+
+    DSPy's ``BootstrapFewShot`` gates a self-generated demo on ``metric_threshold``,
+    which compares the metric's *float* return — unlike ``make_metric``'s
+    ``Prediction`` (for GEPA/Evaluate). Same scoring core; the AST gate short-
+    circuits to 0.0 before the core runs (cheapest-first, §9). The trainset is
+    reference-free, so the metric ignores any gold and scores the produced crawler.
+    """
+
+    def metric(
+        gold: object, pred: object, trace: object = None, *_extra: object
+    ) -> float:
+        from bizup_autocrawler.generate import gates  # lazy: break the import cycle
+
+        source = _source_text(pred)
+        if not gates.check_ast(source).passed:
+            return 0.0
+        result = core(source, gold)
+        return score_candidate(
+            result,
+            target_n=target_n,
+            allowed_hosts=_hosts(gold),
+            min_body_chars=min_body_chars,
+            discovery_method=_discovery(pred),
+            forced=_forced(pred),
+            weights=weights,
+        )
+
+    return metric
+
+
 def _field(carrier: object, name: str, default: object = None) -> object:
     if isinstance(carrier, Mapping):
         return carrier.get(name, default)

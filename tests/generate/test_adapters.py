@@ -19,6 +19,7 @@ from bizup_autocrawler.generate.scoring import (
     FORCED_FINAL_REASONING,
     CandidateResult,
     ScoringCore,
+    make_bootstrap_metric,
     make_metric,
     make_reward_fn,
 )
@@ -138,3 +139,23 @@ def test_reward_fn_vetoes_off_domain_items() -> None:
         min_body_chars=400,
     )
     assert reward({"site_url": "https://example.com"}, _pred()) == 0.0
+
+
+def test_bootstrap_metric_returns_bare_float() -> None:
+    # BootstrapFewShot compares the float against metric_threshold (not a Prediction).
+    metric = make_bootstrap_metric(_core(_result()), target_n=30, min_body_chars=400)
+    value = metric(_gold(), _pred())
+    assert isinstance(value, float)
+    assert value == pytest.approx(1.0)
+
+
+def test_bootstrap_metric_ast_failure_is_zero_without_running_core() -> None:
+    bad = 'import os\nSITE="https://example.com"\ndef crawl(ctx):\n    yield 1\n'
+    metric = make_bootstrap_metric(_exploding_core(), target_n=30, min_body_chars=400)
+    assert metric(_gold(), _pred(bad)) == 0.0
+
+
+def test_bootstrap_metric_tolerates_the_dspy_trace_arg() -> None:
+    # dspy passes (example, pred, trace) during bootstrapping; the metric must accept it.
+    metric = make_bootstrap_metric(_core(_result()), target_n=30, min_body_chars=400)
+    assert metric(_gold(), _pred(), ["a", "trace"]) == pytest.approx(1.0)

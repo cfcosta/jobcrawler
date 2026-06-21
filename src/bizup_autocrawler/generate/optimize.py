@@ -20,7 +20,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Literal
 
 import dspy
-from dspy.teleprompt import GEPA
+from dspy.teleprompt import GEPA, BootstrapFewShotWithRandomSearch
 
 from bizup_autocrawler.generate.evaluate import evaluate_generator
 from bizup_autocrawler.trainset import assert_disjoint
@@ -93,6 +93,36 @@ def gepa_compile(
     """The live GEPA compile (§4.11) — distinct train/val, teacher=None."""
     gepa = build_gepa(metric, reflection_lm=reflection_lm)
     return gepa.compile(baseline, trainset=list(trainset), valset=list(valset))
+
+
+def bootstrap_compile(
+    baseline: dspy.Module,
+    *,
+    trainset: Sequence[dspy.Example],
+    valset: Sequence[dspy.Example],
+    metric: Callable[..., float],
+    max_bootstrapped_demos: int = 4,
+    metric_threshold: float = 0.5,
+    num_candidate_programs: int = 8,
+) -> dspy.Module:
+    """The **M5a** optimizer rung — ``BootstrapFewShotWithRandomSearch`` over the
+    owned predictor (the cheap, always-valid step before GEPA; §4.11).
+
+    The trainset is reference-free, so ``max_labeled_demos=0`` (no gold to seed
+    labeled demos); only self-bootstrapped demos are kept, gated by
+    ``metric_threshold`` against the **float** ``metric`` (see
+    ``scoring.make_bootstrap_metric`` — DSPy compares the float, not a Prediction).
+    Random search selects the best candidate program on the held-back ``valset``.
+    ``max_bootstrapped_demos`` is kept small (a large demo count overfits).
+    """
+    optimizer = BootstrapFewShotWithRandomSearch(
+        metric=metric,
+        max_bootstrapped_demos=max_bootstrapped_demos,
+        max_labeled_demos=0,
+        metric_threshold=metric_threshold,
+        num_candidate_programs=num_candidate_programs,
+    )
+    return optimizer.compile(baseline, trainset=list(trainset), valset=list(valset))
 
 
 def run_optimization(
