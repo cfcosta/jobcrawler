@@ -123,6 +123,25 @@ def ingest_rate() -> str:
     return _str("AUTOCRAWLER_INGEST_RATE", "2/s")
 
 
+# Substrings (case-insensitive) that mark a body as a paywall teaser, not a
+# complete article. A teaser (standfirst + one paragraph + a "subscribe" pitch)
+# can exceed min_body_chars, so the length floor alone misses it (§4.6). Confirmed
+# on valor.globo.com; extend per deployment with AUTOCRAWLER_PAYWALL_MARKERS.
+_DEFAULT_PAYWALL_MARKERS = (
+    "exclusiva para assinantes",
+    "para ter acesso completo",
+)
+
+
+def paywall_markers() -> tuple[str, ...]:
+    """Paywall-teaser markers dropped at ingest even above the length floor (§4.6).
+    Override with ``AUTOCRAWLER_PAYWALL_MARKERS`` (``|``-separated; empty disables)."""
+    raw = os.getenv("AUTOCRAWLER_PAYWALL_MARKERS")
+    if raw is None:
+        return _DEFAULT_PAYWALL_MARKERS
+    return tuple(m.strip() for m in raw.split("|") if m.strip())
+
+
 # --- crawl / politeness (§4.5) ---------------------------------------------
 
 

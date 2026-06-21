@@ -224,6 +224,34 @@ def test_incomplete_item_stays_unseen_for_re_evaluation() -> None:
     store.close()
 
 
+def test_paywall_teaser_is_dropped_even_above_the_length_floor() -> None:
+    # A body that clears min_body_chars but carries a subscription pitch is a paywall
+    # teaser, not a complete article (Valor's partial paywall). The length floor can't
+    # see it; the marker can (§4.6).
+    teaser = "Standfirst.\n\n" + "x" * 500 + " Matéria exclusiva para assinantes."
+
+    def crawl(ctx: CtxProtocol) -> Iterable[Item]:
+        yield _one("https://example.com/paywalled", body=teaser)
+        yield _one("https://example.com/full", body="y" * 600)
+
+    store = StateStore(":memory:")
+    posts, news = _recording_news()
+
+    summary = crawl_site(
+        "s",
+        crawl,
+        _ctx(),
+        store,
+        news,
+        min_body_chars=400,
+        paywall_markers=("exclusiva para assinantes",),
+    )
+
+    assert (summary.new_items, summary.incomplete) == (1, 1)
+    assert [p["body"] for p in posts] == ["y" * 600]
+    store.close()
+
+
 def test_no_floor_preserves_prior_ingest_behavior() -> None:
     # Default (min_body_chars=0) is off: short bodies still ingest, so the runner's
     # existing callers and the M0 path are unchanged unless completeness is wired.

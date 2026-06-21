@@ -60,6 +60,7 @@ def crawl_site(
     first_crawl_cap: int | None = None,
     governor: RateGovernor | None = None,
     min_body_chars: int = 0,
+    paywall_markers: tuple[str, ...] = (),
 ) -> CrawlSummary:
     harden_xml()  # XXE / billion-laughs off before the crawler parses feeds (§8)
     is_first = store.last_run(slug) is None
@@ -73,7 +74,7 @@ def crawl_site(
     items, errors = _collect(crawl_fn, ctx)
     # Only ingest complete (§4.6): teasers/truncated bodies are dropped here, never
     # marked seen — a later complete fetch of the same URL can still be ingested.
-    complete = _complete_items(items, min_body_chars)
+    complete = _complete_items(items, min_body_chars, paywall_markers)
     fresh, historical = _apply_first_crawl_cap(complete, is_first, first_crawl_cap)
 
     # The operator's denylist (§11) is load-bearing on the dedup key (§4.6): two
@@ -139,16 +140,29 @@ def _collect(crawl_fn: CrawlFn, ctx: Ctx) -> tuple[list[Item], int]:
     return items, errors
 
 
-def _complete_items(items: list[Item], min_body_chars: int) -> list[Item]:
-    """Keep only items whose body clears the completeness floor (§4.6).
+def _complete_items(
+    items: list[Item], min_body_chars: int, paywall_markers: tuple[str, ...] = ()
+) -> list[Item]:
+    """Keep only items whose body is a complete article (§4.6).
 
-    ``min_body_chars <= 0`` disables the filter (the default, so non-CLI callers
-    are unchanged). A dropped item is simply omitted — the runner never marks it
-    seen, so a later complete fetch of the same URL is still ingestable.
+    An item is dropped if its body is below ``min_body_chars`` *or* contains a
+    paywall-teaser marker (a standfirst + teaser + "subscribe" pitch can clear the
+    length floor yet not be a full article). No filter active (floor <= 0 and no
+    markers) returns the list unchanged, so non-CLI callers are unaffected. A
+    dropped item is omitted, never marked seen — a later complete fetch still wins.
     """
-    if min_body_chars <= 0:
+    if min_body_chars <= 0 and not paywall_markers:
         return items
-    return [item for item in items if len(item.body.strip()) >= min_body_chars]
+    markers = tuple(m.lower() for m in paywall_markers)
+    kept: list[Item] = []
+    for item in items:
+        body = item.body.strip()
+        if min_body_chars > 0 and len(body) < min_body_chars:
+            continue
+        if markers and any(m in body.lower() for m in markers):
+            continue
+        kept.append(item)
+    return kept
 
 
 def _apply_first_crawl_cap(

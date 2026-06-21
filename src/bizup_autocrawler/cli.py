@@ -120,6 +120,7 @@ def crawl_one(site: Site, *, store: StateStore, news: NewsClient) -> CrawlSummar
         news,
         first_crawl_cap=config.first_crawl_cap(),
         min_body_chars=config.min_body_chars(),  # only ingest complete (§4.6)
+        paywall_markers=config.paywall_markers(),  # drop paywall teasers (§4.6)
     )
 
 
