@@ -8,6 +8,8 @@ canonicalize equal, or a correct crawler gets rejected by gate-3.
 
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 from bizup_autocrawler.urls import canonicalize_url, normalize_host
 
 
@@ -84,3 +86,20 @@ def test_custom_drop_params_replaces_default_but_utm_still_dropped() -> None:
 
 def test_normalize_host_lowercases_and_strips_port() -> None:
     assert normalize_host("HTTPS://News.Example.COM:443/path") == "news.example.com"
+
+
+def test_ipv6_literal_host_keeps_brackets_and_round_trips() -> None:
+    # an IPv6-literal host must stay bracketed so the canonical form is a valid,
+    # re-parseable URL (the dedup key / gate-3 Jaccard depend on round-tripping).
+    out = canonicalize_url("https://[::1]:8443/x")
+    assert out == "https://[::1]:8443/x"
+    assert urlsplit(out).port == 8443  # re-parses without ValueError
+
+
+def test_ipv6_literal_default_port_stripped() -> None:
+    assert canonicalize_url("https://[2001:db8::1]:443/x") == "https://[2001:db8::1]/x"
+
+
+def test_normalize_host_returns_bracketless_ipv6() -> None:
+    # the SSRF primitive feeds ipaddress.ip_address(), which wants no brackets.
+    assert normalize_host("https://[::1]:8443/x") == "::1"

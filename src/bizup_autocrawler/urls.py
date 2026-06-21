@@ -54,9 +54,13 @@ def canonicalize_url(
     scheme = parts.scheme.lower()
 
     host = (parts.hostname or "").lower()
-    netloc = host
+    # urlsplit().hostname strips the brackets around an IPv6 literal; re-add them
+    # so the canonical form stays a valid, re-parseable URL. A ':' in hostname
+    # only occurs for an IPv6 literal — the port is already separated out.
+    host_lit = f"[{host}]" if ":" in host else host
+    netloc = host_lit
     if parts.port is not None and str(parts.port) != _DEFAULT_PORTS.get(scheme):
-        netloc = f"{host}:{parts.port}"
+        netloc = f"{host_lit}:{parts.port}"
 
     path = _PCT.sub(lambda m: m.group().upper(), parts.path)
     path = path.rstrip("/") or "/"
