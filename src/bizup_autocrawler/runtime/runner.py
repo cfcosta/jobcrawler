@@ -97,8 +97,15 @@ def _collect(crawl_fn: CrawlFn, ctx: Ctx) -> tuple[list[Item], int]:
         for obj in crawl_fn(ctx):
             if isinstance(obj, Item):
                 items.append(obj)
-            else:
-                errors += 1  # contract violation: crawl must yield Item
+                continue
+            try:
+                # Generated crawlers commonly yield plain dicts; validate them into
+                # Items exactly as the §4.4 sandbox does, so a candidate that passes
+                # validate_crawler also runs at crawl time. A genuinely invalid yield
+                # is the error.
+                items.append(Item.model_validate(obj))
+            except Exception:
+                errors += 1
     except Exception:  # untrusted generated code — never abort the fleet
         errors += 1
     return items, errors

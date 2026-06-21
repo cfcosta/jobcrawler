@@ -158,6 +158,30 @@ def test_non_item_yield_counts_as_error() -> None:
     store.close()
 
 
+def test_dict_yield_is_validated_and_ingested() -> None:
+    # Generated crawlers commonly yield plain dicts; the runner must accept them
+    # (validating into Item) exactly as the sandbox does — else validate passes
+    # but crawl fails. Regression for the live valor.globo.com run.
+    def crawl(ctx: CtxProtocol) -> Iterable[Item]:
+        yield cast(
+            Item,
+            {
+                "url": "https://example.com/a",
+                "title": "Headline",
+                "body": "x" * 50,
+                "source": "example",
+            },
+        )
+
+    store = StateStore(":memory:")
+    posts, news = _recording_news()
+    summary = crawl_site("s", crawl, _ctx(), store, news)
+
+    assert (summary.items_found, summary.new_items, summary.errors) == (1, 1, 0)
+    assert posts[0] == {"title": "Headline", "body": "x" * 50}
+    store.close()
+
+
 def test_terminal_ingest_marks_seen_and_is_not_retried() -> None:
     def crawl(ctx: CtxProtocol) -> Iterable[Item]:
         yield _one("https://example.com/a")
