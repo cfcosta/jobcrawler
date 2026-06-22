@@ -9,13 +9,16 @@ redirect hop (a redirect to an internal target would otherwise bypass it).
 
 from __future__ import annotations
 
-from collections.abc import Collection
+import time
+from collections.abc import Callable, Collection
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urljoin
 
 import httpx
 
 from bizup_autocrawler import config
+from bizup_autocrawler.durations import parse_retry_after
 from bizup_autocrawler.runtime.encoding import (
     http_charset_from_content_type,
     resolve_text,
@@ -35,10 +38,20 @@ from bizup_autocrawler.runtime.ssrf import SsrfError, check_url
 from bizup_autocrawler.urls import normalize_host
 
 _REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
+# Transient HTTP statuses worth a backed-off retry (§4.5): rate-limit + the gateway
+# overload family. 500 is excluded — it's usually a deterministic app error, not a
+# blip. A 403/503 that is a Cloudflare *challenge* is filtered out separately, since
+# that escalates to the solver rather than a blind retry.
+_RETRYABLE_CODES = frozenset({429, 502, 503, 504})
 
 
 class PageLimitError(RuntimeError):
     """The crawl exceeded its per-run page budget (``AUTOCRAWLER_MAX_PAGES``)."""
+
+
+def _is_transient(resp: httpx.Response) -> bool:
+    """A retryable response (§4.5): a transient status that is not a CF challenge."""
+    return resp.status_code in _RETRYABLE_CODES and not is_challenge(resp)
 
 
 class Ctx:
@@ -54,6 +67,10 @@ class Ctx:
         max_pages: int | None = None,
         pacer: Pacer | None = None,
         robots: Robots | None = None,
+        retries: int | None = None,
+        backoff: float | None = None,
+        retry_cap: float | None = None,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._allowed = set(allowed_hosts)
         self._pages = 0
@@ -62,6 +79,12 @@ class Ctx:
         self._clearance = clearance
         self._pacer = pacer  # §4.5 per-host throttle; None disables (bare-Ctx tests)
         self._robots = robots  # §4.5 robots.txt gate; None disables
+        # §4.5 transient-retry policy; ``sleep`` is injectable so tests assert the
+        # backoff schedule without actually waiting.
+        self._retries = config.fetch_retries() if retries is None else retries
+        self._backoff = config.fetch_backoff() if backoff is None else backoff
+        self._retry_cap = config.fetch_retry_cap() if retry_cap is None else retry_cap
+        self._sleep = sleep
         self._client = client or httpx.Client(
             headers={"user-agent": user_agent or config.user_agent()},
             follow_redirects=False,
@@ -114,17 +137,60 @@ class Ctx:
     def _challenge_aware_get(self, url: str) -> httpx.Response:
         host = normalize_host(url)
         cached = self._clearance.get(host) if self._clearance is not None else None
-        resp = self._client.get(url, headers=cached.headers() if cached else {})
+        resp = self._get_retrying(url, headers=cached.headers() if cached else {})
         if self._solver is None or not is_challenge(resp):
             return resp
         # "Pay once": solve, cache, replay. Still challenged → give up (§4.10).
         clearance = self._solver.solve(url)
         if self._clearance is not None:
             self._clearance.put(host, clearance)
-        resp = self._client.get(url, headers=clearance.headers())
+        resp = self._get_retrying(url, headers=clearance.headers())
         if is_challenge(resp):
             raise ChallengeError(f"still challenged after solve: {url!r}")
         return resp
+
+    def _get_retrying(self, url: str, **kwargs: Any) -> httpx.Response:
+        """``client.get`` with bounded exponential backoff on transient failure (§4.5).
+
+        Retries a transient response (:data:`_RETRYABLE_CODES`, never a Cloudflare
+        challenge) or a transient transport error, preferring a server ``Retry-After``
+        over the computed backoff. A ``Retry-After`` longer than ``retry_cap`` is
+        refused — we surface the response rather than park the crawl — and a network
+        error keeps retrying until the attempt budget is spent, then re-raises.
+        """
+        attempt = 0
+        while True:
+            try:
+                resp = self._client.get(url, **kwargs)
+            except httpx.TransportError:
+                if attempt >= self._retries:
+                    raise
+                self._sleep(self._expo(attempt))
+                attempt += 1
+                continue
+            if attempt >= self._retries or not _is_transient(resp):
+                return resp
+            delay = self._retry_delay(resp, attempt)
+            if delay is None:  # Retry-After past the cap: give up, don't block
+                return resp
+            self._sleep(delay)
+            attempt += 1
+
+    def _retry_delay(self, resp: httpx.Response, attempt: int) -> float | None:
+        """Seconds to wait before the next retry, or ``None`` to stop retrying.
+
+        A parseable ``Retry-After`` wins (``None`` if it exceeds ``retry_cap``);
+        otherwise the capped exponential backoff for this attempt.
+        """
+        header = resp.headers.get("retry-after")
+        if header is not None:
+            after = parse_retry_after(header, datetime.now(timezone.utc))
+            if after is not None:
+                return None if after > self._retry_cap else after
+        return self._expo(attempt)
+
+    def _expo(self, attempt: int) -> float:
+        return min(self._backoff * (2**attempt), self._retry_cap)
 
     def get(self, url: str, **kwargs: Any) -> httpx.Response:
         check_url(url, self._allowed)
@@ -134,7 +200,7 @@ class Ctx:
         # (e.g. 302 → 169.254.169.254) would bypass the SSRF guard. The caller
         # re-fetches the Location through ctx, which re-checks it.
         kwargs["follow_redirects"] = False
-        return self._client.get(url, **kwargs)
+        return self._get_retrying(url, **kwargs)
 
     def _pace(self, url: str) -> None:
         """Politeness gate before a network fetch (§4.5).

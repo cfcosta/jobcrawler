@@ -146,6 +146,27 @@ def test_fetch_timeout_default_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.fetch_timeout() == 5.0
 
 
+def test_fetch_retry_knobs_default_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # §4.5: a transient fetch (429/503/502/504 or a dropped connection) is retried a
+    # bounded number of times with exponential backoff, capped so a hostile Retry-After
+    # can't park a crawl for an hour.
+    for knob in (
+        "AUTOCRAWLER_FETCH_RETRIES",
+        "AUTOCRAWLER_FETCH_BACKOFF",
+        "AUTOCRAWLER_FETCH_RETRY_CAP",
+    ):
+        monkeypatch.delenv(knob, raising=False)
+    assert config.fetch_retries() == 2
+    assert config.fetch_backoff() == 0.5
+    assert config.fetch_retry_cap() == 30.0
+    monkeypatch.setenv("AUTOCRAWLER_FETCH_RETRIES", "5")
+    monkeypatch.setenv("AUTOCRAWLER_FETCH_BACKOFF", "1.5")
+    monkeypatch.setenv("AUTOCRAWLER_FETCH_RETRY_CAP", "60")
+    assert config.fetch_retries() == 5
+    assert config.fetch_backoff() == 1.5
+    assert config.fetch_retry_cap() == 60.0
+
+
 def test_solver_defaults_to_none(monkeypatch: pytest.MonkeyPatch) -> None:
     # §4.10: the safe default is no solver (plain httpx). The old "stealth" default
     # named an unbuilt backend, so make_solver() raised NotImplementedError on boot.

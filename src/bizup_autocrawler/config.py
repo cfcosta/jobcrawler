@@ -228,6 +228,25 @@ def fetch_timeout() -> float:
     return _float("AUTOCRAWLER_FETCH_TIMEOUT", 20.0)
 
 
+def fetch_retries() -> int:
+    """Extra attempts after the first for a *transient* fetch failure (§4.5) — a
+    429/503/502/504 or a dropped connection. ``0`` disables retry. A Cloudflare
+    challenge is never counted here (it escalates to the solver, not a blind retry)."""
+    return _int("AUTOCRAWLER_FETCH_RETRIES", 2)
+
+
+def fetch_backoff() -> float:
+    """Base seconds for the exponential backoff (base·2ⁿ) between transient retries."""
+    return _float("AUTOCRAWLER_FETCH_BACKOFF", 0.5)
+
+
+def fetch_retry_cap() -> float:
+    """Ceiling on any single retry wait (§4.5), in seconds. Also the longest server
+    ``Retry-After`` we'll honor: a larger one is refused rather than parking the crawl
+    budget, and the response is surfaced as an error instead."""
+    return _float("AUTOCRAWLER_FETCH_RETRY_CAP", 30.0)
+
+
 # --- committed-crawl isolation (§4.4) --------------------------------------
 # A committed crawler runs on the production schedule in an isolated subprocess
 # (rlimits + wall-clock timeout) so a runaway one can't take down the daemon.

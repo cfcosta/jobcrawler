@@ -181,6 +181,110 @@ def test_no_solver_means_no_escalation() -> None:
         _ctx(challenge).fetch("https://example.com/a")
 
 
+# -- §4.5 transient-fetch retry with backoff + Retry-After --------------------
+
+
+def _ctx_retry(
+    handler: Handler,
+    *,
+    retries: int = 2,
+    backoff: float = 0.5,
+    retry_cap: float = 30.0,
+) -> tuple[Ctx, list[float]]:
+    """A bare Ctx with the network mocked and ``sleep`` captured, so retry/backoff
+    timing is asserted without the test actually waiting."""
+    waits: list[float] = []
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler), follow_redirects=False
+    )
+    ctx = Ctx(
+        {"example.com"},
+        client=client,
+        retries=retries,
+        backoff=backoff,
+        retry_cap=retry_cap,
+        sleep=waits.append,
+    )
+    return ctx, waits
+
+
+def test_fetch_retries_a_transient_503_then_succeeds() -> None:
+    calls = {"n": 0}
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return httpx.Response(503)  # a plain 503, not a Cloudflare challenge
+        return httpx.Response(200, text="OK")
+
+    ctx, waits = _ctx_retry(handler, retries=2, backoff=0.5)
+    assert ctx.fetch("https://example.com/a") == "OK"
+    assert calls["n"] == 3
+    assert waits == [0.5, 1.0]  # exponential: 0.5·2⁰, then 0.5·2¹
+
+
+def test_fetch_honors_retry_after_over_backoff() -> None:
+    calls = {"n": 0}
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, headers={"retry-after": "7"})
+        return httpx.Response(200, text="OK")
+
+    ctx, waits = _ctx_retry(handler, retries=2, backoff=0.5)
+    assert ctx.fetch("https://example.com/a") == "OK"
+    assert waits == [7.0]  # the server's Retry-After wins over the 0.5 backoff
+
+
+def test_fetch_gives_up_after_max_retries_and_raises() -> None:
+    ctx, waits = _ctx_retry(lambda r: httpx.Response(503), retries=2, backoff=0.25)
+    with pytest.raises(httpx.HTTPStatusError):
+        ctx.fetch("https://example.com/a")
+    assert waits == [0.25, 0.5]  # two backoffs, then the third attempt is surfaced
+
+
+def test_fetch_retries_a_transient_transport_error() -> None:
+    calls = {"n": 0}
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectError("connection reset")
+        return httpx.Response(200, text="OK")
+
+    ctx, waits = _ctx_retry(handler, retries=2, backoff=0.5)
+    assert ctx.fetch("https://example.com/a") == "OK"
+    assert waits == [0.5]
+
+
+def test_fetch_refuses_a_retry_after_beyond_the_cap() -> None:
+    # A site asking us to wait an hour: surface the response rather than park the
+    # crawl budget. We neither sleep nor retry — raise_for_status carries the 503.
+    ctx, waits = _ctx_retry(
+        lambda r: httpx.Response(503, headers={"retry-after": "3600"}),
+        retries=2,
+        retry_cap=30.0,
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        ctx.fetch("https://example.com/a")
+    assert waits == []
+
+
+def test_fetch_does_not_retry_a_cloudflare_challenge() -> None:
+    # A 503 *challenge* is the solver's job (§4.10), not a blind transient retry —
+    # hammering it would just burn the budget. With no solver it surfaces at once.
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            503, headers={"server": "cloudflare"}, text="Just a moment..."
+        )
+
+    ctx, waits = _ctx_retry(handler, retries=2)
+    with pytest.raises(httpx.HTTPStatusError):
+        ctx.fetch("https://example.com/a")
+    assert waits == []
+
+
 def test_get_never_follows_a_redirect_to_an_internal_target() -> None:
     # SSRF: a crawler could pass follow_redirects=True; ctx.get must refuse so a
     # 302 to a metadata IP is never auto-fetched (the Location is unchecked).
