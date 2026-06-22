@@ -27,6 +27,9 @@ class RunAggregate:
 
     @property
     def error_rate(self) -> float:
+        """Mean errors *per run* — total errors / runs. NOT a 0-1 fraction: a single
+        run can contribute many per-item errors, so this can exceed 1.0. The status
+        surface labels it ``errs/run`` for exactly that reason."""
         return self.errors / self.runs if self.runs else 0.0
 
 

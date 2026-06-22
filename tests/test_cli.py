@@ -292,6 +292,10 @@ def test_render_status_surfaces_per_site_run_aggregates() -> None:
     assert "found=9" in site_line
     assert "new=3" in site_line
     assert "errors=1" in site_line
+    # errors/runs is a mean-errors-PER-RUN (can exceed 1.0), not a 0-1 rate; the
+    # label must say so rather than masquerade as a fraction an operator misreads.
+    assert "errs/run=0.50" in site_line
+    assert "err_rate=" not in site_line
     store.close()
 
 

@@ -184,7 +184,7 @@ def render_status(sites: Sequence[Site], store: StateStore) -> list[str]:
         lines.append(
             f"{site.slug:24} health={health.value:<16} "
             f"runs={agg.runs} found={agg.items_found} new={agg.new_items} "
-            f"errors={agg.errors} err_rate={agg.error_rate:.2f} last={last}"
+            f"errors={agg.errors} errs/run={agg.error_rate:.2f} last={last}"
         )
     dist = health_distribution(states)
     lines.append(
