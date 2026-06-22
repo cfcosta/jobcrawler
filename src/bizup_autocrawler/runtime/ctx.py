@@ -20,6 +20,7 @@ from bizup_autocrawler.runtime.encoding import (
     http_charset_from_content_type,
     resolve_text,
 )
+from bizup_autocrawler.runtime.politeness import Pacer
 from bizup_autocrawler.runtime.solver import (
     ChallengeError,
     ChallengeSolver,
@@ -47,12 +48,14 @@ class Ctx:
         solver: ChallengeSolver | None = None,
         clearance: ClearanceCache | None = None,
         max_pages: int | None = None,
+        pacer: Pacer | None = None,
     ) -> None:
         self._allowed = set(allowed_hosts)
         self._pages = 0
         self._max_pages = config.max_pages() if max_pages is None else max_pages
         self._solver = solver
         self._clearance = clearance
+        self._pacer = pacer  # §4.5 per-host throttle; None disables (bare-Ctx tests)
         self._client = client or httpx.Client(
             headers={"user-agent": user_agent or config.user_agent()},
             follow_redirects=False,
@@ -83,6 +86,7 @@ class Ctx:
         current = url
         for _ in range(max_redirects + 1):
             check_url(current, self._allowed)
+            self._pace(current)
             resp = self._challenge_aware_get(current)
             if resp.status_code in _REDIRECT_CODES and "location" in resp.headers:
                 current = urljoin(current, resp.headers["location"])
@@ -119,11 +123,17 @@ class Ctx:
     def get(self, url: str, **kwargs: Any) -> httpx.Response:
         check_url(url, self._allowed)
         self._charge_page()
+        self._pace(url)
         # Never auto-follow: a redirect target is unchecked, so following one
         # (e.g. 302 → 169.254.169.254) would bypass the SSRF guard. The caller
         # re-fetches the Location through ctx, which re-checks it.
         kwargs["follow_redirects"] = False
         return self._client.get(url, **kwargs)
+
+    def _pace(self, url: str) -> None:
+        """Throttle this host before a network fetch (§4.5); a no-op without a pacer."""
+        if self._pacer is not None:
+            self._pacer.wait(normalize_host(url))
 
     def render(self, url: str) -> str:
         raise NotImplementedError(

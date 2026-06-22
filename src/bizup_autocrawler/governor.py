@@ -44,7 +44,33 @@ class RateGovernor:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
-        self._interval = interval_for(rate)
+        self._init(interval_for(rate), clock, sleep)
+
+    @classmethod
+    def from_interval(
+        cls,
+        interval: float,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> RateGovernor:
+        """Build a governor from an explicit seconds-between-events interval.
+
+        The §4.5 per-host pacer derives each host's interval as ``max(base rate,
+        robots Crawl-delay)`` — a float, not a rate string — so it constructs its
+        governors this way instead of through the ``"<N>/<unit>"`` parser.
+        """
+        gov = cls.__new__(cls)
+        gov._init(max(0.0, interval), clock, sleep)
+        return gov
+
+    def _init(
+        self,
+        interval: float,
+        clock: Callable[[], float],
+        sleep: Callable[[float], None],
+    ) -> None:
+        self._interval = interval
         self._clock = clock
         self._sleep = sleep
         self._next: float | None = None  # earliest time the next event may fire

@@ -195,6 +195,59 @@ def test_get_never_follows_a_redirect_to_an_internal_target() -> None:
     assert "INTERNAL" not in resp.text
 
 
+# -- §4.5 politeness: per-host pacing ----------------------------------------
+
+
+class _RecordingPacer:
+    """Captures (host, min_interval) so the ctx→pacer wiring is asserted directly."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, float | None]] = []
+
+    def wait(self, host: str, *, min_interval: float | None = None) -> None:
+        self.calls.append((host, min_interval))
+
+
+def test_fetch_paces_through_the_injected_pacer() -> None:
+    pacer = _RecordingPacer()
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, text="x")),
+        follow_redirects=False,
+    )
+    ctx = Ctx({"example.com"}, client=client, pacer=pacer)
+    ctx.fetch("https://example.com/a")
+    assert pacer.calls == [("example.com", None)]
+
+
+def test_fetch_paces_each_redirect_hop() -> None:
+    # Each hop is a real request to a host, so each must be paced — not just the first.
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/r":
+            return httpx.Response(
+                302, headers={"location": "https://example.com/final"}
+            )
+        return httpx.Response(200, text="FINAL")
+
+    pacer = _RecordingPacer()
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler), follow_redirects=False
+    )
+    ctx = Ctx({"example.com"}, client=client, pacer=pacer)
+    ctx.fetch("https://example.com/r")
+    assert pacer.calls == [("example.com", None), ("example.com", None)]
+
+
+def test_get_paces_through_the_injected_pacer() -> None:
+    pacer = _RecordingPacer()
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, text="x")),
+        follow_redirects=False,
+    )
+    ctx = Ctx({"example.com"}, client=client, pacer=pacer)
+    ctx.get("https://example.com/a")
+    assert pacer.calls == [("example.com", None)]
+
+
 def test_fetch_enforces_the_page_budget() -> None:
     client = httpx.Client(
         transport=httpx.MockTransport(lambda r: httpx.Response(200, text="ok")),
