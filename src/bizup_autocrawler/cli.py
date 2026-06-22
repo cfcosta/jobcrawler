@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import ast
 import asyncio
-import importlib
 import logging
 import signal
 from collections.abc import Sequence
@@ -25,9 +24,11 @@ from bizup_autocrawler.generate.scoring import CandidateResult
 from bizup_autocrawler.governor import RateGovernor
 from bizup_autocrawler.health import HealthState, SelfHealer, staleness_candidate
 from bizup_autocrawler.ingest import NewsClient
-from bizup_autocrawler.runtime.contract import load_crawler
-from bizup_autocrawler.runtime.ctx import Ctx
-from bizup_autocrawler.runtime.runner import CrawlSummary, crawl_site, probe_crawler
+from bizup_autocrawler.runtime.runner import (
+    CrawlSummary,
+    crawl_site_isolated,
+    probe_isolated,
+)
 from bizup_autocrawler.runtime.sandbox import validate_crawler
 from bizup_autocrawler.schedule import Scheduler, Site
 from bizup_autocrawler.sites import find_site, load_sites
@@ -118,22 +119,30 @@ def crawl_one(
     store: StateStore,
     news: NewsClient,
     governor: RateGovernor | None = None,
+    crawlers_dir: Path = _CRAWLERS_DIR,
 ) -> CrawlSummary:
-    """Import the committed crawler and run it through the full ingest path.
+    """Run the committed crawler in a bounded subprocess, then ingest host-side (§4.4).
 
-    ``governor`` is the shared §4.7 ingest pacer; the caller builds one and threads
-    the same instance through every site so the news-API cap is enforced globally
-    across concurrent crawls (a per-call governor would multiply the cap by fan-out).
+    The committed script runs unattended on the production schedule, so it executes in
+    the §4.4 child (AST gate + RLIMIT_AS / RLIMIT_CPU + wall-clock): a runaway crawler
+    (infinite loop, memory blowup) is bounded and reported as a failed run, never
+    allowed to wedge or OOM the daemon and take the whole fleet down with it. The
+    child only fetches + yields; the host keeps dedup, the completeness filter, and
+    governor-paced ingest. ``governor`` is the shared §4.7 ingest pacer; the caller
+    threads one instance through every site so the news-API cap holds globally across
+    concurrent crawls (a per-call governor would multiply it by fan-out).
     """
-    module = importlib.import_module(f"bizup_autocrawler.crawlers.{site.slug}")
-    site_url, crawl_fn = load_crawler(module)
-    ctx = Ctx({normalize_host(site_url)})
-    return crawl_site(
+    source = _crawler_file(site.slug, crawlers_dir).read_text()
+    host = normalize_host(_site_url_of(source))
+    return crawl_site_isolated(
         site.slug,
-        crawl_fn,
-        ctx,
+        source,
+        {host} if host else set(),
         store,
         news,
+        timeout=config.crawl_timeout(),  # wall-clock budget (§4.4)
+        mem_mb=config.crawl_mem_mb(),  # RLIMIT_AS
+        cpu_seconds=config.crawl_cpu_seconds(),  # RLIMIT_CPU (decoupled from wall clock)
         first_crawl_cap=config.first_crawl_cap(),
         governor=governor,
         min_body_chars=config.min_body_chars(),  # only ingest complete (§4.6)
@@ -195,26 +204,29 @@ def cmd_crawl(args: argparse.Namespace) -> int:
     return 0
 
 
-def _probe(slug: str) -> int:
-    """Re-run a committed crawler and count its complete items, no ingest (§4.8).
+def _probe(slug: str, *, crawlers_dir: Path = _CRAWLERS_DIR) -> int:
+    """Re-run a committed crawler in the bounded subprocess, counting complete items (§4.8).
 
-    The re-probe the self-healer uses to tell a real failure from a transient
-    outage. A site whose committed script is missing or unimportable probes to 0
-    (a confirmed failure → regenerate), never an exception that aborts the loop.
+    The §4.8 re-probe the self-healer uses to tell a real failure from a transient
+    outage. It runs through the same §4.4 isolation as the live crawl — a drifted
+    crawler can hang on the reprobe too, and that hang must be bounded, not block the
+    heal loop — with no ingest and no state. A site whose committed script is missing
+    or fails the gate probes to 0 (a confirmed failure → regenerate), never an
+    exception that aborts the loop.
     """
-    site = find_site(load_sites(config.sites_path()), slug)
-    if site is None:
-        return 0
     try:
-        module = importlib.import_module(f"bizup_autocrawler.crawlers.{site.slug}")
-        site_url, crawl_fn = load_crawler(module)
-    except Exception:
-        return 0
-    return probe_crawler(
-        crawl_fn,
-        Ctx({normalize_host(site_url)}),
+        source = _crawler_file(slug, crawlers_dir).read_text()
+    except OSError:
+        return 0  # no committed script → confirmed failure, not a transient blip
+    host = normalize_host(_site_url_of(source))
+    return probe_isolated(
+        source,
+        {host} if host else set(),
         min_body_chars=config.min_body_chars(),
         paywall_markers=config.paywall_markers(),
+        timeout=config.crawl_timeout(),
+        mem_mb=config.crawl_mem_mb(),
+        cpu_seconds=config.crawl_cpu_seconds(),
     )
 
 

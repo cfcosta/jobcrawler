@@ -8,13 +8,17 @@ sandbox-backed validate are unit-testable; the live run/generate paths are not
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 from pytest import MonkeyPatch
+
+from bizup_autocrawler.ingest import NewsClient
 
 from bizup_autocrawler import config
 from bizup_autocrawler.cli import (
     _build_healer,
     _db_path,
+    _probe,
     _record_site_failure,
     _site_url_of,
     build_parser,
@@ -23,6 +27,7 @@ from bizup_autocrawler.cli import (
     cmd_list,
     cmd_run,
     cmd_validate,
+    crawl_one,
     render_list,
     validate_one,
 )
@@ -197,6 +202,59 @@ def test_cmd_crawl_shares_one_governor_across_sites(monkeypatch: MonkeyPatch) ->
     assert len(seen) == 2
     assert seen[0] is not None
     assert seen[0] is seen[1]  # the SAME instance threaded through, not one per site
+
+
+def test_crawl_one_isolates_a_hanging_committed_crawler(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    # The #52 guarantee: a committed crawler that loops without fetching never trips
+    # the page budget, so run in-process it would wedge the daemon (and the whole
+    # fleet) forever. crawl_one must execute it in the bounded §4.4 subprocess — a
+    # hang comes back as a finalized failed run (0 items, >=1 error), never a hung
+    # call, and nothing is ingested.
+    (tmp_path / "hang.py").write_text(
+        'SITE = "https://h.com"\ndef crawl(ctx):\n    while True:\n        pass\n'
+    )
+    monkeypatch.setenv("AUTOCRAWLER_CRAWL_TIMEOUT", "1")
+    monkeypatch.setenv("AUTOCRAWLER_CRAWL_CPU_SECONDS", "1")
+    store = StateStore(":memory:")
+
+    class _News:
+        def post_item(self, *args: object, **kwargs: object) -> object:
+            raise AssertionError("a bounded-out crawler must not ingest")
+
+    summary = crawl_one(
+        Site(slug="hang", url="https://h.com", name="Hang"),
+        store=store,
+        news=cast(NewsClient, _News()),
+        crawlers_dir=tmp_path,
+    )
+
+    assert summary.items_found == 0
+    assert summary.errors >= 1
+    history = store.runs_for("hang")
+    assert len(history) == 1 and history[0].finished is not None
+    store.close()
+
+
+def test_probe_counts_complete_items_through_isolation(tmp_path: Path) -> None:
+    # _probe is the self-healer's confirm-a-real-failure re-run; it must run the
+    # committed script through the same bounded subprocess and count only complete
+    # items (no ingest, no state). A healthy script reports its complete-item count.
+    (tmp_path / "good.py").write_text(
+        "from bizup_autocrawler.runtime.contract import Item\n"
+        'SITE = "https://example.com"\n'
+        "def crawl(ctx):\n"
+        "    for i in range(3):\n"
+        '        yield Item(url=f"{SITE}/a{i}", title=f"T{i}", body="x"*500, source="t")\n'
+    )
+    assert _probe("good", crawlers_dir=tmp_path) == 3
+
+
+def test_probe_is_zero_when_the_script_is_missing(tmp_path: Path) -> None:
+    # A site whose committed script is missing probes to 0 (a confirmed failure →
+    # regenerate), never an exception that aborts the self-heal loop.
+    assert _probe("ghost", crawlers_dir=tmp_path) == 0
 
 
 def test_validate_one_runs_the_sandbox(tmp_path: Path) -> None:
