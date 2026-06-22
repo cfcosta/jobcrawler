@@ -31,10 +31,12 @@ from bizup_autocrawler.cli import (
     cmd_list,
     cmd_promote,
     cmd_run,
+    cmd_status,
     cmd_validate,
     crawl_one,
     preflight,
     render_list,
+    render_status,
     validate_one,
 )
 from bizup_autocrawler.governor import RateGovernor
@@ -62,6 +64,8 @@ def test_parser_dispatches_each_command() -> None:
     promoted = parser.parse_args(["promote", "techcrunch"])
     assert promoted.func is cmd_promote
     assert promoted.slug == "techcrunch"
+
+    assert parser.parse_args(["status"]).func is cmd_status
 
 
 def test_cmd_promote_returns_zero_on_success(monkeypatch: MonkeyPatch) -> None:
@@ -267,6 +271,95 @@ def test_render_list_surfaces_persisted_pending_review(tmp_path: Path) -> None:
 
     assert "health=pending-review" in lines[0]
     store.close()
+
+
+# -- status (M4 observability surface) ---------------------------------------
+
+
+def test_render_status_surfaces_per_site_run_aggregates() -> None:
+    # `status` wires metrics.aggregate_runs: each site shows its folded run totals
+    # (runs / found / new / errors) so an operator can read the fleet without psql.
+    store = StateStore(":memory:")
+    r1 = store.start_run("techcrunch")
+    store.finish_run(r1, items_found=5, new_items=2, errors=0, pages_fetched=3)
+    r2 = store.start_run("techcrunch")
+    store.finish_run(r2, items_found=4, new_items=1, errors=1, pages_fetched=2)
+
+    lines = render_status([Site(slug="techcrunch", url="https://t.com")], store)
+    site_line = next(line for line in lines if "techcrunch" in line)
+
+    assert "runs=2" in site_line
+    assert "found=9" in site_line
+    assert "new=3" in site_line
+    assert "errors=1" in site_line
+    store.close()
+
+
+def test_render_status_includes_a_fleet_health_distribution() -> None:
+    # `status` wires metrics.health_distribution across the registry: persisted states
+    # are tallied (and a site with no recorded health reads as healthy-by-default).
+    store = StateStore(":memory:")
+    for slug in ("a", "b"):
+        rid = store.start_run(slug)
+        store.finish_run(rid, items_found=1, new_items=1, errors=0, pages_fetched=1)
+    store.set_health("a", HealthState.STALE.value)
+    # "b" has no persisted health → counted healthy.
+
+    lines = render_status(
+        [Site(slug="a", url="https://a.com"), Site(slug="b", url="https://b.com")],
+        store,
+    )
+    fleet_line = next(line for line in lines if "healthy=" in line)
+
+    assert "healthy=1" in fleet_line
+    assert "stale=1" in fleet_line
+    assert "pending_review=0" in fleet_line
+    store.close()
+
+
+def test_render_status_surfaces_observed_drift_mttr() -> None:
+    # `status` wires metrics.drift_mttr over recovery events derived from run history
+    # (no transition log exists yet): a live→dark→recovered cycle yields a median.
+    store = StateStore(":memory:")
+    r1 = store.start_run("techcrunch")
+    store.finish_run(r1, items_found=5, new_items=5, errors=0, pages_fetched=2)
+    r2 = store.start_run("techcrunch")
+    store.finish_run(r2, items_found=0, new_items=0, errors=1, pages_fetched=1)
+    r3 = store.start_run("techcrunch")
+    store.finish_run(r3, items_found=6, new_items=6, errors=0, pages_fetched=2)
+
+    lines = render_status([Site(slug="techcrunch", url="https://t.com")], store)
+
+    assert any("drift" in line.lower() for line in lines)
+
+
+def test_render_status_drift_mttr_is_na_without_recovery_events() -> None:
+    # No recovered drift in the history → drift MTTR has no data and reads "n/a"
+    # rather than fabricating a duration.
+    store = StateStore(":memory:")
+    rid = store.start_run("techcrunch")
+    store.finish_run(rid, items_found=5, new_items=5, errors=0, pages_fetched=2)
+
+    lines = render_status([Site(slug="techcrunch", url="https://t.com")], store)
+    drift_line = next(line for line in lines if "drift" in line.lower())
+
+    assert "n/a" in drift_line.lower()
+    store.close()
+
+
+def test_cmd_status_prints_and_returns_zero(
+    tmp_path: Path, monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # cmd_status loads the registry + opens the configured store, prints the surface,
+    # and exits 0. The rendering is unit-tested above; this pins the wiring.
+    sites = tmp_path / "sites.yaml"
+    sites.write_text("- slug: techcrunch\n  url: https://t.com\n")
+    monkeypatch.setattr(config, "sites_path", lambda: str(sites))
+    monkeypatch.setattr(config, "state_url", lambda: "sqlite:///:memory:")
+
+    assert cmd_status(build_parser().parse_args(["status"])) == 0
+    out = capsys.readouterr().out
+    assert "techcrunch" in out
 
 
 def test_record_site_failure_writes_a_hard_case(

@@ -60,3 +60,40 @@ def health_distribution(states: Sequence[HealthState]) -> dict[str, int]:
     for state in states:
         counts[state.value] += 1
     return counts
+
+
+def recovery_events(
+    history: Sequence[RunRecord],
+) -> list[tuple[datetime, datetime]]:
+    """Derive (went-dark → recovered) pairs from one site's run history (§4.8).
+
+    ``drift_mttr`` wants (dark, enabled) timestamps, but the state store keeps no
+    health-transition log; the only durable signal is the §5 run history. So the
+    status surface reconstructs *observed* drift recoveries from it: starting from a
+    live baseline (a finished run that found items), the first subsequent finished run
+    that finds none marks the site going dark, and the next finished run that finds
+    items again marks recovery. Each completed dark→recovered cycle yields one pair;
+    an as-yet-unrecovered drift yields nothing (MTTR is over recovered drifts only),
+    and a site that has only ever returned zero never went dark *from healthy*.
+
+    History need not be sorted (``runs_for`` returns newest-first); only finished runs
+    count. This measures recovery as observed at the item level — broader than §4.8's
+    "gate-passing replacement enabled" (it also catches a site that recovered on its
+    own), so the surface labels it *observed*, never claims the precise regen metric.
+    """
+    runs = sorted(
+        ((r.finished, r.items_found) for r in history if r.finished is not None),
+        key=lambda pair: pair[0],
+    )
+    events: list[tuple[datetime, datetime]] = []
+    seen_alive = False
+    dark_at: datetime | None = None
+    for finished, items in runs:
+        if items > 0:
+            if dark_at is not None:
+                events.append((dark_at, finished))
+                dark_at = None
+            seen_alive = True
+        elif seen_alive and dark_at is None:
+            dark_at = finished
+    return events

@@ -9,6 +9,7 @@ from bizup_autocrawler.metrics import (
     aggregate_runs,
     drift_mttr,
     health_distribution,
+    recovery_events,
 )
 from bizup_autocrawler.state import RunRecord
 
@@ -80,3 +81,65 @@ def test_health_distribution_counts_all_states() -> None:
         "pending_review": 0,
         "generation_failed": 0,
     }
+
+
+def test_recovery_events_pairs_dark_to_recovered() -> None:
+    # A drift recovery the status surface can feed drift_mttr without a transition log:
+    # a live baseline (items>0) → a dark run (items==0) → a recovered run (items>0)
+    # yields one (went-dark-finished, recovered-finished) pair.
+    history = [
+        _run(5, 2, 0, 3, T0),
+        _run(0, 0, 1, 1, T0 + timedelta(hours=1)),
+        _run(7, 3, 0, 4, T0 + timedelta(hours=3)),
+    ]
+    assert recovery_events(history) == [
+        (T0 + timedelta(hours=1), T0 + timedelta(hours=3))
+    ]
+
+
+def test_recovery_events_ignores_unrecovered_drift() -> None:
+    # A site still dark has no recovery yet — MTTR is over *recovered* drifts only.
+    history = [
+        _run(5, 2, 0, 3, T0),
+        _run(0, 0, 1, 1, T0 + timedelta(hours=1)),
+    ]
+    assert recovery_events(history) == []
+
+
+def test_recovery_events_needs_a_live_baseline() -> None:
+    # A site that has only ever returned zero never "went dark" from healthy.
+    history = [
+        _run(0, 0, 0, 1, T0),
+        _run(0, 0, 0, 1, T0 + timedelta(hours=1)),
+    ]
+    assert recovery_events(history) == []
+
+
+def test_recovery_events_sorts_newest_first_history() -> None:
+    # runs_for returns newest-first; recovery_events sorts chronologically and uses the
+    # FIRST zero run after a live baseline as the dark moment, the first subsequent
+    # items>0 run as the recovery.
+    history = [
+        _run(7, 3, 0, 4, T0 + timedelta(hours=4)),  # recovered (newest)
+        _run(0, 0, 1, 1, T0 + timedelta(hours=3)),  # still dark
+        _run(0, 0, 1, 1, T0 + timedelta(hours=2)),  # went dark here
+        _run(5, 2, 0, 3, T0 + timedelta(hours=1)),  # live baseline (oldest)
+    ]
+    assert recovery_events(history) == [
+        (T0 + timedelta(hours=2), T0 + timedelta(hours=4))
+    ]
+
+
+def test_recovery_events_handles_multiple_cycles() -> None:
+    # Two independent dark→recovered cycles yield two events (the dark marker resets).
+    history = [
+        _run(5, 2, 0, 3, T0),
+        _run(0, 0, 1, 1, T0 + timedelta(hours=1)),
+        _run(6, 2, 0, 3, T0 + timedelta(hours=2)),
+        _run(0, 0, 1, 1, T0 + timedelta(hours=4)),
+        _run(8, 4, 0, 5, T0 + timedelta(hours=5)),
+    ]
+    assert recovery_events(history) == [
+        (T0 + timedelta(hours=1), T0 + timedelta(hours=2)),
+        (T0 + timedelta(hours=4), T0 + timedelta(hours=5)),
+    ]

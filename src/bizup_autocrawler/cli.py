@@ -1,4 +1,4 @@
-"""Operator CLI (§10): ``autocrawl run | generate | validate | crawl | promote | list``.
+"""Operator CLI (§10): ``autocrawl run | generate | validate | crawl | promote | list | status``.
 
 ``run`` is the primary deployment entrypoint (the service schedules itself, §4.9);
 ``crawl`` is for manual one-shot runs and CI; ``validate`` dry-runs a committed
@@ -6,8 +6,10 @@ script through the §4.4 sandbox with **no ingest**; ``generate`` runs the RLM a
 gates before writing ``crawlers/<slug>.py`` (it needs a configured LM + Deno, so
 its heavy deps are imported lazily); ``promote`` moves a self-heal crawler staged
 under ``crawlers/_pending`` (§14.2) to live; ``list`` shows sites, script presence,
-and last-run health. The list/validate/crawl wiring is thin over already-tested
-backends; the live paths are correct-by-construction.
+and last-run health; ``status`` is the M4 observability read — per-site run
+aggregates, fleet health distribution, and observed drift-recovery MTTR. The
+list/validate/crawl/status wiring is thin over already-tested backends; the live
+paths are correct-by-construction.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ import logging
 import os
 import signal
 from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -35,6 +38,12 @@ from bizup_autocrawler.health import (
     staleness_candidate,
 )
 from bizup_autocrawler.ingest import NewsClient
+from bizup_autocrawler.metrics import (
+    aggregate_runs,
+    drift_mttr,
+    health_distribution,
+    recovery_events,
+)
 from bizup_autocrawler.runtime.runner import (
     CrawlSummary,
     crawl_site_isolated,
@@ -128,6 +137,62 @@ def render_list(
             f"last_items={items:>4} health={health}"
         )
     return rows
+
+
+# -- status ------------------------------------------------------------------
+
+
+def _coerce_health(value: str | None) -> HealthState:
+    """Map a persisted health string (or None) to a HealthState for the fleet tally.
+
+    A site with no recorded health has never been assessed by the §4.8 sweep; absent
+    any recorded problem it counts as healthy-by-default. An unrecognized string (an
+    older schema value) likewise degrades to healthy rather than crashing the surface.
+    """
+    if value is None:
+        return HealthState.HEALTHY
+    try:
+        return HealthState(value)
+    except ValueError:
+        return HealthState.HEALTHY
+
+
+def render_status(sites: Sequence[Site], store: StateStore) -> list[str]:
+    """Operator status surface (M4): per-site run totals, fleet health, drift MTTR.
+
+    Surfaces the otherwise-unwired metrics.py: ``aggregate_runs`` folds each site's run
+    history (so an operator reads the fleet without touching the DB), ``health_distribution``
+    tallies the persisted §4.8 states, and ``drift_mttr`` summarizes recovery time over
+    drift events reconstructed from run history (``recovery_events``). The MTTR is
+    labeled *observed* — with no health-transition log it measures item-level
+    dark→recovered, a superset of §4.8's "gate-passing replacement enabled".
+    """
+    lines: list[str] = []
+    states: list[HealthState] = []
+    events: list[tuple[datetime, datetime]] = []
+    for site in sites:
+        history = store.runs_for(site.slug)
+        agg = aggregate_runs(history)
+        health = _coerce_health(store.get_health(site.slug))
+        states.append(health)
+        events.extend(recovery_events(history))
+        last = (
+            agg.last_finished.isoformat(timespec="seconds")
+            if agg.last_finished is not None
+            else "never"
+        )
+        lines.append(
+            f"{site.slug:24} health={health.value:<16} "
+            f"runs={agg.runs} found={agg.items_found} new={agg.new_items} "
+            f"errors={agg.errors} err_rate={agg.error_rate:.2f} last={last}"
+        )
+    dist = health_distribution(states)
+    lines.append(
+        "fleet: " + " ".join(f"{name}={count}" for name, count in dist.items())
+    )
+    mttr = drift_mttr(events)
+    lines.append(f"drift recovery MTTR (observed): {'n/a' if mttr is None else mttr}")
+    return lines
 
 
 # -- validate ----------------------------------------------------------------
@@ -281,6 +346,19 @@ def cmd_list(args: argparse.Namespace) -> int:
     store = StateStore(_db_path())
     try:
         for line in render_list(load_sites(config.sites_path()), store):
+            print(line)
+    finally:
+        store.close()
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    # Read-only M4 observability surface: per-site run aggregates, fleet health
+    # distribution, and observed drift-recovery MTTR — the numbers an operator reads
+    # without touching the state DB. Pure read; opens the store, renders, closes.
+    store = StateStore(_db_path())
+    try:
+        for line in render_status(load_sites(config.sites_path()), store):
             print(line)
     finally:
         store.close()
@@ -507,6 +585,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("list", help="show sites, script presence, health").set_defaults(
         func=cmd_list
     )
+
+    sub.add_parser(
+        "status", help="show per-site run aggregates, fleet health, drift MTTR (M4)"
+    ).set_defaults(func=cmd_status)
 
     sub.add_parser(
         "optimize",
