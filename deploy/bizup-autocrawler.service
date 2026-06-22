@@ -5,6 +5,7 @@
 # to *build* it). The image bakes the /data contract:
 #   AUTOCRAWLER_SITES=/data/sites.yaml
 #   AUTOCRAWLER_STATE_URL=sqlite:////data/autocrawler.db
+#   AUTOCRAWLER_CRAWLERS_DIR=/data/crawlers  (committed crawlers + _pending staging)
 #   DENO_DIR=/data/deno-cache            (Pyodide WASM cache, generate/optimize only)
 # so the only host-side wiring is: bind-mount /data and supply the env file.
 #
@@ -20,9 +21,10 @@
 #   sudo install -m 644 deploy/bizup-autocrawler.service /etc/systemd/system/
 #   sudo systemctl daemon-reload && sudo systemctl enable --now bizup-autocrawler
 #
-# Before first run, generate the per-site crawlers once (writes into the image's
-# crawler package; for a long-lived deployment, prefer generating at build time
-# or mounting a crawlers volume — see ../README.md):
+# Before first run, generate the per-site crawlers once. With the /data bind-mount
+# they land in AUTOCRAWLER_CRAWLERS_DIR=/data/crawlers on the volume, so they persist
+# across restarts and --rm — no image rebuild to add or self-heal a crawler (see
+# ../README.md):
 #   podman run --rm --env-file /etc/bizup-autocrawler/autocrawler.env \
 #     -v /var/lib/bizup-autocrawler:/data bizup-autocrawler:latest autocrawl generate --all
 
