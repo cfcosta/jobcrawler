@@ -219,6 +219,38 @@ def max_pages() -> int:
     return _int("AUTOCRAWLER_MAX_PAGES", 200)
 
 
+# --- committed-crawl isolation (§4.4) --------------------------------------
+# A committed crawler runs on the production schedule in an isolated subprocess
+# (rlimits + wall-clock timeout) so a runaway one can't take down the daemon.
+
+
+def crawl_timeout() -> float:
+    """Wall-clock ceiling for one committed crawl's subprocess (§4.4).
+
+    Generous by default: a polite crawl spends most of its wall-clock *asleep*
+    between paced fetches, so the wall-clock budget must cover ``max_pages`` ×
+    per-host interval plus fetch latency. It bounds a *hung* crawl (a stuck socket,
+    a sleep); a compute spin is caught sooner and tighter by the CPU cap. Raise it
+    if you crawl large sites under slow per-host pacing."""
+    return _float("AUTOCRAWLER_CRAWL_TIMEOUT", 600.0)
+
+
+def crawl_cpu_seconds() -> float:
+    """RLIMIT_CPU (CPU-seconds) for one committed crawl's subprocess (§4.4).
+
+    Decoupled from :func:`crawl_timeout`: a legitimate crawl is I/O-bound and burns
+    little CPU even over a long wall-clock, so this stays tight to kill a compute
+    spin (an infinite ``while`` loop blows past any finite CPU budget) without
+    mistaking a slow-but-paced crawl for a runaway."""
+    return _float("AUTOCRAWLER_CRAWL_CPU_SECONDS", 120.0)
+
+
+def crawl_mem_mb() -> int:
+    """RLIMIT_AS (MB) for one committed crawl's subprocess — caps a memory blowup
+    so one bad crawler can't OOM the daemon. Matches the validation sandbox."""
+    return _int("AUTOCRAWLER_CRAWL_MEM_MB", 1024)
+
+
 def tracking_param_denylist() -> frozenset[str]:
     raw = os.getenv("AUTOCRAWLER_TRACKING_PARAM_DENYLIST")
     if raw is None:

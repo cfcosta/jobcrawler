@@ -111,6 +111,32 @@ def test_fanout_spend_cap_usd_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.fanout_spend_cap_usd() == 8.0
 
 
+def test_crawl_isolation_knobs_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    # §4.4 committed-crawl subprocess bounds. Wall-clock is generous (a polite, paced
+    # crawl spends most of its time asleep between fetches, accruing little CPU);
+    # RLIMIT_CPU is tight (a compute spin is the real runaway); memory matches the
+    # validation sandbox. The CPU cap is decoupled from wall-clock precisely so a
+    # legitimately slow-but-paced crawl isn't mistaken for a runaway.
+    for knob in (
+        "AUTOCRAWLER_CRAWL_TIMEOUT",
+        "AUTOCRAWLER_CRAWL_CPU_SECONDS",
+        "AUTOCRAWLER_CRAWL_MEM_MB",
+    ):
+        monkeypatch.delenv(knob, raising=False)
+    assert config.crawl_timeout() == 600.0
+    assert config.crawl_cpu_seconds() == 120.0
+    assert config.crawl_mem_mb() == 1024
+
+
+def test_crawl_isolation_knobs_parse_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTOCRAWLER_CRAWL_TIMEOUT", "90")
+    monkeypatch.setenv("AUTOCRAWLER_CRAWL_CPU_SECONDS", "30")
+    monkeypatch.setenv("AUTOCRAWLER_CRAWL_MEM_MB", "512")
+    assert config.crawl_timeout() == 90.0
+    assert config.crawl_cpu_seconds() == 30.0
+    assert config.crawl_mem_mb() == 512
+
+
 def test_solver_defaults_to_none(monkeypatch: pytest.MonkeyPatch) -> None:
     # §4.10: the safe default is no solver (plain httpx). The old "stealth" default
     # named an unbuilt backend, so make_solver() raised NotImplementedError on boot.

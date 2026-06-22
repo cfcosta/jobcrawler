@@ -25,6 +25,7 @@ back-catalog never floods the news API's LLM enrichment.
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import timezone
 
@@ -34,6 +35,7 @@ from bizup_autocrawler.ingest import IngestOutcome, NewsClient
 from bizup_autocrawler.runtime.contract import CrawlFn, Item
 from bizup_autocrawler.runtime.ctx import Ctx
 from bizup_autocrawler.runtime.hardening import harden_xml
+from bizup_autocrawler.runtime.sandbox import collect_crawler
 from bizup_autocrawler.state import StateStore
 from bizup_autocrawler.urls import canonicalize_url
 
@@ -64,16 +66,121 @@ def crawl_site(
     crawler_name: str = "",
     crawler_url: str = "",
 ) -> CrawlSummary:
+    """In-process crawl: import → crawl → normalize → dedup → ingest.
+
+    The path the M0 reference crawler and the test surface drive directly, holding
+    the ``crawl_fn`` + ``ctx`` themselves. Production runs *committed* scripts through
+    :func:`crawl_site_isolated` instead (subprocess-bounded, §4.4); this in-process
+    form trusts its caller to have already bounded the crawler.
+    """
     harden_xml()  # XXE / billion-laughs off before the crawler parses feeds (§8)
     is_first = store.last_run(slug) is None
     run_id = store.start_run(slug)
+    items, errors = _collect(crawl_fn, ctx)
+    return _ingest_collected(
+        slug,
+        run_id,
+        is_first,
+        items,
+        errors,
+        ctx.pages_fetched,
+        store,
+        news,
+        first_crawl_cap=first_crawl_cap,
+        governor=governor,
+        min_body_chars=min_body_chars,
+        paywall_markers=paywall_markers,
+        crawler_name=crawler_name,
+        crawler_url=crawler_url,
+    )
 
+
+def crawl_site_isolated(
+    slug: str,
+    source: str,
+    allowed_hosts: Collection[str],
+    store: StateStore,
+    news: NewsClient,
+    *,
+    timeout: float = 600.0,
+    mem_mb: int = 1024,
+    cpu_seconds: float = 120.0,
+    first_crawl_cap: int | None = None,
+    governor: RateGovernor | None = None,
+    min_body_chars: int = 0,
+    paywall_markers: tuple[str, ...] = (),
+    crawler_name: str = "",
+    crawler_url: str = "",
+) -> CrawlSummary:
+    """Run a *committed* crawler in a bounded subprocess, then ingest host-side (§4.4).
+
+    The production crawl path. The script executes in the §4.4 child (AST gate +
+    RLIMIT_AS / RLIMIT_CPU + wall-clock), so a runaway crawler (infinite loop, memory
+    blowup) is bounded and reported rather than wedging or OOMing the daemon. The
+    child only fetches + yields items; the host keeps ownership of dedup, the
+    completeness filter, governor-paced ingest, and the run record — the child never
+    touches the news API or the state store. A hang / crash / gate rejection comes
+    back as a failed run (0 items, ≥1 error), never a raise (§4.4 failure isolation).
+    XML hardening runs inside the child, so it is not repeated here.
+    """
+    is_first = store.last_run(slug) is None
+    run_id = store.start_run(slug)
+    result = collect_crawler(
+        source,
+        allowed_hosts=allowed_hosts,
+        timeout=timeout,
+        mem_mb=mem_mb,
+        cpu_seconds=cpu_seconds,
+    )
+    # A top-level child crash/timeout is one health-signal error, mirroring the
+    # in-process _collect (a raise mid-crawl → +1 error, partial items kept).
+    errors = result.errors + (1 if result.exception is not None else 0)
+    return _ingest_collected(
+        slug,
+        run_id,
+        is_first,
+        result.items,
+        errors,
+        result.pages_fetched,
+        store,
+        news,
+        first_crawl_cap=first_crawl_cap,
+        governor=governor,
+        min_body_chars=min_body_chars,
+        paywall_markers=paywall_markers,
+        crawler_name=crawler_name,
+        crawler_url=crawler_url,
+    )
+
+
+def _ingest_collected(
+    slug: str,
+    run_id: int,
+    is_first: bool,
+    items: list[Item],
+    errors: int,
+    pages_fetched: int,
+    store: StateStore,
+    news: NewsClient,
+    *,
+    first_crawl_cap: int | None = None,
+    governor: RateGovernor | None = None,
+    min_body_chars: int = 0,
+    paywall_markers: tuple[str, ...] = (),
+    crawler_name: str = "",
+    crawler_url: str = "",
+) -> CrawlSummary:
+    """Dedup → completeness-filter → governor-paced ingest of already-collected items.
+
+    The shared back half of both crawl paths (in-process and subprocess-isolated):
+    only *how* the items were produced differs upstream; the dedup, ingest, and run
+    record are identical, so they live here once.
+    """
     # Pace ingestion to the news-API LLM capacity (§4.7) — distinct from the §4.5
     # per-host *fetch* cap. Each POST drives 2–3 server-side LLM calls, so a burst
     # (a first crawl, several sites finishing at once) would overrun enrichment.
     governor = governor or RateGovernor(config.ingest_rate())
 
-    items, errors = _collect(crawl_fn, ctx)
     # Only ingest complete (§4.6): teasers/truncated bodies are dropped here, never
     # marked seen — a later complete fetch of the same URL can still be ingested.
     complete = _complete_items(items, min_body_chars, paywall_markers)
@@ -112,14 +219,14 @@ def crawl_site(
         items_found=len(items),
         new_items=new_items,
         errors=errors,
-        pages_fetched=ctx.pages_fetched,
+        pages_fetched=pages_fetched,
     )
     return CrawlSummary(
         slug,
         len(items),
         new_items,
         errors,
-        ctx.pages_fetched,
+        pages_fetched,
         len(items) - len(complete),
     )
 
@@ -142,6 +249,33 @@ def probe_crawler(
     harden_xml()
     items, _ = _collect(crawl_fn, ctx)
     return len(_complete_items(items, min_body_chars, paywall_markers))
+
+
+def probe_isolated(
+    source: str,
+    allowed_hosts: Collection[str],
+    *,
+    min_body_chars: int = 0,
+    paywall_markers: tuple[str, ...] = (),
+    timeout: float = 600.0,
+    mem_mb: int = 1024,
+    cpu_seconds: float = 120.0,
+) -> int:
+    """Subprocess-isolated §4.8 re-probe: count complete items, no ingest, no state.
+
+    The isolated sibling of :func:`probe_crawler`. The self-healer's confirm-a-real-
+    failure re-run must itself be bounded (a drifted crawler can hang on the reprobe
+    too) and must never raise into the heal loop, so a hang / crash / gate rejection
+    counts zero complete items — a confirmed failure, exactly as a live run would.
+    """
+    result = collect_crawler(
+        source,
+        allowed_hosts=allowed_hosts,
+        timeout=timeout,
+        mem_mb=mem_mb,
+        cpu_seconds=cpu_seconds,
+    )
+    return len(_complete_items(result.items, min_body_chars, paywall_markers))
 
 
 def _collect(crawl_fn: CrawlFn, ctx: Ctx) -> tuple[list[Item], int]:

@@ -23,7 +23,12 @@ from bizup_autocrawler.ingest import NewsClient
 from bizup_autocrawler.runtime.contract import Ctx as CtxProtocol
 from bizup_autocrawler.runtime.contract import Item, load_crawler
 from bizup_autocrawler.runtime.ctx import Ctx
-from bizup_autocrawler.runtime.runner import crawl_site, probe_crawler
+from bizup_autocrawler.runtime.runner import (
+    crawl_site,
+    crawl_site_isolated,
+    probe_crawler,
+    probe_isolated,
+)
 from bizup_autocrawler.state import StateStore
 from bizup_autocrawler.urls import canonicalize_url
 
@@ -476,6 +481,90 @@ def test_governor_paces_only_real_posts_not_skipped_items() -> None:
     assert summary.new_items == 1  # only 'b'
     assert clock.sleeps == []  # one POST → the dedup-skipped 'a' costs no budget
     store.close()
+
+
+# -- §4.4 committed-crawl subprocess isolation -------------------------------
+#
+# Production crawls run the committed script in an isolated child (rlimits +
+# wall-clock) so a runaway one can't wedge or OOM the daemon. These drive the real
+# subprocess from source; the host still owns dedup + ingest (the child never
+# POSTs), so a recording news client over MockTransport captures the ingests.
+
+_ISOLATED_SRC = """
+from bizup_autocrawler.runtime.contract import Item
+SITE = "https://example.com"
+def crawl(ctx):
+    yield Item(url="https://example.com/a", title="Alpha", body="x" * 600, source="example")
+    yield Item(url="https://example.com/b", title="Beta", body="y" * 600, source="example")
+"""
+
+
+def test_crawl_site_isolated_ingests_full_items() -> None:
+    store = StateStore(":memory:")
+    posts, news = _recording_news()
+
+    summary = crawl_site_isolated(
+        "example", _ISOLATED_SRC, {"example.com"}, store, news, timeout=20.0
+    )
+
+    assert (summary.items_found, summary.new_items, summary.errors) == (2, 2, 0)
+    assert {p["title"] for p in posts} == {"Alpha", "Beta"}
+    # Full bodies survive the subprocess boundary (the scorer's 600-char sample cap
+    # does not apply to a crawl) — here each body is exactly 600.
+    assert {p["body"] for p in posts} == {"x" * 600, "y" * 600}
+    store.close()
+
+
+def test_crawl_site_isolated_records_a_run() -> None:
+    store = StateStore(":memory:")
+    _, news = _recording_news()
+
+    crawl_site_isolated(
+        "example", _ISOLATED_SRC, {"example.com"}, store, news, timeout=20.0
+    )
+    rec = store.last_run("example")
+
+    assert rec is not None
+    assert rec.finished is not None
+    assert (rec.items_found, rec.new_items) == (2, 2)
+    store.close()
+
+
+def test_crawl_site_isolated_bounds_a_hang_without_aborting_the_fleet() -> None:
+    # The release-safety case: a committed crawler that spins forever is killed by the
+    # wall-clock bound, recorded as a failed run (0 items, 1 error), and the call
+    # returns — the daemon thread is never wedged.
+    hang = "SITE='https://example.com'\ndef crawl(ctx):\n    while True:\n        pass\n    yield None\n"
+    store = StateStore(":memory:")
+    posts, news = _recording_news()
+
+    summary = crawl_site_isolated(
+        "example", hang, {"example.com"}, store, news, timeout=1.0
+    )
+
+    assert summary.items_found == 0
+    assert summary.errors == 1  # the timeout, folded into the run's error count
+    assert posts == []
+    rec = store.last_run("example")
+    assert rec is not None and rec.finished is not None  # run still finalized
+    store.close()
+
+
+def test_probe_isolated_counts_only_complete_items() -> None:
+    src = """
+from bizup_autocrawler.runtime.contract import Item
+SITE = "https://example.com"
+def crawl(ctx):
+    yield Item(url=SITE + "/full", title="F", body="x" * 600, source="s")
+    yield Item(url=SITE + "/teaser", title="T", body="short", source="s")
+"""
+    assert probe_isolated(src, {"example.com"}, min_body_chars=400, timeout=20.0) == 1
+
+
+def test_probe_isolated_is_zero_on_a_hang_never_raising() -> None:
+    # The §4.8 re-probe must never raise into the heal loop; a hung crawler probes to 0.
+    hang = "SITE='https://example.com'\ndef crawl(ctx):\n    while True:\n        pass\n    yield None\n"
+    assert probe_isolated(hang, {"example.com"}, min_body_chars=400, timeout=1.0) == 0
 
 
 def test_first_crawl_cap_keeps_newest_and_skips_backlog() -> None:
