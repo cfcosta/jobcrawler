@@ -22,6 +22,7 @@ from pathlib import Path
 
 from bizup_autocrawler import config
 from bizup_autocrawler.generate.scoring import CandidateResult
+from bizup_autocrawler.governor import RateGovernor
 from bizup_autocrawler.health import HealthState, SelfHealer, staleness_candidate
 from bizup_autocrawler.ingest import NewsClient
 from bizup_autocrawler.runtime.contract import load_crawler
@@ -111,8 +112,19 @@ def validate_one(slug: str, *, crawlers_dir: Path = _CRAWLERS_DIR) -> CandidateR
 # -- crawl -------------------------------------------------------------------
 
 
-def crawl_one(site: Site, *, store: StateStore, news: NewsClient) -> CrawlSummary:
-    """Import the committed crawler and run it through the full ingest path."""
+def crawl_one(
+    site: Site,
+    *,
+    store: StateStore,
+    news: NewsClient,
+    governor: RateGovernor | None = None,
+) -> CrawlSummary:
+    """Import the committed crawler and run it through the full ingest path.
+
+    ``governor`` is the shared §4.7 ingest pacer; the caller builds one and threads
+    the same instance through every site so the news-API cap is enforced globally
+    across concurrent crawls (a per-call governor would multiply the cap by fan-out).
+    """
     module = importlib.import_module(f"bizup_autocrawler.crawlers.{site.slug}")
     site_url, crawl_fn = load_crawler(module)
     ctx = Ctx({normalize_host(site_url)})
@@ -123,6 +135,7 @@ def crawl_one(site: Site, *, store: StateStore, news: NewsClient) -> CrawlSummar
         store,
         news,
         first_crawl_cap=config.first_crawl_cap(),
+        governor=governor,
         min_body_chars=config.min_body_chars(),  # only ingest complete (§4.6)
         paywall_markers=config.paywall_markers(),  # drop paywall teasers (§4.6)
         crawler_name=site.name,  # attribute each item to its source crawler
@@ -166,9 +179,12 @@ def _crawl_targets(args: argparse.Namespace) -> list[Site]:
 def cmd_crawl(args: argparse.Namespace) -> int:
     store = StateStore(_db_path())
     news = NewsClient(timeout=config.ingest_timeout())
+    governor = RateGovernor(
+        config.ingest_rate()
+    )  # one shared pacer for the batch (§4.7)
     try:
         for site in _crawl_targets(args):
-            summary = crawl_one(site, store=store, news=news)
+            summary = crawl_one(site, store=store, news=news, governor=governor)
             print(
                 f"{summary.site}: found={summary.items_found} "
                 f"new={summary.new_items} incomplete={summary.incomplete} "
@@ -258,8 +274,15 @@ def cmd_run(args: argparse.Namespace) -> int:
     if reaped:
         _log.warning("reaped %d orphaned run row(s) from a prior crash", reaped)
 
+    # One shared, thread-safe pacer (§4.7): the scheduler runs up to `concurrency`
+    # crawls at once on to_thread workers, so a per-crawl governor would let the
+    # global news-API ingest cap be exceeded by the fan-out factor.
+    governor = RateGovernor(config.ingest_rate())
+
     async def crawl(site: Site) -> CrawlSummary:
-        return await asyncio.to_thread(crawl_one, site, store=store, news=news)
+        return await asyncio.to_thread(
+            crawl_one, site, store=store, news=news, governor=governor
+        )
 
     scheduler = Scheduler(
         sites, store=store, crawl=crawl, healer=_build_healer(store, sites)

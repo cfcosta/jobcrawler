@@ -26,7 +26,9 @@ from bizup_autocrawler.cli import (
     render_list,
     validate_one,
 )
+from bizup_autocrawler.governor import RateGovernor
 from bizup_autocrawler.health import HealthState
+from bizup_autocrawler.runtime.runner import CrawlSummary
 from bizup_autocrawler.schedule import Site
 from bizup_autocrawler.state import StateStore
 from bizup_autocrawler.trainset import load_records
@@ -161,6 +163,40 @@ async def test_build_healer_records_hard_case_on_confirmed_failure(
     assert state is HealthState.GENERATION_FAILED
     assert [r["kind"] for r in load_records(path)] == ["hard"]
     store.close()
+
+
+def test_cmd_crawl_shares_one_governor_across_sites(monkeypatch: MonkeyPatch) -> None:
+    # §4.7: every crawl in a single invocation must share ONE ingest governor so the
+    # global news-API pacing holds. A per-crawl governor (the prior crawl_site
+    # fallback) would let N concurrent sites each pace independently → N× the cap.
+    seen: list[RateGovernor | None] = []
+
+    def fake_crawl_one(
+        site: Site,
+        *,
+        store: StateStore,
+        news: object,
+        governor: RateGovernor | None = None,
+    ) -> CrawlSummary:
+        seen.append(governor)
+        return CrawlSummary(
+            site.slug, items_found=0, new_items=0, errors=0, pages_fetched=0
+        )
+
+    monkeypatch.setenv("AUTOCRAWLER_STATE_URL", ":memory:")
+    monkeypatch.setattr(
+        "bizup_autocrawler.cli.load_sites",
+        lambda _path: [
+            Site(slug="a", url="https://a.com"),
+            Site(slug="b", url="https://b.com"),
+        ],
+    )
+    monkeypatch.setattr("bizup_autocrawler.cli.crawl_one", fake_crawl_one)
+
+    assert cmd_crawl(build_parser().parse_args(["crawl", "--all"])) == 0
+    assert len(seen) == 2
+    assert seen[0] is not None
+    assert seen[0] is seen[1]  # the SAME instance threaded through, not one per site
 
 
 def test_validate_one_runs_the_sandbox(tmp_path: Path) -> None:

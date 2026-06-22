@@ -15,6 +15,7 @@ is allowed. Clock and sleep are injected so the timing is deterministic in tests
 from __future__ import annotations
 
 import re
+import threading
 import time
 from collections.abc import Callable
 
@@ -47,13 +48,23 @@ class RateGovernor:
         self._clock = clock
         self._sleep = sleep
         self._next: float | None = None  # earliest time the next event may fire
+        self._lock = (
+            threading.Lock()
+        )  # one shared governor is hit from many crawl threads
 
     def wait(self) -> None:
-        """Block until at least ``interval`` has elapsed since the prior event."""
+        """Block until at least ``interval`` has elapsed since the prior event.
+
+        The lock is held across the sleep on purpose: the §4.9 scheduler shares one
+        governor across crawls running on ``asyncio.to_thread`` workers, so the
+        reservation must be atomic *and* callers must serialize — admitting two at
+        once would fire two POSTs inside one interval and overrun the news-API cap.
+        """
         if self._interval <= 0:
             return
-        now = self._clock()
-        if self._next is not None and now < self._next:
-            self._sleep(self._next - now)
-            now = self._next  # logical time; robust to a sleep that under-advances
-        self._next = now + self._interval
+        with self._lock:
+            now = self._clock()
+            if self._next is not None and now < self._next:
+                self._sleep(self._next - now)
+                now = self._next  # logical time; robust to a sleep that under-advances
+            self._next = now + self._interval

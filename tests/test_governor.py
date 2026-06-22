@@ -8,6 +8,9 @@ an injected clock + sleep, so the timing is asserted deterministically.
 
 from __future__ import annotations
 
+import threading
+import time
+
 import pytest
 
 from bizup_autocrawler.governor import RateGovernor, interval_for
@@ -90,3 +93,39 @@ def test_zero_rate_is_a_no_op() -> None:
     for _ in range(10):
         gov.wait()
     assert clock.sleeps == []
+
+
+def test_wait_serializes_concurrent_callers() -> None:
+    # cmd_run shares ONE governor across crawls that run on asyncio.to_thread worker
+    # threads (§4.7). wait() must admit one caller at a time: an unguarded
+    # read-modify-write of the next-fire time lets callers overlap and overrun the
+    # news-API cap. The clock is pinned so every call past the first takes the
+    # pacing branch; a small real sleep widens the window a missing lock would expose.
+    active = 0
+    peak = 0
+    guard = threading.Lock()
+
+    def sleep(_: float) -> None:
+        nonlocal active, peak
+        with guard:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.001)
+        with guard:
+            active -= 1
+
+    gov = RateGovernor("100/s", clock=lambda: 0.0, sleep=sleep)  # 0.01s interval
+
+    def hammer() -> None:
+        for _ in range(10):
+            gov.wait()
+
+    threads = [threading.Thread(target=hammer) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert (
+        peak == 1
+    )  # the governor admitted exactly one caller into the pacer at a time
