@@ -20,7 +20,11 @@ from bizup_autocrawler.runtime.encoding import (
     http_charset_from_content_type,
     resolve_text,
 )
-from bizup_autocrawler.runtime.politeness import Pacer
+from bizup_autocrawler.runtime.politeness import (
+    Pacer,
+    Robots,
+    RobotsDisallowedError,
+)
 from bizup_autocrawler.runtime.solver import (
     ChallengeError,
     ChallengeSolver,
@@ -49,6 +53,7 @@ class Ctx:
         clearance: ClearanceCache | None = None,
         max_pages: int | None = None,
         pacer: Pacer | None = None,
+        robots: Robots | None = None,
     ) -> None:
         self._allowed = set(allowed_hosts)
         self._pages = 0
@@ -56,6 +61,7 @@ class Ctx:
         self._solver = solver
         self._clearance = clearance
         self._pacer = pacer  # §4.5 per-host throttle; None disables (bare-Ctx tests)
+        self._robots = robots  # §4.5 robots.txt gate; None disables
         self._client = client or httpx.Client(
             headers={"user-agent": user_agent or config.user_agent()},
             follow_redirects=False,
@@ -131,9 +137,20 @@ class Ctx:
         return self._client.get(url, **kwargs)
 
     def _pace(self, url: str) -> None:
-        """Throttle this host before a network fetch (§4.5); a no-op without a pacer."""
+        """Politeness gate before a network fetch (§4.5).
+
+        robots.txt is consulted first — a disallowed path raises before any request
+        and before pacing (no point sleeping to refuse) — then the host is throttled,
+        with its floor raised to any robots ``Crawl-delay``. Both layers are optional:
+        without a robots policy or pacer this is a no-op (bare-Ctx tests, M0/M1).
+        """
+        delay: float | None = None
+        if self._robots is not None:
+            if not self._robots.allowed(url):
+                raise RobotsDisallowedError(url)
+            delay = self._robots.crawl_delay(url)
         if self._pacer is not None:
-            self._pacer.wait(normalize_host(url))
+            self._pacer.wait(normalize_host(url), min_interval=delay)
 
     def render(self, url: str) -> str:
         raise NotImplementedError(

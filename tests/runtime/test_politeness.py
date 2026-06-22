@@ -9,7 +9,11 @@ fed through an injected fetcher so no real network is touched.
 
 from __future__ import annotations
 
-from bizup_autocrawler.runtime.politeness import PerHostPacer, host_rate_interval
+from bizup_autocrawler.runtime.politeness import (
+    PerHostPacer,
+    RobotsPolicy,
+    host_rate_interval,
+)
 
 
 class _Clock:
@@ -95,3 +99,73 @@ def test_unlimited_rate_never_sleeps() -> None:
     for _ in range(5):
         pacer.wait("a.com")
     assert clock.sleeps == []
+
+
+# -- robots.txt compliance ---------------------------------------------------
+
+_ROBOTS = "User-agent: *\nDisallow: /private\nCrawl-delay: 5\n"
+
+
+class _RecordingFetcher:
+    """A robots.txt fetcher returning canned text and counting fetches per URL."""
+
+    def __init__(self, body: str | None) -> None:
+        self.body = body
+        self.urls: list[str] = []
+
+    def __call__(self, url: str) -> str | None:
+        self.urls.append(url)
+        return self.body
+
+
+def _robots(body: str | None, ua: str = "bizup-autocrawler") -> RobotsPolicy:
+    return RobotsPolicy(_RecordingFetcher(body), user_agent=ua)
+
+
+def test_robots_disallows_a_blocked_path() -> None:
+    policy = _robots(_ROBOTS)
+    assert policy.allowed("https://x.com/public/article") is True
+    assert policy.allowed("https://x.com/private/secret") is False
+
+
+def test_robots_reports_crawl_delay() -> None:
+    assert _robots(_ROBOTS).crawl_delay("https://x.com/a") == 5.0
+
+
+def test_no_crawl_delay_directive_is_none() -> None:
+    assert (
+        _robots("User-agent: *\nDisallow: /x\n").crawl_delay("https://x.com/a") is None
+    )
+
+
+def test_missing_robots_txt_allows_everything() -> None:
+    # A site without robots.txt (fetcher returns None) is fully crawlable (convention).
+    policy = _robots(None)
+    assert policy.allowed("https://x.com/anything") is True
+    assert policy.crawl_delay("https://x.com/anything") is None
+
+
+def test_robots_fails_open_when_unfetchable() -> None:
+    # A robots.txt we can't fetch (network error) must not block the crawl.
+    def boom(url: str) -> str | None:
+        raise RuntimeError("connection reset")
+
+    policy = RobotsPolicy(boom, user_agent="bizup-autocrawler")
+    assert policy.allowed("https://x.com/private/secret") is True
+
+
+def test_robots_is_fetched_once_per_host() -> None:
+    fetcher = _RecordingFetcher(_ROBOTS)
+    policy = RobotsPolicy(fetcher, user_agent="bizup-autocrawler")
+    policy.allowed("https://x.com/a")
+    policy.allowed("https://x.com/b")
+    policy.crawl_delay("https://x.com/c")
+    assert fetcher.urls == ["https://x.com/robots.txt"]  # cached after the first fetch
+
+
+def test_robots_fetches_the_host_root_robots_path() -> None:
+    fetcher = _RecordingFetcher(_ROBOTS)
+    RobotsPolicy(fetcher, user_agent="bizup-autocrawler").allowed(
+        "https://x.com/deep/nested/page?q=1"
+    )
+    assert fetcher.urls == ["https://x.com/robots.txt"]

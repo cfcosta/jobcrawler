@@ -22,8 +22,11 @@ import threading
 import time
 from collections.abc import Callable
 from typing import Protocol
+from urllib import robotparser
+from urllib.parse import urljoin
 
 from bizup_autocrawler.governor import RateGovernor, interval_for
+from bizup_autocrawler.urls import normalize_host
 
 
 def host_rate_interval(rate: str) -> float:
@@ -37,6 +40,10 @@ def host_rate_interval(rate: str) -> float:
     if core.lower().endswith("/host"):
         core = core[: -len("/host")].rstrip().rstrip("/")
     return interval_for(core)
+
+
+class RobotsDisallowedError(RuntimeError):
+    """A fetch was refused because robots.txt disallows the path (§4.5)."""
 
 
 class Pacer(Protocol):
@@ -86,3 +93,57 @@ class PerHostPacer:
                 )
                 self._governors[host] = gov
         gov.wait()  # the governor holds its own lock across the sleep
+
+
+class RobotsPolicy:
+    """robots.txt compliance for the §4.5 fetch path: Disallow + Crawl-delay.
+
+    A site's ``/robots.txt`` is fetched once per host (through the injected
+    ``fetch_text``, so it rides the same SSRF-checked client) and parsed with the
+    stdlib :mod:`urllib.robotparser`. The policy **fails open**: a site with no
+    robots.txt, or one we can't fetch, is treated as fully crawlable — the web
+    convention, and the safe choice for availability (a transient robots fetch
+    error must not silently halt a crawl). The per-host parser is cached so a run
+    over many pages of one site costs a single robots fetch.
+    """
+
+    def __init__(
+        self, fetch_text: Callable[[str], str | None], *, user_agent: str
+    ) -> None:
+        self._fetch_text = fetch_text
+        self._ua = user_agent
+        self._lock = threading.Lock()
+        self._cache: dict[str, robotparser.RobotFileParser] = {}
+
+    def allowed(self, url: str) -> bool:
+        """Whether our user-agent may fetch ``url`` per the host's robots.txt."""
+        return self._parser_for(url).can_fetch(self._ua, url)
+
+    def crawl_delay(self, url: str) -> float | None:
+        """The host's ``Crawl-delay`` for our user-agent (seconds), or None."""
+        delay = self._parser_for(url).crawl_delay(self._ua)
+        return float(delay) if delay is not None else None
+
+    def _parser_for(self, url: str) -> robotparser.RobotFileParser:
+        host = normalize_host(url)
+        with self._lock:
+            cached = self._cache.get(host)
+        if cached is not None:
+            return cached
+        parser = self._load(url)  # fetch + parse outside the lock (it may do network)
+        with self._lock:
+            # A concurrent thread may have loaded the same host first; first wins.
+            return self._cache.setdefault(host, parser)
+
+    def _load(self, url: str) -> robotparser.RobotFileParser:
+        parser = robotparser.RobotFileParser()
+        try:
+            text = self._fetch_text(urljoin(url, "/robots.txt"))
+        except Exception:
+            text = None  # unreachable robots.txt → fail open (allow), per convention
+        # No robots.txt (or unfetchable) parses as empty lines, which the parser
+        # treats as "no rules" → everything allowed; a present file is parsed for
+        # its Disallow / Crawl-delay rules. (Parsing empty avoids poking the parser's
+        # private allow_all flag, which the type stubs don't expose.)
+        parser.parse((text or "").splitlines())
+        return parser

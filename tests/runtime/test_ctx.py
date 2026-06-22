@@ -16,6 +16,7 @@ from datetime import timedelta
 
 from bizup_autocrawler.runtime.contract import Ctx as CtxProtocol
 from bizup_autocrawler.runtime.ctx import Ctx, PageLimitError
+from bizup_autocrawler.runtime.politeness import RobotsDisallowedError
 from bizup_autocrawler.runtime.solver import (
     ChallengeError,
     ChallengeSolver,
@@ -246,6 +247,60 @@ def test_get_paces_through_the_injected_pacer() -> None:
     ctx = Ctx({"example.com"}, client=client, pacer=pacer)
     ctx.get("https://example.com/a")
     assert pacer.calls == [("example.com", None)]
+
+
+# -- §4.5 politeness: robots.txt ---------------------------------------------
+
+
+class _FakeRobots:
+    """A robots policy with canned verdicts so ctx enforcement is asserted directly."""
+
+    def __init__(self, *, allow: bool = True, delay: float | None = None) -> None:
+        self._allow = allow
+        self._delay = delay
+
+    def allowed(self, url: str) -> bool:
+        return self._allow
+
+    def crawl_delay(self, url: str) -> float | None:
+        return self._delay
+
+
+def _boom_client() -> httpx.Client:
+    def handler(_: httpx.Request) -> httpx.Response:
+        raise AssertionError("a robots-disallowed URL must never hit the network")
+
+    return httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False)
+
+
+def test_fetch_blocked_by_robots_raises_before_any_request() -> None:
+    ctx = Ctx({"example.com"}, client=_boom_client(), robots=_FakeRobots(allow=False))
+    with pytest.raises(RobotsDisallowedError):
+        ctx.fetch("https://example.com/private")
+
+
+def test_get_blocked_by_robots_raises_before_any_request() -> None:
+    ctx = Ctx({"example.com"}, client=_boom_client(), robots=_FakeRobots(allow=False))
+    with pytest.raises(RobotsDisallowedError):
+        ctx.get("https://example.com/private")
+
+
+def test_fetch_feeds_robots_crawl_delay_to_the_pacer() -> None:
+    # A Crawl-delay raises this host's pacing floor — ctx passes it through as the
+    # pacer's min_interval so robots can slow us below the configured base rate.
+    pacer = _RecordingPacer()
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, text="x")),
+        follow_redirects=False,
+    )
+    ctx = Ctx(
+        {"example.com"},
+        client=client,
+        pacer=pacer,
+        robots=_FakeRobots(allow=True, delay=5.0),
+    )
+    ctx.fetch("https://example.com/a")
+    assert pacer.calls == [("example.com", 5.0)]
 
 
 def test_fetch_enforces_the_page_budget() -> None:
