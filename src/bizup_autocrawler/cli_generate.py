@@ -54,7 +54,7 @@ from bizup_autocrawler.urls import normalize_host
 
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 
-_CRAWLERS_DIR = Path(__file__).parent / "crawlers"
+_CRAWLERS_DIR = Path(config.crawlers_dir())
 _TARGET_ITEMS = 30  # items-axis saturation for the graded scalar
 
 
@@ -207,7 +207,12 @@ def _deliver(
     With ``stage`` (the self-heal default — ``AUTOCRAWLER_REVIEW_GATE`` on) the crawler
     lands in ``crawlers/_pending/<slug>.py`` for a human to ``promote``; the live
     crawler the daemon runs is deliberately left untouched. Otherwise it goes live.
+
+    The crawlers dir is created if absent: a relocated ``AUTOCRAWLER_CRAWLERS_DIR``
+    (e.g. a fresh ``/data/crawlers`` volume) won't exist on first delivery, and a live
+    write must not ``FileNotFoundError`` on it.
     """
+    crawlers_dir.mkdir(parents=True, exist_ok=True)
     if stage:
         pending = crawlers_dir / "_pending"
         pending.mkdir(parents=True, exist_ok=True)

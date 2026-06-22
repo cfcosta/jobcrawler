@@ -9,8 +9,13 @@ wrappers over a few typed parsers.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from bizup_autocrawler.urls import DEFAULT_TRACKING_PARAMS
+
+# This module lives at the package root, so its directory *is* the package dir —
+# used to default the committed-crawlers location to the in-package crawlers/ dir.
+_PKG_DIR = Path(__file__).parent
 
 # --- parsers ---------------------------------------------------------------
 
@@ -163,6 +168,23 @@ def news_api_url() -> str:
 
 def sites_path() -> str:
     return _str("AUTOCRAWLER_SITES", "sites.yaml")
+
+
+def crawlers_dir() -> str:
+    """Directory of committed per-site crawlers — ``crawlers/<slug>.py`` plus the
+    §14.2 ``_pending`` staging area. Read by crawl/probe, written by
+    generate/promote and the §4.8 self-heal.
+
+    Defaults to the in-package ``crawlers/`` dir, where the editable dev install
+    resolves them and the baked example crawler lives. A production deploy must point
+    ``AUTOCRAWLER_CRAWLERS_DIR`` at a writable, persistent path (e.g. a mounted
+    ``/data/crawlers``): the in-package dir is read-only on a native Nix-store install
+    (so generate/promote/self-heal can't write) and ephemeral in a container layer (so
+    generated crawlers vanish on restart). The crawl loader reads the script *text*
+    (never imports the package), so an out-of-package dir works for the whole
+    crawl/probe/generate/promote surface.
+    """
+    return _str("AUTOCRAWLER_CRAWLERS_DIR", str(_PKG_DIR / "crawlers"))
 
 
 def first_crawl_cap() -> int:

@@ -56,7 +56,7 @@ from bizup_autocrawler.state import RunRecord, StateStore
 from bizup_autocrawler.trainset import record_failure
 from bizup_autocrawler.urls import normalize_host
 
-_CRAWLERS_DIR = Path(__file__).parent / "crawlers"
+_CRAWLERS_DIR = Path(config.crawlers_dir())
 
 _log = logging.getLogger("bizup_autocrawler.cli")
 

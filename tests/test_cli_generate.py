@@ -105,6 +105,15 @@ def test_deliver_writes_live_when_not_gated(tmp_path: Path) -> None:
     assert not (tmp_path / "_pending").exists()
 
 
+def test_deliver_creates_crawlers_dir_when_missing(tmp_path: Path) -> None:
+    # A relocated AUTOCRAWLER_CRAWLERS_DIR (e.g. a fresh /data/crawlers volume) doesn't
+    # exist yet on first run; live delivery must create it, not FileNotFoundError (§11).
+    target = tmp_path / "crawlers"  # does not exist yet
+    outcome = _deliver("acme", _SRC, stage=False, crawlers_dir=target)
+    assert outcome is RegenOutcome.PROMOTED
+    assert (target / "acme.py").read_text() == _SRC
+
+
 def test_staged_delivery_never_clobbers_the_live_crawler(tmp_path: Path) -> None:
     # The core safety guarantee: with review_gate on, the daemon keeps running the old
     # (known) crawler until a human promotes — self-heal cannot silently replace it.
@@ -173,3 +182,9 @@ def test_regenerate_one_goes_live_when_review_gate_off(
     monkeypatch.setenv("AUTOCRAWLER_REVIEW_GATE", "off")
     assert regenerate_one("acme") is RegenOutcome.PROMOTED
     assert seen["stage"] is False
+
+
+def test_crawlers_dir_default_is_config_driven() -> None:
+    # _deliver/promote_one default to the same config-driven dir as the crawl/probe
+    # side, so a relocated AUTOCRAWLER_CRAWLERS_DIR keeps writer and reader in sync (§11).
+    assert cli_generate._CRAWLERS_DIR == Path(config.crawlers_dir())

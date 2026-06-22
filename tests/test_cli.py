@@ -525,3 +525,11 @@ def test_validate_one_runs_the_sandbox(tmp_path: Path) -> None:
     result = validate_one("good", crawlers_dir=tmp_path)
     assert result.exception is None
     assert result.item_count == 3
+
+
+def test_crawlers_dir_default_is_config_driven() -> None:
+    # The module default must come from config.crawlers_dir() so a read-only Nix-store
+    # deploy can relocate the writable crawlers dir via AUTOCRAWLER_CRAWLERS_DIR (§11).
+    from bizup_autocrawler import cli
+
+    assert cli._CRAWLERS_DIR == Path(config.crawlers_dir())

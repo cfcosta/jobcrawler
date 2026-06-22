@@ -7,6 +7,8 @@ the parsing behavior plus a representative sample of getters.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from bizup_autocrawler import config
@@ -201,3 +203,20 @@ def test_require_model_errors_when_unset(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_require_model_returns_value_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AUTOCRAWLER_MODEL", "openrouter/some/model")
     assert config.require_model() == "openrouter/some/model"
+
+
+def test_crawlers_dir_defaults_to_in_package_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The committed crawlers live beside the package by default — where the editable
+    # dev install resolves them and the baked example crawler lives.
+    monkeypatch.delenv("AUTOCRAWLER_CRAWLERS_DIR", raising=False)
+    assert config.crawlers_dir() == str(Path(config.__file__).parent / "crawlers")
+
+
+def test_crawlers_dir_honors_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    # §11: a Nix/container deploy installs the package read-only in the store, so the
+    # writable crawlers dir (the generate/promote/self-heal target, and where crawl
+    # reads committed scripts) must be relocatable onto a writable volume.
+    monkeypatch.setenv("AUTOCRAWLER_CRAWLERS_DIR", "/data/crawlers")
+    assert config.crawlers_dir() == "/data/crawlers"
