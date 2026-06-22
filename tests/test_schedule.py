@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from pydantic import ValidationError
 
-from bizup_autocrawler.health import HealthState, SelfHealer
+from bizup_autocrawler.health import HealthState, RegenOutcome, SelfHealer
 from bizup_autocrawler.runtime.runner import CrawlSummary
 from bizup_autocrawler.schedule import Scheduler, Site
 from bizup_autocrawler.state import StateStore
@@ -208,8 +208,10 @@ def _healer(store: StateStore, *, reprobe_items: int, regen_passes: bool) -> Sel
     async def reprobe(slug: str) -> int:
         return reprobe_items
 
-    async def regenerate(slug: str) -> bool:
-        return regen_passes
+    async def regenerate(slug: str) -> RegenOutcome:
+        # These scheduler tests predate the §14.2 stage/live split; they only assert
+        # heal-vs-fail, so a pass maps to a live promotion (→ HEALTHY).
+        return RegenOutcome.PROMOTED if regen_passes else RegenOutcome.FAILED
 
     return SelfHealer(store, reprobe=reprobe, regenerate=regenerate)
 
@@ -243,7 +245,7 @@ async def test_regen_tick_is_a_noop_without_a_healer() -> None:
 async def test_regen_tick_skips_disabled_sites() -> None:
     store = _stale_store("s0")
 
-    async def regenerate(slug: str) -> bool:
+    async def regenerate(slug: str) -> RegenOutcome:
         raise AssertionError("a disabled site must not be regenerated")
 
     async def reprobe(slug: str) -> int:
@@ -307,10 +309,10 @@ async def test_regen_tick_isolates_a_single_sites_failure() -> None:
     async def reprobe(slug: str) -> int:
         return 0  # confirmed stale → proceeds to regenerate
 
-    async def regenerate(slug: str) -> bool:
+    async def regenerate(slug: str) -> RegenOutcome:
         if slug == "s0":
             raise RuntimeError("LM backend exploded")
-        return True
+        return RegenOutcome.PROMOTED
 
     healer = SelfHealer(store, reprobe=reprobe, regenerate=regenerate)
     sched = Scheduler(

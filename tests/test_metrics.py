@@ -74,4 +74,9 @@ def test_drift_mttr_no_events() -> None:
 def test_health_distribution_counts_all_states() -> None:
     states = [HealthState.HEALTHY, HealthState.HEALTHY, HealthState.STALE]
     dist = health_distribution(states)
-    assert dist == {"healthy": 2, "stale": 1, "generation_failed": 0}
+    assert dist == {
+        "healthy": 2,
+        "stale": 1,
+        "pending_review": 0,
+        "generation_failed": 0,
+    }

@@ -1,11 +1,12 @@
-"""Operator CLI (§10): ``autocrawl run | generate | validate | crawl | list``.
+"""Operator CLI (§10): ``autocrawl run | generate | validate | crawl | promote | list``.
 
 ``run`` is the primary deployment entrypoint (the service schedules itself, §4.9);
 ``crawl`` is for manual one-shot runs and CI; ``validate`` dry-runs a committed
 script through the §4.4 sandbox with **no ingest**; ``generate`` runs the RLM and
 gates before writing ``crawlers/<slug>.py`` (it needs a configured LM + Deno, so
-its heavy deps are imported lazily); ``list`` shows sites, script presence, and
-last-run health. The list/validate/crawl wiring is thin over already-tested
+its heavy deps are imported lazily); ``promote`` moves a self-heal crawler staged
+under ``crawlers/_pending`` (§14.2) to live; ``list`` shows sites, script presence,
+and last-run health. The list/validate/crawl wiring is thin over already-tested
 backends; the live paths are correct-by-construction.
 """
 
@@ -22,7 +23,12 @@ from pathlib import Path
 from bizup_autocrawler import config
 from bizup_autocrawler.generate.scoring import CandidateResult
 from bizup_autocrawler.governor import RateGovernor
-from bizup_autocrawler.health import HealthState, SelfHealer, staleness_candidate
+from bizup_autocrawler.health import (
+    HealthState,
+    RegenOutcome,
+    SelfHealer,
+    staleness_candidate,
+)
 from bizup_autocrawler.ingest import NewsClient
 from bizup_autocrawler.runtime.runner import (
     CrawlSummary,
@@ -68,14 +74,18 @@ def _db_path() -> str:
 def _health_label(
     store: StateStore, slug: str, history: Sequence[RunRecord], has_run: bool
 ) -> str:
-    """The health column: persisted generation-failed wins over a re-derived stale.
+    """The health column: a persisted terminal state wins over a re-derived stale.
 
-    A generation-failed site still *looks* like a staleness candidate from its run
-    history, so re-deriving would mislabel it "stale" (implying it self-heals); the
-    persisted state (§4.8) is authoritative for that terminal case.
+    A generation-failed or pending-review site still *looks* like a staleness
+    candidate from its run history, so re-deriving would mislabel it "stale" (implying
+    it self-heals); the persisted state (§4.8, §14.2) is authoritative — gen-failed
+    needs an operator, pending-review awaits ``autocrawl promote``.
     """
-    if store.get_health(slug) == HealthState.GENERATION_FAILED.value:
+    persisted = store.get_health(slug)
+    if persisted == HealthState.GENERATION_FAILED.value:
         return "gen-failed"
+    if persisted == HealthState.PENDING_REVIEW.value:
+        return "pending-review"
     if staleness_candidate(list(history)):
         return "stale"
     return "ok" if has_run else "new"
@@ -261,9 +271,11 @@ def _build_healer(store: StateStore, sites: Sequence[Site]) -> SelfHealer:
     async def reprobe(slug: str) -> int:
         return await asyncio.to_thread(_probe, slug)
 
-    async def regenerate(slug: str) -> bool:
+    async def regenerate(slug: str) -> RegenOutcome:
         from bizup_autocrawler.cli_generate import regenerate_one
 
+        # regenerate_one honors AUTOCRAWLER_REVIEW_GATE: by default it stages the new
+        # crawler (RegenOutcome.STAGED → pending-review, §14.2) rather than going live.
         return await asyncio.to_thread(regenerate_one, slug)
 
     return SelfHealer(
@@ -325,6 +337,17 @@ def cmd_generate(args: argparse.Namespace) -> int:
     return generate_command(args)
 
 
+def cmd_promote(args: argparse.Namespace) -> int:
+    # Promote a self-heal candidate staged under crawlers/_pending (§14.2) to live.
+    # promote_one is pure filesystem, but it lives beside generate (shared crawlers/
+    # paths), so import it lazily to keep cli.py free of the dspy-heavy module at start.
+    from bizup_autocrawler.cli_generate import promote_one
+
+    ok, message = promote_one(args.slug)
+    print(message)
+    return 0 if ok else 1
+
+
 def cmd_optimize(args: argparse.Namespace) -> int:
     # The offline §4.11 self-improvement job (build trainset → optimize → promote);
     # its deps (dspy + the sandbox) are heavy, so import lazily.
@@ -355,6 +378,12 @@ def build_parser() -> argparse.ArgumentParser:
     crawl_target.add_argument("slug", nargs="?")
     crawl_target.add_argument("--all", action="store_true")
     crawl.set_defaults(func=cmd_crawl)
+
+    prom = sub.add_parser(
+        "promote", help="promote a staged self-heal crawler to live (§14.2)"
+    )
+    prom.add_argument("slug")
+    prom.set_defaults(func=cmd_promote)
 
     sub.add_parser("list", help="show sites, script presence, health").set_defaults(
         func=cmd_list

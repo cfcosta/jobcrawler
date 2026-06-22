@@ -12,10 +12,13 @@ machinery runs here:
      candidate through the §4.4 sandbox);
   4. gate the winner with the full set — AST → must-observe (validate-before-SUBMIT
      / consult-feeds-before-scrape, read off the trajectory) → runtime completeness
-     → two-run Jaccard stability — and write ``crawlers/<slug>.py`` for review (§8)
-     only on a pass.
+     → two-run Jaccard stability — and, only on a pass, *deliver* the crawler: an
+     operator-run ``generate`` writes ``crawlers/<slug>.py`` directly, but the
+     unattended §4.8 self-heal (``regenerate_one``) honors ``AUTOCRAWLER_REVIEW_GATE``
+     — on by default — and instead *stages* it to ``crawlers/_pending/<slug>.py`` for
+     a human to ``promote`` (§14.2), never silently replacing the live crawler.
 
-The whole path is live (LM, Deno, network); the gating logic is unit-tested.
+The whole path is live (LM, Deno, network); the gating + delivery logic is unit-tested.
 """
 
 from __future__ import annotations
@@ -41,6 +44,7 @@ from bizup_autocrawler.generate.generator import best_of_n, load_generator
 from bizup_autocrawler.generate.scoring import CandidateResult, make_reward_fn
 from bizup_autocrawler.generate.snapshot import prefetch_corpus
 from bizup_autocrawler.generate.tools import make_host_tools
+from bizup_autocrawler.health import RegenOutcome
 from bizup_autocrawler.runtime.ctx import Ctx
 from bizup_autocrawler.runtime.sandbox import validate_crawler
 from bizup_autocrawler.schedule import Site
@@ -62,18 +66,21 @@ def generate_command(args: argparse.Namespace) -> int:
     return asyncio.run(_run(targets))
 
 
-def regenerate_one(slug: str) -> bool:
-    """Regenerate one site's crawler; True iff a gate-passing crawler was written.
+def regenerate_one(slug: str) -> RegenOutcome:
+    """Regenerate one site's crawler, reporting how it was delivered (§4.8, §14.2).
 
-    The §4.8 self-healing entry point — the scheduler's regen timer calls this for a
-    confirmed-stale site. Runs the full §6 generation for that one site (writing
-    crawlers/<slug>.py on a gate pass), exactly like ``autocrawl generate <slug>``.
+    The self-healing entry point — the scheduler's regen timer calls this for a
+    confirmed-stale site. Runs the full §6 generation for that one site, then honors
+    ``AUTOCRAWLER_REVIEW_GATE`` (on by default): a gate-passing crawler is *staged* to
+    crawlers/_pending/<slug>.py for human promotion rather than overwriting the live
+    crawler the daemon is running. With the gate off it goes live (auto-heal). A
+    missing site or an exhausted generation reports ``FAILED``.
     """
     site = find_site(load_sites(config.sites_path()), slug)
     if site is None:
-        return False
+        return RegenOutcome.FAILED
     root_lm, sub_lm = _build_lms()
-    return asyncio.run(_generate_one(site, root_lm, sub_lm))
+    return asyncio.run(_generate_one(site, root_lm, sub_lm, stage=config.review_gate()))
 
 
 def _build_lms() -> tuple[dspy.LM, dspy.LM]:
@@ -108,12 +115,16 @@ async def _run(targets: list[Site]) -> int:
     root_lm, sub_lm = _build_lms()
     failures = 0
     for site in targets:
-        if not await _generate_one(site, root_lm, sub_lm):
+        # Operator-run generate writes live (stage defaults off); only a generation
+        # that produced no gate-passing crawler counts as a failure.
+        if await _generate_one(site, root_lm, sub_lm) is RegenOutcome.FAILED:
             failures += 1
     return 1 if failures else 0
 
 
-async def _generate_one(site: Site, root_lm: dspy.LM, sub_lm: dspy.LM) -> bool:
+async def _generate_one(
+    site: Site, root_lm: dspy.LM, sub_lm: dspy.LM, *, stage: bool = False
+) -> RegenOutcome:
     hosts = {normalize_host(site.url)}
     ctx = Ctx(hosts)
     corpus = prefetch_corpus(site.url, ctx)
@@ -162,7 +173,7 @@ async def _generate_one(site: Site, root_lm: dspy.LM, sub_lm: dspy.LM) -> bool:
     )
     if best is None:
         print(f"FAIL {site.slug}: no candidate produced")
-        return False
+        return RegenOutcome.FAILED
 
     source = _source_text(best)
     # The enumeration *count* floor is NOT applied here: the 10s validation sandbox
@@ -175,13 +186,50 @@ async def _generate_one(site: Site, root_lm: dspy.LM, sub_lm: dspy.LM) -> bool:
     ok, reason = gate_winner(best, source, hosts)
     if not ok:
         print(f"FAIL {site.slug}: {reason}")
-        return False
-    (_CRAWLERS_DIR / f"{site.slug}.py").write_text(source)
-    print(
-        f"OK {site.slug}: wrote crawlers/{site.slug}.py (score {score:.2f}) for review"
-    )
+        return RegenOutcome.FAILED
+    outcome = _deliver(site.slug, source, stage=stage)
+    if outcome is RegenOutcome.STAGED:
+        print(
+            f"OK {site.slug}: staged crawlers/_pending/{site.slug}.py (score "
+            f"{score:.2f}) — run `autocrawl promote {site.slug}` to go live (§14.2)"
+        )
+    else:
+        print(f"OK {site.slug}: wrote crawlers/{site.slug}.py (score {score:.2f})")
     _record_for_trainset(site, ctx, corpus, best, source, hosts)
-    return True
+    return outcome
+
+
+def _deliver(
+    slug: str, source: str, *, stage: bool, crawlers_dir: Path = _CRAWLERS_DIR
+) -> RegenOutcome:
+    """Write a gate-passing crawler to its destination and report the outcome (§14.2).
+
+    With ``stage`` (the self-heal default — ``AUTOCRAWLER_REVIEW_GATE`` on) the crawler
+    lands in ``crawlers/_pending/<slug>.py`` for a human to ``promote``; the live
+    crawler the daemon runs is deliberately left untouched. Otherwise it goes live.
+    """
+    if stage:
+        pending = crawlers_dir / "_pending"
+        pending.mkdir(parents=True, exist_ok=True)
+        (pending / f"{slug}.py").write_text(source)
+        return RegenOutcome.STAGED
+    (crawlers_dir / f"{slug}.py").write_text(source)
+    return RegenOutcome.PROMOTED
+
+
+def promote_one(slug: str, *, crawlers_dir: Path = _CRAWLERS_DIR) -> tuple[bool, str]:
+    """Promote a staged crawler to live (the human half of the §14.2 review gate).
+
+    Moves ``crawlers/_pending/<slug>.py`` over ``crawlers/<slug>.py`` and consumes the
+    staged copy. Returns ``(ok, message)``; ``ok`` is False (and nothing is written) if
+    no crawler is staged for the slug.
+    """
+    pending = crawlers_dir / "_pending" / f"{slug}.py"
+    if not pending.exists():
+        return False, f"no staged crawler for {slug!r} (nothing in crawlers/_pending/)"
+    (crawlers_dir / f"{slug}.py").write_text(pending.read_text())
+    pending.unlink()
+    return True, f"promoted {slug}: crawlers/_pending/{slug}.py → crawlers/{slug}.py"
 
 
 def gate_winner(

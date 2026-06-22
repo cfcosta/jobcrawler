@@ -25,6 +25,7 @@ from bizup_autocrawler.cli import (
     cmd_crawl,
     cmd_generate,
     cmd_list,
+    cmd_promote,
     cmd_run,
     cmd_validate,
     crawl_one,
@@ -32,7 +33,7 @@ from bizup_autocrawler.cli import (
     validate_one,
 )
 from bizup_autocrawler.governor import RateGovernor
-from bizup_autocrawler.health import HealthState
+from bizup_autocrawler.health import HealthState, RegenOutcome
 from bizup_autocrawler.runtime.runner import CrawlSummary
 from bizup_autocrawler.schedule import Site
 from bizup_autocrawler.state import StateStore
@@ -52,6 +53,34 @@ def test_parser_dispatches_each_command() -> None:
     crawled = parser.parse_args(["crawl", "--all"])
     assert crawled.func is cmd_crawl
     assert crawled.all is True
+
+    promoted = parser.parse_args(["promote", "techcrunch"])
+    assert promoted.func is cmd_promote
+    assert promoted.slug == "techcrunch"
+
+
+def test_cmd_promote_returns_zero_on_success(monkeypatch: MonkeyPatch) -> None:
+    # cmd_promote wires the slug through cli_generate.promote_one and maps the
+    # (ok, message) result to a shell exit code; the move mechanics live in
+    # test_cli_generate. A staged crawler found → promoted → exit 0.
+    from bizup_autocrawler import cli_generate
+
+    monkeypatch.setattr(
+        cli_generate, "promote_one", lambda slug: (True, f"promoted {slug}")
+    )
+    assert cmd_promote(build_parser().parse_args(["promote", "acme"])) == 0
+
+
+def test_cmd_promote_returns_one_when_nothing_staged(monkeypatch: MonkeyPatch) -> None:
+    # Nothing staged for the slug → non-zero exit so an operator/script sees the miss.
+    from bizup_autocrawler import cli_generate
+
+    monkeypatch.setattr(
+        cli_generate,
+        "promote_one",
+        lambda slug: (False, f"no staged crawler for {slug}"),
+    )
+    assert cmd_promote(build_parser().parse_args(["promote", "ghost"])) == 1
 
 
 def test_site_url_of_reads_the_constant() -> None:
@@ -102,6 +131,25 @@ def test_render_list_surfaces_persisted_generation_failed(tmp_path: Path) -> Non
     )
 
     assert "health=gen-failed" in lines[0]
+    store.close()
+
+
+def test_render_list_surfaces_persisted_pending_review(tmp_path: Path) -> None:
+    # A site whose self-heal regen was staged for human promotion (§14.2) reads as a
+    # staleness candidate from its run history, so `list` must surface the *persisted*
+    # pending-review state distinctly — it is awaiting `autocrawl promote`, not stale.
+    store = StateStore(":memory:")
+    baseline = store.start_run("techcrunch")
+    store.finish_run(baseline, items_found=8, new_items=8, errors=0, pages_fetched=2)
+    latest = store.start_run("techcrunch")
+    store.finish_run(latest, items_found=0, new_items=0, errors=1, pages_fetched=1)
+    store.set_health("techcrunch", HealthState.PENDING_REVIEW.value)
+
+    lines = render_list(
+        [Site(slug="techcrunch", url="https://t.com")], store, crawlers_dir=tmp_path
+    )
+
+    assert "health=pending-review" in lines[0]
     store.close()
 
 
@@ -157,8 +205,8 @@ async def test_build_healer_records_hard_case_on_confirmed_failure(
     async def _zero(slug: str) -> int:
         return 0  # re-probe confirms a real failure, not a transient outage
 
-    async def _failed(slug: str) -> bool:
-        return False
+    async def _failed(slug: str) -> RegenOutcome:
+        return RegenOutcome.FAILED
 
     healer._reprobe = _zero
     healer._regenerate = _failed

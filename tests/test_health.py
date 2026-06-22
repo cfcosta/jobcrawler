@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 
 from bizup_autocrawler.health import (
     HealthState,
+    RegenOutcome,
     SelfHealer,
     regeneration_state,
     staleness_candidate,
@@ -60,8 +61,9 @@ def test_empty_history_is_not_a_candidate() -> None:
 
 
 def test_regeneration_state_maps_outcome() -> None:
-    assert regeneration_state(gate_passed=True) is HealthState.HEALTHY
-    assert regeneration_state(gate_passed=False) is HealthState.GENERATION_FAILED
+    assert regeneration_state(RegenOutcome.PROMOTED) is HealthState.HEALTHY
+    assert regeneration_state(RegenOutcome.STAGED) is HealthState.PENDING_REVIEW
+    assert regeneration_state(RegenOutcome.FAILED) is HealthState.GENERATION_FAILED
 
 
 def _stale_store() -> StateStore:
@@ -73,12 +75,14 @@ def _stale_store() -> StateStore:
     return store
 
 
-async def _healer(store: StateStore, *, reprobe_items: int, regen_passes: bool):
+async def _healer(
+    store: StateStore, *, reprobe_items: int, regen_outcome: RegenOutcome
+):
     async def reprobe(slug: str) -> int:
         return reprobe_items
 
-    async def regenerate(slug: str) -> bool:
-        return regen_passes
+    async def regenerate(slug: str) -> RegenOutcome:
+        return regen_outcome
 
     return SelfHealer(store, reprobe=reprobe, regenerate=regenerate)
 
@@ -95,7 +99,7 @@ async def test_healthy_site_is_not_probed_or_regenerated() -> None:
         probed = True
         return 0
 
-    async def regenerate(slug: str) -> bool:
+    async def regenerate(slug: str) -> RegenOutcome:
         raise AssertionError("must not regenerate a healthy site")
 
     healer = SelfHealer(store, reprobe=reprobe, regenerate=regenerate)
@@ -112,8 +116,8 @@ async def test_confirmed_failure_invokes_the_capture_hook() -> None:
     async def reprobe(slug: str) -> int:
         return 0  # re-probe confirms: not a transient outage
 
-    async def regenerate(slug: str) -> bool:
-        return False
+    async def regenerate(slug: str) -> RegenOutcome:
+        return RegenOutcome.FAILED
 
     healer = SelfHealer(
         store,
@@ -133,7 +137,7 @@ async def test_a_blip_does_not_invoke_the_capture_hook() -> None:
     async def reprobe(slug: str) -> int:
         return 2  # re-parsed → tolerated blip
 
-    async def regenerate(slug: str) -> bool:
+    async def regenerate(slug: str) -> RegenOutcome:
         raise AssertionError("a blip must not regenerate")
 
     healer = SelfHealer(
@@ -147,17 +151,33 @@ async def test_a_blip_does_not_invoke_the_capture_hook() -> None:
 
 
 async def test_reprobe_clears_a_blip() -> None:
-    healer = await _healer(_stale_store(), reprobe_items=3, regen_passes=False)
+    healer = await _healer(
+        _stale_store(), reprobe_items=3, regen_outcome=RegenOutcome.FAILED
+    )
     assert await healer.assess("s") is HealthState.HEALTHY
 
 
-async def test_confirmed_stale_regenerates_and_recovers() -> None:
-    healer = await _healer(_stale_store(), reprobe_items=0, regen_passes=True)
+async def test_confirmed_stale_regenerates_live_and_recovers() -> None:
+    # review_gate off (or auto-deliver): the regen goes live → the site is healed.
+    healer = await _healer(
+        _stale_store(), reprobe_items=0, regen_outcome=RegenOutcome.PROMOTED
+    )
     assert await healer.assess("s") is HealthState.HEALTHY
+
+
+async def test_staged_regen_is_pending_review() -> None:
+    # review_gate on (the default, §14.2): a gate-passing crawler is staged for a human
+    # to promote, NOT delivered live — the site is awaiting review, not yet healthy.
+    store = _stale_store()
+    healer = await _healer(store, reprobe_items=0, regen_outcome=RegenOutcome.STAGED)
+    assert await healer.assess("s") is HealthState.PENDING_REVIEW
+    assert store.get_health("s") == HealthState.PENDING_REVIEW.value
 
 
 async def test_regeneration_exhaustion_is_generation_failed() -> None:
-    healer = await _healer(_stale_store(), reprobe_items=0, regen_passes=False)
+    healer = await _healer(
+        _stale_store(), reprobe_items=0, regen_outcome=RegenOutcome.FAILED
+    )
     assert await healer.assess("s") is HealthState.GENERATION_FAILED
 
 
@@ -166,7 +186,7 @@ async def test_regeneration_exhaustion_is_generation_failed() -> None:
 
 async def test_assess_persists_the_resulting_state() -> None:
     store = _stale_store()
-    healer = await _healer(store, reprobe_items=0, regen_passes=False)
+    healer = await _healer(store, reprobe_items=0, regen_outcome=RegenOutcome.FAILED)
     await healer.assess("s")
     assert store.get_health("s") == HealthState.GENERATION_FAILED.value
 
@@ -181,10 +201,10 @@ async def test_generation_failed_site_is_not_re_regenerated() -> None:
     async def reprobe(slug: str) -> int:
         return 0
 
-    async def regenerate(slug: str) -> bool:
+    async def regenerate(slug: str) -> RegenOutcome:
         nonlocal regen_calls
         regen_calls += 1
-        return False
+        return RegenOutcome.FAILED
 
     healer = SelfHealer(store, reprobe=reprobe, regenerate=regenerate)
     assert await healer.assess("s") is HealthState.GENERATION_FAILED
@@ -203,7 +223,49 @@ async def test_recovered_site_clears_generation_failed() -> None:
     async def reprobe(slug: str) -> int:
         raise AssertionError("a recovered site must not be re-probed")
 
-    async def regenerate(slug: str) -> bool:
+    async def regenerate(slug: str) -> RegenOutcome:
+        raise AssertionError("a recovered site must not be regenerated")
+
+    healer = SelfHealer(store, reprobe=reprobe, regenerate=regenerate)
+    assert await healer.assess("s") is HealthState.HEALTHY
+    assert store.get_health("s") == HealthState.HEALTHY.value
+
+
+async def test_pending_review_site_is_not_re_regenerated() -> None:
+    # Same no-spin rule as generation-failed, for the §14.2 staged state: while a
+    # regenerated crawler sits awaiting human promotion, a later assessment surfaces
+    # PENDING_REVIEW without re-running the (expensive) generator — and without
+    # re-staging over the candidate a human is reviewing.
+    store = _stale_store()
+    regen_calls = 0
+
+    async def reprobe(slug: str) -> int:
+        return 0
+
+    async def regenerate(slug: str) -> RegenOutcome:
+        nonlocal regen_calls
+        regen_calls += 1
+        return RegenOutcome.STAGED
+
+    healer = SelfHealer(store, reprobe=reprobe, regenerate=regenerate)
+    assert await healer.assess("s") is HealthState.PENDING_REVIEW
+    assert await healer.assess("s") is HealthState.PENDING_REVIEW
+    assert regen_calls == 1
+
+
+async def test_promoted_site_clears_pending_review() -> None:
+    # Once a human promotes the staged crawler, the live crawler finds items again, so
+    # the latest run is no longer a staleness candidate → healthy, clearing the stuck
+    # pending-review state (mirrors the generation-failed recovery path).
+    store = _stale_store()
+    store.set_health("s", HealthState.PENDING_REVIEW.value)
+    recovered = store.start_run("s")
+    store.finish_run(recovered, items_found=6, new_items=6, errors=0, pages_fetched=1)
+
+    async def reprobe(slug: str) -> int:
+        raise AssertionError("a recovered site must not be re-probed")
+
+    async def regenerate(slug: str) -> RegenOutcome:
         raise AssertionError("a recovered site must not be regenerated")
 
     healer = SelfHealer(store, reprobe=reprobe, regenerate=regenerate)
