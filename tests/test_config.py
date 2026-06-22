@@ -54,6 +54,17 @@ def test_review_gate_defaults_on(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.review_gate() is True
 
 
+def test_log_level_defaults_to_info(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AUTOCRAWLER_LOG_LEVEL", raising=False)
+    assert config.log_level() == "INFO"
+
+
+def test_log_level_is_normalized_upper(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Accept a lowercase env value but return a name logging.setLevel accepts.
+    monkeypatch.setenv("AUTOCRAWLER_LOG_LEVEL", "debug")
+    assert config.log_level() == "DEBUG"
+
+
 def test_news_api_url_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("NEWS_API_URL", raising=False)
     assert config.news_api_url() == "http://localhost:8000"

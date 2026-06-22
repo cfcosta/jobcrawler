@@ -381,3 +381,14 @@ def egress_proxy() -> str | None:
 
 def review_gate() -> bool:
     return _bool("AUTOCRAWLER_REVIEW_GATE", True)
+
+
+# --- observability (§4.9) --------------------------------------------------
+
+
+def log_level() -> str:
+    """Root log level for the daemon/CLI (``AUTOCRAWLER_LOG_LEVEL``; default INFO).
+
+    Upper-cased so a lowercase value still names a level ``logging.setLevel`` accepts.
+    """
+    return _str("AUTOCRAWLER_LOG_LEVEL", "INFO").upper()

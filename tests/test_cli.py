@@ -7,6 +7,7 @@ sandbox-backed validate are unit-testable; the live run/generate paths are not
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import cast
 
@@ -17,6 +18,7 @@ from bizup_autocrawler.ingest import NewsClient
 from bizup_autocrawler import config
 from bizup_autocrawler.cli import (
     _build_healer,
+    _configure_logging,
     _db_path,
     _probe,
     _record_site_failure,
@@ -91,6 +93,19 @@ def test_site_url_of_reads_the_constant() -> None:
 def test_db_path_strips_sqlite_scheme(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setenv("AUTOCRAWLER_STATE_URL", "sqlite:///data/x.db")
     assert _db_path() == "data/x.db"
+
+
+def test_configure_logging_honors_the_level_env(monkeypatch: MonkeyPatch) -> None:
+    # The daemon entrypoint must route the scheduler's INFO heartbeat to a handler at
+    # the configured level — otherwise the run loop's logs are swallowed in production.
+    monkeypatch.setenv("AUTOCRAWLER_LOG_LEVEL", "warning")
+    pkg = logging.getLogger("bizup_autocrawler")
+    original = pkg.level
+    try:
+        _configure_logging()
+        assert pkg.level == logging.WARNING
+    finally:
+        pkg.setLevel(original)
 
 
 def test_render_list_shows_script_presence_and_last_items(tmp_path: Path) -> None:

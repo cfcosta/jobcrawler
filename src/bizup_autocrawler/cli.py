@@ -46,6 +46,21 @@ _CRAWLERS_DIR = Path(__file__).parent / "crawlers"
 
 _log = logging.getLogger("bizup_autocrawler.cli")
 
+_LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
+
+
+def _configure_logging() -> None:
+    """Route the daemon/CLI's structured logs to stderr at the configured level (§4.9).
+
+    Without this the run loop's INFO heartbeat — each crawl's item counts, the regen
+    sweep tally — is swallowed and a production daemon looks dead. ``basicConfig`` is a
+    no-op once the root logger has handlers, so we also set our package logger's level
+    explicitly to honor ``AUTOCRAWLER_LOG_LEVEL`` even on a second entry.
+    """
+    level = config.log_level()
+    logging.basicConfig(level=level, format=_LOG_FORMAT)
+    logging.getLogger("bizup_autocrawler").setLevel(level)
+
 
 def _crawler_file(slug: str, crawlers_dir: Path = _CRAWLERS_DIR) -> Path:
     return crawlers_dir / f"{slug}.py"
@@ -196,6 +211,7 @@ def _crawl_targets(args: argparse.Namespace) -> list[Site]:
 
 
 def cmd_crawl(args: argparse.Namespace) -> int:
+    _configure_logging()  # surface runtime warnings (robots/politeness) on one-shot runs
     store = StateStore(_db_path())
     news = NewsClient(timeout=config.ingest_timeout())
     governor = RateGovernor(
@@ -287,6 +303,7 @@ def _build_healer(store: StateStore, sites: Sequence[Site]) -> SelfHealer:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
+    _configure_logging()  # the daemon must not run silent (§4.9)
     store = StateStore(_db_path())
     news = NewsClient(timeout=config.ingest_timeout())
     sites = load_sites(config.sites_path())

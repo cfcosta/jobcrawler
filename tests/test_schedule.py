@@ -9,6 +9,7 @@ work. Clock, crawl, and sleep are injected so the timing is deterministic.
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -240,6 +241,86 @@ async def test_regen_tick_assesses_and_persists_health() -> None:
 async def test_regen_tick_is_a_noop_without_a_healer() -> None:
     sched = _sched(StateStore(":memory:"), healer=None)
     assert await sched.regen_tick() == {}
+
+
+# -- structured run-loop logging (§4.9 operability) --------------------------
+
+
+async def test_tick_logs_each_crawl_outcome(caplog: pytest.LogCaptureFixture) -> None:
+    # A production daemon must not be silent: every dispatched crawl logs its item
+    # counts at INFO so an operator can see the loop is working without a debugger.
+    store = StateStore(":memory:", clock=lambda: T0)
+
+    async def crawl(site: Site) -> CrawlSummary:
+        return CrawlSummary(
+            site.slug, items_found=4, new_items=2, errors=0, pages_fetched=3
+        )
+
+    sched = Scheduler(
+        [Site(slug="s0", url="https://x.com")],
+        store=store,
+        crawl=crawl,
+        clock=lambda: T0,
+    )
+    with caplog.at_level(logging.INFO, logger="bizup_autocrawler.schedule"):
+        await sched.tick()
+
+    line = next(r.getMessage() for r in caplog.records if "slug=s0" in r.getMessage())
+    assert "found=4" in line and "new=2" in line and "pages=3" in line
+
+
+async def test_tick_warns_when_a_crawl_is_dropped_after_retries(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A site that exhausts its retries is dropped (a §4.8 health signal), but the drop
+    # must be visible at WARNING — silently vanishing work is the bug this guards.
+    async def always_fail(site: Site) -> CrawlSummary:
+        raise RuntimeError("boom")
+
+    sched = Scheduler(
+        [Site(slug="s0", url="https://x.com")],
+        store=StateStore(":memory:"),
+        crawl=always_fail,
+        clock=lambda: T0,
+        max_retries=0,
+    )
+    with caplog.at_level(logging.WARNING, logger="bizup_autocrawler.schedule"):
+        await sched.tick()
+
+    assert any(
+        r.levelno == logging.WARNING and "s0" in r.getMessage() for r in caplog.records
+    )
+
+
+async def test_regen_tick_logs_a_summary(caplog: pytest.LogCaptureFixture) -> None:
+    # The §4.8 sweep logs a one-line state tally so a drifting fleet is visible.
+    store = _stale_store()
+    sched = _sched(store, healer=_healer(store, reprobe_items=0, regen_passes=False))
+    with caplog.at_level(logging.INFO, logger="bizup_autocrawler.schedule"):
+        await sched.regen_tick()
+
+    line = next(r.getMessage() for r in caplog.records if "assessed=" in r.getMessage())
+    assert "assessed=1" in line and "generation_failed=1" in line
+
+
+async def test_run_logs_startup(caplog: pytest.LogCaptureFixture) -> None:
+    # The loop announces its operating parameters once on start (sites + cadences),
+    # so a deployed daemon's logs confirm it came up and how it's configured.
+    sched = Scheduler(
+        [Site(slug="s0", url="https://x.com")],
+        store=StateStore(":memory:", clock=lambda: T0),
+        crawl=_ok_crawl,
+        clock=lambda: T0,
+    )
+    stop = asyncio.Event()
+    stop.set()  # stop immediately; only the pre-loop startup line is under test
+    with caplog.at_level(logging.INFO, logger="bizup_autocrawler.schedule"):
+        await sched.run(stop=stop, interval=0.001)
+
+    assert any(
+        "starting" in r.getMessage() and "sites=1" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 async def test_regen_tick_skips_disabled_sites() -> None:

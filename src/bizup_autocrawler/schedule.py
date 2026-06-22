@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Protocol
@@ -105,6 +106,12 @@ def _regen_interval(raw: str) -> timedelta | None:
         return None
 
 
+def _state_summary(states: dict[str, HealthState]) -> str:
+    """A compact ``healthy=2 pending_review=1`` tally for the regen sweep log line."""
+    counts = Counter(state.value for state in states.values())
+    return " ".join(f"{name}={counts[name]}" for name in sorted(counts))
+
+
 class Scheduler:
     def __init__(
         self,
@@ -162,12 +169,41 @@ class Scheduler:
             return parse_duration(self._default)  # cron exprs deferred to a later v
 
     async def tick(self) -> list[CrawlSummary]:
-        """Dispatch every currently-due site (bounded), returning the successes."""
+        """Dispatch every currently-due site (bounded), returning the successes.
+
+        Each dispatched crawl logs its outcome (the daemon's operational heartbeat,
+        §4.9): item counts at INFO on success, a WARNING when a site is dropped after
+        exhausting its retries so the lost work isn't invisible.
+        """
         due = self.due_sites()
+        if due:
+            _log.info(
+                "tick dispatching n=%d sites=%s",
+                len(due),
+                ",".join(s.slug for s in due),
+            )
         results = await asyncio.gather(
             *(self._dispatch(s) for s in due), return_exceptions=True
         )
-        return [r for r in results if isinstance(r, CrawlSummary)]
+        summaries: list[CrawlSummary] = []
+        for site, result in zip(due, results):
+            if isinstance(result, CrawlSummary):
+                _log.info(
+                    "crawl ok slug=%s found=%d new=%d pages=%d errors=%d",
+                    result.site,
+                    result.items_found,
+                    result.new_items,
+                    result.pages_fetched,
+                    result.errors,
+                )
+                summaries.append(result)
+            else:
+                # Persistent failure after the bounded retries — dropped as a §4.8
+                # health signal (the regen sweep handles it), but surfaced, not silent.
+                _log.warning(
+                    "crawl dropped slug=%s after retries: %r", site.slug, result
+                )
+        return summaries
 
     def regen_due(self, now: datetime) -> bool:
         """True if a §4.8 staleness sweep is due (per ``AUTOCRAWLER_REGEN_CHECK``)."""
@@ -199,6 +235,8 @@ class Scheduler:
                 # One site's regenerate (LM / Deno / network) raising must not abort
                 # the sweep or the daemon — isolate it, log, and assess the rest (§4.8).
                 _log.exception("regen sweep failed for %s; skipping", site.slug)
+        if states:
+            _log.info("regen sweep assessed=%d %s", len(states), _state_summary(states))
         return states
 
     async def run(self, *, stop: asyncio.Event, interval: float = 60.0) -> None:
@@ -207,6 +245,12 @@ class Scheduler:
         The slow §4.8 regeneration sweep hangs off the same loop on its own cadence
         — never ``.compile()`` in-band (that offline GEPA work is §4.11's hand-off).
         """
+        _log.info(
+            "scheduler starting sites=%d interval=%ss regen=%s",
+            len(self._sites),
+            interval,
+            "off" if self._regen_interval is None else self._regen_interval,
+        )
         while not stop.is_set():
             try:
                 await self.tick()
