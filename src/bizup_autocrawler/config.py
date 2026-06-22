@@ -54,6 +54,25 @@ def sub_model() -> str | None:
     return _opt("AUTOCRAWLER_SUB_MODEL")
 
 
+def require_sub_model() -> str:
+    """The ``sub_lm`` model, erroring if unset (§4.2/§11).
+
+    An unset ``sub_lm`` silently falls back to the *root* planner LM inside
+    ``dspy.RLM``, billing every in-sandbox ``llm_query`` at planner rates. The spec
+    makes ``AUTOCRAWLER_SUB_MODEL`` **required** precisely so this fails loud instead
+    of quietly overspending — generation call sites must use this, never the
+    ``sub_model() or model()`` fallback it replaces.
+    """
+    value = sub_model()
+    if value is None:
+        raise RuntimeError(
+            "AUTOCRAWLER_SUB_MODEL is required (§4.2): unset, every in-sandbox "
+            "llm_query silently bills at the root planner's rate. Set it to a cheap, "
+            "code-capable model (e.g. a small/instruct tier)."
+        )
+    return value
+
+
 def reflection_model() -> str | None:
     """GEPA ``reflection_lm`` (strong, ideally a different family); §4.11/M5."""
     return _opt("AUTOCRAWLER_REFLECTION_MODEL")
@@ -76,6 +95,17 @@ def max_subcalls() -> int:
 
 def fanout_spend_cap() -> str:
     return _str("AUTOCRAWLER_FANOUT_SPEND_CAP", "$8/site")
+
+
+def fanout_spend_cap_usd() -> float:
+    """The §4.2 aggregate fan-out spend ceiling as a float USD/site.
+
+    Parses the human-friendly ``$8/site`` form (and a bare ``8`` / ``8.0``) into the
+    dollar budget the selection fan-out is bounded by. Size it against the p95 tail,
+    not the mean (§4.2).
+    """
+    raw = fanout_spend_cap().strip().lstrip("$").split("/")[0].strip()
+    return float(raw)
 
 
 def fanout_n() -> int:

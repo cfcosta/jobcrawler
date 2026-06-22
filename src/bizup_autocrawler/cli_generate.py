@@ -36,6 +36,7 @@ from bizup_autocrawler.generate.gates import (
     stability_verdict,
 )
 from bizup_autocrawler.generate.adversarial import cross_validate
+from bizup_autocrawler.generate.budget import CappedLM
 from bizup_autocrawler.generate.generator import best_of_n, load_generator
 from bizup_autocrawler.generate.scoring import CandidateResult, make_reward_fn
 from bizup_autocrawler.generate.snapshot import prefetch_corpus
@@ -71,10 +72,26 @@ def regenerate_one(slug: str) -> bool:
     site = find_site(load_sites(config.sites_path()), slug)
     if site is None:
         return False
+    root_lm, sub_lm = _build_lms()
+    return asyncio.run(_generate_one(site, root_lm, sub_lm))
+
+
+def _build_lms() -> tuple[dspy.LM, dspy.LM]:
+    """The §4.2 LM pair: a strong root planner + the cheap, host-capped ``sub_lm``.
+
+    ``require_sub_model()`` errors when ``AUTOCRAWLER_SUB_MODEL`` is unset rather than
+    silently billing every in-sandbox ``llm_query`` at the root planner's rate, and
+    ``CappedLM`` adds the unconditional sub-call kill (the only hard stop on a
+    catch-and-continue loop). Both caps are host-side, never seen by the generator.
+    """
     max_tokens = config.max_tokens()
     root_lm = dspy.LM(config.model(), max_tokens=max_tokens)
-    sub_lm = dspy.LM(config.sub_model() or config.model(), max_tokens=max_tokens)
-    return asyncio.run(_generate_one(site, root_lm, sub_lm))
+    sub_lm = CappedLM(
+        config.require_sub_model(),
+        max_subcalls=config.max_subcalls(),
+        max_tokens=max_tokens,
+    )
+    return root_lm, sub_lm
 
 
 def _select(sites: list[Site], args: argparse.Namespace) -> list[Site]:
@@ -88,10 +105,7 @@ def _select(sites: list[Site], args: argparse.Namespace) -> list[Site]:
 
 
 async def _run(targets: list[Site]) -> int:
-    max_tokens = config.max_tokens()
-    root_lm = dspy.LM(config.model(), max_tokens=max_tokens)
-    # Explicit sub_lm — never None, which dspy silently bills at root rates (§4.2).
-    sub_lm = dspy.LM(config.sub_model() or config.model(), max_tokens=max_tokens)
+    root_lm, sub_lm = _build_lms()
     failures = 0
     for site in targets:
         if not await _generate_one(site, root_lm, sub_lm):
@@ -127,7 +141,10 @@ async def _generate_one(site: Site, root_lm: dspy.LM, sub_lm: dspy.LM) -> bool:
     )
 
     async def make_attempt(i: int) -> object:
-        with dspy.context(lm=root_lm.copy(rollout_id=i, temperature=1.0)):
+        # track_usage so each candidate's $ cost is readable for the §4.2 fan-out cap.
+        with dspy.context(
+            lm=root_lm.copy(rollout_id=i, temperature=1.0), track_usage=True
+        ):
             return await generator.aforward(
                 site_url=site.url,
                 corpus=corpus,
@@ -140,6 +157,8 @@ async def _generate_one(site: Site, root_lm: dspy.LM, sub_lm: dspy.LM) -> bool:
         reward=lambda pred: reward_fn(inputs, pred),
         n=config.fanout_n(),
         threshold=1.0,
+        cost=_pred_cost,  # aggregate FANOUT_SPEND_CAP across the fan-out (§4.2)
+        spend_cap=config.fanout_spend_cap_usd(),
     )
     if best is None:
         print(f"FAIL {site.slug}: no candidate produced")
@@ -207,6 +226,30 @@ def gate_winner(
         return False, f"stability: near-random across two runs (jaccard {jaccard:.2f})"
 
     return True, "ok"
+
+
+def _pred_cost(pred: object) -> float:
+    """Best-effort USD cost of one candidate from dspy's LM-usage tracking.
+
+    Returns 0.0 when no usage/cost signal is available (e.g. a provider litellm has
+    no cost map for) — the §4.2 fan-out is then bounded structurally by ``fanout_n``
+    and each candidate by the per-trajectory ``MAX_SUBCALLS`` kill, never by a
+    fabricated number.
+    """
+    getter = getattr(pred, "get_lm_usage", None)
+    if not callable(getter):
+        return 0.0
+    try:
+        usage = getter() or {}
+    except Exception:
+        return 0.0
+    if not isinstance(usage, dict):
+        return 0.0
+    total = 0.0
+    for entry in usage.values():
+        if isinstance(entry, dict) and isinstance(entry.get("cost"), (int, float)):
+            total += float(entry["cost"])
+    return total
 
 
 def _sample_urls(result: CandidateResult) -> list[str]:

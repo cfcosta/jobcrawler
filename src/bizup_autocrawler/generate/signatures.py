@@ -31,6 +31,9 @@ class GenerateCrawler(dspy.Signature):
     crawl(ctx) yielding items). Validate it with validate_crawler before
     submitting; it must yield several items, each with a non-empty title, body,
     and on-domain URL.
+
+    Reason in code over the snapshot; use llm_query sparingly (a few targeted
+    calls at most — never a per-URL or per-item loop of sub-calls).
     """
 
     site_url: str = dspy.InputField(desc="site root / section URL")

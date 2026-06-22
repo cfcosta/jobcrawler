@@ -29,9 +29,10 @@ class Item(BaseModel):
 class Ctx(Protocol):
     """The single fetch boundary a crawler is handed (§4.5).
 
-    All network access goes through ``ctx`` so the runner enforces robots,
-    rate-limit, timeouts, the SSRF guard, and encoding centrally — the script
-    declares *what* to fetch, not *how*.
+    All network access goes through ``ctx`` so timeouts, the SSRF guard, and
+    encoding are enforced centrally now, and robots / rate-limit / Cloudflare
+    join them with the M2 politeness layer — the script declares *what* to
+    fetch, not *how*.
     """
 
     def fetch(self, url: str) -> str: ...

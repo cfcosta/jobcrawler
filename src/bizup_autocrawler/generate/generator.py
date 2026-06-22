@@ -25,6 +25,7 @@ import dspy
 from dspy.primitives import CodeInterpreter
 
 from bizup_autocrawler import config
+from bizup_autocrawler.generate.budget import reset_subcalls
 from bizup_autocrawler.generate.signatures import DiscoveryStrategy, GenerateCrawler
 
 
@@ -40,6 +41,9 @@ class CrawlerGenerator(dspy.Module):
     ) -> None:
         super().__init__()
         self.strategy = dspy.ChainOfThought(DiscoveryStrategy)
+        # Held for the §4.2 per-trajectory sub-call budget reset (a CappedLM in
+        # production; duck-typed so a plain/fake sub_lm in tests is a no-op).
+        self._sub_lm = sub_lm
         self.rlm = dspy.RLM(
             GenerateCrawler,
             tools=tools or [],
@@ -62,6 +66,9 @@ class CrawlerGenerator(dspy.Module):
         hints: str = "",
     ) -> dspy.Prediction:
         """Generate one crawler candidate: run the owned strategy, then the RLM."""
+        # One aforward is one trajectory: reset the host sub-call budget so the
+        # ceiling bounds *this* generation, not the cumulative fan-out/batch (§4.2).
+        reset_subcalls(self._sub_lm)
         plan = await self.strategy.acall(site_features=site_features(corpus))
         return await self.rlm.acall(
             site_url=site_url,
@@ -125,6 +132,8 @@ async def best_of_n(
     reward: Callable[[object], float],
     n: int,
     threshold: float = 1.0,
+    cost: Callable[[object], float] | None = None,
+    spend_cap: float | None = None,
 ) -> tuple[object, float]:
     """§6 sequential best-of-N for the async generator: argmax over the scalar.
 
@@ -133,9 +142,17 @@ async def best_of_n(
     ``reward`` and early-breaks the moment one clears ``threshold`` (the win is
     the break, not parallelism). Unlike ``select_best`` (stock sync ``BestOfN``),
     this drives an ``aforward``-only module directly — the §4.11 async caveat.
+
+    ``cost`` + ``spend_cap`` enforce the §4.2 aggregate ``FANOUT_SPEND_CAP``: the
+    cumulative ``cost(pred)`` is tracked and the fan-out stops once it reaches the
+    cap (after keeping the best so far), so a long tail of expensive candidates
+    can't run away. With no cap (or a cost that reports 0 — no usage signal), the
+    fan-out is still bounded structurally by ``n`` and each candidate by the
+    per-trajectory ``MAX_SUBCALLS`` kill.
     """
     best: object = None
     best_reward = float("-inf")
+    spent = 0.0
     for i in range(n):
         try:
             pred = await make_attempt(i)
@@ -149,6 +166,14 @@ async def best_of_n(
             best, best_reward = pred, value
         if value >= threshold:
             break
+        if cost is not None and spend_cap is not None:
+            spent += cost(pred)
+            if spent >= spend_cap:
+                print(
+                    f"[best_of_n] fan-out spend cap reached: ${spent:.2f} >= "
+                    f"${spend_cap:.2f} — stopping after {i + 1} candidate(s)"
+                )
+                break
     return best, best_reward
 
 

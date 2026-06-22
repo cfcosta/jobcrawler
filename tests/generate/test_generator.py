@@ -200,6 +200,39 @@ async def test_best_of_n_skips_a_failing_attempt() -> None:
     assert best == 2 and value == 2.0  # the failed attempt is skipped, not fatal
 
 
+async def test_best_of_n_stops_at_the_fanout_spend_cap() -> None:
+    # The §4.2 aggregate spend cap bounds the fan-out: at $3/candidate with a $5 cap,
+    # the loop stops after the candidate that crosses it — never launching the rest.
+    seen: list[int] = []
+
+    async def make_attempt(i: int) -> object:
+        seen.append(i)
+        return i
+
+    best, value = await best_of_n(
+        make_attempt,
+        reward=lambda p: 0.1,  # never clears the threshold
+        n=10,
+        threshold=1.0,
+        cost=lambda p: 3.0,
+        spend_cap=5.0,
+    )
+    assert seen == [0, 1]  # $3 then $6 ≥ $5 → stop, candidates 2..9 never run
+    assert best == 0  # constant reward → the first candidate stays the argmax
+
+
+async def test_best_of_n_without_spend_cap_runs_all_candidates() -> None:
+    # Cost accounting is opt-in: absent a cap, prior behavior is unchanged.
+    seen: list[int] = []
+
+    async def make_attempt(i: int) -> object:
+        seen.append(i)
+        return i
+
+    await best_of_n(make_attempt, reward=lambda p: 0.1, n=4, threshold=1.0)
+    assert seen == [0, 1, 2, 3]
+
+
 # -- §4.11 persistence: save / boot-load / rollback --------------------------
 
 _OPTIMIZED = "OPTIMIZED DISCOVERY RULES"

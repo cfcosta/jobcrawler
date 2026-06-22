@@ -75,3 +75,37 @@ def test_sub_model_required_returns_none_when_unset(
 ) -> None:
     monkeypatch.delenv("AUTOCRAWLER_SUB_MODEL", raising=False)
     assert config.sub_model() is None
+
+
+def test_require_sub_model_errors_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    # §4.2/§11: an unset sub_lm silently bills every llm_query at root rates, so the
+    # caller must error rather than fall back — never `sub_model() or model()`.
+    monkeypatch.delenv("AUTOCRAWLER_SUB_MODEL", raising=False)
+    with pytest.raises(RuntimeError, match="AUTOCRAWLER_SUB_MODEL"):
+        config.require_sub_model()
+
+
+def test_require_sub_model_returns_value_when_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTOCRAWLER_SUB_MODEL", "openrouter/cheap/model")
+    assert config.require_sub_model() == "openrouter/cheap/model"
+
+
+def test_fanout_spend_cap_usd_parses_dollar_per_site(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTOCRAWLER_FANOUT_SPEND_CAP", "$8/site")
+    assert config.fanout_spend_cap_usd() == 8.0
+
+
+def test_fanout_spend_cap_usd_accepts_bare_number(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTOCRAWLER_FANOUT_SPEND_CAP", "12.5")
+    assert config.fanout_spend_cap_usd() == 12.5
+
+
+def test_fanout_spend_cap_usd_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AUTOCRAWLER_FANOUT_SPEND_CAP", raising=False)
+    assert config.fanout_spend_cap_usd() == 8.0

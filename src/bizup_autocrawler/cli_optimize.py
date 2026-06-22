@@ -24,6 +24,7 @@ from typing import cast
 import dspy
 
 from bizup_autocrawler import config
+from bizup_autocrawler.generate.budget import CappedLM
 from bizup_autocrawler.generate.generator import (
     CrawlerGenerator,
     load_generator,
@@ -100,7 +101,13 @@ def _optimize(
     """The live optimize step — build the metrics + incumbent, then run_optimization."""
     max_tokens = config.max_tokens()
     root_lm = dspy.LM(config.model(), max_tokens=max_tokens)
-    sub_lm = dspy.LM(config.sub_model() or config.model(), max_tokens=max_tokens)
+    # Required cheap sub_lm + the §4.2 host sub-call kill (never the silent root
+    # fallback, which bills every llm_query at planner rates).
+    sub_lm = CappedLM(
+        config.require_sub_model(),
+        max_subcalls=config.max_subcalls(),
+        max_tokens=max_tokens,
+    )
 
     def core(source: str, carrier: object) -> CandidateResult:
         host = normalize_host(_carrier_site_url(carrier))
