@@ -137,6 +137,15 @@ def test_crawl_isolation_knobs_parse_env(monkeypatch: pytest.MonkeyPatch) -> Non
     assert config.crawl_mem_mb() == 512
 
 
+def test_fetch_timeout_default_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # §4.5: per-request HTTP timeout for the live crawl/robots client, well under the
+    # subprocess wall-clock so one hung socket can't eat the whole crawl budget.
+    monkeypatch.delenv("AUTOCRAWLER_FETCH_TIMEOUT", raising=False)
+    assert config.fetch_timeout() == 20.0
+    monkeypatch.setenv("AUTOCRAWLER_FETCH_TIMEOUT", "5")
+    assert config.fetch_timeout() == 5.0
+
+
 def test_solver_defaults_to_none(monkeypatch: pytest.MonkeyPatch) -> None:
     # §4.10: the safe default is no solver (plain httpx). The old "stealth" default
     # named an unbuilt backend, so make_solver() raised NotImplementedError on boot.

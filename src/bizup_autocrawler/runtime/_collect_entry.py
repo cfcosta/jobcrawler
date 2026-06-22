@@ -22,13 +22,16 @@ from typing import cast
 from bizup_autocrawler.runtime.contract import Item
 from bizup_autocrawler.runtime.ctx import Ctx
 from bizup_autocrawler.runtime.hardening import harden_xml
+from bizup_autocrawler.runtime.live_ctx import build_live_ctx
 
 
 def _build_ctx(allowed_hosts: set[str]) -> Ctx:
-    # A live, SSRF-guarded ctx — the committed crawl fetches the real site. This is
-    # the seam the production live-Ctx factory enriches with the §4.5 per-host pacer,
-    # robots policy, and the §4.10 solver/clearance + egress proxy from config.
-    return Ctx(allowed_hosts)
+    # The production crawl path: a live, SSRF-guarded ctx that fetches the real site
+    # through the §4.5 per-host pacer + robots policy and the §4.10 solver/clearance +
+    # egress proxy, all assembled from config. Config is read here (in the child),
+    # which inherits the daemon's environment. Politeness is on by default — a
+    # committed crawler never contains any of this logic.
+    return build_live_ctx(allowed_hosts)
 
 
 def main() -> None:

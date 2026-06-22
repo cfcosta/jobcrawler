@@ -219,6 +219,15 @@ def max_pages() -> int:
     return _int("AUTOCRAWLER_MAX_PAGES", 200)
 
 
+def fetch_timeout() -> float:
+    """Per-request HTTP timeout for a production crawl's fetches (§4.5).
+
+    Bounds a single hung fetch so one stuck socket can't eat the whole subprocess
+    wall-clock budget (:func:`crawl_timeout`); kept well under it. The validation
+    sandbox keeps its own tight default — this is the live crawl/robots client."""
+    return _float("AUTOCRAWLER_FETCH_TIMEOUT", 20.0)
+
+
 # --- committed-crawl isolation (§4.4) --------------------------------------
 # A committed crawler runs on the production schedule in an isolated subprocess
 # (rlimits + wall-clock timeout) so a runaway one can't take down the daemon.
