@@ -15,6 +15,7 @@ import argparse
 import ast
 import asyncio
 import importlib
+import logging
 import signal
 from collections.abc import Sequence
 from pathlib import Path
@@ -34,6 +35,8 @@ from bizup_autocrawler.trainset import record_failure
 from bizup_autocrawler.urls import normalize_host
 
 _CRAWLERS_DIR = Path(__file__).parent / "crawlers"
+
+_log = logging.getLogger("bizup_autocrawler.cli")
 
 
 def _crawler_file(slug: str, crawlers_dir: Path = _CRAWLERS_DIR) -> Path:
@@ -247,6 +250,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     store = StateStore(_db_path())
     news = NewsClient(timeout=config.ingest_timeout())
     sites = load_sites(config.sites_path())
+
+    # A prior daemon killed mid-crawl leaves finished=NULL run rows; the scheduler
+    # would treat those sites as perpetually in-flight and never re-dispatch them.
+    # Reap before the scheduler starts (single-process §4.9: nothing is in-flight yet).
+    reaped = store.reap_orphans()
+    if reaped:
+        _log.warning("reaped %d orphaned run row(s) from a prior crash", reaped)
 
     async def crawl(site: Site) -> CrawlSummary:
         return await asyncio.to_thread(crawl_one, site, store=store, news=news)

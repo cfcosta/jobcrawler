@@ -287,6 +287,73 @@ def test_regen_disabled_without_a_healer() -> None:
     assert sched.regen_due(T0) is False
 
 
+def _two_site_stale_store() -> StateStore:
+    store = StateStore(":memory:", clock=lambda: T0)
+    for slug in ("s0", "s1"):
+        baseline = store.start_run(slug)
+        store.finish_run(
+            baseline, items_found=8, new_items=8, errors=0, pages_fetched=2
+        )
+        latest = store.start_run(slug)
+        store.finish_run(latest, items_found=0, new_items=0, errors=1, pages_fetched=1)
+    return store
+
+
+async def test_regen_tick_isolates_a_single_sites_failure() -> None:
+    # One site's regenerate (LM/Deno/network) raising must not abort the sweep or the
+    # daemon — the other sites are still assessed (§4.8 failure isolation).
+    store = _two_site_stale_store()
+
+    async def reprobe(slug: str) -> int:
+        return 0  # confirmed stale → proceeds to regenerate
+
+    async def regenerate(slug: str) -> bool:
+        if slug == "s0":
+            raise RuntimeError("LM backend exploded")
+        return True
+
+    healer = SelfHealer(store, reprobe=reprobe, regenerate=regenerate)
+    sched = Scheduler(
+        [Site(slug="s0", url="https://x.com"), Site(slug="s1", url="https://x.com")],
+        store=store,
+        crawl=_ok_crawl,
+        healer=healer,
+        clock=lambda: T0,
+    )
+    states = await sched.regen_tick()  # must not raise
+    assert states["s1"] is HealthState.HEALTHY  # the healthy site was still assessed
+    assert "s0" not in states  # the failing site is isolated, not fleet-fatal
+
+
+async def test_run_loop_survives_a_tick_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = StateStore(":memory:", clock=lambda: T0)
+    sched = Scheduler(
+        [Site(slug="s0", url="https://x.com")],
+        store=store,
+        crawl=_ok_crawl,
+        clock=lambda: T0,
+    )
+    calls = 0
+    real_tick = sched.tick
+
+    async def flaky_tick() -> list[CrawlSummary]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("transient loop error")
+        return await real_tick()
+
+    monkeypatch.setattr(sched, "tick", flaky_tick)
+    stop = asyncio.Event()
+
+    async def stopper() -> None:
+        await asyncio.sleep(0.03)
+        stop.set()
+
+    await asyncio.gather(sched.run(stop=stop, interval=0.005), stopper())
+    assert calls >= 2  # the loop kept ticking after the first tick raised
+
+
 async def test_run_invokes_regen_at_least_once() -> None:
     store = _stale_store()
     healer = _healer(store, reprobe_items=0, regen_passes=False)

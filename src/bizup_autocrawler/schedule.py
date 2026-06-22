@@ -24,6 +24,7 @@ off the same loop and land with those features; ``compile()`` never runs in-band
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime, timedelta, timezone
@@ -36,6 +37,8 @@ from bizup_autocrawler.durations import parse_duration
 from bizup_autocrawler.health import HealthState
 from bizup_autocrawler.runtime.runner import CrawlSummary
 from bizup_autocrawler.state import StateStore
+
+_log = logging.getLogger("bizup_autocrawler.schedule")
 
 
 class Healer(Protocol):
@@ -188,8 +191,14 @@ class Scheduler:
             return {}
         states: dict[str, HealthState] = {}
         for site in self._sites:
-            if site.enabled:
+            if not site.enabled:
+                continue
+            try:
                 states[site.slug] = await self._healer.assess(site.slug)
+            except Exception:
+                # One site's regenerate (LM / Deno / network) raising must not abort
+                # the sweep or the daemon — isolate it, log, and assess the rest (§4.8).
+                _log.exception("regen sweep failed for %s; skipping", site.slug)
         return states
 
     async def run(self, *, stop: asyncio.Event, interval: float = 60.0) -> None:
@@ -199,11 +208,16 @@ class Scheduler:
         — never ``.compile()`` in-band (that offline GEPA work is §4.11's hand-off).
         """
         while not stop.is_set():
-            await self.tick()
-            now = self._clock()
-            if self.regen_due(now):
-                await self.regen_tick()
-                self.mark_regen(now)
+            try:
+                await self.tick()
+                now = self._clock()
+                if self.regen_due(now):
+                    await self.regen_tick()
+                    self.mark_regen(now)
+            except Exception:
+                # Last-resort guard: an unexpected error in a tick or sweep must not
+                # terminate the daemon — log it and carry on to the next interval.
+                _log.exception("scheduler loop iteration failed; continuing")
             try:
                 await asyncio.wait_for(stop.wait(), timeout=interval)
             except asyncio.TimeoutError:

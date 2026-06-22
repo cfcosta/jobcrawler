@@ -158,6 +158,21 @@ class StateStore:
             )
             self._conn.commit()
 
+    def reap_orphans(self) -> int:
+        """Clear runs left unfinished by a crash; returns how many were reaped.
+
+        ``start_run`` inserts ``finished=NULL``; a ``kill -9`` mid-crawl leaves it
+        NULL forever, and the scheduler's due-check treats an unfinished last run as
+        "in-flight" and never re-dispatches that site — wedging it permanently. Run
+        once at daemon startup (single-process §4.9, so no genuinely in-flight run
+        exists yet): the orphan row carries no useful counters, so dropping it makes
+        the site fall back to its prior completed run (or none) and become due again.
+        """
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM runs WHERE finished IS NULL")
+            self._conn.commit()
+            return cur.rowcount
+
     def last_run(self, site: str) -> RunRecord | None:
         history = self.runs_for(site, limit=1)
         return history[0] if history else None
