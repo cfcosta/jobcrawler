@@ -150,3 +150,25 @@ def test_wall_clock_timeout_hard_stops_a_hang() -> None:
     result = validate_crawler(hang, allowed_hosts={"x.com"}, timeout=1.0)
     assert result.exception is not None
     assert result.exception.type == "TimeoutError"
+
+
+def test_build_ctx_live_is_bare_by_default() -> None:
+    # Offline generation/scoring keeps a bare live Ctx (no pacer/robots): its restraint
+    # comes from the replay map and the page budget, not §4.5 throttling — so the RLM's
+    # exploration is not silently reshaped by robots/pacing.
+    from bizup_autocrawler.runtime._sandbox_entry import _build_ctx
+
+    ctx = _build_ctx({"example.com"}, None, polite=False)
+    assert ctx._pacer is None
+    assert ctx._robots is None
+
+
+def test_build_ctx_live_polite_mirrors_the_production_crawl() -> None:
+    # `autocrawl validate` opts in (polite=True), so its live ctx is assembled by the
+    # SAME build_live_ctx factory the scheduled crawl uses — per-host pacer + robots on,
+    # so a dry-run reflects exactly what production will (and won't) fetch.
+    from bizup_autocrawler.runtime._sandbox_entry import _build_ctx
+
+    ctx = _build_ctx({"example.com"}, None, polite=True)
+    assert ctx._pacer is not None
+    assert ctx._robots is not None

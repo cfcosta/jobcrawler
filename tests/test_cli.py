@@ -531,6 +531,31 @@ def test_validate_one_runs_the_sandbox(tmp_path: Path) -> None:
     assert result.item_count == 3
 
 
+def test_validate_one_previews_production_politeness(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    # `autocrawl validate` is the operator's dry-run preview of what the scheduled
+    # crawl will do, so it must run the committed crawler through the SAME §4.5-polite
+    # live ctx (per-host pacer + robots) production uses. Otherwise a crawler can
+    # validate clean yet under-collect in production, where robots blocks a path the
+    # bare validation ctx happily fetched (a train/serve skew).
+    from bizup_autocrawler import cli
+    from bizup_autocrawler.generate.scoring import CandidateResult
+
+    (tmp_path / "good.py").write_text(
+        'SITE = "https://example.com"\ndef crawl(ctx):\n    return []\n'
+    )
+    captured: dict[str, object] = {}
+
+    def fake_validate(source: str, **kwargs: object) -> CandidateResult:
+        captured.update(kwargs)
+        return CandidateResult(item_count=0, pages_fetched=0)
+
+    monkeypatch.setattr(cli, "validate_crawler", fake_validate)
+    cli.validate_one("good", crawlers_dir=tmp_path)
+    assert captured["polite"] is True
+
+
 def test_crawlers_dir_default_is_config_driven() -> None:
     # The module default must come from config.crawlers_dir() so a read-only Nix-store
     # deploy can relocate the writable crawlers dir via AUTOCRAWLER_CRAWLERS_DIR (§11).

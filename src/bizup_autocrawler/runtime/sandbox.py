@@ -46,14 +46,27 @@ def validate_crawler(
     replay: Mapping[str, Mapping[str, object]] | None = None,
     timeout: float = 10.0,
     mem_mb: int = 1024,
+    polite: bool = False,
 ) -> CandidateResult:
-    """Run one candidate crawler in an isolated subprocess → ``CandidateResult``."""
+    """Run one candidate crawler in an isolated subprocess → ``CandidateResult``.
+
+    ``polite`` only bites on the live path (``replay is None``): when set, the child
+    builds the §4.5-polite production ctx (per-host pacer + robots) via the same
+    ``build_live_ctx`` factory the scheduled crawl uses, so an ``autocrawl validate``
+    dry-run mirrors exactly what production will fetch. It defaults off so offline
+    generation/scoring keeps a bare ctx and is not reshaped by robots/pacing.
+    """
     ast_result = check_ast(source)
     if not ast_result.passed:
         return _failed("ASTGateError", ast_result.reason)
 
     payload = json.dumps(
-        {"source": source, "allowed_hosts": list(allowed_hosts), "replay": replay}
+        {
+            "source": source,
+            "allowed_hosts": list(allowed_hosts),
+            "replay": replay,
+            "polite": polite,
+        }
     )
     try:
         proc = subprocess.run(

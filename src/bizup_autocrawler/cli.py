@@ -199,10 +199,17 @@ def render_status(sites: Sequence[Site], store: StateStore) -> list[str]:
 
 
 def validate_one(slug: str, *, crawlers_dir: Path = _CRAWLERS_DIR) -> CandidateResult:
-    """Dry-run a committed script through the sandbox — no ingest (§10)."""
+    """Dry-run a committed script through the sandbox — no ingest (§10).
+
+    ``polite=True`` runs it through the §4.5 production ctx (per-host pacer + robots),
+    so the dry-run is a faithful preview of the scheduled crawl rather than a bare-ctx
+    fetch that could over-collect paths production's robots policy would refuse.
+    """
     source = _crawler_file(slug, crawlers_dir).read_text()
     host = normalize_host(_site_url_of(source))
-    return validate_crawler(source, allowed_hosts={host} if host else set())
+    return validate_crawler(
+        source, allowed_hosts={host} if host else set(), polite=True
+    )
 
 
 # -- crawl -------------------------------------------------------------------
