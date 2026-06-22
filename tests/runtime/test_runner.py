@@ -23,7 +23,7 @@ from bizup_autocrawler.ingest import NewsClient
 from bizup_autocrawler.runtime.contract import Ctx as CtxProtocol
 from bizup_autocrawler.runtime.contract import Item, load_crawler
 from bizup_autocrawler.runtime.ctx import Ctx
-from bizup_autocrawler.runtime.runner import crawl_site
+from bizup_autocrawler.runtime.runner import crawl_site, probe_crawler
 from bizup_autocrawler.state import StateStore
 from bizup_autocrawler.urls import canonicalize_url
 
@@ -297,6 +297,23 @@ def test_no_floor_preserves_prior_ingest_behavior() -> None:
     assert (summary.new_items, summary.incomplete) == (1, 0)
     assert len(posts) == 1
     store.close()
+
+
+def test_probe_crawler_counts_only_complete_items_no_ingest() -> None:
+    # The §4.8 re-probe: re-run the crawler, count complete items, never POST.
+    def crawl(ctx: CtxProtocol) -> Iterable[Item]:
+        yield _one("https://example.com/full", body="x" * 600)
+        yield _one("https://example.com/teaser", body="a short teaser")
+
+    assert probe_crawler(crawl, _ctx(), min_body_chars=400) == 1
+
+
+def test_probe_crawler_is_zero_when_nothing_complete() -> None:
+    # A site that now yields only teasers re-probes to zero → a confirmed failure.
+    def crawl(ctx: CtxProtocol) -> Iterable[Item]:
+        yield _one("https://example.com/a", body="short")
+
+    assert probe_crawler(crawl, _ctx(), min_body_chars=400) == 0
 
 
 def test_terminal_ingest_marks_seen_and_is_not_retried() -> None:

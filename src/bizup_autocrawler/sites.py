@@ -6,6 +6,7 @@ A checked-in list is the system's input — one entry per site, validated into t
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import yaml
@@ -19,5 +20,5 @@ def load_sites(path: str) -> list[Site]:
     return [Site.model_validate(entry) for entry in raw]
 
 
-def find_site(sites: list[Site], slug: str) -> Site | None:
+def find_site(sites: Sequence[Site], slug: str) -> Site | None:
     return next((s for s in sites if s.slug == slug), None)

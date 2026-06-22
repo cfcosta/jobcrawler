@@ -21,15 +21,16 @@ from pathlib import Path
 
 from bizup_autocrawler import config
 from bizup_autocrawler.generate.scoring import CandidateResult
-from bizup_autocrawler.health import HealthState, staleness_candidate
+from bizup_autocrawler.health import HealthState, SelfHealer, staleness_candidate
 from bizup_autocrawler.ingest import NewsClient
 from bizup_autocrawler.runtime.contract import load_crawler
 from bizup_autocrawler.runtime.ctx import Ctx
-from bizup_autocrawler.runtime.runner import CrawlSummary, crawl_site
+from bizup_autocrawler.runtime.runner import CrawlSummary, crawl_site, probe_crawler
 from bizup_autocrawler.runtime.sandbox import validate_crawler
 from bizup_autocrawler.schedule import Scheduler, Site
 from bizup_autocrawler.sites import find_site, load_sites
 from bizup_autocrawler.state import RunRecord, StateStore
+from bizup_autocrawler.trainset import record_failure
 from bizup_autocrawler.urls import normalize_host
 
 _CRAWLERS_DIR = Path(__file__).parent / "crawlers"
@@ -175,6 +176,73 @@ def cmd_crawl(args: argparse.Namespace) -> int:
     return 0
 
 
+def _probe(slug: str) -> int:
+    """Re-run a committed crawler and count its complete items, no ingest (§4.8).
+
+    The re-probe the self-healer uses to tell a real failure from a transient
+    outage. A site whose committed script is missing or unimportable probes to 0
+    (a confirmed failure → regenerate), never an exception that aborts the loop.
+    """
+    site = find_site(load_sites(config.sites_path()), slug)
+    if site is None:
+        return 0
+    try:
+        module = importlib.import_module(f"bizup_autocrawler.crawlers.{site.slug}")
+        site_url, crawl_fn = load_crawler(module)
+    except Exception:
+        return 0
+    return probe_crawler(
+        crawl_fn,
+        Ctx({normalize_host(site_url)}),
+        min_body_chars=config.min_body_chars(),
+        paywall_markers=config.paywall_markers(),
+    )
+
+
+def _record_site_failure(sites: Sequence[Site], slug: str) -> None:
+    """Capture a confirmed-failed site as a §4.11 hard case (the optimizer's signal).
+
+    Only the site identity / render / hints are stored; the corpus is re-prefetched
+    fresh at optimize time so the strategy is scored against the site's *current*
+    (drifted) state (:func:`bizup_autocrawler.trainset.record_failure`).
+    """
+    site = find_site(sites, slug)
+    if site is not None:
+        record_failure(
+            config.trainset_path(),
+            slug=slug,
+            site_url=site.url,
+            render=site.render,
+            hints=site.hints,
+        )
+
+
+def _build_healer(store: StateStore, sites: Sequence[Site]) -> SelfHealer:
+    """The production §4.8 self-healer the scheduler drives on its regen timer.
+
+    ``reprobe`` re-runs the live crawler (a real failure vs a transient blip);
+    ``regenerate`` re-runs the generator for the slug (lazy import — it pulls dspy).
+    A confirmed failure is first captured as a §4.11 hard case, so a genuinely
+    broken site feeds the offline optimizer before self-healing tries to fix it.
+    Both live calls run off the event loop via ``to_thread``.
+    """
+
+    async def reprobe(slug: str) -> int:
+        return await asyncio.to_thread(_probe, slug)
+
+    async def regenerate(slug: str) -> bool:
+        from bizup_autocrawler.cli_generate import regenerate_one
+
+        return await asyncio.to_thread(regenerate_one, slug)
+
+    return SelfHealer(
+        store,
+        reprobe=reprobe,
+        regenerate=regenerate,
+        on_confirmed_failure=lambda slug: _record_site_failure(sites, slug),
+    )
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     store = StateStore(_db_path())
     news = NewsClient(timeout=config.ingest_timeout())
@@ -183,7 +251,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     async def crawl(site: Site) -> CrawlSummary:
         return await asyncio.to_thread(crawl_one, site, store=store, news=news)
 
-    scheduler = Scheduler(sites, store=store, crawl=crawl)
+    scheduler = Scheduler(
+        sites, store=store, crawl=crawl, healer=_build_healer(store, sites)
+    )
 
     async def serve() -> None:
         stop = asyncio.Event()

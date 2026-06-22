@@ -61,6 +61,22 @@ def generate_command(args: argparse.Namespace) -> int:
     return asyncio.run(_run(targets))
 
 
+def regenerate_one(slug: str) -> bool:
+    """Regenerate one site's crawler; True iff a gate-passing crawler was written.
+
+    The §4.8 self-healing entry point — the scheduler's regen timer calls this for a
+    confirmed-stale site. Runs the full §6 generation for that one site (writing
+    crawlers/<slug>.py on a gate pass), exactly like ``autocrawl generate <slug>``.
+    """
+    site = find_site(load_sites(config.sites_path()), slug)
+    if site is None:
+        return False
+    max_tokens = config.max_tokens()
+    root_lm = dspy.LM(config.model(), max_tokens=max_tokens)
+    sub_lm = dspy.LM(config.sub_model() or config.model(), max_tokens=max_tokens)
+    return asyncio.run(_generate_one(site, root_lm, sub_lm))
+
+
 def _select(sites: list[Site], args: argparse.Namespace) -> list[Site]:
     if args.all:
         return [s for s in sites if s.enabled]

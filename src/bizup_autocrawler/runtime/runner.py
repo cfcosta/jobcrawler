@@ -124,6 +124,26 @@ def crawl_site(
     )
 
 
+def probe_crawler(
+    crawl_fn: CrawlFn,
+    ctx: Ctx,
+    *,
+    min_body_chars: int = 0,
+    paywall_markers: tuple[str, ...] = (),
+) -> int:
+    """Run a crawler and count its **complete** items — no ingest, no state (§4.8).
+
+    The re-probe that confirms a staleness candidate is a *real* failure rather than
+    a transient outage: re-run the crawler and see whether it still parses >= 1
+    complete item. Mirrors the crawl path's collect + completeness filter (so a
+    paywalled-teaser-only result counts as zero), but never POSTs or touches the
+    store. XML is hardened first, since the crawler may parse an attacker feed (§8).
+    """
+    harden_xml()
+    items, _ = _collect(crawl_fn, ctx)
+    return len(_complete_items(items, min_body_chars, paywall_markers))
+
+
 def _collect(crawl_fn: CrawlFn, ctx: Ctx) -> tuple[list[Item], int]:
     """Drain the crawler, isolating any failure to this site (§4.4)."""
     items: list[Item] = []

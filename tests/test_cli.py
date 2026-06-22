@@ -11,8 +11,11 @@ from pathlib import Path
 
 from pytest import MonkeyPatch
 
+from bizup_autocrawler import config
 from bizup_autocrawler.cli import (
+    _build_healer,
     _db_path,
+    _record_site_failure,
     _site_url_of,
     build_parser,
     cmd_crawl,
@@ -23,8 +26,10 @@ from bizup_autocrawler.cli import (
     render_list,
     validate_one,
 )
+from bizup_autocrawler.health import HealthState
 from bizup_autocrawler.schedule import Site
 from bizup_autocrawler.state import StateStore
+from bizup_autocrawler.trainset import load_records
 
 
 def test_parser_dispatches_each_command() -> None:
@@ -90,6 +95,71 @@ def test_render_list_surfaces_persisted_generation_failed(tmp_path: Path) -> Non
     )
 
     assert "health=gen-failed" in lines[0]
+    store.close()
+
+
+def test_record_site_failure_writes_a_hard_case(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    # A confirmed-failed site is captured as a §4.11 hard case (site identity only —
+    # the corpus is re-prefetched fresh at optimize time).
+    path = str(tmp_path / "trainset.jsonl")
+    monkeypatch.setattr(config, "trainset_path", lambda: path)
+    sites = [
+        Site(slug="valor", url="https://valor.com", render="static", hints="rss only")
+    ]
+
+    _record_site_failure(sites, "valor")
+
+    records = load_records(path)
+    assert len(records) == 1
+    assert records[0]["kind"] == "hard"
+    assert records[0]["slug"] == "valor"
+    assert records[0]["site_url"] == "https://valor.com"
+    assert records[0]["render"] == "static"
+
+
+def test_record_site_failure_unknown_slug_is_a_noop(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    path = str(tmp_path / "trainset.jsonl")
+    monkeypatch.setattr(config, "trainset_path", lambda: path)
+
+    _record_site_failure([], "ghost")  # not in the registry
+
+    assert load_records(path) == []
+
+
+async def test_build_healer_records_hard_case_on_confirmed_failure(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    # The production §4.8 healer's confirmed-failure hook must feed the §4.11 trainset.
+    # Stub the live re-probe/regenerate (they pull an LM + the live crawler); only the
+    # wiring of on_confirmed_failure -> _record_site_failure is under test.
+    path = str(tmp_path / "trainset.jsonl")
+    monkeypatch.setattr(config, "trainset_path", lambda: path)
+    store = StateStore(":memory:")
+    baseline = store.start_run("valor")
+    store.finish_run(baseline, items_found=5, new_items=5, errors=0, pages_fetched=1)
+    latest = store.start_run("valor")
+    store.finish_run(latest, items_found=0, new_items=0, errors=1, pages_fetched=1)
+    sites = [Site(slug="valor", url="https://valor.com")]
+
+    healer = _build_healer(store, sites)
+
+    async def _zero(slug: str) -> int:
+        return 0  # re-probe confirms a real failure, not a transient outage
+
+    async def _failed(slug: str) -> bool:
+        return False
+
+    healer._reprobe = _zero
+    healer._regenerate = _failed
+
+    state = await healer.assess("valor")
+
+    assert state is HealthState.GENERATION_FAILED
+    assert [r["kind"] for r in load_records(path)] == ["hard"]
     store.close()
 
 
