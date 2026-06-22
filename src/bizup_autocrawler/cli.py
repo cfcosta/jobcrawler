@@ -16,9 +16,14 @@ import argparse
 import ast
 import asyncio
 import logging
+import os
 import signal
 from collections.abc import Sequence
 from pathlib import Path
+from urllib.parse import urlparse
+
+import yaml
+from pydantic import ValidationError
 
 from bizup_autocrawler import config
 from bizup_autocrawler.generate.scoring import CandidateResult
@@ -177,6 +182,98 @@ def crawl_one(
     )
 
 
+# -- startup preflight -------------------------------------------------------
+
+
+class PreflightError(Exception):
+    """A run/crawl startup precondition (config / registry / state) failed (§4.9).
+
+    Raised with an operator-actionable message so a misconfiguration fails fast at
+    boot instead of surfacing as an opaque error deep in the run loop.
+    """
+
+
+def _valid_http_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+
+
+def _state_writability(db_path: str) -> str | None:
+    """Return a reason the state path can't be written, or None if it's fine."""
+    if db_path == ":memory:" or db_path.startswith("file::memory:"):
+        return None  # an in-memory store is always writable
+    target = Path(db_path)
+    parent = target.parent
+    if not parent.exists():
+        return f"state directory {parent} does not exist"
+    if not os.access(parent, os.W_OK):
+        return f"state directory {parent} is not writable"
+    if target.exists() and not os.access(target, os.W_OK):
+        return f"state file {target} is not writable"
+    return None
+
+
+def preflight(
+    *,
+    sites_path: str | None = None,
+    db_path: str | None = None,
+    news_url: str | None = None,
+) -> list[Site]:
+    """Validate run/crawl startup preconditions, returning the loaded registry (§4.9).
+
+    Fails fast (``PreflightError`` with an actionable message) on a missing or
+    malformed ``sites.yaml``, an invalid site entry, a malformed ``NEWS_API_URL``, or
+    an unwritable state path — the opaque mid-run failures these would otherwise
+    become. An empty *enabled* registry is a warning, not fatal (an operator may be
+    staging the list); the daemon would simply idle.
+    """
+    sites_path = sites_path or config.sites_path()
+    db_path = db_path or _db_path()
+    news_url = news_url or config.news_api_url()
+
+    try:
+        sites = load_sites(sites_path)
+    except FileNotFoundError as exc:
+        raise PreflightError(
+            f"site registry not found at {sites_path} "
+            "(set AUTOCRAWLER_SITES or create the file)"
+        ) from exc
+    except yaml.YAMLError as exc:
+        raise PreflightError(
+            f"site registry {sites_path} is not valid YAML: {exc}"
+        ) from exc
+    except ValidationError as exc:
+        raise PreflightError(
+            f"site registry {sites_path} has an invalid entry: {exc}"
+        ) from exc
+
+    if not any(s.enabled for s in sites):
+        _log.warning(
+            "preflight: no enabled sites in %s — the daemon will idle", sites_path
+        )
+
+    if not _valid_http_url(news_url):
+        raise PreflightError(
+            f"NEWS_API_URL {news_url!r} is not a valid http(s) URL "
+            "(expected e.g. http://localhost:8000)"
+        )
+
+    reason = _state_writability(db_path)
+    if reason is not None:
+        raise PreflightError(f"state store is not writable: {reason}")
+
+    return sites
+
+
+def _preflight_or_exit() -> tuple[list[Site] | None, int]:
+    """Run the startup preflight; on failure log it and return a nonzero exit code."""
+    try:
+        return preflight(), 0
+    except PreflightError as exc:
+        _log.error("startup preflight failed: %s", exc)
+        return None, 2
+
+
 # -- command handlers --------------------------------------------------------
 
 
@@ -212,6 +309,9 @@ def _crawl_targets(args: argparse.Namespace) -> list[Site]:
 
 def cmd_crawl(args: argparse.Namespace) -> int:
     _configure_logging()  # surface runtime warnings (robots/politeness) on one-shot runs
+    _, code = _preflight_or_exit()  # fail fast on bad config before opening the store
+    if code != 0:
+        return code
     store = StateStore(_db_path())
     news = NewsClient(timeout=config.ingest_timeout())
     governor = RateGovernor(
@@ -304,9 +404,11 @@ def _build_healer(store: StateStore, sites: Sequence[Site]) -> SelfHealer:
 
 def cmd_run(args: argparse.Namespace) -> int:
     _configure_logging()  # the daemon must not run silent (§4.9)
+    sites, code = _preflight_or_exit()  # fail fast on bad config, never mid-loop
+    if sites is None:
+        return code
     store = StateStore(_db_path())
     news = NewsClient(timeout=config.ingest_timeout())
-    sites = load_sites(config.sites_path())
 
     # A prior daemon killed mid-crawl leaves finished=NULL run rows; the scheduler
     # would treat those sites as perpetually in-flight and never re-dispatch them.

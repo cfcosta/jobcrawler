@@ -11,12 +11,14 @@ import logging
 from pathlib import Path
 from typing import cast
 
+import pytest
 from pytest import MonkeyPatch
 
 from bizup_autocrawler.ingest import NewsClient
 
 from bizup_autocrawler import config
 from bizup_autocrawler.cli import (
+    PreflightError,
     _build_healer,
     _configure_logging,
     _db_path,
@@ -31,6 +33,7 @@ from bizup_autocrawler.cli import (
     cmd_run,
     cmd_validate,
     crawl_one,
+    preflight,
     render_list,
     validate_one,
 )
@@ -106,6 +109,104 @@ def test_configure_logging_honors_the_level_env(monkeypatch: MonkeyPatch) -> Non
         assert pkg.level == logging.WARNING
     finally:
         pkg.setLevel(original)
+
+
+# -- startup preflight (§4.9/§11 fail-fast) ----------------------------------
+
+_VALID_SITES = "- slug: s0\n  url: https://x.com\n"
+
+
+def test_preflight_passes_and_returns_the_registry(tmp_path: Path) -> None:
+    sites = tmp_path / "sites.yaml"
+    sites.write_text(_VALID_SITES)
+    result = preflight(
+        sites_path=str(sites),
+        db_path=str(tmp_path / "state.db"),
+        news_url="http://localhost:8000",
+    )
+    assert [s.slug for s in result] == ["s0"]
+
+
+def test_preflight_rejects_a_missing_registry(tmp_path: Path) -> None:
+    with pytest.raises(PreflightError, match="not found"):
+        preflight(
+            sites_path=str(tmp_path / "nope.yaml"),
+            db_path=str(tmp_path / "s.db"),
+            news_url="http://x",
+        )
+
+
+def test_preflight_rejects_malformed_sites_yaml(tmp_path: Path) -> None:
+    sites = tmp_path / "sites.yaml"
+    sites.write_text("[unterminated")  # not valid YAML
+    with pytest.raises(PreflightError, match="YAML"):
+        preflight(
+            sites_path=str(sites),
+            db_path=str(tmp_path / "s.db"),
+            news_url="http://x",
+        )
+
+
+def test_preflight_rejects_an_invalid_site_entry(tmp_path: Path) -> None:
+    sites = tmp_path / "sites.yaml"
+    sites.write_text(
+        "- slug: has-hyphen\n  url: https://x.com\n"
+    )  # slug not import-safe
+    with pytest.raises(PreflightError, match="invalid entry"):
+        preflight(
+            sites_path=str(sites),
+            db_path=str(tmp_path / "s.db"),
+            news_url="http://x",
+        )
+
+
+def test_preflight_rejects_a_malformed_news_url(tmp_path: Path) -> None:
+    sites = tmp_path / "sites.yaml"
+    sites.write_text(_VALID_SITES)
+    with pytest.raises(PreflightError, match="NEWS_API_URL"):
+        preflight(
+            sites_path=str(sites),
+            db_path=str(tmp_path / "s.db"),
+            news_url="not-a-url",
+        )
+
+
+def test_preflight_rejects_an_unwritable_state_dir(tmp_path: Path) -> None:
+    sites = tmp_path / "sites.yaml"
+    sites.write_text(_VALID_SITES)
+    missing = tmp_path / "nonexistent" / "state.db"  # parent dir does not exist
+    with pytest.raises(PreflightError, match="state"):
+        preflight(
+            sites_path=str(sites),
+            db_path=str(missing),
+            news_url="http://x",
+        )
+
+
+def test_preflight_warns_on_an_empty_enabled_registry(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # An all-disabled (or empty) registry is a warning, not fatal — an operator may be
+    # staging the list — but the daemon would otherwise idle silently.
+    sites = tmp_path / "sites.yaml"
+    sites.write_text("- slug: s0\n  url: https://x.com\n  enabled: false\n")
+    with caplog.at_level(logging.WARNING, logger="bizup_autocrawler.cli"):
+        result = preflight(
+            sites_path=str(sites),
+            db_path=str(tmp_path / "s.db"),
+            news_url="http://x",
+        )
+    assert result and not any(s.enabled for s in result)
+    assert any("no enabled sites" in r.getMessage() for r in caplog.records)
+
+
+def test_cmd_run_fails_fast_on_bad_config(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    # cmd_run must return nonzero WITHOUT starting the daemon when preflight fails.
+    monkeypatch.setenv("AUTOCRAWLER_SITES", str(tmp_path / "missing.yaml"))
+    monkeypatch.setenv("AUTOCRAWLER_STATE_URL", str(tmp_path / "s.db"))
+    assert cmd_run(build_parser().parse_args(["run"])) == 2
 
 
 def test_render_list_shows_script_presence_and_last_items(tmp_path: Path) -> None:
