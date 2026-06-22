@@ -100,7 +100,7 @@ def _optimize(
 ) -> dict[str, object]:
     """The live optimize step — build the metrics + incumbent, then run_optimization."""
     max_tokens = config.max_tokens()
-    root_lm = dspy.LM(config.model(), max_tokens=max_tokens)
+    root_lm = dspy.LM(config.require_model(), max_tokens=max_tokens)
     # Required cheap sub_lm + the §4.2 host sub-call kill (never the silent root
     # fallback, which bills every llm_query at planner rates).
     sub_lm = CappedLM(

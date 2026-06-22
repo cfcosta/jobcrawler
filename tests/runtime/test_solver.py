@@ -13,9 +13,18 @@ from bizup_autocrawler.runtime.solver import (
     ClearanceCache,
     FlareSolverrSolver,
     is_challenge,
+    make_solver,
 )
 
 UTC = timezone.utc
+
+
+def test_make_solver_defaults_to_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The default backend must be "none": booting a production Ctx must not raise on
+    # an unbuilt stealth backend (§4.10). FlareSolverr stays opt-in.
+    monkeypatch.delenv("AUTOCRAWLER_SOLVER", raising=False)
+    monkeypatch.delenv("FLARESOLVERR_URL", raising=False)
+    assert make_solver() is None
 
 
 def test_detects_cf_mitigated_header() -> None:

@@ -85,7 +85,7 @@ def _build_lms() -> tuple[dspy.LM, dspy.LM]:
     catch-and-continue loop). Both caps are host-side, never seen by the generator.
     """
     max_tokens = config.max_tokens()
-    root_lm = dspy.LM(config.model(), max_tokens=max_tokens)
+    root_lm = dspy.LM(config.require_model(), max_tokens=max_tokens)
     sub_lm = CappedLM(
         config.require_sub_model(),
         max_subcalls=config.max_subcalls(),

@@ -109,3 +109,28 @@ def test_fanout_spend_cap_usd_accepts_bare_number(
 def test_fanout_spend_cap_usd_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AUTOCRAWLER_FANOUT_SPEND_CAP", raising=False)
     assert config.fanout_spend_cap_usd() == 8.0
+
+
+def test_solver_defaults_to_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    # §4.10: the safe default is no solver (plain httpx). The old "stealth" default
+    # named an unbuilt backend, so make_solver() raised NotImplementedError on boot.
+    monkeypatch.delenv("AUTOCRAWLER_SOLVER", raising=False)
+    assert config.solver() == "none"
+
+
+def test_model_optional_none_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AUTOCRAWLER_MODEL", raising=False)
+    assert config.model() is None
+
+
+def test_require_model_errors_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    # §4.2/§11: AUTOCRAWLER_MODEL has no safe default (the old one was a non-existent
+    # slug), so the generation/optimize path must error loud rather than fail opaque.
+    monkeypatch.delenv("AUTOCRAWLER_MODEL", raising=False)
+    with pytest.raises(RuntimeError, match="AUTOCRAWLER_MODEL"):
+        config.require_model()
+
+
+def test_require_model_returns_value_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTOCRAWLER_MODEL", "openrouter/some/model")
+    assert config.require_model() == "openrouter/some/model"

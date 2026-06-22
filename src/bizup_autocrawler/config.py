@@ -43,9 +43,29 @@ def _bool(name: str, default: bool) -> bool:
 # --- models ----------------------------------------------------------------
 
 
-def model() -> str:
-    """RLM root planner/extractor — a strong, code-capable model."""
-    return _str("AUTOCRAWLER_MODEL", "openrouter/qwen/qwen3.7-plus")
+def model() -> str | None:
+    """RLM root planner/extractor — a strong, code-capable model. Required: there is
+    no safe default (a placeholder slug fails opaque at the provider), so generation
+    call sites use :func:`require_model`, never a fabricated default."""
+    return _opt("AUTOCRAWLER_MODEL")
+
+
+def require_model() -> str:
+    """The root planner model, erroring if unset (§4.2/§11).
+
+    ``AUTOCRAWLER_MODEL`` names the provider model slug for ``dspy.LM``; there is no
+    sensible default (the old ``openrouter/qwen/qwen3.7-plus`` was a non-existent
+    slug that failed deep in litellm), so the generation/optimize path errors loud
+    and early rather than surfacing an opaque provider 404 mid-run.
+    """
+    value = model()
+    if value is None:
+        raise RuntimeError(
+            "AUTOCRAWLER_MODEL is required (§4.2): the RLM root planner needs a real "
+            "provider model slug (e.g. openrouter/<vendor>/<model>). Set it to a "
+            "strong, code-capable model."
+        )
+    return value
 
 
 def sub_model() -> str | None:
@@ -277,7 +297,11 @@ def generator_path() -> str | None:
 
 
 def solver() -> str:
-    return _str("AUTOCRAWLER_SOLVER", "stealth")
+    """Challenge-solver backend (§4.10). Defaults to ``none`` (plain httpx): most
+    news sites need no solver, and the in-process stealth backends aren't built, so
+    a non-``none`` default would make ``make_solver`` raise on boot. ``flaresolverr``
+    (+ ``FLARESOLVERR_URL``) is the opt-in backend."""
+    return _str("AUTOCRAWLER_SOLVER", "none")
 
 
 def flaresolverr_url() -> str | None:
