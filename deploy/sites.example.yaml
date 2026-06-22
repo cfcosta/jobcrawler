@@ -1,0 +1,29 @@
+# bizup-autocrawler site registry (§4.1) — the system's checked-in input.
+# Copy to your state dir as sites.yaml and replace with your real seed list.
+#
+# fields:
+#   slug     stable id — names the crawler file and the `source` on ingested items.
+#   name     human label.
+#   url      root or section page the crawler starts from.
+#   render   max fetch tier: auto | static | browser | solver (§4.10). `auto` lets
+#            the generator pick the cheapest tier that works; `solver` needs
+#            AUTOCRAWLER_SOLVER + a backend configured.
+#   hints    free-text steer for the generator (section paths, language, layout).
+#   schedule per-site cadence (e.g. 30m | 6h | a cron expr); omit to use
+#            AUTOCRAWLER_DEFAULT_SCHEDULE (30m).
+#   enabled  crawl on/off without deleting the entry.
+
+- slug: example
+  name: Example News
+  url: https://example.com/news
+  render: auto
+  schedule: 30m
+  enabled: true
+
+# - slug: techcrunch
+#   name: TechCrunch
+#   url: https://techcrunch.com
+#   render: auto
+#   hints: Tech/startup news; articles under dated permalink paths.
+#   schedule: 30m
+#   enabled: true

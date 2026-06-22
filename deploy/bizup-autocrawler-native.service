@@ -1,0 +1,67 @@
+# bizup-autocrawler — native (non-container) deployment (systemd + Nix).
+#
+# Runs the daemon straight from the Nix-built console script — no container
+# runtime. The crawl daemon (`run`/`crawl`) never shells out to Deno, so a native
+# run host does NOT need Deno on PATH; only `generate`/`optimize` (the §4.2 RLM
+# Pyodide sandbox) do, and those are typically run interactively, not by this unit.
+#
+# Install:
+#   nix build .#default --out-link /var/lib/bizup-autocrawler/app   # → app/bin/autocrawl
+#   sudo install -d -m 700 /var/lib/bizup-autocrawler
+#   sudo install -d -m 700 /etc/bizup-autocrawler
+#   sudo install -m 600 deploy/autocrawler.env.example /etc/bizup-autocrawler/autocrawler.env
+#   sudo $EDITOR /etc/bizup-autocrawler/autocrawler.env       # fill REQUIRED values
+#   sudo install -m 644 deploy/sites.example.yaml /var/lib/bizup-autocrawler/sites.yaml
+#   sudo $EDITOR /var/lib/bizup-autocrawler/sites.yaml
+#   sudo useradd --system --home-dir /var/lib/bizup-autocrawler --shell /usr/sbin/nologin autocrawler || true
+#   sudo chown -R autocrawler:autocrawler /var/lib/bizup-autocrawler
+#   sudo install -m 644 deploy/bizup-autocrawler-native.service \
+#     /etc/systemd/system/bizup-autocrawler.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now bizup-autocrawler
+#
+# `nix build .#default` pins the exact dependency closure from uv.lock, so a redeploy
+# is: rebuild the out-link, then `systemctl restart bizup-autocrawler`.
+
+[Unit]
+Description=bizup-autocrawler — self-scheduling news crawler daemon (native)
+Documentation=file:///etc/bizup-autocrawler https://github.com/bizup/autocrawler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=autocrawler
+Group=autocrawler
+WorkingDirectory=/var/lib/bizup-autocrawler
+EnvironmentFile=/etc/bizup-autocrawler/autocrawler.env
+# Absolute state/registry paths (the relative defaults resolve against
+# WorkingDirectory, but be explicit so a stray `cd` can't relocate the DB).
+Environment=AUTOCRAWLER_SITES=/var/lib/bizup-autocrawler/sites.yaml
+Environment=AUTOCRAWLER_STATE_URL=sqlite:////var/lib/bizup-autocrawler/autocrawler.db
+# Committed crawlers must live on a writable path — the Nix-store package is read-only,
+# so generate/promote/self-heal write here, and crawl reads committed scripts from here.
+Environment=AUTOCRAWLER_CRAWLERS_DIR=/var/lib/bizup-autocrawler/crawlers
+Environment=AUTOCRAWLER_GENERATOR_DIR=/var/lib/bizup-autocrawler/generators
+Environment=AUTOCRAWLER_TRAINSET_PATH=/var/lib/bizup-autocrawler/trainset.jsonl
+ExecStart=/var/lib/bizup-autocrawler/app/bin/autocrawl run
+Restart=on-failure
+RestartSec=10s
+StartLimitIntervalSec=300
+StartLimitBurst=5
+TimeoutStartSec=120
+
+# --- hardening (it runs on the host, so confine it) ---
+# The store path is read-only anyway; lock the rest of the FS down to the state dir.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/bizup-autocrawler
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+# Outbound HTTPS only (crawl fetches + news ingest + LM API); no inbound listener.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

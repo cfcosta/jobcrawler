@@ -112,9 +112,80 @@
         }
       );
 
-      packages = forAllSystems (system: {
-        default = pythonSets.${system}.mkVirtualEnv "bizup-autocrawler-env" workspace.deps.default;
-      });
+      packages = forAllSystems (
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+          # The runtime virtualenv: `${appEnv}/bin/autocrawl` is the §10 console script
+          # (bizup_autocrawler.cli:main), with the full pinned dependency closure.
+          appEnv = pythonSets.${system}.mkVirtualEnv "bizup-autocrawler-env" workspace.deps.default;
+        in
+        {
+          default = appEnv;
+        }
+        # Container image only makes sense for Linux targets (it ships a Linux rootfs);
+        # gating keeps `nix flake check` eval clean on darwin.
+        // lib.optionalAttrs (lib.hasSuffix "-linux" system) {
+          # `nix build .#dockerImage` → a loadable layered image (no Docker daemon needed
+          # to build). Reuses the exact flake closure, so the image can never drift from
+          # uv.lock the way a hand-rolled `pip install` Dockerfile would. Bundles Deno for
+          # the §4.2 generation sandbox (dspy's Pyodide interpreter shells out to `deno`);
+          # the run/crawl daemon itself never invokes Deno — only `generate`/`optimize` do.
+          dockerImage = pkgs.dockerTools.buildLayeredImage {
+            name = "bizup-autocrawler";
+            tag = "latest";
+            contents = [
+              appEnv # autocrawl console script + Python runtime closure
+              pkgs.deno # §4.2 RLM Pyodide sandbox (generate/optimize only)
+              pkgs.cacert # TLS roots for httpx (live fetch + news ingest + LM API)
+              pkgs.coreutils # a minimal shell toolbox for debugging / exec
+              pkgs.bashInteractive
+            ];
+            config = {
+              # The primary deployment entrypoint: the self-scheduling daemon (§4.9).
+              # Override with `generate`/`crawl`/`status` for one-shot/CI invocations.
+              Cmd = [
+                "autocrawl"
+                "run"
+              ];
+              WorkingDir = "/data";
+              Env = [
+                "PATH=/bin"
+                "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+                "NIX_SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+                # Persist the Deno/Pyodide cache on the data volume so generation cold
+                # starts don't re-download the WASM runtime every container restart.
+                "DENO_DIR=/data/deno-cache"
+                # Default the registry + state onto the mounted /data volume; an operator
+                # mounts sites.yaml there and the sqlite run history persists alongside it.
+                "AUTOCRAWLER_SITES=/data/sites.yaml"
+                "AUTOCRAWLER_STATE_URL=sqlite:////data/autocrawler.db"
+                # The committed crawlers (and the §14.2 _pending staging dir) MUST live on
+                # the writable /data volume so generate/promote/self-heal persist them: the
+                # in-image package dir is part of the ephemeral container layer (lost on
+                # restart / --rm), and is read-only on a native Nix-store deploy. /data is
+                # both writable and durable.
+                "AUTOCRAWLER_CRAWLERS_DIR=/data/crawlers"
+              ];
+              # Readiness/config check (§10): `status` loads the registry + opens the state
+              # store and renders the M4 surface — it catches a missing/broken sites.yaml or
+              # an unreadable DB. It does NOT prove daemon liveness (that awaits the spec's
+              # future HTTP health surface); it is a config/readiness probe, not a heartbeat.
+              Healthcheck = {
+                Test = [
+                  "CMD"
+                  "autocrawl"
+                  "status"
+                ];
+                Interval = 60000000000; # 60s (ns)
+                Timeout = 10000000000; # 10s
+                StartPeriod = 5000000000; # 5s
+                Retries = 3;
+              };
+            };
+          };
+        }
+      );
 
       checks = forAllSystems (
         system:
