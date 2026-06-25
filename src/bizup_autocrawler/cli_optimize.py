@@ -18,6 +18,7 @@ in-band. Heavy deps (dspy, the sandbox) are imported by the CLI lazily.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
@@ -25,12 +26,18 @@ import dspy
 
 from bizup_autocrawler import config
 from bizup_autocrawler.generate.budget import CappedLM
+from bizup_autocrawler.generate.evaluate import evaluate_generator
 from bizup_autocrawler.generate.generator import (
     CrawlerGenerator,
     load_generator,
     save_generator,
 )
-from bizup_autocrawler.generate.optimize import bootstrap_compile, run_optimization
+from bizup_autocrawler.generate.optimize import (
+    bootstrap_compile,
+    gepa_compile,
+    run_optimization,
+    select_optimizer,
+)
 from bizup_autocrawler.generate.scoring import (
     CandidateResult,
     make_bootstrap_metric,
@@ -61,16 +68,25 @@ def optimize_command(args: argparse.Namespace) -> int:
     finally:
         store.close()
 
-    if len(examples) < _MIN_SITES:
+    # Guard on distinct *sites*, not examples: split_by_site partitions by site, so a
+    # disjoint train/val/held-out needs >= holdout+val+1 sites (a many-example,
+    # few-site pool would otherwise leave train empty).
+    n_sites = len({str(ex.site_url) for ex in examples})
+    if n_sites < _MIN_SITES:
         print(
-            f"no admitted trainset yet: {len(examples)} site(s) cleared "
+            f"no admitted trainset yet: {n_sites} site(s) cleared "
             f"{config.trainset_stable_runs()} stable run(s) — need >= {_MIN_SITES} "
             "for a disjoint train/val/held-out split (§4.11)"
         )
         return 0
 
-    train, val, holdout = split_by_site(examples, holdout=1, val=1)
+    holdout_n, val_n = _split_sizes(n_sites)
+    train, val, holdout = split_by_site(examples, holdout=holdout_n, val=val_n)
     result = _optimize(train, val, holdout)
+
+    for note_key in ("pareto_health", "budget_health"):
+        if result.get(note_key):
+            print(f"warning: {result[note_key]}")
 
     if result.get("promoted"):
         out = save_generator(
@@ -129,6 +145,27 @@ def _optimize(
         max_llm_calls=config.max_llm_calls(),
     )
 
+    optimized_factory = _build_factory(
+        select_optimizer(len(train)),
+        baseline=baseline,
+        train=train,
+        val=val,
+        bootstrap_metric=bootstrap_metric,
+        eval_metric=eval_metric,
+        max_tokens=max_tokens,
+    )
+    # Average several held-out passes (the generator is stochastic) so a marginal win
+    # isn't promoted on sampling luck — promotion rigor over a single noisy pass (§4.11).
+    passes = config.promotion_eval_passes()
+
+    def eval_fn(program: object, *, devset: object, metric: object) -> float:
+        return evaluate_generator(
+            cast("CrawlerGenerator", program),
+            devset=cast("list[dspy.Example]", devset),
+            metric=cast("Callable[..., object]", metric),
+            passes=passes,
+        )
+
     with dspy.context(lm=root_lm):
         # The minibatch the saturation guard reads: the incumbent's per-site scores.
         minibatch_scores = [
@@ -136,15 +173,83 @@ def _optimize(
         ]
         return run_optimization(
             baseline=baseline,
-            optimized_factory=lambda: bootstrap_compile(
-                baseline, trainset=train, valset=val, metric=bootstrap_metric
-            ),
+            optimized_factory=optimized_factory,
             trainset=train,
             valset=val,
             holdout=holdout,
             metric=eval_metric,
             minibatch_scores=minibatch_scores,
+            eval_fn=eval_fn,
         )
+
+
+def _build_factory(
+    optimizer: str,
+    *,
+    baseline: CrawlerGenerator,
+    train: list[dspy.Example],
+    val: list[dspy.Example],
+    bootstrap_metric: Callable[..., float],
+    eval_metric: Callable[..., object],
+    max_tokens: int,
+) -> Callable[[], object]:
+    """Pick the optimizer rung's compile step (§4.11 ladder).
+
+    ``select_optimizer`` keys on the *example* count: ``bootstrap_fewshot`` is the
+    cheap always-valid rung; ``gepa`` evolves the strategy instruction once the
+    trainset is feedback-rich. ``mipro`` (documented-not-built in v1) falls *forward*
+    to GEPA — the strongest built rung — with a loud notice, never a silent drop to
+    bootstrap. ``none`` never reaches here (``run_optimization`` short-circuits it),
+    but maps to bootstrap as a harmless never-called placeholder.
+    """
+    if optimizer == "mipro":
+        print(
+            f"note: {len(train)} examples reach the MIPRO tier (§4.11), but MIPRO is "
+            "documented-not-built in v1 — using the GEPA rung instead"
+        )
+    if optimizer in ("gepa", "mipro"):
+        # Fail fast on a missing reflection model *before* the expensive minibatch
+        # scoring, then build the LM lazily inside the factory (gepa-only).
+        reflection_model = config.require_reflection_model()
+
+        def gepa_factory() -> object:
+            reflection_lm = dspy.LM(reflection_model, max_tokens=max_tokens)
+            return gepa_compile(
+                baseline,
+                trainset=train,
+                valset=val,
+                reflection_lm=reflection_lm,
+                metric=eval_metric,
+            )
+
+        return gepa_factory
+
+    def bootstrap_factory() -> object:
+        return bootstrap_compile(
+            baseline, trainset=train, valset=val, metric=bootstrap_metric
+        )
+
+    return bootstrap_factory
+
+
+def _split_sizes(n_sites: int) -> tuple[int, int]:
+    """Scale the ``(holdout, val)`` site counts with the pool — ~1/5 each, >= 1, and
+    always leaving train non-empty (§4.11).
+
+    At the 3-site floor this is ``(1, 1)`` (train = 1 site), matching the original
+    fixed split; it grows with the pool so the held-out gains the statistical power
+    to clear the noise-floor margin (``promotion_margin`` is ``100/|held-out|`` — a
+    bigger held-out means a smaller, more discriminating margin, so real gains aren't
+    drowned by one flipped example).
+    """
+    holdout = max(1, n_sites // 5)
+    val = max(1, n_sites // 5)
+    while holdout + val >= n_sites and (holdout > 1 or val > 1):
+        if val > 1:
+            val -= 1
+        else:
+            holdout -= 1
+    return holdout, val
 
 
 def _prefetch_corpus(site_url: str) -> dict[str, object]:

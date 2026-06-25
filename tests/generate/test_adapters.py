@@ -95,6 +95,45 @@ def test_metric_completeness_failure_feeds_back_what_failed() -> None:
     assert "items" in out.feedback
 
 
+def test_metric_feeds_back_axes_when_gates_pass_but_score_submaximal() -> None:
+    # The bug fix: item_count=10 PASSES completeness (>= min_items 5) but is
+    # sub-maximal (10/30). The old path returned feedback="" — no signal for GEPA;
+    # now the weak items axis is surfaced.
+    out = _metric(_core(_result(item_count=10)))(_gold(), _pred())
+    assert 0.0 < out.score < 1.0
+    assert out.feedback != ""
+    assert "item coverage" in out.feedback
+
+
+def test_metric_feedback_nudges_toward_better_discovery() -> None:
+    # A perfect-coverage scrape crawler is sub-maximal only on discovery quality;
+    # feedback should steer it toward a feed/sitemap/content API.
+    out = _metric(_core(_result(item_count=30)))(
+        _gold(), _pred(discovery_method="scrape")
+    )
+    assert 0.0 < out.score < 1.0
+    assert "feed" in out.feedback or "sitemap" in out.feedback
+
+
+def test_metric_feedback_never_leaks_the_target_count() -> None:
+    # §8: even the enriched axis feedback names what to improve, never the bar.
+    out = _metric(_core(_result(item_count=10)))(_gold(), _pred())
+    assert ">=" not in out.feedback and ">" not in out.feedback
+    assert "need" not in out.feedback and "target" not in out.feedback
+
+
+def test_metric_forced_extraction_still_feeds_back_despite_maximal_axes() -> None:
+    # A forced extraction with otherwise-perfect axes scores 0.95 — sub-perfect, so
+    # GEPA does NOT skip it, yet the axis breakdown is empty. The forced remedy is the
+    # only remaining signal; it must surface (else GEPA gets feedback="" — the pitfall).
+    out = _metric(_core(_result()))(
+        _gold(), _pred(final_reasoning=FORCED_FINAL_REASONING)
+    )
+    assert 0.0 < out.score < 1.0
+    assert out.feedback != ""
+    assert "force-completed" in out.feedback
+
+
 def test_metric_is_float_coercible_for_evaluate() -> None:
     # dspy.Evaluate sums the metric return; Prediction.__float__ reads .score.
     out = _metric(_core(_result()))(_gold(), _pred())

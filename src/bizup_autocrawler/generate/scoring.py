@@ -100,6 +100,21 @@ def graded_score(
     return veto * graded
 
 
+def score_from_axes(
+    axes: QualityAxes, *, forced: bool = False, weights: GradedWeights = DEFAULT_WEIGHTS
+) -> float:
+    """The graded scalar from pre-measured axes, minus the forced-extraction tie-breaker.
+
+    Split out from :func:`score_candidate` so the GEPA/Evaluate metric can derive the
+    score and the per-axis feedback from one ``compute_axes`` pass (the axes are the
+    feedback signal GEPA reflects on; recomputing them twice would be wasteful).
+    """
+    score = graded_score(axes, weights=weights)
+    if forced:
+        score -= FORCED_EXTRACTION_PENALTY
+    return max(0.0, score)
+
+
 # A forced RLM extraction (hit max_iterations, §4.2) yields this sentinel as
 # final_reasoning. It scores slightly below a deliberate SUBMIT — a tie-breaker
 # (§6), never a veto: a forced extraction can still be a perfectly good crawler.
@@ -163,10 +178,7 @@ def score_candidate(
         min_body_chars=min_body_chars,
         discovery_method=discovery_method,
     )
-    score = graded_score(axes, weights=weights)
-    if forced:
-        score -= FORCED_EXTRACTION_PENALTY
-    return max(0.0, score)
+    return score_from_axes(axes, forced=forced, weights=weights)
 
 
 def _has_fields(sample: Mapping[str, object]) -> bool:
@@ -186,26 +198,120 @@ def _valid_url(sample: Mapping[str, object], allowed_hosts: Collection[str]) -> 
     return valid_on_domain_url(str(sample.get("url") or ""), allowed_hosts)
 
 
+# Per-axis remediation, surfaced when an axis is sub-maximal (§4.11). This text
+# IS the optimization signal: GEPA's reflection LM never sees the numeric scores,
+# only the feedback string (gepa 0.0.27 reflective_mutation). So a gate-passing
+# but mediocre candidate must still get *actionable* prose — the empty-string the
+# old transform returned gave the reflector nothing to mutate on. Each line is
+# threshold-free (no ``<>=``), so the §8 scrub passes it through and the optimized
+# loop learns *what to improve*, never the hidden bar. Phrased as "how the response
+# could be better" (GEPA meta-prompt, Appendix 10).
+_AXIS_LABEL: dict[str, str] = {
+    "items_ratio": "item coverage",
+    "field_presence": "field completeness",
+    "body_quality": "body text",
+    "url_validity": "url validity",
+    "discovery_quality": "discovery method",
+}
+_AXIS_GUIDANCE: dict[str, str] = {
+    "items_ratio": (
+        "few articles enumerated — find a source that lists ALL recent articles "
+        "(a content API, RSS/Atom feed, or sitemap) rather than scraping one page"
+    ),
+    "field_presence": (
+        "some items are missing a title, body, or url — yield every item with all three"
+    ),
+    "body_quality": (
+        "article bodies are short or garbled — extract the FULL article text and "
+        "drop nav/boilerplate and encoding artefacts"
+    ),
+    "url_validity": (
+        "some item urls are off-domain or malformed — yield only absolute, "
+        "on-domain article urls"
+    ),
+    "discovery_quality": (
+        "prefer a content API, RSS/Atom feed, or sitemap over scraping HTML pages"
+    ),
+}
+# The order axes are considered for the breakdown when several tie on value: the
+# veto axes first (a low veto caps the whole score), then the weighted axes.
+_AXIS_ORDER = (
+    "url_validity",
+    "field_presence",
+    "body_quality",
+    "items_ratio",
+    "discovery_quality",
+)
+
+
+def _axis_feedback(
+    axes: QualityAxes, *, max_axes: int, epsilon: float = 1e-9
+) -> list[str]:
+    """Remediation lines for the worst sub-maximal axes (worst first), capped.
+
+    Veto axes break value ties (``_AXIS_ORDER``) since a low veto caps the score.
+    A maximal axis (``>= 1 - epsilon``) emits nothing — so a perfect candidate
+    yields ``[]`` and ``build_feedback`` returns ``""`` (which GEPA harmlessly
+    skips via ``skip_perfect_score``).
+    """
+    if max_axes <= 0:
+        return []
+    scored = [(name, getattr(axes, name)) for name in _AXIS_ORDER]
+    sub_maximal = [(name, value) for name, value in scored if value < 1.0 - epsilon]
+    sub_maximal.sort(key=lambda nv: (nv[1], _AXIS_ORDER.index(nv[0])))
+    return [
+        f"{_AXIS_LABEL[name]} low ({value:.2f}): {_AXIS_GUIDANCE[name]}"
+        for name, value in sub_maximal[:max_axes]
+    ]
+
+
+# A forced extraction (hit max_iterations, §4.2) costs FORCED_EXTRACTION_PENALTY but
+# touches no axis, so it can drive a candidate sub-perfect (0.95) while every axis is
+# maximal → `_axis_feedback` is empty. Without a matching remedy line that candidate
+# would hand GEPA `feedback=""` (the empty-feedback pitfall) for a non-perfect score
+# GEPA does *not* skip. Threshold-free, so §8 holds.
+_FORCED_REMEDY = (
+    "extraction was force-completed at the iteration budget — make discovery converge "
+    "sooner (commit to one discovery path early) so the crawler emits its final result "
+    "deliberately instead of being cut off"
+)
+
+
 def build_feedback(
     *,
     gate_failures: Sequence[str],
     stability_note: str | None = None,
     max_foreground: int = 2,
+    axes: QualityAxes | None = None,
+    forced: bool = False,
 ) -> str:
     """The §4.11 feedback transform: concrete, severity-capped, across-run-aware.
 
     ``gate_failures`` arrive in pipeline-severity order (AST → completeness); we
     surface only the top ``max_foreground`` (many co-equal directives degrade
-    compliance — later retries surface the next as gates clear). The stability
-    verdict is appended as an across-run aggregate, never folded into the scalar.
-    Numeric **thresholds are scrubbed** so the hidden-scorer rule (§8) holds — the
-    optimized loop sees *what* failed, never a target it could blank out. A pure
-    transform over already-computed facts: no extra LLM-judge pass.
+    compliance — later retries surface the next as gates clear). When ``axes`` are
+    supplied and free foreground slots remain, the **worst sub-maximal axes** fill
+    them — so a candidate that *passes* the gates but scores below 1.0 still gets
+    actionable signal (without this, GEPA's reflection LM saw an empty string and
+    had nothing to mutate). When ``forced`` and a slot still remains, a forced-
+    extraction remedy fills it — the one sub-maximal cause an all-maximal-axis
+    candidate has, so a 0.95 forced candidate never hands GEPA empty feedback. The
+    stability verdict is appended as an across-run aggregate, never folded into the
+    scalar. Numeric **thresholds are scrubbed** so the hidden-scorer rule (§8) holds
+    — the optimized loop sees *what* to improve, never a target it could blank out.
+    A pure transform over already-computed facts: no extra LLM-judge pass.
     """
-    lines = [_scrub_thresholds(line) for line in gate_failures[:max_foreground]]
+    foreground = [_scrub_thresholds(line) for line in gate_failures[:max_foreground]]
+    foreground = [line for line in foreground if line]
+    if axes is not None and len(foreground) < max_foreground:
+        foreground.extend(
+            _axis_feedback(axes, max_axes=max_foreground - len(foreground))
+        )
+    if forced and len(foreground) < max_foreground:
+        foreground.append(_FORCED_REMEDY)
     if stability_note:
-        lines.append(_scrub_thresholds(stability_note))
-    return "; ".join(lines)
+        foreground.append(_scrub_thresholds(stability_note))
+    return "; ".join(foreground)
 
 
 # Strip scorer thresholds a candidate could target ("need >= 5", ">= 0.6") while
@@ -292,17 +398,23 @@ def make_metric(
             min_body_chars=min_body_chars,
             allowed_hosts=hosts,
         )
-        score = score_candidate(
+        # One axis pass feeds both the scalar and the per-axis remediation, so a
+        # gate-passing-but-mediocre candidate still hands GEPA actionable feedback
+        # (the empty-string path gave the reflection LM nothing — see build_feedback).
+        forced = _forced(pred)
+        axes = compute_axes(
             result,
             target_n=target_n,
             allowed_hosts=hosts,
             min_body_chars=min_body_chars,
             discovery_method=_discovery(pred),
-            forced=_forced(pred),
-            weights=weights,
         )
+        score = score_from_axes(axes, forced=forced, weights=weights)
         return dspy.Prediction(
-            score=score, feedback=build_feedback(gate_failures=completeness.failures)
+            score=score,
+            feedback=build_feedback(
+                gate_failures=completeness.failures, axes=axes, forced=forced
+            ),
         )
 
     return metric

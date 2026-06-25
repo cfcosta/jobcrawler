@@ -24,6 +24,7 @@ from bizup_autocrawler.generate.scoring import (
     graded_score,
     items_axis,
     score_candidate,
+    score_from_axes,
 )
 
 
@@ -241,6 +242,123 @@ def test_feedback_appends_stability_note() -> None:
 
 def test_feedback_empty_when_nothing_failed() -> None:
     assert build_feedback(gate_failures=[]) == ""
+
+
+# -- build_feedback axis breakdown: signal for gate-passing-but-mediocre ------
+#
+# The bug this fixes: GEPA's reflection LM never sees numeric scores — only the
+# feedback string. A candidate that *passes* the gates but scores below 1.0 used
+# to emit feedback="", handing the reflector nothing to mutate. The sub-maximal
+# axis breakdown is now that signal.
+
+
+def test_feedback_surfaces_submaximal_axes_when_gates_pass() -> None:
+    axes = _perfect().model_copy(update={"items_ratio": 0.3, "discovery_quality": 0.4})
+    fb = build_feedback(gate_failures=[], axes=axes)
+    assert fb != ""  # was "" before the fix — no signal for GEPA
+    assert "item coverage" in fb  # the weakest axis (0.3) leads
+
+
+def test_feedback_perfect_axes_emit_nothing() -> None:
+    # A 1.0 candidate still yields "" — harmless: GEPA skips it (skip_perfect_score).
+    assert build_feedback(gate_failures=[], axes=_perfect()) == ""
+
+
+def test_feedback_axes_are_worst_first_and_capped() -> None:
+    axes = QualityAxes(
+        items_ratio=0.3,
+        field_presence=0.5,
+        body_quality=0.9,
+        url_validity=1.0,
+        discovery_quality=0.4,
+    )
+    fb = build_feedback(gate_failures=[], axes=axes, max_foreground=2)
+    assert len(fb.split("; ")) == 2  # capped
+    assert fb.startswith("item coverage")  # worst axis (0.3) first
+    assert "discovery method" in fb  # second-worst (0.4)
+    assert "field completeness" not in fb and "body text" not in fb  # squeezed out
+
+
+def test_feedback_gate_failures_take_precedence_over_axes() -> None:
+    # Gate failures fill foreground first; axes only fill the remaining slot(s).
+    axes = _perfect().model_copy(update={"discovery_quality": 0.4})
+    fb = build_feedback(
+        gate_failures=["AST: import os banned"], axes=axes, max_foreground=2
+    )
+    parts = fb.split("; ")
+    assert parts[0] == "AST: import os banned"
+    assert "discovery method" in parts[1]  # axis fills the one remaining slot
+
+
+def test_feedback_axes_carry_no_scorer_threshold() -> None:
+    # §8 hidden-scorer: the guidance names *what* to improve, never the bar — no
+    # comparison operator, no "need"/"require". The candidate's own axis value is
+    # allowed (mirrors gate failures keeping the candidate's own counts).
+    axes = _perfect().model_copy(update={"items_ratio": 0.5})
+    fb = build_feedback(gate_failures=[], axes=axes)
+    assert "item coverage" in fb
+    assert ">=" not in fb and "<=" not in fb and ">" not in fb and "<" not in fb
+    assert "need" not in fb and "require" not in fb
+
+
+# -- build_feedback forced-extraction remedy: the last empty-feedback path -----
+#
+# A forced extraction costs FORCED_EXTRACTION_PENALTY but touches no axis, so an
+# otherwise-perfect candidate scores 0.95 — sub-perfect (GEPA does NOT skip it) yet
+# its axes are all maximal, so the axis breakdown is empty. Without a forced remedy
+# the reflection LM would again get feedback="" for a candidate it must mutate.
+
+
+def test_feedback_forced_extraction_fills_empty_when_axes_are_maximal() -> None:
+    fb = build_feedback(gate_failures=[], axes=_perfect(), forced=True)
+    assert fb != ""  # the empty-feedback pitfall, closed on its last reachable path
+    assert "force-completed" in fb
+
+
+def test_feedback_forced_remedy_yields_to_a_weaker_axis() -> None:
+    # A real axis weakness is more actionable than the 0.05 forced penalty, so it
+    # leads; the forced remedy fills the remaining slot.
+    axes = _perfect().model_copy(update={"items_ratio": 0.3})
+    parts = build_feedback(gate_failures=[], axes=axes, forced=True).split("; ")
+    assert parts[0].startswith("item coverage")
+    assert "force-completed" in parts[1]
+
+
+def test_feedback_forced_remedy_squeezed_out_when_foreground_is_full() -> None:
+    # Two gate failures already fill the foreground → the forced remedy is dropped
+    # (the candidate has bigger problems than a forced final extraction).
+    fb = build_feedback(
+        gate_failures=["AST: import os banned", "items missing a title"],
+        forced=True,
+        max_foreground=2,
+    )
+    assert "force-completed" not in fb
+
+
+def test_feedback_forced_remedy_carries_no_scorer_threshold() -> None:
+    # §8 hidden-scorer: the forced remedy names what to do, never a bar.
+    fb = build_feedback(gate_failures=[], axes=_perfect(), forced=True)
+    assert ">=" not in fb and "<=" not in fb and ">" not in fb and "<" not in fb
+    assert "need" not in fb and "require" not in fb
+
+
+def test_score_from_axes_is_graded_minus_forced_penalty() -> None:
+    axes = _perfect().model_copy(update={"discovery_quality": 0.4})
+    assert score_from_axes(axes) == pytest.approx(graded_score(axes))
+    assert score_from_axes(axes, forced=True) == pytest.approx(
+        graded_score(axes) - FORCED_EXTRACTION_PENALTY
+    )
+
+
+def test_score_from_axes_never_below_zero() -> None:
+    empty = QualityAxes(
+        items_ratio=0.0,
+        field_presence=0.0,
+        body_quality=0.0,
+        url_validity=0.0,
+        discovery_quality=0.0,
+    )
+    assert score_from_axes(empty, forced=True) == 0.0
 
 
 def test_feedback_scrubs_scorer_thresholds() -> None:

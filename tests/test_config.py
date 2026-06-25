@@ -205,6 +205,43 @@ def test_require_model_returns_value_when_set(monkeypatch: pytest.MonkeyPatch) -
     assert config.require_model() == "openrouter/some/model"
 
 
+def test_reflection_model_optional_none_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AUTOCRAWLER_REFLECTION_MODEL", raising=False)
+    assert config.reflection_model() is None
+
+
+def test_require_reflection_model_errors_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # §4.11/M5: GEPA's reflective mutation needs a reflection LM; build_gepa requires
+    # a non-None one, so the gepa rung must error loud rather than build without it.
+    monkeypatch.delenv("AUTOCRAWLER_REFLECTION_MODEL", raising=False)
+    with pytest.raises(RuntimeError, match="AUTOCRAWLER_REFLECTION_MODEL"):
+        config.require_reflection_model()
+
+
+def test_require_reflection_model_returns_value_when_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTOCRAWLER_REFLECTION_MODEL", "openrouter/strong/reflector")
+    assert config.require_reflection_model() == "openrouter/strong/reflector"
+
+
+def test_promotion_eval_passes_defaults_to_three(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AUTOCRAWLER_PROMOTION_EVAL_PASSES", raising=False)
+    assert config.promotion_eval_passes() == 3
+
+
+def test_promotion_eval_passes_floors_at_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A nonsensical 0/negative must not disable the promotion eval entirely.
+    monkeypatch.setenv("AUTOCRAWLER_PROMOTION_EVAL_PASSES", "0")
+    assert config.promotion_eval_passes() == 1
+
+
 def test_crawlers_dir_defaults_to_in_package_dir(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

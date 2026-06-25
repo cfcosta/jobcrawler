@@ -103,6 +103,28 @@ def reflection_model() -> str | None:
     return _opt("AUTOCRAWLER_REFLECTION_MODEL")
 
 
+def require_reflection_model() -> str:
+    """The GEPA ``reflection_lm`` model, erroring if unset (§4.11/M5).
+
+    GEPA's whole loop is *reflective prompt mutation*: a strong LM reads each
+    candidate's outputs + textual feedback and proposes a better instruction. It
+    must be set (and is best a strong model from a *different* family than the
+    planner, to avoid blind spots) — ``build_gepa`` requires a non-``None`` LM, so
+    the optimize path errors loud here rather than constructing GEPA with no
+    reflector. Only the ``gepa`` rung of the optimizer ladder reaches this; the
+    bootstrap rung never needs a reflection model.
+    """
+    value = reflection_model()
+    if value is None:
+        raise RuntimeError(
+            "AUTOCRAWLER_REFLECTION_MODEL is required for the GEPA optimizer rung "
+            "(§4.11): GEPA mutates the strategy prompt by reflecting on candidate "
+            "feedback with this LM. Set it to a strong model, ideally a different "
+            "family than AUTOCRAWLER_MODEL."
+        )
+    return value
+
+
 # --- generation caps (§4.2) ------------------------------------------------
 
 
@@ -356,6 +378,17 @@ def reopt_check() -> str:
 
 def trainset_stable_runs() -> int:
     return _int("AUTOCRAWLER_TRAINSET_STABLE_RUNS", 3)
+
+
+def promotion_eval_passes() -> int:
+    """Independent held-out eval passes averaged before a §4.11 promotion decision.
+
+    The generator is stochastic, so one pass over a small frozen held-out is noisy
+    (~a few points of cross-run std) — enough to promote a candidate on sampling
+    luck. Averaging a few passes makes ``should_promote`` compare stable estimates.
+    Default 3 (promotion rigor); set to 1 to restore single-pass (cheaper, noisier).
+    """
+    return max(1, _int("AUTOCRAWLER_PROMOTION_EVAL_PASSES", 3))
 
 
 def trainset_path() -> str:

@@ -90,8 +90,22 @@ def gepa_compile(
     reflection_lm: dspy.LM,
     metric: Callable[..., object],
 ) -> dspy.Module:
-    """The live GEPA compile (§4.11) — distinct train/val, teacher=None."""
-    gepa = build_gepa(metric, reflection_lm=reflection_lm)
+    """The live GEPA compile (§4.11) — distinct train/val, teacher=None.
+
+    Adapts two GEPA knobs to the pool sizes so a small admitted trainset doesn't
+    break the compile: Pareto selection needs ≥2 val instances to form a frontier
+    (degrade to ``'current_best'`` below that), and the reflection minibatch must
+    not exceed the trainset (clamp it). The gepa rung only runs with ≥20 examples
+    (``select_optimizer``), so these are floors, not the common case.
+    """
+    selection = "pareto" if len(valset) >= 2 else "current_best"
+    minibatch = max(1, min(3, len(trainset)))
+    gepa = build_gepa(
+        metric,
+        reflection_lm=reflection_lm,
+        candidate_selection_strategy=selection,
+        reflection_minibatch_size=minibatch,
+    )
     return gepa.compile(baseline, trainset=list(trainset), valset=list(valset))
 
 
@@ -156,13 +170,94 @@ def run_optimization(
     optimized_score = eval_fn(optimized, devset=holdout, metric=metric)
     margin = promotion_margin(len(holdout))
     promoted = should_promote(baseline_score, optimized_score, margin=margin)
-    return {
+    result: dict[str, object] = {
         "promoted": promoted,
         "baseline": baseline_score,
         "optimized": optimized_score,
         "margin": margin,
         "optimized_program": optimized if promoted else None,
     }
+    health = _pareto_health_note(optimized)
+    if health:
+        result["pareto_health"] = health
+    budget = _budget_health_note(optimized)
+    if budget:
+        result["budget_health"] = budget
+    return result
+
+
+def _pareto_health_note(optimized: object) -> str | None:
+    """Warn if GEPA's candidates never discriminated across val instances (§4.11).
+
+    GEPA's Pareto sampling only has signal when at least one val instance ranks
+    candidates differently (``has_per_instance_spread``). If every instance scored
+    every candidate identically, the frontier collapsed to a single co-leader set
+    and selection was effectively uniform — the search ran but explored nothing, a
+    sign the valset is saturated/non-discriminative. Read from the optional
+    ``detailed_results.val_subscores`` (``track_stats=True``); silent when the data
+    isn't present (e.g. the injected string programs in tests) or looks healthy.
+
+    Each candidate's per-instance scores arrive as either a ``dict`` keyed by
+    instance id (gepa's native, possibly **sparse** form — a candidate need not be
+    scored on every instance) or a list indexed by instance (DSPy's annotation / the
+    test fakes). We normalize both and compare only the instances at least two
+    candidates share, so a sparse row can't ``KeyError`` or fake a collapse.
+    """
+    detailed = getattr(optimized, "detailed_results", None)
+    subscores = getattr(detailed, "val_subscores", None)
+    if not subscores or len(subscores) < 2:
+        return None  # need ≥2 candidates to compare per-instance ranks
+    per_instance: dict[object, list[float]] = {}
+    for row in subscores:
+        pairs = row.items() if isinstance(row, Mapping) else enumerate(row)
+        for inst, value in pairs:
+            per_instance.setdefault(inst, []).append(value)
+    comparable = {
+        str(inst): scores for inst, scores in per_instance.items() if len(scores) >= 2
+    }
+    if not comparable or has_per_instance_spread(comparable):
+        return None
+    return (
+        "GEPA's valset never discriminated between candidates (no per-instance "
+        "spread) — the frontier collapsed and selection was effectively uniform. "
+        "The valset is likely saturated/non-discriminative; bias it toward harder, "
+        "more varied sites before trusting a promotion. " + SATURATION_REMEDY
+    )
+
+
+def _budget_health_note(optimized: object, *, min_candidates: int = 3) -> str | None:
+    """Warn if GEPA explored too few candidates to be a real search (§4.11).
+
+    ``detailed_results.candidates`` is the seed plus every *accepted* mutation — gepa
+    appends to the candidate pool only when a proposal strictly beats the incumbent
+    on the reflection minibatch (engine acceptance gate). A count below
+    ``min_candidates`` therefore means the search barely moved, and the cause is
+    **low mutation acceptance**: a saturated/non-discriminative pool on which the
+    reflected proposals can't beat the incumbent.
+
+    It is specifically *not* validation starving proposal. gepa runs exactly one
+    full-valset evaluation per accepted candidate (a full eval happens iff a
+    candidate is added), so when this fires (``n < min_candidates``) validation
+    consumed only ``n·|valset|`` of the ~``4·|valset| + const`` budget — a minority,
+    leaving the bulk to the reflection phase, which simply didn't land. (A large
+    valset *can* dominate the budget, but only in the healthy ``n >= min_candidates``
+    case, which returns ``None`` here; DSPy also warns on an oversized valset at
+    compile time, and ``cli_optimize`` caps it at ``max(1, n_sites//5)`` regardless.)
+    Advisory, never a promotion veto; silent when stats aren't present (injected
+    test programs).
+    """
+    detailed = getattr(optimized, "detailed_results", None)
+    candidates = getattr(detailed, "candidates", None)
+    if candidates is None:
+        return None
+    n = len(candidates)
+    if n >= min_candidates:
+        return None
+    return (
+        f"GEPA explored only {n} candidate(s) — the search barely moved, almost "
+        "always low mutation acceptance: the reflected proposals never beat the "
+        "incumbent on the minibatch. " + SATURATION_REMEDY
+    )
 
 
 def build_gepa(
@@ -171,6 +266,9 @@ def build_gepa(
     reflection_lm: dspy.LM,
     auto: Literal["light", "medium", "heavy"] = "light",
     track_stats: bool = True,
+    candidate_selection_strategy: Literal["pareto", "current_best"] = "pareto",
+    reflection_minibatch_size: int = 3,
+    seed: int = 0,
 ):
     """Construct the GEPA optimizer (§4.11 config). ``compile`` is the live step.
 
@@ -179,6 +277,20 @@ def build_gepa(
     mutation count is not failure). (Return type is left to inference: ty models
     dspy's ``GEPA`` as a constructor-typed value, not a class, so neither an
     explicit ``-> GEPA`` annotation nor ``isinstance(x, GEPA)`` type-checks.)
+
+    Three knobs DSPy already defaults are pinned **explicitly** so the run is
+    reproducible and robust to a dspy version bump (the GEPA internals were
+    verified against 3.2.1 — see ``test_dspy_pin``):
+
+      * ``candidate_selection_strategy='pareto'`` — sample the next parent ∝ the
+        number of *valset* instances on which it is among the per-instance best
+        (co-leaders counted, per the paper, not sole leadership); this is GEPA's
+        core sampling and needs per-instance score variance to work
+        (``has_per_instance_spread`` is the post-compile health check). Degrade to
+        ``'current_best'`` only when the valset is too small to form a frontier.
+      * ``reflection_minibatch_size=3`` — the trainset minibatch each reflection
+        step scores; must be ``<=`` trainset size (``gepa_compile`` clamps it).
+      * ``seed=0`` — pins minibatch sampling so promotion isn't chasing RNG.
     """
     return GEPA(
         metric=metric,
@@ -186,4 +298,7 @@ def build_gepa(
         auto=auto,
         track_stats=track_stats,
         use_merge=False,  # §4.11: Merge is OFF for v1 (dspy defaults it on)
+        candidate_selection_strategy=candidate_selection_strategy,
+        reflection_minibatch_size=reflection_minibatch_size,
+        seed=seed,
     )
