@@ -12,8 +12,14 @@
     against a baseline that was above it. Two consecutive sub-floor runs already rule
     out a one-off truncation, so this path skips the re-probe and regenerates directly.
 
-A confirmed-drifted site is re-entered into §4.2 generation with the *current*
-generator. By default (``AUTOCRAWLER_REVIEW_GATE`` on) a gate-passing crawler is
+The same path also handles the **cold-start** case: a registry entry with no committed
+crawler at all (nothing to crawl, nothing to re-probe) is an immediately-confirmed
+candidate, so the daemon *writes its first crawler* before the loop can crawl it —
+delivered through the very same review gate as a self-heal.
+
+A confirmed-drifted (or never-generated) site is re-entered into §4.2 generation with
+the *current* generator. By default (``AUTOCRAWLER_REVIEW_GATE`` on) a gate-passing
+crawler is
 **staged for human promotion**, not delivered live — the site enters a distinct
 **pending-review** state (§14.2) and keeps running its old crawler until an operator
 runs ``autocrawl promote``. If generation exhausts its budget without a gate-passing
@@ -165,10 +171,16 @@ class SelfHealer:
         genfail_backoff_cap: float = 7 * 86400.0,
         review_mode: Callable[[], str] = lambda: "on",
         promote: Callable[[str], Awaitable[bool]] | None = None,
+        has_crawler: Callable[[str], bool] | None = None,
     ) -> None:
         self._store = store
         self._reprobe = reprobe  # async (slug) -> items re-parsed
         self._regenerate = regenerate  # async (slug) -> how the regen was delivered
+        # Does the site have a committed crawler yet? A registry entry with none is a
+        # §4.2 cold-start: there's nothing to crawl, so assess writes the first crawler
+        # before the loop can crawl it. Defaults to "always present", so a healer wired
+        # without this (the pure-drift tests) behaves exactly as it did before.
+        self._has_crawler = has_crawler or (lambda _slug: True)
         # Called once a failure is confirmed real (re-probe ruled out a transient
         # outage) — the §4.11 hook that captures the site as a hard optimizer case.
         self._on_confirmed_failure = on_confirmed_failure
@@ -183,13 +195,22 @@ class SelfHealer:
         self._promote = promote
 
     async def assess(self, slug: str) -> HealthState:
-        """Detect → confirm → regenerate, persisting and returning the new state."""
+        """Detect → confirm → regenerate, persisting and returning the new state.
+
+        A registry entry with no committed crawler is a §4.2 cold-start: there's nothing
+        to crawl and nothing to re-probe, so it's an immediately-confirmed regenerate
+        candidate (write the first crawler) that then runs through the same delivery and
+        backoff machinery as a self-heal — staged for review by default, live under the
+        ``auto``/``off`` gate. The held-state guards below keep a staged or failed
+        bootstrap from re-generating on every sweep.
+        """
         history = self._store.runs_for(slug)
+        missing = not self._has_crawler(slug)
         blackout = staleness_candidate(history)
         collapse = not blackout and body_quality_collapse(
             history, floor=self._body_quality_floor
         )
-        if not blackout and not collapse:
+        if not missing and not blackout and not collapse:
             # Not a candidate (incl. a previously failed/pending site now healthy
             # again) → healthy, which also clears any stuck terminal state.
             return self._record(slug, HealthState.HEALTHY)
@@ -202,14 +223,15 @@ class SelfHealer:
             # the geometric backoff elapses; until then surface the failed state (§4.8).
             if record is None or not self._retry_due(record):
                 return HealthState.GENERATION_FAILED
-        # A blackout might be a transient outage, so confirm it with a re-probe; a
-        # body-quality collapse is already confirmed by two consecutive sub-floor runs
-        # (a markup change, not a network blip), so it skips straight to regeneration.
-        if blackout and await self._reprobe(slug) > 0:
+        # A blackout might be a transient outage, so confirm it with a re-probe. A
+        # body-quality collapse (two consecutive sub-floor runs) and a missing crawler
+        # (nothing to crawl) are already confirmed, so they skip straight to regeneration.
+        if blackout and not missing and await self._reprobe(slug) > 0:
             return self._record(slug, HealthState.HEALTHY)  # re-parsed: tolerated blip
-        # Drift confirmed: a real failure, not a transient outage. Capture it as a
-        # §4.11 hard case (the optimizer learns from failures) before self-healing.
-        if self._on_confirmed_failure is not None:
+        # Drift confirmed: a real failure, not a transient outage. Capture it as a §4.11
+        # hard case (the optimizer learns from failures) before self-healing. A cold-start
+        # is a new site, not a failure to learn from, so it is not captured.
+        if not missing and self._on_confirmed_failure is not None:
             self._on_confirmed_failure(slug)
         outcome = await self._regenerate(slug)
         _notify_regen(slug, outcome)

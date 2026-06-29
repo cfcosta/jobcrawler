@@ -284,6 +284,14 @@ failure; the `errors` counter is recorded either way.) Stale sites are re-entere
 validated and proposed to replace the old one (review gate per §8). This is the
 "regenerate when the site changes" loop made automatic.
 
+The same machinery covers **cold-start**: an enabled site with *no committed crawler at all* is
+an immediately-confirmed candidate (nothing to crawl, nothing to re-probe), so the daemon writes
+its **first** crawler before the loop can crawl it — same generator, same review gate, same
+generation-failed backoff. A crawler-less site is therefore never dispatched to crawl (that would
+only error every tick); it is routed to generation instead. (It is *not* captured as a §4.11 hard
+case — a brand-new site is not a failure to learn from — and, like every self-modifying action, it
+is frozen by the `AUTOCRAWLER_AUTONOMY` brake.)
+
 Regeneration runs the **current** generator. If generation exhausts its budget without a
 gate-passing crawler — including a forced RLM extraction (`final_reasoning == "Extract forced
 final output"`, §4.2) — the site enters a distinct **generation-failed** state, surfaced
@@ -302,6 +310,8 @@ scheduler that operates the whole crawl loop itself, rather than relying on an e
 
 - **Due-selection.** Each site has a cadence (`schedule` in §4.1, else `AUTOCRAWLER_DEFAULT_SCHEDULE`).
   The scheduler keeps `next_run` per site in the state store and dispatches sites whose time has come.
+  A due site with no committed crawler is split off from the crawl wave and routed to the §4.8
+  cold-start bootstrap (write its first crawler) rather than crawled into a `FileNotFoundError`.
 - **Bounded concurrency.** A global cap (`AUTOCRAWLER_CONCURRENCY`) limits how many sites crawl at
   once; per-host limits come from the politeness layer (§4.5). A site never overlaps its own prior run.
 - **Retry & backoff (one owner per failure class).** A crawl that fails *before yielding/ingesting any

@@ -229,9 +229,16 @@ Undo a bad adoption by hand with `autocrawl rollback-generator`.
 ## Operator runbook
 
 **Add a site.** Append an entry to `sites.yaml` (schema in
-`deploy/sites.example.yaml`), then `autocrawl generate <slug>` → `autocrawl validate
-<slug>` → `autocrawl crawl <slug>` to confirm before the daemon picks it up. The
-daemon also generates missing crawlers for enabled sites on its own.
+`deploy/sites.example.yaml`) — that's all that's required. When the running daemon finds
+an enabled site with no crawler, it writes the first one itself (§4.2 cold-start) instead
+of crawling into an error, honoring `AUTOCRAWLER_REVIEW_GATE`: under the default `on` the
+crawler is staged to `_pending/<slug>.py` (the site shows `pending_review` until you
+`promote` it); under `auto`/`off` it goes live and the site starts crawling unattended.
+A failed first generation is held and retried with backoff, exactly like a self-heal, so
+it can't spin. To bring a site up by hand instead (immediate, operator-owned), run
+`autocrawl generate <slug>` → `autocrawl validate <slug>` → `autocrawl crawl <slug>`.
+(With `AUTOCRAWLER_AUTONOMY=off` the daemon won't generate on its own — a crawler-less
+site simply stays idle until you generate it manually.)
 
 **Watch the fleet.** `autocrawl list` shows which sites have a committed script, their
 last item count, and the learned cadence (`every=2h` / `every=adaptive` / `every=fixed`).

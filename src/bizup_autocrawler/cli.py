@@ -84,6 +84,16 @@ def _crawler_file(slug: str, crawlers_dir: Path = _CRAWLERS_DIR) -> Path:
     return crawlers_dir / f"{slug}.py"
 
 
+def _has_live_crawler(slug: str, crawlers_dir: Path = _CRAWLERS_DIR) -> bool:
+    """True if a committed live crawler exists for the slug (else a §4.2 cold-start).
+
+    The run loop and the self-healer share this to tell a crawlable site from one that
+    still needs its first crawler written. A crawler staged under ``_pending`` does not
+    count — it isn't live yet — so a site stays in the bootstrap path until promoted.
+    """
+    return _crawler_file(slug, crawlers_dir).exists()
+
+
 def _site_url_of(source: str) -> str:
     """Read the module-level SITE constant from crawler source without importing."""
     for node in ast.parse(source).body:
@@ -584,6 +594,7 @@ def _build_healer(store: StateStore, sites: Sequence[Site]) -> SelfHealer:
         genfail_backoff_cap=config.genfail_backoff_cap(),
         review_mode=config.review_gate,
         promote=promote,
+        has_crawler=_has_live_crawler,  # §4.2 cold-start: write a first crawler if none
     )
 
 
@@ -613,7 +624,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
 
     scheduler = Scheduler(
-        sites, store=store, crawl=crawl, healer=_build_healer(store, sites)
+        sites,
+        store=store,
+        crawl=crawl,
+        healer=_build_healer(store, sites),
+        has_crawler=_has_live_crawler,  # route crawler-less sites to §4.2 bootstrap
     )
 
     async def serve() -> None:

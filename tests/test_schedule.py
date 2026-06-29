@@ -993,3 +993,111 @@ async def test_run_invokes_the_adopt_watch() -> None:
 
     await asyncio.gather(sched.run(stop=stop, interval=0.005), stopper())
     assert seen  # the watcher rode the run loop at least once
+
+
+# -- §4.2 cold-start bootstrap: a due site with no committed crawler ----------
+
+
+async def _ok_crawl(site: Site) -> CrawlSummary:
+    return CrawlSummary(
+        site.slug, items_found=5, new_items=1, errors=0, pages_fetched=1
+    )
+
+
+def _bootstrap_sched(
+    *,
+    crawl: CrawlFn,
+    healer: _RecordingHealer | None,
+    has_crawler: Callable[[str], bool],
+    autonomy: bool = True,
+) -> Scheduler:
+    # "has" already owns a committed crawler; "new" does not. Both are due (no prior
+    # runs). The periodic sweep and the event-heal path are off, so the only thing that
+    # can act on the crawler-less site is the dispatch-time cold-start bootstrap.
+    return Scheduler(
+        [
+            Site(slug="has", url="https://has.com"),
+            Site(slug="new", url="https://new.com"),
+        ],
+        store=StateStore(":memory:"),
+        crawl=crawl,
+        healer=healer,
+        has_crawler=has_crawler,
+        autonomy=autonomy,
+        regen_check="off",
+        heal_cooldown="off",
+    )
+
+
+async def test_due_site_without_a_crawler_is_bootstrapped_not_crawled() -> None:
+    # The core of the fix: a crawler-less site is never dispatched to crawl (that would
+    # only FileNotFoundError every tick); it's routed to the generator instead, while the
+    # site that has a crawler crawls as usual.
+    crawled: list[str] = []
+
+    async def crawl(site: Site) -> CrawlSummary:
+        crawled.append(site.slug)
+        return await _ok_crawl(site)
+
+    healer = _RecordingHealer()
+    sched = _bootstrap_sched(
+        crawl=crawl, healer=healer, has_crawler=lambda slug: slug == "has"
+    )
+    summaries = await sched.tick()
+
+    assert crawled == ["has"]
+    assert healer.assessed == ["new"]
+    assert [s.site for s in summaries] == ["has"]
+
+
+async def test_bootstrap_is_frozen_when_autonomy_is_off() -> None:
+    # Writing a first crawler is self-modification, so the master autonomy switch freezes
+    # it. The crawler-less site is then simply left idle — never crawled into an error.
+    crawled: list[str] = []
+
+    async def crawl(site: Site) -> CrawlSummary:
+        crawled.append(site.slug)
+        return await _ok_crawl(site)
+
+    healer = _RecordingHealer()
+    sched = _bootstrap_sched(
+        crawl=crawl,
+        healer=healer,
+        has_crawler=lambda slug: slug == "has",
+        autonomy=False,
+    )
+    await sched.tick()
+
+    assert crawled == ["has"]  # the present-crawler site still crawls
+    assert healer.assessed == []  # no generation while autonomy is off
+
+
+async def test_bootstrap_without_a_healer_is_a_noop() -> None:
+    # No generator wired → a crawler-less site isn't crawled; the tick still completes and
+    # the crawlable site's summary comes back.
+    crawled: list[str] = []
+
+    async def crawl(site: Site) -> CrawlSummary:
+        crawled.append(site.slug)
+        return await _ok_crawl(site)
+
+    sched = _bootstrap_sched(
+        crawl=crawl, healer=None, has_crawler=lambda slug: slug == "has"
+    )
+    summaries = await sched.tick()
+
+    assert crawled == ["has"]
+    assert [s.site for s in summaries] == ["has"]
+
+
+async def test_a_raising_bootstrap_does_not_abort_the_tick() -> None:
+    # A generation raising (LM/Deno/network) is isolated like the heal path — the
+    # crawlable site's summary is still returned and the daemon survives.
+    healer = _RecordingHealer(raises=True)
+    sched = _bootstrap_sched(
+        crawl=_ok_crawl, healer=healer, has_crawler=lambda slug: slug == "has"
+    )
+    summaries = await sched.tick()
+
+    assert [s.site for s in summaries] == ["has"]
+    assert healer.assessed == ["new"]  # attempted, raised, tick survived

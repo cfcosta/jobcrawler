@@ -147,6 +147,7 @@ class Scheduler:
         backoff_base: float = 1.0,
         jitter: Callable[[], float] | None = None,
         healer: Healer | None = None,
+        has_crawler: Callable[[str], bool] | None = None,
         autonomy: bool | None = None,
         regen_check: str | None = None,
         reopt_check: str | None = None,
@@ -171,6 +172,11 @@ class Scheduler:
         self._jitter = jitter or (lambda: random.uniform(0, 0.5))
         self._inflight: set[str] = set()
         self._healer = healer
+        # Does a site have a committed crawler yet? A due site with none can't be crawled
+        # (it would just FileNotFoundError every tick), so the loop routes it to the §4.2
+        # cold-start bootstrap instead. Defaults to "always present" so the many tests
+        # that inject only a crawl fn keep exercising the pure crawl path unchanged.
+        self._has_crawler = has_crawler or (lambda _slug: True)
         # §4.8/§4.11 master autonomy switch: when off, every self-*modifying* action
         # (periodic regen, event-driven heal, out-of-band reopt — and the auto-promote /
         # auto-adopt they gate) is frozen, while crawl + ingest keep running so the loop
@@ -350,6 +356,37 @@ class Scheduler:
             _log.info("event heal assessed=%d %s", len(states), _state_summary(states))
         return states
 
+    async def _bootstrap_missing(self, sites: list[Site]) -> dict[str, HealthState]:
+        """Write a first crawler for each due site that has none yet (§4.2 cold-start).
+
+        A registry entry with no ``crawlers/<slug>.py`` can't be crawled, so the daemon
+        generates one before crawling — the same generator the §4.8 healer runs, via the
+        healer's ``assess`` (which treats a missing crawler as an immediately-confirmed
+        regenerate candidate). Delivery honors ``AUTOCRAWLER_REVIEW_GATE``: staged for
+        review by default, live under ``auto``/``off``. The health state machine
+        (pending-review / generation-failed + backoff) keeps a staged or failed
+        bootstrap from re-generating every tick.
+
+        Frozen by the master autonomy switch — generating crawler code is
+        self-modification — so with autonomy off (or no healer wired) a crawler-less site
+        simply stays idle rather than being crawled into a FileNotFoundError. Each site is
+        isolated like the heal path so one generation raising can't abort the tick.
+        """
+        if not self._autonomy or self._healer is None:
+            return {}
+        healer = self._healer
+        states: dict[str, HealthState] = {}
+        for site in sites:
+            try:
+                states[site.slug] = await healer.assess(site.slug)
+            except Exception:
+                _log.exception(
+                    "cold-start bootstrap failed for %s; skipping", site.slug
+                )
+        if states:
+            _log.info("bootstrap generated=%d %s", len(states), _state_summary(states))
+        return states
+
     async def tick(self) -> list[CrawlSummary]:
         """Dispatch every currently-due site (bounded), returning the successes.
 
@@ -358,21 +395,27 @@ class Scheduler:
         exhausting its retries so the lost work isn't invisible. A crawl that comes back
         drifted (blackout or body-quality collapse) triggers an immediate §4.8 heal,
         rate-limited per-site by the heal cooldown.
+
+        A due site that has no committed crawler yet is never crawled (that would only
+        FileNotFoundError); it's routed to the §4.2 cold-start bootstrap after the crawl
+        wave, which writes its first crawler honoring the review gate.
         """
         due = self.due_sites()
-        if due:
+        crawlable = [s for s in due if self._has_crawler(s.slug)]
+        missing = [s for s in due if not self._has_crawler(s.slug)]
+        if crawlable:
             _log.info(
                 "tick dispatching n=%d sites=%s",
-                len(due),
-                ",".join(s.slug for s in due),
+                len(crawlable),
+                ",".join(s.slug for s in crawlable),
             )
         results = await asyncio.gather(
-            *(self._dispatch(s) for s in due), return_exceptions=True
+            *(self._dispatch(s) for s in crawlable), return_exceptions=True
         )
         summaries: list[CrawlSummary] = []
         to_heal: list[str] = []
         now = self._clock()
-        for site, result in zip(due, results):
+        for site, result in zip(crawlable, results):
             if isinstance(result, CrawlSummary):
                 _log.info(
                     "crawl ok slug=%s found=%d new=%d pages=%d errors=%d",
@@ -397,6 +440,8 @@ class Scheduler:
                 )
         if to_heal:
             await self._event_heal(to_heal)
+        if missing:
+            await self._bootstrap_missing(missing)
         return summaries
 
     def regen_due(self, now: datetime) -> bool:

@@ -740,6 +740,10 @@ async def test_build_healer_records_hard_case_on_confirmed_failure(
     latest = store.start_run("valor")
     store.finish_run(latest, items_found=0, new_items=0, errors=1, pages_fetched=1)
     sites = [Site(slug="valor", url="https://valor.com")]
+    # This is drift, not a cold-start: the site HAS a live crawler that broke, so the
+    # failure-capture hook fires. (A crawler-less site is a new-site bootstrap, which is
+    # not a learning signal and skips the hook.)
+    monkeypatch.setattr("bizup_autocrawler.cli._has_live_crawler", lambda slug: True)
 
     healer = _build_healer(store, sites)
 

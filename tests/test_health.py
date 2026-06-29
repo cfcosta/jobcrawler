@@ -483,6 +483,87 @@ async def test_backoff_is_capped() -> None:
     assert regen_calls == 2
 
 
+# -- cold-start bootstrap: a registry entry with no crawler yet (§4.2) --------
+
+
+def _bootstrap_healer(
+    *,
+    regen_outcome: RegenOutcome,
+    captured: list[str] | None = None,
+    review_mode: str = "on",
+) -> tuple[SelfHealer, dict[str, int], StateStore]:
+    """A healer over an EMPTY store (no run history) whose site has no committed crawler.
+
+    With ``has_crawler`` False and no history, assess can't be detecting drift — the
+    only reason it acts is the cold-start: write the site's first crawler. Returns the
+    healer, a mutable call-count map (``reprobe``/``regenerate``), and the store.
+    """
+    store = StateStore(":memory:", clock=lambda: T0)
+    calls = {"reprobe": 0, "regenerate": 0}
+
+    async def reprobe(slug: str) -> int:
+        calls["reprobe"] += 1
+        return 0
+
+    async def regenerate(slug: str) -> RegenOutcome:
+        calls["regenerate"] += 1
+        return regen_outcome
+
+    healer = SelfHealer(
+        store,
+        reprobe=reprobe,
+        regenerate=regenerate,
+        clock=lambda: T0,
+        has_crawler=lambda _slug: False,
+        review_mode=lambda: review_mode,
+        on_confirmed_failure=None if captured is None else captured.append,
+    )
+    return healer, calls, store
+
+
+async def test_cold_start_writes_a_first_crawler_without_reprobing() -> None:
+    # A new site (no crawler, no runs) is bootstrapped: the generator runs and, under a
+    # go-live gate, the site is immediately healthy. There's nothing to re-probe — the
+    # re-probe only disambiguates a blackout from a transient outage, neither of which
+    # applies when no crawler has ever run.
+    healer, calls, store = _bootstrap_healer(regen_outcome=RegenOutcome.PROMOTED)
+    assert await healer.assess("new") is HealthState.HEALTHY
+    assert calls == {"reprobe": 0, "regenerate": 1}
+    assert store.get_health("new") == HealthState.HEALTHY.value
+
+
+async def test_cold_start_under_review_gate_stages_and_does_not_respin() -> None:
+    # Default gate (on): the first crawler is staged for review (pending-review), and a
+    # later tick of the still-crawler-less site must NOT regenerate again — the staged
+    # candidate is awaiting a human, not a signal to re-run the generator.
+    healer, calls, _store = _bootstrap_healer(regen_outcome=RegenOutcome.STAGED)
+    assert await healer.assess("new") is HealthState.PENDING_REVIEW
+    assert await healer.assess("new") is HealthState.PENDING_REVIEW
+    assert calls["regenerate"] == 1
+
+
+async def test_cold_start_generation_failure_is_held_within_backoff() -> None:
+    # A first generation that produces nothing is generation-failed and held under the
+    # same geometric backoff as a failed heal — it must not re-generate every tick.
+    healer, calls, _store = _bootstrap_healer(regen_outcome=RegenOutcome.FAILED)
+    assert await healer.assess("new") is HealthState.GENERATION_FAILED
+    assert await healer.assess("new") is HealthState.GENERATION_FAILED
+    assert calls["regenerate"] == 1
+
+
+async def test_cold_start_is_not_captured_as_a_hard_case() -> None:
+    # The §4.11 capture hook records sites the generator *failed on* (a learning signal).
+    # A brand-new site is not a failure to learn from, so a cold-start never captures —
+    # even though it does run the generator.
+    captured: list[str] = []
+    healer, calls, _store = _bootstrap_healer(
+        regen_outcome=RegenOutcome.PROMOTED, captured=captured
+    )
+    await healer.assess("new")
+    assert captured == []
+    assert calls["regenerate"] == 1
+
+
 # -- stranded pending-review auto-clear (§14.2, P2c) -------------------------
 
 
