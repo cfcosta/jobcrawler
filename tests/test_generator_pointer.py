@@ -37,8 +37,11 @@ def test_set_active_then_read_round_trips() -> None:
 
 def test_set_active_writes_atomically_without_leaving_a_temp(tmp_path: Path) -> None:
     generator_pointer.set_active("generators/generator-1.json")
-    # The temp file used for the atomic os.replace must not survive the write.
+    # The unique temp used for the atomic os.replace must not survive the write — and
+    # no temp of *any* name (the write uses mkstemp, not a fixed ``ACTIVE.tmp``, so a
+    # concurrent rollback/adopt can't collide on one shared temp).
     assert not (tmp_path / "ACTIVE.tmp").exists()
+    assert list(tmp_path.glob("*.tmp")) == []
     assert (tmp_path / "ACTIVE").exists()
 
 

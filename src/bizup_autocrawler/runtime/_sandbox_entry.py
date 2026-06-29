@@ -23,6 +23,7 @@ from bizup_autocrawler.runtime.contract import Item
 from bizup_autocrawler.runtime.ctx import Ctx
 from bizup_autocrawler.runtime.hardening import harden_xml
 from bizup_autocrawler.runtime.live_ctx import build_live_ctx
+from bizup_autocrawler.runtime.safe_exec import exec_crawler
 
 _SAMPLE_CAP = 5
 _BODY_PREVIEW = 600
@@ -70,8 +71,10 @@ def main() -> None:
         "exception": None,
     }
     try:
-        namespace: dict[str, object] = {}
-        exec(compile(data["source"], "<candidate>", "exec"), namespace)  # noqa: S102
+        # Exec under the §8 restricted ``__builtins__`` (eval/exec/open/raw
+        # __import__ absent; imports allowlisted) — the runtime half of the sandbox,
+        # not trusting the AST gate alone.
+        namespace = exec_crawler(data["source"], filename="<candidate>")
         crawl = cast("Callable[[Ctx], Iterable[object]]", namespace["crawl"])
         count = 0
         samples: list[dict[str, str]] = []

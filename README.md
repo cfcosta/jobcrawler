@@ -120,7 +120,7 @@ starting point.
 | `AUTOCRAWLER_STATE_URL` | `sqlite:///autocrawler.db` | Run-history + health state store. |
 | `AUTOCRAWLER_CRAWLERS_DIR` | in-package `crawlers/` | Committed crawlers + `_pending` staging. **Relocate to a writable, persistent path in production** (the package dir is read-only on native Nix and ephemeral in a container). |
 | `AUTOCRAWLER_GENERATOR_DIR` | `generators` | Where `optimize` writes versioned `generator-N.json`. |
-| `AUTOCRAWLER_GENERATOR_PATH` | unset | Pointer to the active `generator.json`; unset boots the baseline. **Flipping this to a prior artifact is the rollback.** |
+| `AUTOCRAWLER_GENERATOR_PATH` | unset | *Fallback* pointer to the active `generator.json` (resolution order: CLI arg › `ACTIVE` pointer file › this env var › baseline). The autonomous loop now adopts/rolls back via the `ACTIVE` pointer file with no restart; deploys that only set this still boot from it. Roll back with `autocrawl rollback-generator`, not by editing this. |
 | `AUTOCRAWLER_TRAINSET_PATH` | `trainset.jsonl` | §4.11 trainset (one row per admitted generation / recorded failure). |
 
 ### Models (optional)
@@ -165,17 +165,62 @@ starting point.
 | `AUTOCRAWLER_MIN_BODY_CHARS` | `400` | `AUTOCRAWLER_ENUM_FLOOR_RATIO` | `0.5` |
 | `AUTOCRAWLER_MIN_BODY_QUALITY` | `0.6` | | |
 
-### Scheduler (§4.9), review (§8), solver (§4.10), logging
+### Scheduler & adaptive cadence (§4.9)
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `AUTOCRAWLER_DEFAULT_SCHEDULE` | `30m` | Per-site cadence when a site sets none. |
+| `AUTOCRAWLER_DEFAULT_SCHEDULE` | `30m` | Fixed per-site cadence when a site sets none and isn't adaptive. |
 | `AUTOCRAWLER_CONCURRENCY` | `4` | Max simultaneous crawls. |
-| `AUTOCRAWLER_REGEN_CHECK` | `24h` | How often the self-heal timer assesses drift. |
-| `AUTOCRAWLER_REOPT_CHECK` | `off` | Offline re-optimization cadence (`off` disables). |
+| `AUTOCRAWLER_ADAPTIVE_DEFAULT` | `false` | When true, a site with no explicit `schedule` runs **adaptive** instead of the fixed `DEFAULT_SCHEDULE` (otherwise adaptive is opt-in per source via `adaptive: true`). |
+| `AUTOCRAWLER_MIN_SCHEDULE` | `15m` | Politeness floor for an adaptive interval — the controller never crawls faster than this. |
+| `AUTOCRAWLER_MAX_SCHEDULE` | `1d` | Staleness ceiling for an adaptive interval — the controller never crawls slower than this. |
+| `AUTOCRAWLER_ADAPTIVE_TARGET_N` | `2` | Target checks-per-post: an AIMD-style controller on the fraction of recent crawls finding ≥1 new item steers toward a `1/N` hit rate (fast multiplicative shrink when busy, gentle grow when quiet), clamped into the `MIN_SCHEDULE…MAX_SCHEDULE` band (`N` clamped ≥ 1). |
+| `AUTOCRAWLER_ADAPTIVE_WINDOW` | `8` | How many recent crawls the controller averages the hit rate over. |
+
+The learned per-site interval shows in `autocrawl list` as `every=…` (or `every=adaptive`
+before one is learned). The controller adjusts only *timing*, never code, and so is **not**
+governed by the autonomy brake below.
+
+### Self-heal (§4.8)
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `AUTOCRAWLER_REGEN_CHECK` | `24h` | How often the periodic self-heal timer assesses drift fleet-wide. |
+| `AUTOCRAWLER_HEAL_COOLDOWN` | `6h` | Minimum spacing between *event-driven* heals of one site (a blacked-out or quality-collapsed crawl triggers an immediate assessment instead of waiting for the periodic sweep). `off` disables the fast path, leaving only the periodic sweep. |
+| `AUTOCRAWLER_BODY_QUALITY_FLOOR` | `0.5` | Share of complete-bodied items below which a crawl (that still found items) is a partial-drift signal — catches a site quietly switching to teasers/paywalls. Host-side only (§8); clamped to (0, 1]. |
+| `AUTOCRAWLER_GENFAIL_BACKOFF` | `6h` | Base delay before a generation-failed site is retried with the current generator; doubles per consecutive failure. |
+| `AUTOCRAWLER_GENFAIL_BACKOFF_CAP` | `7d` | Ceiling for that geometric retry backoff — a chronically broken site backs off without ever being abandoned. |
+| `AUTOCRAWLER_REVIEW_GATE` | `on` | Tri-state self-heal delivery (§4.8/§14.2): **`on`** stages a healed crawler to `_pending/<slug>.py` for an operator `promote`; **`auto`** auto-promotes after backing the live crawler up to `_history/<slug>/` (safety = §6 gates + `rollback`, not a human); **`off`** writes live with no backup. Legacy booleans still parse (truthy ⇒ `on`, falsy ⇒ `off`). |
+
+### Self-improvement (§4.11) — *offline, out-of-band*
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `AUTOCRAWLER_REOPT_CHECK` | `off` | Cadence of the GEPA re-optimization timer (`off` disables). Each tick dispatches `autocrawl optimize` **detached** — never inside the crawl loop. |
 | `AUTOCRAWLER_TRAINSET_STABLE_RUNS` | `3` | Stable runs before a generation is trainset-admissible. |
-| `AUTOCRAWLER_REVIEW_GATE` | `true` | On: self-heal stages to `_pending` for human `promote`. Off: auto-heal goes live. |
-| `AUTOCRAWLER_SOLVER` | `none` | Challenge-solver backend (§4.10). `flaresolverr` is the opt-in backend. |
+| `AUTOCRAWLER_PROMOTION_EVAL_PASSES` | `3` | Independent held-out eval passes averaged before a promotion/adoption decision — averages out the stochastic generator's cross-run noise so a candidate can't clear the margin on sampling luck (`1` = single-pass; cheaper, noisier). |
+| `AUTOCRAWLER_OPTIMIZE_LOCK` | `optimize.lock` | Single-flight lockfile held for an optimize run, so a reopt tick that fires mid-compile is a no-op rather than a pile-up. CWD-relative. |
+| `AUTOCRAWLER_OPTIMIZE_LOG` | `optimize.log` | Where the detached optimize subprocess appends stdout/stderr (it outlives the daemon). CWD-relative. |
+| `AUTOCRAWLER_ADOPT_PROBATION` | `48h` | Probation window after an auto-adoption before the regression watcher judges it; `off` disables the watcher (the held-out margin gate is then the only protection). |
+| `AUTOCRAWLER_ADOPT_REGRESSION_DELTA` | `2` | How many *more* sites must newly enter `generation_failed` in the window after an adoption than in the equal window before it for the watcher to roll the pointer back (floored at 1). |
+
+A newly-optimized generator that clears the frozen held-out margin is **auto-adopted** (the
+active-generator pointer flips with no restart); the watcher above is the paired safety net.
+Undo a bad adoption by hand with `autocrawl rollback-generator`.
+
+### Autonomy & notifications (§8)
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `AUTOCRAWLER_AUTONOMY` | `on` | Master kill-switch over **every** self-modifying action — periodic + event-driven self-heal, auto-promotion, the reopt dispatch, and auto-adoption. `off` freezes all of them (the daemon still crawls, ingests, and records run/health signals); operator commands (`promote`, `rollback`, `rollback-generator`, `optimize --adopt`) stay available. Read at scheduler start — flip and restart to apply. |
+| `AUTOCRAWLER_NOTIFY_WEBHOOK` | unset | `http(s)` URL sent a small JSON payload on every autonomous action (heal/promote, adopt, generator rollback), in addition to the log line. Best-effort and fire-and-forget. Unset ⇒ log only. |
+| `AUTOCRAWLER_NOTIFY_TIMEOUT` | `10.0` | Per-POST timeout (seconds) for the notify webhook. |
+
+### Solver (§4.10) & logging
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `AUTOCRAWLER_SOLVER` | `none` | Challenge-solver backend. `flaresolverr` is the opt-in backend. |
 | `FLARESOLVERR_URL` | unset | Required when `AUTOCRAWLER_SOLVER=flaresolverr`. |
 | `AUTOCRAWLER_CLEARANCE_TTL` | `30m` | Cached-clearance lifetime. |
 | `AUTOCRAWLER_EGRESS_PROXY` | unset | Optional egress proxy for fetches. |
@@ -188,23 +233,39 @@ starting point.
 <slug>` → `autocrawl crawl <slug>` to confirm before the daemon picks it up. The
 daemon also generates missing crawlers for enabled sites on its own.
 
-**Watch the fleet.** `autocrawl list` shows which sites have a committed script and
-their last item count; `autocrawl status` shows run aggregates, the health
-distribution (`healthy` / `stale` / `pending_review` / `generation_failed`), and the
-observed drift-recovery MTTR.
+**Watch the fleet.** `autocrawl list` shows which sites have a committed script, their
+last item count, and the learned cadence (`every=2h` / `every=adaptive` / `every=fixed`).
+`autocrawl status` shows run aggregates, the health distribution (`healthy` / `stale` /
+`pending_review` / `generation_failed`), the observed drift-recovery MTTR, per-site drift
+churn (`transitions=`), the active generator version + held-out score (and any adoption
+under probation), and whether the autonomy brake is `on`/`OFF`.
 
-**Promote a self-healed crawler.** When a site drifts, the daemon stages a
-regenerated crawler. `status` shows it as `pending_review`; inspect
-`<crawlers_dir>/_pending/<slug>.py`, then `autocrawl promote <slug>` to take it live.
-(Set `AUTOCRAWLER_REVIEW_GATE=off` only if you want fully autonomous healing.)
+**Promote a self-healed crawler.** Behaviour depends on `AUTOCRAWLER_REVIEW_GATE`
+(default `on`). With `on`, a drifted site's regenerated crawler is staged and `status`
+shows it `pending_review`; inspect `<crawlers_dir>/_pending/<slug>.py`, then `autocrawl
+promote <slug>` to take it live. With `auto`, the daemon promotes it itself after backing
+the live crawler up to `_history/<slug>/` — undo with `autocrawl rollback <slug>`. With
+`off`, it writes live with no backup.
 
 **Improve the generator.** Run `autocrawl optimize` (offline; LM-heavy) to build the
-trainset and emit a new `generators/generator-N.json`. Deploy it by pointing
-`AUTOCRAWLER_GENERATOR_PATH` at it and restarting the daemon.
+trainset and emit a new `generators/generator-N.json`. Set `AUTOCRAWLER_REOPT_CHECK` to a
+cadence and the daemon dispatches this itself, **out-of-band** (a detached subprocess
+logging to `AUTOCRAWLER_OPTIMIZE_LOG`, serialized by `AUTOCRAWLER_OPTIMIZE_LOCK`); a
+result that clears the frozen held-out margin is auto-adopted (pointer flips, no restart).
+`status`'s `generator:` line shows the active version, its held-out score, and any
+adoption still under probation.
 
-**Roll back a bad generator.** Flip `AUTOCRAWLER_GENERATOR_PATH` back to the previous
-`generator-N.json` (or unset it to boot the baseline) and restart. Committed
+**Roll back a bad generator.** `autocrawl rollback-generator` undoes the last adoption —
+restoring the previous `generator-N.json`, or baseline when the first-ever adoption is
+undone. The §4.11 watcher does this automatically if an adoption regresses the fleet
+within `AUTOCRAWLER_ADOPT_PROBATION` (see `AUTOCRAWLER_ADOPT_REGRESSION_DELTA`). Committed
 crawlers are unaffected — only future generations change.
+
+**Pull the brake.** `AUTOCRAWLER_AUTONOMY=off` (then restart) freezes every
+self-modifying action — self-heal, auto-promotion, the reopt dispatch, auto-adoption —
+while the daemon keeps crawling, ingesting, and recording signals. Operator commands
+(`promote`, `rollback`, `rollback-generator`, `optimize --adopt`) stay available, so you
+can drive changes by hand with the daemon's own initiative stopped.
 
 **Troubleshooting.**
 

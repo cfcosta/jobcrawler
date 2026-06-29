@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from bizup_autocrawler.generate.scoring import CandidateResult
+from bizup_autocrawler.runtime.safe_exec import BANNED_BUILTINS, module_allowed
 from bizup_autocrawler.urls import canonicalize_url, valid_on_domain_url
 
 
@@ -44,56 +45,12 @@ class GateResult:
 
 # -- gate 1: AST allowlist ---------------------------------------------------
 
-# Exact module names a generated crawler may import. urllib is intentionally
-# narrowed to ``urllib.parse`` (``urllib.request`` would be a network egress
-# path outside ctx). __future__ is the harmless annotations directive.
-_ALLOWED_EXACT = frozenset(
-    {
-        "__future__",
-        "re",
-        "json",
-        "datetime",
-        "urllib.parse",
-        "collections",
-        "collections.abc",
-        "itertools",
-        "math",
-        "html",
-        "string",
-        "typing",
-        "dataclasses",
-        "bizup_autocrawler.runtime.contract",
-    }
-)
-# Parser packages: the package and any submodule (lxml.etree, selectolax.parser).
-# stdlib ``xml`` (xml.etree/xml.dom/xml.sax) is permitted because the §8
-# hardening (runtime/hardening.py, applied before any crawler runs) defuses XXE /
-# entity-expansion in every execution path — so it is a safe feed/sitemap parser.
-_ALLOWED_PREFIXES = ("selectolax", "lxml", "feedparser", "xml")
-# Builtins that grant filesystem/eval/introspection escape.
-_BANNED_NAMES = frozenset(
-    {
-        "eval",
-        "exec",
-        "open",
-        "compile",
-        "__import__",
-        "input",
-        "breakpoint",
-        "globals",
-        "locals",
-        "vars",
-        "getattr",
-        "setattr",
-        "delattr",
-    }
-)
-
-
-def _module_allowed(name: str) -> bool:
-    if name in _ALLOWED_EXACT:
-        return True
-    return any(name == p or name.startswith(p + ".") for p in _ALLOWED_PREFIXES)
+# The import allowlist (``module_allowed``) and the banned-builtin set
+# (``BANNED_BUILTINS``) are owned by ``runtime.safe_exec`` — the single source of
+# truth shared with the *runtime* half of the sandbox (the restricted
+# ``__builtins__`` both subprocess entries exec under). One definition means the
+# static gate and the runtime sandbox can never drift apart and leave a hole one
+# side has closed.
 
 
 def _is_dunder(name: str) -> bool:
@@ -113,15 +70,21 @@ def check_ast(source: str) -> GateResult:
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if not _module_allowed(alias.name):
+                if not module_allowed(alias.name):
                     failures.append(f"banned import: {alias.name}")
         elif isinstance(node, ast.ImportFrom):
             if node.level:
                 failures.append("relative import not allowed")
-            elif not _module_allowed(node.module or ""):
+            elif not module_allowed(node.module or ""):
                 failures.append(f"banned import: {node.module}")
-        elif isinstance(node, ast.Name) and node.id in _BANNED_NAMES:
+        elif isinstance(node, ast.Name) and node.id in BANNED_BUILTINS:
             failures.append(f"banned builtin: {node.id}")
+        elif isinstance(node, ast.Name) and _is_dunder(node.id):
+            # ``__builtins__`` (and any dunder name) is the canonical gate-bypass
+            # handle: reach the builtins mapping by name, then index a raw
+            # ``__import__``/``eval`` out of it. Ban every dunder name, symmetric
+            # with the dunder-attribute escape ban below.
+            failures.append(f"banned dunder name: {node.id}")
         elif isinstance(node, ast.Attribute) and _is_dunder(node.attr):
             failures.append(f"banned dunder access: {node.attr}")
 

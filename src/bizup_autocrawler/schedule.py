@@ -289,6 +289,10 @@ class Scheduler:
             ceiling_secs=self._max_schedule,
             target_hit_rate=self._target_hit_rate,
             window=self._adaptive_window,
+            # Don't require more observations than the window can ever hold, or an
+            # operator who sets a window < the controller's default min would freeze
+            # the cadence at its seed forever. Caps at the default 3 otherwise.
+            min_observations=min(3, self._adaptive_window),
         )
         if nxt != current:
             _log.info(

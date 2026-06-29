@@ -57,6 +57,21 @@ def test_ast_gate_blocks_banned_code_before_running() -> None:
     assert result.exception.type == "ASTGateError"
 
 
+def test_sandbox_blocks_builtins_escape() -> None:
+    # A crawler trying to climb out via __builtins__ never reaches exec: the AST gate
+    # rejects the __builtins__ name first. Even past it, the child execs under a
+    # restricted __builtins__ (no __import__/eval) — so the escape is reported, not run.
+    escape = (
+        'SITE="https://example.com"\n'
+        "def crawl(ctx):\n"
+        '    __builtins__["__import__"]("os").system("id")\n'
+        "    yield None\n"
+    )
+    result = validate_crawler(escape, allowed_hosts={"example.com"}, timeout=20.0)
+    assert result.exception is not None
+    assert result.exception.type == "ASTGateError"
+
+
 def test_runtime_exception_is_captured() -> None:
     raises = """
 SITE = "https://example.com"

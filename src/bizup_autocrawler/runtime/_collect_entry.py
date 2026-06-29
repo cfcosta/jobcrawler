@@ -23,6 +23,7 @@ from bizup_autocrawler.runtime.contract import Item
 from bizup_autocrawler.runtime.ctx import Ctx
 from bizup_autocrawler.runtime.hardening import harden_xml
 from bizup_autocrawler.runtime.live_ctx import build_live_ctx
+from bizup_autocrawler.runtime.safe_exec import exec_crawler
 
 
 def _build_ctx(allowed_hosts: set[str]) -> Ctx:
@@ -42,8 +43,10 @@ def main() -> None:
     errors = 0
     exception: dict[str, str] | None = None
     try:
-        namespace: dict[str, object] = {}
-        exec(compile(data["source"], "<crawler>", "exec"), namespace)  # noqa: S102
+        # Exec under the §8 restricted ``__builtins__`` (eval/exec/open/raw
+        # __import__ absent; imports allowlisted) — the runtime half of the sandbox,
+        # not trusting the AST gate alone.
+        namespace = exec_crawler(data["source"], filename="<crawler>")
         crawl = cast("Callable[[Ctx], Iterable[object]]", namespace["crawl"])
         for obj in crawl(ctx):
             item = obj if isinstance(obj, Item) else None

@@ -102,6 +102,20 @@ def test_banned_dunder_attribute_escape() -> None:
     assert not check_ast(src).passed
 
 
+def test_banned_builtins_name_escape() -> None:
+    # The classic gate bypass: reach the builtins mapping by name, then index a raw
+    # __import__/eval out of it. Banning __builtins__ (any dunder name) shuts it (§8).
+    src = (
+        'SITE="https://x.com"\n'
+        "def crawl(ctx):\n"
+        '    imp = __builtins__["__import__"]\n'
+        "    yield imp\n"
+    )
+    res = check_ast(src)
+    assert not res.passed
+    assert any("__builtins__" in f for f in res.failures)
+
+
 def test_missing_site_or_crawl_fails() -> None:
     assert not check_ast("def crawl(ctx):\n    yield 1\n").passed
     assert not check_ast('SITE = "https://x.com"\n').passed

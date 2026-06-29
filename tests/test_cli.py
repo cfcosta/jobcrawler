@@ -163,6 +163,54 @@ def test_cmd_rollback_generator_returns_one_when_nothing_to_roll_back(
     )
 
 
+def test_cmd_rollback_generator_clears_the_probation_marker(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    # A successful manual rollback must also consume the adoption-under-probation
+    # marker, or the §4.11 auto-rollback watcher would keep judging (and possibly
+    # re-rolling) the generator the operator just reverted.
+    from bizup_autocrawler import generator_pointer
+
+    cleared = False
+
+    def _clear() -> None:
+        nonlocal cleared
+        cleared = True
+
+    monkeypatch.setattr(
+        generator_pointer,
+        "rollback_active",
+        lambda: (True, "generators/generator-1.json"),
+    )
+    monkeypatch.setattr(generator_pointer, "clear_adoption", _clear)
+
+    assert (
+        cmd_rollback_generator(build_parser().parse_args(["rollback-generator"])) == 0
+    )
+    assert cleared
+
+
+def test_cmd_rollback_generator_leaves_marker_when_nothing_to_roll_back(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    # Nothing to undo → don't touch the marker (there is no adoption to de-probate).
+    from bizup_autocrawler import generator_pointer
+
+    cleared = False
+
+    def _clear() -> None:
+        nonlocal cleared
+        cleared = True
+
+    monkeypatch.setattr(generator_pointer, "rollback_active", lambda: (False, None))
+    monkeypatch.setattr(generator_pointer, "clear_adoption", _clear)
+
+    assert (
+        cmd_rollback_generator(build_parser().parse_args(["rollback-generator"])) == 1
+    )
+    assert not cleared
+
+
 def test_site_url_of_reads_the_constant() -> None:
     source = 'SITE = "https://example.com"\ndef crawl(ctx):\n    yield None\n'
     assert _site_url_of(source) == "https://example.com"

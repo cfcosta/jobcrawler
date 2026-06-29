@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -75,10 +76,23 @@ def active_generator_meta() -> dict[str, object]:
 
 
 def _atomic_write(path: Path, text: str) -> None:
+    # Unique temp in the same dir (same filesystem ⇒ os.replace is atomic) rather than
+    # a fixed ``<name>.tmp``: two concurrent writers to the same pointer file — an
+    # operator ``rollback-generator`` racing the optimize job's adoption — must not
+    # collide on one shared temp and corrupt or lose a write. With distinct temps the
+    # replaces simply resolve last-wins; neither file is ever seen torn.
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text)
-    os.replace(tmp, path)  # atomic on POSIX within one filesystem
+    fd, tmp_name = tempfile.mkstemp(
+        dir=path.parent, prefix=path.name + ".", suffix=".tmp"
+    )
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(text)
+        os.replace(tmp, path)  # atomic on POSIX within one filesystem
+    except BaseException:
+        tmp.unlink(missing_ok=True)  # never leak the temp on a failed write
+        raise
 
 
 def set_active(path: str | Path) -> None:

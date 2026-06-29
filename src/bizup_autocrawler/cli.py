@@ -680,6 +680,10 @@ def cmd_rollback_generator(args: argparse.Namespace) -> int:
     if not ok:
         print("rollback-generator: no prior generator adoption to roll back to")
         return 1
+    # The rolled-back adoption is no longer the one on probation: consume its marker
+    # so the §4.11 auto-rollback watcher doesn't keep judging (and re-rolling) a
+    # generator the operator just reverted. Mirrors the watcher's own rollback path.
+    generator_pointer.clear_adoption()
     if restored is None:
         print("rolled back generator to baseline (pointer cleared)")
     else:

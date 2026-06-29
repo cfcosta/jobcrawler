@@ -646,6 +646,18 @@ def test_update_cadence_holds_at_target() -> None:
     assert store.get_interval("s0") == 3600.0
 
 
+def test_update_cadence_adapts_when_window_below_default_min_observations() -> None:
+    # A small adaptive_window (operator override) must not freeze the controller: the
+    # scheduler caps min_observations at the window, so 2 busy crawls in a window of 2
+    # still shrink the interval instead of holding at the seed forever.
+    store = StateStore(":memory:")
+    _seed_runs(store, "s0", hits=2, misses=0)
+    store.set_interval("s0", 3600.0)
+    sched = _adaptive_sched(store, adaptive_window=2)
+    sched._update_cadence(sched._sites[0])
+    assert store.get_interval("s0") == 1800.0  # 3600 × down(0.5): adapted, not frozen
+
+
 def test_update_cadence_is_noop_for_fixed_site() -> None:
     # A fixed-cadence site never grows a learned interval, even with rich history.
     store = StateStore(":memory:")
