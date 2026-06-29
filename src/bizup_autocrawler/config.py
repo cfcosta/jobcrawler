@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from bizup_autocrawler.durations import parse_duration
 from bizup_autocrawler.urls import DEFAULT_TRACKING_PARAMS
 
 # This module lives at the package root, so its directory *is* the package dir —
@@ -366,6 +367,55 @@ def default_schedule() -> str:
 
 def concurrency() -> int:
     return _int("AUTOCRAWLER_CONCURRENCY", 4)
+
+
+# --- adaptive cadence (§4.9, the hit-rate controller) ----------------------
+# A source flagged ``schedule: adaptive`` learns its own interval from recent
+# hit/miss outcomes (see :mod:`bizup_autocrawler.adaptive`). These bound and
+# tune that controller; all are host-side, never exposed to the generator (§8).
+
+
+def _duration_secs(name: str, default: str) -> float:
+    """An ``AUTOCRAWLER_*`` duration env var as float seconds (falls back on a
+    malformed value to the default, so a typo can't crash the daemon at boot)."""
+    raw = os.getenv(name)
+    if raw is None:
+        return parse_duration(default).total_seconds()
+    try:
+        return parse_duration(raw).total_seconds()
+    except ValueError:
+        return parse_duration(default).total_seconds()
+
+
+def min_schedule() -> float:
+    """Politeness floor (seconds) for an adaptive interval — the controller never
+    shrinks below this no matter how busy a source is. Default 15m."""
+    return _duration_secs("AUTOCRAWLER_MIN_SCHEDULE", "15m")
+
+
+def max_schedule() -> float:
+    """Staleness ceiling (seconds) for an adaptive interval — the controller never
+    grows beyond this no matter how quiet a source is. Default 1d."""
+    return _duration_secs("AUTOCRAWLER_MAX_SCHEDULE", "1d")
+
+
+def adaptive_target_n() -> float:
+    """Desired checks-per-post for an adaptive source: the controller steers the hit
+    rate toward ``1 / target_n``. Default 2 (≈ check twice per post). Clamped ≥ 1 so
+    the target hit rate stays in (0, 1]."""
+    return max(1.0, _float("AUTOCRAWLER_ADAPTIVE_TARGET_N", 2.0))
+
+
+def adaptive_default() -> bool:
+    """When true, a site with no explicit ``schedule`` is adaptive rather than using
+    the fixed ``default_schedule``. Default false (opt-in per source)."""
+    return _bool("AUTOCRAWLER_ADAPTIVE_DEFAULT", False)
+
+
+def adaptive_window() -> int:
+    """How many recent crawls the hit-rate controller averages over. Default 8 —
+    long enough to smooth single-crawl noise, short enough to track a real shift."""
+    return max(1, _int("AUTOCRAWLER_ADAPTIVE_WINDOW", 8))
 
 
 def regen_check() -> str:

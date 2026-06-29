@@ -17,7 +17,7 @@ from pydantic import ValidationError
 
 from bizup_autocrawler.health import HealthState, RegenOutcome, SelfHealer
 from bizup_autocrawler.runtime.runner import CrawlSummary
-from bizup_autocrawler.schedule import Scheduler, Site
+from bizup_autocrawler.schedule import CrawlFn, Scheduler, Site
 from bizup_autocrawler.state import StateStore
 
 UTC = timezone.utc
@@ -50,6 +50,31 @@ def test_cron_schedule_is_rejected_until_supported() -> None:
 
 def test_duration_schedule_is_accepted() -> None:
     assert Site(slug="s", url="https://x.com", schedule="6h").schedule == "6h"
+
+
+def test_adaptive_defaults_off() -> None:
+    site = Site(slug="s", url="https://x.com")
+    assert site.adaptive is False
+    assert site.schedule is None
+
+
+def test_schedule_adaptive_sentinel_sets_flag_and_clears_cadence() -> None:
+    # `schedule: adaptive` is sugar — it raises the flag and nulls the fixed cadence
+    # so the §4.9 controller owns the interval.
+    site = Site(slug="s", url="https://x.com", schedule="adaptive")
+    assert site.adaptive is True
+    assert site.schedule is None
+
+
+def test_adaptive_flag_can_be_set_directly() -> None:
+    site = Site(slug="s", url="https://x.com", adaptive=True)
+    assert site.adaptive is True
+
+
+def test_fixed_schedule_leaves_adaptive_off() -> None:
+    site = Site(slug="s", url="https://x.com", schedule="30m")
+    assert site.adaptive is False
+    assert site.schedule == "30m"
 
 
 def _store_with_finished_run(slug: str, at: datetime) -> StateStore:
@@ -450,3 +475,134 @@ async def test_run_invokes_regen_at_least_once() -> None:
     await asyncio.gather(sched.run(stop=stop, interval=0.005), stopper())
     # The frozen clock makes regen due exactly once; it should have run and persisted.
     assert store.get_health("s0") == "generation_failed"
+
+
+# -- §4.9 adaptive cadence integration ---------------------------------------
+
+
+def _adaptive_sched(
+    store: StateStore,
+    *,
+    crawl: CrawlFn = _ok_crawl,
+    default_schedule: str = "30m",
+    min_schedule: float = 900.0,
+    max_schedule: float = 86400.0,
+    adaptive_window: int = 8,
+    adaptive_target_n: float = 2.0,
+) -> Scheduler:
+    return Scheduler(
+        [Site(slug="s0", url="https://x.com", adaptive=True)],
+        store=store,
+        crawl=crawl,
+        default_schedule=default_schedule,
+        min_schedule=min_schedule,
+        max_schedule=max_schedule,
+        adaptive_window=adaptive_window,
+        adaptive_target_n=adaptive_target_n,
+        clock=lambda: T0,
+    )
+
+
+def _seed_runs(store: StateStore, slug: str, *, hits: int, misses: int) -> None:
+    for _ in range(hits):
+        rid = store.start_run(slug)
+        store.finish_run(rid, items_found=1, new_items=1, errors=0, pages_fetched=1)
+    for _ in range(misses):
+        rid = store.start_run(slug)
+        store.finish_run(rid, items_found=0, new_items=0, errors=0, pages_fetched=1)
+
+
+def test_adaptive_cadence_uses_seed_when_no_interval_persisted() -> None:
+    # No learned interval yet → seed from the default cadence (30m), within the band.
+    store = StateStore(":memory:")
+    sched = _adaptive_sched(store)
+    assert sched._cadence(sched._sites[0]) == timedelta(seconds=1800)
+
+
+def test_adaptive_seed_is_clamped_into_band() -> None:
+    # A floor above the default cadence pulls the seed up to the floor.
+    store = StateStore(":memory:")
+    sched = _adaptive_sched(store, min_schedule=3600.0)
+    assert sched._cadence(sched._sites[0]) == timedelta(seconds=3600)
+
+
+def test_adaptive_cadence_uses_persisted_interval() -> None:
+    store = StateStore(":memory:")
+    store.set_interval("s0", 5400.0)
+    sched = _adaptive_sched(store)
+    assert sched._cadence(sched._sites[0]) == timedelta(seconds=5400)
+
+
+def test_update_cadence_shrinks_on_busy_source() -> None:
+    store = StateStore(":memory:")
+    _seed_runs(store, "s0", hits=8, misses=0)
+    store.set_interval("s0", 3600.0)
+    sched = _adaptive_sched(store)
+    sched._update_cadence(sched._sites[0])
+    assert store.get_interval("s0") == 1800.0  # 3600 × down(0.5): under-checking
+
+
+def test_update_cadence_grows_on_quiet_source() -> None:
+    store = StateStore(":memory:")
+    _seed_runs(store, "s0", hits=0, misses=8)
+    store.set_interval("s0", 3600.0)
+    sched = _adaptive_sched(store)
+    sched._update_cadence(sched._sites[0])
+    assert store.get_interval("s0") == 5400.0  # 3600 × up(1.5): over-checking
+
+
+def test_update_cadence_holds_at_target() -> None:
+    store = StateStore(":memory:")
+    _seed_runs(store, "s0", hits=4, misses=4)  # 0.5 == target
+    store.set_interval("s0", 3600.0)
+    sched = _adaptive_sched(store)
+    sched._update_cadence(sched._sites[0])
+    assert store.get_interval("s0") == 3600.0
+
+
+def test_update_cadence_is_noop_for_fixed_site() -> None:
+    # A fixed-cadence site never grows a learned interval, even with rich history.
+    store = StateStore(":memory:")
+    _seed_runs(store, "s0", hits=8, misses=0)
+    sched = Scheduler(
+        [Site(slug="s0", url="https://x.com", schedule="30m")],
+        store=store,
+        crawl=_ok_crawl,
+        clock=lambda: T0,
+    )
+    sched._update_cadence(sched._sites[0])
+    assert store.get_interval("s0") is None
+
+
+async def test_tick_persists_adaptive_interval() -> None:
+    # End-to-end: a real tick records the crawl and then retunes+persists the
+    # interval. With one hit (< min_observations) the controller holds the seed,
+    # but persistence proves the wiring fired.
+    store = StateStore(":memory:")
+
+    async def recording_crawl(site: Site) -> CrawlSummary:
+        rid = store.start_run(site.slug)
+        store.finish_run(rid, items_found=1, new_items=1, errors=0, pages_fetched=1)
+        return _summary(site.slug)
+
+    sched = _adaptive_sched(store, crawl=recording_crawl)
+    summaries = await sched.tick()
+    assert [s.site for s in summaries] == ["s0"]
+    assert store.get_interval("s0") == 1800.0  # seed held + persisted
+
+
+async def test_adaptive_interval_converges_over_repeated_busy_ticks() -> None:
+    # A persistently busy source drives the interval down to the floor across ticks.
+    store = StateStore(":memory:")
+
+    async def busy_crawl(site: Site) -> CrawlSummary:
+        rid = store.start_run(site.slug)
+        store.finish_run(rid, items_found=3, new_items=3, errors=0, pages_fetched=1)
+        return CrawlSummary(site.slug, 3, 3, 0, 1)
+
+    sched = _adaptive_sched(store, crawl=busy_crawl)
+    for _ in range(12):
+        # due-check would gate real time; call _update via the success path directly.
+        await sched._dispatch(sched._sites[0])
+        sched._update_cadence(sched._sites[0])
+    assert store.get_interval("s0") == 900.0  # pinned at the politeness floor

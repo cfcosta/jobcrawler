@@ -257,3 +257,66 @@ def test_crawlers_dir_honors_env_override(monkeypatch: pytest.MonkeyPatch) -> No
     # reads committed scripts) must be relocatable onto a writable volume.
     monkeypatch.setenv("AUTOCRAWLER_CRAWLERS_DIR", "/data/crawlers")
     assert config.crawlers_dir() == "/data/crawlers"
+
+
+# --- adaptive cadence (§4.9 hit-rate controller) ---------------------------
+
+
+def test_min_schedule_defaults_to_15m_in_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AUTOCRAWLER_MIN_SCHEDULE", raising=False)
+    assert config.min_schedule() == 15 * 60
+
+
+def test_max_schedule_defaults_to_1d_in_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AUTOCRAWLER_MAX_SCHEDULE", raising=False)
+    assert config.max_schedule() == 24 * 60 * 60
+
+
+def test_min_max_schedule_parse_duration_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTOCRAWLER_MIN_SCHEDULE", "5m")
+    monkeypatch.setenv("AUTOCRAWLER_MAX_SCHEDULE", "6h")
+    assert config.min_schedule() == 5 * 60
+    assert config.max_schedule() == 6 * 60 * 60
+
+
+def test_schedule_bounds_fall_back_on_malformed_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A typo in the bound must not crash the daemon at boot — fall back to default.
+    monkeypatch.setenv("AUTOCRAWLER_MIN_SCHEDULE", "every-so-often")
+    assert config.min_schedule() == 15 * 60
+
+
+def test_adaptive_target_n_defaults_to_two(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AUTOCRAWLER_ADAPTIVE_TARGET_N", raising=False)
+    assert config.adaptive_target_n() == 2.0
+
+
+def test_adaptive_target_n_floors_at_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    # target_n < 1 would push the target hit rate above 1.0 (unreachable) — clamp.
+    monkeypatch.setenv("AUTOCRAWLER_ADAPTIVE_TARGET_N", "0.5")
+    assert config.adaptive_target_n() == 1.0
+
+
+def test_adaptive_default_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AUTOCRAWLER_ADAPTIVE_DEFAULT", raising=False)
+    assert config.adaptive_default() is False
+
+
+def test_adaptive_default_honors_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTOCRAWLER_ADAPTIVE_DEFAULT", "true")
+    assert config.adaptive_default() is True
+
+
+def test_adaptive_window_defaults_to_eight(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AUTOCRAWLER_ADAPTIVE_WINDOW", raising=False)
+    assert config.adaptive_window() == 8
+
+
+def test_adaptive_window_floors_at_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTOCRAWLER_ADAPTIVE_WINDOW", "0")
+    assert config.adaptive_window() == 1

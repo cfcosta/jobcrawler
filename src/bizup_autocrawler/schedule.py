@@ -31,9 +31,10 @@ from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Protocol
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 from bizup_autocrawler import config
+from bizup_autocrawler.adaptive import next_interval
 from bizup_autocrawler.durations import parse_duration
 from bizup_autocrawler.health import HealthState
 from bizup_autocrawler.runtime.runner import CrawlSummary
@@ -57,6 +58,7 @@ class Site(BaseModel):
     render: Literal["auto", "static", "browser", "solver"] = "auto"
     hints: str = ""
     schedule: str | None = None
+    adaptive: bool = False
     enabled: bool = True
 
     @field_validator("slug")
@@ -76,7 +78,9 @@ class Site(BaseModel):
     def _duration_only(cls, value: str | None) -> str | None:
         # Reject a cron expr loudly rather than silently downgrading it to the
         # default cadence — cron is deferred until the §4.9 scheduler grows it.
-        if value is None:
+        # The ``adaptive`` sentinel passes through here; ``_resolve_adaptive``
+        # below turns it into the adaptive flag.
+        if value is None or value == "adaptive":
             return value
         try:
             parse_duration(value)
@@ -86,6 +90,17 @@ class Site(BaseModel):
                 "use a duration like 30m, 6h, 1d"
             ) from exc
         return value
+
+    @model_validator(mode="after")
+    def _resolve_adaptive(self) -> Site:
+        # ``schedule: adaptive`` is sugar for the §4.9 hit-rate controller — it
+        # raises the adaptive flag and clears the fixed cadence, since the
+        # controller owns the interval (learned + persisted per-site). Setting
+        # ``adaptive: true`` directly works too; the two forms converge here.
+        if self.schedule == "adaptive":
+            self.adaptive = True
+            self.schedule = None
+        return self
 
 
 def _utcnow() -> datetime:
@@ -128,6 +143,10 @@ class Scheduler:
         jitter: Callable[[], float] | None = None,
         healer: Healer | None = None,
         regen_check: str | None = None,
+        min_schedule: float | None = None,
+        max_schedule: float | None = None,
+        adaptive_window: int | None = None,
+        adaptive_target_n: float | None = None,
     ) -> None:
         self._sites = list(sites)
         self._store = store
@@ -145,6 +164,22 @@ class Scheduler:
             config.regen_check() if regen_check is None else regen_check
         )
         self._next_regen: datetime | None = None
+        # §4.9 adaptive cadence bounds/tuning (host-side; never sent to the generator).
+        self._min_schedule = (
+            min_schedule if min_schedule is not None else config.min_schedule()
+        )
+        self._max_schedule = (
+            max_schedule if max_schedule is not None else config.max_schedule()
+        )
+        self._adaptive_window = (
+            adaptive_window if adaptive_window is not None else config.adaptive_window()
+        )
+        target_n = (
+            adaptive_target_n
+            if adaptive_target_n is not None
+            else config.adaptive_target_n()
+        )
+        self._target_hit_rate = 1.0 / target_n
 
     def due_sites(self) -> list[Site]:
         return [
@@ -162,11 +197,66 @@ class Scheduler:
         return self._clock() >= last.finished + self._cadence(site)
 
     def _cadence(self, site: Site) -> timedelta:
+        if site.adaptive:
+            secs = self._store.get_interval(site.slug)
+            if secs is None:
+                secs = self._adaptive_seed()
+            return timedelta(seconds=secs)
         raw = site.schedule or self._default
         try:
             return parse_duration(raw)
         except ValueError:
             return parse_duration(self._default)  # cron exprs deferred to a later v
+
+    def _adaptive_seed(self) -> float:
+        """Starting interval (seconds) for an adaptive site with no learned one yet.
+
+        Seeds from the fixed default cadence, clamped into the politeness/staleness
+        band, so a freshly-added adaptive site behaves like a default-scheduled one
+        until the §4.9 controller accumulates enough crawls to tune it.
+        """
+        try:
+            seed = parse_duration(self._default).total_seconds()
+        except ValueError:
+            seed = self._min_schedule
+        return max(self._min_schedule, min(self._max_schedule, seed))
+
+    def _update_cadence(self, site: Site) -> None:
+        """Recompute and persist an adaptive site's interval from recent outcomes.
+
+        The §4.9 hit-rate controller reads the last ``adaptive_window`` runs (a "hit"
+        is a crawl that found ≥1 new item) and steers the interval toward checking the
+        source ``target_n`` times per post, bounded by ``[min, max]_schedule``. Called
+        once per *completed* crawl in ``tick``; a no-op for fixed-cadence sites.
+        """
+        if not site.adaptive:
+            return
+        history = self._store.runs_for(site.slug, limit=self._adaptive_window)
+        hits = [
+            r.new_items > 0 for r in history
+        ]  # newest-first, matching next_interval
+        current = self._store.get_interval(site.slug)
+        if current is None:
+            current = self._adaptive_seed()
+        nxt = next_interval(
+            current,
+            hits,
+            floor_secs=self._min_schedule,
+            ceiling_secs=self._max_schedule,
+            target_hit_rate=self._target_hit_rate,
+            window=self._adaptive_window,
+        )
+        if nxt != current:
+            _log.info(
+                "adaptive cadence slug=%s %.0fs -> %.0fs (window=%d hits=%d/%d)",
+                site.slug,
+                current,
+                nxt,
+                self._adaptive_window,
+                sum(hits[: self._adaptive_window]),
+                min(len(hits), self._adaptive_window),
+            )
+        self._store.set_interval(site.slug, nxt)
 
     async def tick(self) -> list[CrawlSummary]:
         """Dispatch every currently-due site (bounded), returning the successes.
@@ -197,6 +287,9 @@ class Scheduler:
                     result.errors,
                 )
                 summaries.append(result)
+                # Retune an adaptive site's interval from this (now-persisted) crawl's
+                # outcome plus its recent history (§4.9); a no-op for fixed sites.
+                self._update_cadence(site)
             else:
                 # Persistent failure after the bounded retries — dropped as a §4.8
                 # health signal (the regen sweep handles it), but surfaced, not silent.

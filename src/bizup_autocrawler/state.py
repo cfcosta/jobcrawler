@@ -101,6 +101,11 @@ CREATE TABLE IF NOT EXISTS health_log (
     ts         TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS health_log_by_site ON health_log (site, id DESC);
+CREATE TABLE IF NOT EXISTS schedule_state (
+    site         TEXT PRIMARY KEY,
+    interval_secs REAL NOT NULL,
+    updated_at   TEXT NOT NULL
+);
 """
 
 
@@ -297,6 +302,32 @@ class StateStore:
                 (site, limit),
             ).fetchall()
         return [_to_transition(r) for r in rows]
+
+    # -- adaptive cadence (§4.9 hit-rate controller) -------------------------
+
+    def get_interval(self, site: str) -> float | None:
+        """The persisted learned crawl interval (seconds) for ``site``, or None.
+
+        None means the controller has not yet recorded one (a freshly-added adaptive
+        site), so the scheduler seeds from a default. Persistence only: the control
+        law lives in :mod:`bizup_autocrawler.adaptive`.
+        """
+        row = self._conn.execute(
+            "SELECT interval_secs FROM schedule_state WHERE site = ?", (site,)
+        ).fetchone()
+        return row["interval_secs"] if row is not None else None
+
+    def set_interval(self, site: str, secs: float) -> None:
+        """Upsert ``site``'s learned crawl interval (seconds)."""
+        now = self._clock().isoformat()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO schedule_state (site, interval_secs, updated_at) "
+                "VALUES (?, ?, ?) "
+                "ON CONFLICT (site) DO UPDATE SET interval_secs = ?, updated_at = ?",
+                (site, secs, now, secs, now),
+            )
+            self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()

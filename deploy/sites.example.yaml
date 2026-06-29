@@ -9,8 +9,15 @@
 #            the generator pick the cheapest tier that works; `solver` needs
 #            AUTOCRAWLER_SOLVER + a backend configured.
 #   hints    free-text steer for the generator (section paths, language, layout).
-#   schedule per-site cadence (e.g. 30m | 6h | a cron expr); omit to use
-#            AUTOCRAWLER_DEFAULT_SCHEDULE (30m).
+#   schedule per-site cadence — a duration (e.g. 30m | 6h | 1d), or `adaptive` to
+#            let the §4.9 hit-rate controller learn the cadence from how often the
+#            source actually posts (bounded by AUTOCRAWLER_MIN_SCHEDULE /
+#            AUTOCRAWLER_MAX_SCHEDULE, tuned by AUTOCRAWLER_ADAPTIVE_TARGET_N).
+#            Omit to use AUTOCRAWLER_DEFAULT_SCHEDULE (30m), unless
+#            AUTOCRAWLER_ADAPTIVE_DEFAULT=on makes adaptive the default. (Cron
+#            expressions are not supported yet and are rejected.)
+#   adaptive equivalently, `adaptive: true` (the `schedule: adaptive` shorthand
+#            just sets this and clears the fixed cadence).
 #   enabled  crawl on/off without deleting the entry.
 
 - slug: example
@@ -25,5 +32,5 @@
 #   url: https://techcrunch.com
 #   render: auto
 #   hints: Tech/startup news; articles under dated permalink paths.
-#   schedule: 30m
+#   schedule: adaptive   # learn the cadence from this source's posting rate
 #   enabled: true

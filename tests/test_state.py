@@ -341,3 +341,37 @@ def test_migration_is_idempotent(tmp_path: object) -> None:
     cols = [row["name"] for row in s._conn.execute("PRAGMA table_info(runs)")]
     assert cols.count("signals") == 1
     s.close()
+
+
+# -- adaptive learned interval (§4.9 hit-rate controller, P1) -----------------
+
+
+def test_interval_is_none_until_set(store: StateStore) -> None:
+    assert store.get_interval("acme") is None
+
+
+def test_set_then_get_interval(store: StateStore) -> None:
+    store.set_interval("acme", 1800.0)
+    assert store.get_interval("acme") == 1800.0
+
+
+def test_set_interval_overwrites_prior(store: StateStore) -> None:
+    store.set_interval("acme", 1800.0)
+    store.set_interval("acme", 3600.0)
+    assert store.get_interval("acme") == 3600.0
+
+
+def test_interval_is_scoped_per_site(store: StateStore) -> None:
+    store.set_interval("acme", 900.0)
+    assert store.get_interval("other") is None
+
+
+def test_interval_persists_across_reopen(tmp_path: object) -> None:
+    db = f"{tmp_path}/state.db"  # type: ignore[str-bytes-safe]
+    s1 = StateStore(db)
+    s1.set_interval("acme", 1234.0)
+    s1.close()
+
+    s2 = StateStore(db)
+    assert s2.get_interval("acme") == 1234.0
+    s2.close()
