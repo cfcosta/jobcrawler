@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from bizup_autocrawler.health import HealthState
-from bizup_autocrawler.state import RunRecord
+from bizup_autocrawler.state import HealthTransition, RunRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +63,51 @@ def health_distribution(states: Sequence[HealthState]) -> dict[str, int]:
     for state in states:
         counts[state.value] += 1
     return counts
+
+
+def transition_events(
+    transitions: Sequence[HealthTransition],
+) -> list[tuple[datetime, datetime]]:
+    """Pair (went-dark → recovered) from a site's real health-transition log (§4.8).
+
+    This is the *measured* drift metric, the one ``recovery_events`` only approximates.
+    It reads the durable ``health_log``: a **dark onset** is the first transition out of
+    HEALTHY into any non-healthy state (``from_state == healthy``), and a **recovery** is
+    the next transition back to HEALTHY — exactly §4.8's "previously-healthy site going
+    dark → gate-passing replacement enabled". Each completed dark→recovered cycle yields
+    one pair; an as-yet-unrecovered drift yields nothing. A site that was never healthy
+    first (``None → stale``) never counts as drift. Transitions may arrive in any order
+    (``transitions_for`` is newest-first); they are sorted chronologically here.
+    """
+    healthy = HealthState.HEALTHY.value
+    ordered = sorted(transitions, key=lambda t: t.ts)
+    events: list[tuple[datetime, datetime]] = []
+    dark_at: datetime | None = None
+    for t in ordered:
+        if t.to_state == healthy:
+            if dark_at is not None:
+                events.append((dark_at, t.ts))
+                dark_at = None
+        elif dark_at is None and t.from_state == healthy:
+            dark_at = t.ts
+    return events
+
+
+def mean_body_quality(history: Sequence[RunRecord]) -> float | None:
+    """Mean ``body_quality`` over finished runs that recorded it, or None (§4.8).
+
+    ``body_quality`` (fraction of fetched items whose body cleared the host-side
+    completeness bar) is the partial-drift signal: a site that starts serving teasers
+    keeps ``items_found`` healthy while this sags. None when no run carries the signal
+    (older runs, or a site whose crawls never collected items)."""
+    scores: list[float] = []
+    for r in history:
+        if r.signals is None:
+            continue
+        value = r.signals.get("body_quality")
+        if isinstance(value, (int, float)):
+            scores.append(float(value))
+    return sum(scores) / len(scores) if scores else None
 
 
 def recovery_events(

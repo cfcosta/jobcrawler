@@ -214,12 +214,23 @@ def _ingest_collected(
         else:  # RETRY: leave unseen so the next crawl re-attempts the POST
             errors += 1
 
+    # §4.8 partial-drift telemetry (P0): body_quality is the fraction of fetched
+    # items whose body cleared the host-side completeness bar — it sags when a site
+    # starts serving teasers even while items_found stays healthy. Host-side only,
+    # never surfaced to the generator/RLM (§8). Omitted on a zero-yield crawl (the
+    # blackout signal is items_found == 0 itself).
+    incomplete = len(items) - len(complete)
+    signals: dict[str, object] = {"incomplete": incomplete}
+    if items:
+        signals["body_quality"] = len(complete) / len(items)
+
     store.finish_run(
         run_id,
         items_found=len(items),
         new_items=new_items,
         errors=errors,
         pages_fetched=pages_fetched,
+        signals=signals,
     )
     return CrawlSummary(
         slug,
@@ -227,7 +238,7 @@ def _ingest_collected(
         new_items,
         errors,
         pages_fetched,
-        len(items) - len(complete),
+        incomplete,
     )
 
 

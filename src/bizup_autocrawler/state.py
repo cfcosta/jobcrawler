@@ -17,6 +17,7 @@ failure-class re-attempt policy) is the runner's call, not the store's.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from collections.abc import Callable
@@ -30,7 +31,13 @@ def _utcnow() -> datetime:
 
 @dataclass(frozen=True, slots=True)
 class RunRecord:
-    """A single crawl's health counters (§5 canonical Run record)."""
+    """A single crawl's health counters (§5 canonical Run record).
+
+    ``signals`` carries the optional §4.8 partial-drift telemetry threaded from
+    the runner (e.g. ``body_quality``, ``incomplete``) — a small JSON blob so new
+    signals can be added without a schema migration. It is host-side observability
+    only and is never exposed to the generator/RLM (the §8 hidden-scorer invariant).
+    """
 
     id: int
     site: str
@@ -40,6 +47,24 @@ class RunRecord:
     new_items: int
     errors: int
     pages_fetched: int
+    signals: dict[str, object] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class HealthTransition:
+    """One row of the append-only health-transition log (§4.8 observability).
+
+    ``set_health`` appends a row only when the state actually changes, so a real
+    drift lifecycle (HEALTHY → STALE → … → HEALTHY) is recorded with measured
+    timestamps. This is what lets ``metrics.drift_mttr`` read true recovery times
+    rather than reconstructing them from run history. ``from_state`` is None for a
+    site's first recorded state.
+    """
+
+    site: str
+    from_state: str | None
+    to_state: str
+    ts: datetime
 
 
 _SCHEMA = """
@@ -59,7 +84,8 @@ CREATE TABLE IF NOT EXISTS runs (
     items_found   INTEGER NOT NULL DEFAULT 0,
     new_items     INTEGER NOT NULL DEFAULT 0,
     errors        INTEGER NOT NULL DEFAULT 0,
-    pages_fetched INTEGER NOT NULL DEFAULT 0
+    pages_fetched INTEGER NOT NULL DEFAULT 0,
+    signals       TEXT
 );
 CREATE INDEX IF NOT EXISTS runs_by_site ON runs (site, id DESC);
 CREATE TABLE IF NOT EXISTS site_health (
@@ -67,6 +93,14 @@ CREATE TABLE IF NOT EXISTS site_health (
     state      TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS health_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    site       TEXT NOT NULL,
+    from_state TEXT,
+    to_state   TEXT NOT NULL,
+    ts         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS health_log_by_site ON health_log (site, id DESC);
 """
 
 
@@ -82,7 +116,21 @@ class StateStore:
             self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Additive migrations for DBs created before a column existed.
+
+        ``_SCHEMA`` covers fresh DBs; this backfills columns onto pre-existing
+        ones. Idempotent (guarded on ``PRAGMA table_info``) so it is safe to run
+        on every open.
+        """
+        run_cols = {
+            row["name"] for row in self._conn.execute("PRAGMA table_info(runs)")
+        }
+        if "signals" not in run_cols:
+            self._conn.execute("ALTER TABLE runs ADD COLUMN signals TEXT")
 
     # -- item state (dedup) --------------------------------------------------
 
@@ -142,17 +190,20 @@ class StateStore:
         new_items: int,
         errors: int,
         pages_fetched: int,
+        signals: dict[str, object] | None = None,
     ) -> None:
+        payload = json.dumps(signals) if signals is not None else None
         with self._lock:
             self._conn.execute(
                 "UPDATE runs SET finished = ?, items_found = ?, new_items = ?, "
-                "errors = ?, pages_fetched = ? WHERE id = ?",
+                "errors = ?, pages_fetched = ?, signals = ? WHERE id = ?",
                 (
                     self._clock().isoformat(),
                     items_found,
                     new_items,
                     errors,
                     pages_fetched,
+                    payload,
                     run_id,
                 ),
             )
@@ -199,9 +250,25 @@ class StateStore:
         return row["state"] if row is not None else None
 
     def set_health(self, site: str, state: str) -> None:
-        """Upsert ``site``'s health state (overwrites any prior state)."""
+        """Upsert ``site``'s health state, logging a transition on real change.
+
+        ``site_health`` keeps only the latest state (overwritten each call); the
+        append-only ``health_log`` gains a row only when the state actually changes
+        (prior != new), so the §4.8 drift lifecycle is recorded with measured
+        timestamps. A no-op re-assert of the same state writes no log row.
+        """
         now = self._clock().isoformat()
         with self._lock:
+            prior = self._conn.execute(
+                "SELECT state FROM site_health WHERE site = ?", (site,)
+            ).fetchone()
+            prior_state = prior["state"] if prior is not None else None
+            if prior_state != state:
+                self._conn.execute(
+                    "INSERT INTO health_log (site, from_state, to_state, ts) "
+                    "VALUES (?, ?, ?, ?)",
+                    (site, prior_state, state, now),
+                )
             self._conn.execute(
                 "INSERT INTO site_health (site, state, updated_at) VALUES (?, ?, ?) "
                 "ON CONFLICT (site) DO UPDATE SET state = ?, updated_at = ?",
@@ -209,12 +276,35 @@ class StateStore:
             )
             self._conn.commit()
 
+    def transitions_for(
+        self, site: str, *, since: datetime | None = None, limit: int = 100
+    ) -> list[HealthTransition]:
+        """Health transitions for ``site``, newest-first (the ``*_for`` convention).
+
+        ``since`` filters to transitions at or after a wall-clock time (used by the
+        post-adoption regression watcher). Callers needing a chronological timeline
+        (e.g. ``metrics.transition_events``) reverse the result.
+        """
+        if since is not None:
+            rows = self._conn.execute(
+                "SELECT * FROM health_log WHERE site = ? AND ts >= ? "
+                "ORDER BY id DESC LIMIT ?",
+                (site, since.isoformat(), limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM health_log WHERE site = ? ORDER BY id DESC LIMIT ?",
+                (site, limit),
+            ).fetchall()
+        return [_to_transition(r) for r in rows]
+
     def close(self) -> None:
         self._conn.close()
 
 
 def _to_record(row: sqlite3.Row) -> RunRecord:
     finished = row["finished"]
+    raw_signals = row["signals"] if "signals" in row.keys() else None
     return RunRecord(
         id=row["id"],
         site=row["site"],
@@ -224,4 +314,14 @@ def _to_record(row: sqlite3.Row) -> RunRecord:
         new_items=row["new_items"],
         errors=row["errors"],
         pages_fetched=row["pages_fetched"],
+        signals=json.loads(raw_signals) if raw_signals else None,
+    )
+
+
+def _to_transition(row: sqlite3.Row) -> HealthTransition:
+    return HealthTransition(
+        site=row["site"],
+        from_state=row["from_state"],
+        to_state=row["to_state"],
+        ts=datetime.fromisoformat(row["ts"]),
     )

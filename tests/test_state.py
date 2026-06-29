@@ -8,6 +8,7 @@ states and never silently downgrades an ingested URL back to merely seen.
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterator
 from datetime import datetime, timezone
 
@@ -173,3 +174,170 @@ def test_health_persists_across_reopen(tmp_path: object) -> None:
     s2 = StateStore(db)
     assert s2.get_health("acme") == "generation_failed"
     s2.close()
+
+
+# -- health-transition log (§4.8 observability, P0) --------------------------
+
+
+def test_no_transitions_before_any_health_set(store: StateStore) -> None:
+    assert store.transitions_for("acme") == []
+
+
+def test_first_set_health_logs_transition_from_none(store: StateStore) -> None:
+    store.set_health("acme", "healthy")
+    log = store.transitions_for("acme")
+    assert len(log) == 1
+    assert log[0].from_state is None
+    assert log[0].to_state == "healthy"
+    assert log[0].site == "acme"
+    assert log[0].ts.tzinfo is not None
+
+
+def test_real_change_logs_a_transition(store: StateStore) -> None:
+    store.set_health("acme", "healthy")
+    store.set_health("acme", "stale")
+    log = store.transitions_for("acme")  # newest-first
+    assert [(t.from_state, t.to_state) for t in log] == [
+        ("healthy", "stale"),
+        (None, "healthy"),
+    ]
+
+
+def test_reasserting_same_state_logs_no_transition(store: StateStore) -> None:
+    store.set_health("acme", "healthy")
+    store.set_health("acme", "healthy")  # no-op re-assert
+    store.set_health("acme", "healthy")
+    assert len(store.transitions_for("acme")) == 1
+
+
+def test_transitions_are_scoped_per_site(store: StateStore) -> None:
+    store.set_health("acme", "healthy")
+    store.set_health("other", "stale")
+    assert len(store.transitions_for("acme")) == 1
+    assert len(store.transitions_for("other")) == 1
+
+
+def test_transitions_for_since_filters_by_time() -> None:
+    times = iter(
+        [
+            datetime(2026, 1, 1, tzinfo=timezone.utc),  # None -> healthy
+            datetime(2026, 1, 2, tzinfo=timezone.utc),  # healthy -> stale
+            datetime(2026, 1, 3, tzinfo=timezone.utc),  # stale -> healthy
+        ]
+    )
+    s = StateStore(":memory:", clock=lambda: next(times))
+    s.set_health("acme", "healthy")
+    s.set_health("acme", "stale")
+    s.set_health("acme", "healthy")
+    recent = s.transitions_for(
+        "acme", since=datetime(2026, 1, 2, 12, tzinfo=timezone.utc)
+    )
+    assert [(t.from_state, t.to_state) for t in recent] == [("stale", "healthy")]
+    s.close()
+
+
+def test_transitions_persist_across_reopen(tmp_path: object) -> None:
+    db = f"{tmp_path}/state.db"  # type: ignore[str-bytes-safe]
+    s1 = StateStore(db)
+    s1.set_health("acme", "healthy")
+    s1.set_health("acme", "stale")
+    s1.close()
+
+    s2 = StateStore(db)
+    assert len(s2.transitions_for("acme")) == 2
+    s2.close()
+
+
+# -- run signals (§4.8 partial-drift telemetry, P0) --------------------------
+
+
+def test_signals_default_to_none(store: StateStore) -> None:
+    run_id = store.start_run("acme")
+    store.finish_run(run_id, items_found=5, new_items=2, errors=0, pages_fetched=1)
+    rec = store.last_run("acme")
+    assert rec is not None and rec.signals is None
+
+
+def test_signals_round_trip(store: StateStore) -> None:
+    run_id = store.start_run("acme")
+    store.finish_run(
+        run_id,
+        items_found=5,
+        new_items=2,
+        errors=0,
+        pages_fetched=1,
+        signals={"body_quality": 0.8, "incomplete": 1},
+    )
+    rec = store.last_run("acme")
+    assert rec is not None and rec.signals == {"body_quality": 0.8, "incomplete": 1}
+
+
+def test_signals_persist_across_reopen(tmp_path: object) -> None:
+    db = f"{tmp_path}/state.db"  # type: ignore[str-bytes-safe]
+    s1 = StateStore(db)
+    rid = s1.start_run("acme")
+    s1.finish_run(
+        rid,
+        items_found=1,
+        new_items=1,
+        errors=0,
+        pages_fetched=1,
+        signals={"body_quality": 0.5},
+    )
+    s1.close()
+
+    s2 = StateStore(db)
+    rec = s2.last_run("acme")
+    assert rec is not None and rec.signals == {"body_quality": 0.5}
+    s2.close()
+
+
+def test_migration_adds_signals_column_to_legacy_db(tmp_path: object) -> None:
+    # Simulate a DB created before the `signals` column existed: build the runs
+    # table by hand without it, then open a StateStore and confirm signals work.
+    db = f"{tmp_path}/legacy.db"  # type: ignore[str-bytes-safe]
+    raw = sqlite3.connect(db)
+    raw.executescript(
+        """
+        CREATE TABLE runs (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            site          TEXT NOT NULL,
+            started       TEXT NOT NULL,
+            finished      TEXT,
+            items_found   INTEGER NOT NULL DEFAULT 0,
+            new_items     INTEGER NOT NULL DEFAULT 0,
+            errors        INTEGER NOT NULL DEFAULT 0,
+            pages_fetched INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT INTO runs (site, started, finished, items_found)
+        VALUES ('acme', '2026-01-01T00:00:00+00:00', '2026-01-01T00:01:00+00:00', 3);
+        """
+    )
+    raw.commit()
+    raw.close()
+
+    s = StateStore(db)
+    legacy = s.last_run("acme")  # pre-existing row reads back with signals=None
+    assert legacy is not None and legacy.items_found == 3 and legacy.signals is None
+    rid = s.start_run("acme")
+    s.finish_run(
+        rid,
+        items_found=4,
+        new_items=1,
+        errors=0,
+        pages_fetched=1,
+        signals={"body_quality": 0.9},
+    )
+    rec = s.last_run("acme")
+    assert rec is not None and rec.signals == {"body_quality": 0.9}
+    s.close()
+
+
+def test_migration_is_idempotent(tmp_path: object) -> None:
+    db = f"{tmp_path}/state.db"  # type: ignore[str-bytes-safe]
+    StateStore(db).close()
+    # Re-opening (which re-runs _migrate) must not error or double-add the column.
+    s = StateStore(db)
+    cols = [row["name"] for row in s._conn.execute("PRAGMA table_info(runs)")]
+    assert cols.count("signals") == 1
+    s.close()

@@ -237,6 +237,26 @@ def test_incomplete_bodies_are_not_ingested() -> None:
     store.close()
 
 
+def test_run_record_carries_body_quality_signal() -> None:
+    # §4.8 partial-drift telemetry (P0): the run record persists body_quality (the
+    # fraction of fetched items that cleared the completeness bar) so the monitor can
+    # spot a site that starts serving teasers even while items_found stays healthy.
+    def crawl(ctx: CtxProtocol) -> Iterable[Item]:
+        yield _one("https://example.com/teaser", body="a short teaser paragraph")
+        yield _one("https://example.com/full", body="x" * 600)
+
+    store = StateStore(":memory:")
+    _, news = _recording_news()
+
+    crawl_site("s", crawl, _ctx(), store, news, min_body_chars=400)
+    rec = store.last_run("s")
+
+    assert rec is not None and rec.signals is not None
+    assert rec.signals["body_quality"] == 0.5  # 1 of 2 items complete
+    assert rec.signals["incomplete"] == 1
+    store.close()
+
+
 def test_incomplete_item_stays_unseen_for_re_evaluation() -> None:
     # A teaser is not marked seen, so once the page carries the full body (the
     # article is un-paywalled / fixed) the next crawl ingests it — no permanent drop.

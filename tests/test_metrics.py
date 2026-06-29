@@ -9,16 +9,24 @@ from bizup_autocrawler.metrics import (
     aggregate_runs,
     drift_mttr,
     health_distribution,
+    mean_body_quality,
     recovery_events,
+    transition_events,
 )
-from bizup_autocrawler.state import RunRecord
+from bizup_autocrawler.state import HealthTransition, RunRecord
 
 UTC = timezone.utc
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def _run(
-    items: int, new: int, errors: int, pages: int, finished: datetime | None
+    items: int,
+    new: int,
+    errors: int,
+    pages: int,
+    finished: datetime | None,
+    *,
+    signals: dict[str, object] | None = None,
 ) -> RunRecord:
     return RunRecord(
         id=1,
@@ -29,7 +37,12 @@ def _run(
         new_items=new,
         errors=errors,
         pages_fetched=pages,
+        signals=signals,
     )
+
+
+def _t(from_state: str | None, to_state: str, ts: datetime) -> HealthTransition:
+    return HealthTransition(site="s", from_state=from_state, to_state=to_state, ts=ts)
 
 
 def test_aggregate_runs_sums_and_error_rate() -> None:
@@ -143,3 +156,88 @@ def test_recovery_events_handles_multiple_cycles() -> None:
         (T0 + timedelta(hours=1), T0 + timedelta(hours=2)),
         (T0 + timedelta(hours=4), T0 + timedelta(hours=5)),
     ]
+
+
+# -- transition_events (measured §4.8 MTTR from the health log) ---------------
+
+
+def test_transition_events_pairs_dark_onset_to_recovery() -> None:
+    # HEALTHY → STALE (dark onset) → HEALTHY (gate-passing replacement enabled).
+    transitions = [
+        _t("healthy", "stale", T0 + timedelta(hours=1)),
+        _t("stale", "healthy", T0 + timedelta(hours=3)),
+    ]
+    assert transition_events(transitions) == [
+        (T0 + timedelta(hours=1), T0 + timedelta(hours=3))
+    ]
+
+
+def test_transition_events_dark_onset_only_from_healthy() -> None:
+    # A site whose first recorded state is non-healthy (None → stale) never "went
+    # dark from healthy", so there is no drift event even after it recovers.
+    transitions = [
+        _t(None, "stale", T0),
+        _t("stale", "healthy", T0 + timedelta(hours=2)),
+    ]
+    assert transition_events(transitions) == []
+
+
+def test_transition_events_collapses_intermediate_states() -> None:
+    # HEALTHY → STALE → GENERATION_FAILED → HEALTHY is one drift: onset at the first
+    # step out of healthy, recovery at the return — intermediate hops don't restart it.
+    transitions = [
+        _t("healthy", "stale", T0 + timedelta(hours=1)),
+        _t("stale", "generation_failed", T0 + timedelta(hours=2)),
+        _t("generation_failed", "healthy", T0 + timedelta(hours=5)),
+    ]
+    assert transition_events(transitions) == [
+        (T0 + timedelta(hours=1), T0 + timedelta(hours=5))
+    ]
+
+
+def test_transition_events_ignores_unrecovered_drift() -> None:
+    transitions = [_t("healthy", "stale", T0 + timedelta(hours=1))]
+    assert transition_events(transitions) == []
+
+
+def test_transition_events_handles_newest_first_and_multiple_cycles() -> None:
+    # transitions_for returns newest-first; transition_events sorts chronologically.
+    transitions = [
+        _t("stale", "healthy", T0 + timedelta(hours=5)),  # recovery 2 (newest)
+        _t("healthy", "stale", T0 + timedelta(hours=4)),  # onset 2
+        _t("stale", "healthy", T0 + timedelta(hours=2)),  # recovery 1
+        _t("healthy", "stale", T0 + timedelta(hours=1)),  # onset 1 (oldest)
+    ]
+    assert transition_events(transitions) == [
+        (T0 + timedelta(hours=1), T0 + timedelta(hours=2)),
+        (T0 + timedelta(hours=4), T0 + timedelta(hours=5)),
+    ]
+
+
+def test_transition_events_empty() -> None:
+    assert transition_events([]) == []
+
+
+# -- mean_body_quality (partial-drift signal) --------------------------------
+
+
+def test_mean_body_quality_averages_signal_runs() -> None:
+    history = [
+        _run(5, 2, 0, 3, T0, signals={"body_quality": 1.0}),
+        _run(4, 1, 0, 2, T0 + timedelta(hours=1), signals={"body_quality": 0.5}),
+    ]
+    assert mean_body_quality(history) == 0.75
+
+
+def test_mean_body_quality_skips_runs_without_signal() -> None:
+    history = [
+        _run(5, 2, 0, 3, T0),  # no signals (legacy / zero-yield)
+        _run(4, 1, 0, 2, T0 + timedelta(hours=1), signals={"incomplete": 0}),
+        _run(4, 1, 0, 2, T0 + timedelta(hours=2), signals={"body_quality": 0.8}),
+    ]
+    assert mean_body_quality(history) == 0.8
+
+
+def test_mean_body_quality_none_when_no_signal() -> None:
+    assert mean_body_quality([_run(0, 0, 0, 1, T0)]) is None
+    assert mean_body_quality([]) is None

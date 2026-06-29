@@ -42,7 +42,9 @@ from bizup_autocrawler.metrics import (
     aggregate_runs,
     drift_mttr,
     health_distribution,
+    mean_body_quality,
     recovery_events,
+    transition_events,
 )
 from bizup_autocrawler.runtime.runner import (
     CrawlSummary,
@@ -162,36 +164,54 @@ def render_status(sites: Sequence[Site], store: StateStore) -> list[str]:
 
     Surfaces the otherwise-unwired metrics.py: ``aggregate_runs`` folds each site's run
     history (so an operator reads the fleet without touching the DB), ``health_distribution``
-    tallies the persisted §4.8 states, and ``drift_mttr`` summarizes recovery time over
-    drift events reconstructed from run history (``recovery_events``). The MTTR is
-    labeled *observed* — with no health-transition log it measures item-level
-    dark→recovered, a superset of §4.8's "gate-passing replacement enabled".
+    tallies the persisted §4.8 states, and ``drift_mttr`` summarizes recovery time.
+
+    MTTR prefers the durable health-transition log (``transition_events``) — the
+    *measured* §4.8 metric ("previously-healthy site going dark → gate-passing
+    replacement enabled"). When no transitions are recorded yet (e.g. a DB predating
+    the log), it falls back to reconstructing item-level dark→recovered from run
+    history (``recovery_events``), labeled *observed* to flag the approximation.
     """
     lines: list[str] = []
     states: list[HealthState] = []
-    events: list[tuple[datetime, datetime]] = []
+    logged: list[tuple[datetime, datetime]] = []
+    reconstructed: list[tuple[datetime, datetime]] = []
+    have_log = False
     for site in sites:
         history = store.runs_for(site.slug)
         agg = aggregate_runs(history)
         health = _coerce_health(store.get_health(site.slug))
         states.append(health)
-        events.extend(recovery_events(history))
+        transitions = store.transitions_for(site.slug)
+        if transitions:
+            have_log = True
+        logged.extend(transition_events(transitions))
+        reconstructed.extend(recovery_events(history))
         last = (
             agg.last_finished.isoformat(timespec="seconds")
             if agg.last_finished is not None
             else "never"
         )
+        bq = mean_body_quality(history)
+        bq_str = "n/a" if bq is None else f"{bq:.2f}"
         lines.append(
             f"{site.slug:24} health={health.value:<16} "
             f"runs={agg.runs} found={agg.items_found} new={agg.new_items} "
-            f"errors={agg.errors} errs/run={agg.error_rate:.2f} last={last}"
+            f"errors={agg.errors} errs/run={agg.error_rate:.2f} "
+            f"body_q={bq_str} last={last}"
         )
     dist = health_distribution(states)
     lines.append(
         "fleet: " + " ".join(f"{name}={count}" for name, count in dist.items())
     )
-    mttr = drift_mttr(events)
-    lines.append(f"drift recovery MTTR (observed): {'n/a' if mttr is None else mttr}")
+    if have_log:
+        mttr = drift_mttr(logged)
+        lines.append(f"drift recovery MTTR: {'n/a' if mttr is None else mttr}")
+    else:
+        mttr = drift_mttr(reconstructed)
+        lines.append(
+            f"drift recovery MTTR (observed): {'n/a' if mttr is None else mttr}"
+        )
     return lines
 
 

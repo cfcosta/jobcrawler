@@ -8,6 +8,7 @@ sandbox-backed validate are unit-testable; the live run/generate paths are not
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
@@ -348,6 +349,62 @@ def test_render_status_drift_mttr_is_na_without_recovery_events() -> None:
     drift_line = next(line for line in lines if "drift" in line.lower())
 
     assert "n/a" in drift_line.lower()
+
+
+def test_render_status_prefers_measured_mttr_from_transition_log() -> None:
+    # When the durable health-transition log has data, `status` reports the *measured*
+    # §4.8 MTTR (dark onset → return to healthy), dropping the reconstructed "(observed)"
+    # qualifier it uses when only run history is available.
+    times = iter(
+        [
+            datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc),  # None -> healthy
+            datetime(2026, 1, 1, 1, 0, tzinfo=timezone.utc),  # healthy -> stale (dark)
+            datetime(
+                2026, 1, 1, 3, 0, tzinfo=timezone.utc
+            ),  # stale -> healthy (recovered)
+        ]
+    )
+    store = StateStore(":memory:", clock=lambda: next(times))
+    store.set_health("techcrunch", HealthState.HEALTHY.value)
+    store.set_health("techcrunch", HealthState.STALE.value)
+    store.set_health("techcrunch", HealthState.HEALTHY.value)
+
+    lines = render_status([Site(slug="techcrunch", url="https://t.com")], store)
+    drift_line = next(line for line in lines if "drift" in line.lower())
+
+    assert "(observed)" not in drift_line  # measured, not reconstructed
+    assert "2:00:00" in drift_line  # 01:00 dark -> 03:00 recovered == 2h
+    store.close()
+
+
+def test_render_status_surfaces_mean_body_quality() -> None:
+    # The per-site line surfaces mean body_quality (partial-drift signal) from run
+    # signals; a site whose runs carry no signal reads body_q=n/a.
+    store = StateStore(":memory:")
+    r1 = store.start_run("techcrunch")
+    store.finish_run(
+        r1,
+        items_found=4,
+        new_items=4,
+        errors=0,
+        pages_fetched=2,
+        signals={"body_quality": 0.5},
+    )
+    r2 = store.start_run("techcrunch")
+    store.finish_run(
+        r2,
+        items_found=4,
+        new_items=0,
+        errors=0,
+        pages_fetched=2,
+        signals={"body_quality": 1.0},
+    )
+
+    lines = render_status([Site(slug="techcrunch", url="https://t.com")], store)
+    site_line = next(line for line in lines if "techcrunch" in line)
+
+    assert "body_q=0.75" in site_line
+    store.close()
     store.close()
 
 
