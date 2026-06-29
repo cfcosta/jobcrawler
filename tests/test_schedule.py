@@ -422,10 +422,18 @@ def test_reopt_due_respects_the_cadence() -> None:
     assert sched.reopt_due(T0 + timedelta(hours=25)) is True
 
 
-def test_reopt_off_is_never_due() -> None:
-    # Off by default — the multi-hour compile is opt-in, never fires unconfigured.
+def test_reopt_off_disables_the_timer() -> None:
+    # Explicit `off` disables the multi-hour compile timer entirely.
     assert _reopt_sched(reopt_check="off").reopt_due(T0) is False
-    assert _reopt_sched(reopt_check=None).reopt_due(T0) is False
+
+
+def test_reopt_unset_uses_the_config_default_cadence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # reopt_check=None falls back to AUTOCRAWLER_REOPT_CHECK, which now defaults to a
+    # real cadence (autonomous self-improvement on by default) → due on the first check.
+    monkeypatch.delenv("AUTOCRAWLER_REOPT_CHECK", raising=False)
+    assert _reopt_sched(reopt_check=None).reopt_due(T0) is True
 
 
 def test_reopt_tick_dispatches_via_the_injected_callable() -> None:
@@ -996,12 +1004,6 @@ async def test_run_invokes_the_adopt_watch() -> None:
 
 
 # -- §4.2 cold-start bootstrap: a due site with no committed crawler ----------
-
-
-async def _ok_crawl(site: Site) -> CrawlSummary:
-    return CrawlSummary(
-        site.slug, items_found=5, new_items=1, errors=0, pages_fetched=1
-    )
 
 
 def _bootstrap_sched(

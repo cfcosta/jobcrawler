@@ -79,9 +79,11 @@ def test_review_gate_unknown_value_falls_back_to_on(
     assert config.review_gate() == "on"
 
 
-def test_review_gate_defaults_on(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_review_gate_defaults_to_auto(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Autonomous by default (§4.8 "full-auto, gated by proof"): an unset gate
+    # auto-promotes a healed/bootstrapped crawler rather than staging it for a human.
     monkeypatch.delenv("AUTOCRAWLER_REVIEW_GATE", raising=False)
-    assert config.review_gate() == "on"
+    assert config.review_gate() == "auto"
 
 
 def test_log_level_defaults_to_info(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -330,14 +332,28 @@ def test_adaptive_target_n_floors_at_one(monkeypatch: pytest.MonkeyPatch) -> Non
     assert config.adaptive_target_n() == 1.0
 
 
-def test_adaptive_default_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_adaptive_default_on_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The fleet self-tunes cadence by default; a site opts out by pinning ``schedule:``
+    # or ``adaptive: false``.
     monkeypatch.delenv("AUTOCRAWLER_ADAPTIVE_DEFAULT", raising=False)
+    assert config.adaptive_default() is True
+
+
+def test_adaptive_default_can_be_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTOCRAWLER_ADAPTIVE_DEFAULT", "false")
     assert config.adaptive_default() is False
 
 
-def test_adaptive_default_honors_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AUTOCRAWLER_ADAPTIVE_DEFAULT", "true")
-    assert config.adaptive_default() is True
+def test_reopt_check_defaults_to_24h(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The offline §4.11 self-improvement loop is scheduled by default — a daily *check*,
+    # gated so it only dispatches a compile when the trainset/pool are ready.
+    monkeypatch.delenv("AUTOCRAWLER_REOPT_CHECK", raising=False)
+    assert config.reopt_check() == "24h"
+
+
+def test_reopt_check_can_be_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTOCRAWLER_REOPT_CHECK", "off")
+    assert config.reopt_check() == "off"
 
 
 def test_adaptive_window_defaults_to_eight(monkeypatch: pytest.MonkeyPatch) -> None:

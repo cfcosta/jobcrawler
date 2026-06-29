@@ -820,7 +820,7 @@ stays for manual one-shot runs and CI.
 | `AUTOCRAWLER_TRACKING_PARAM_DENYLIST` | `utm_*,fbclid,gclid,…` | query params stripped in URL canonicalization (§4.6) |
 | `AUTOCRAWLER_DEFAULT_SCHEDULE` | e.g. `30m` | fixed crawl cadence for sites that set none and aren't adaptive |
 | `AUTOCRAWLER_CONCURRENCY` | e.g. `4` | max sites crawled concurrently |
-| `AUTOCRAWLER_ADAPTIVE_DEFAULT` | `false` | make a site with no explicit `schedule` adaptive rather than fixed (§4.9) |
+| `AUTOCRAWLER_ADAPTIVE_DEFAULT` | `true` | a site with no explicit `schedule` self-tunes its cadence rather than running fixed (§4.9); pin `schedule:`/`adaptive: false` to opt out |
 | `AUTOCRAWLER_MIN_SCHEDULE` | e.g. `15m` | politeness floor for an adaptive interval (§4.9) |
 | `AUTOCRAWLER_MAX_SCHEDULE` | e.g. `1d` | staleness ceiling for an adaptive interval (§4.9) |
 | `AUTOCRAWLER_ADAPTIVE_TARGET_N` | e.g. `2` | target checks-per-post; AIMD-style hit-rate controller steers toward a `1/N` hit rate (§4.9) |
@@ -830,7 +830,7 @@ stays for manual one-shot runs and CI.
 | `AUTOCRAWLER_BODY_QUALITY_FLOOR` | e.g. `0.5` | complete-body share below which a crawl (with items) is a partial-drift signal; host-side only (§4.8/§8) |
 | `AUTOCRAWLER_GENFAIL_BACKOFF` | e.g. `6h` | base retry delay for a generation-failed site; ×2 per consecutive failure (§4.8) |
 | `AUTOCRAWLER_GENFAIL_BACKOFF_CAP` | e.g. `7d` | ceiling for that geometric backoff (§4.8) |
-| `AUTOCRAWLER_REOPT_CHECK` | e.g. `off` / `7d` | cadence of the offline self-improvement job (§4.11) |
+| `AUTOCRAWLER_REOPT_CHECK` | `24h` (`off` to disable) | cadence of the offline self-improvement job (§4.11); a readiness-gated check, not a guaranteed compile |
 | `AUTOCRAWLER_TRAINSET_STABLE_RUNS` | e.g. `3` | sustained healthy runs before a pair is admitted to the trainset (§4.11) |
 | `AUTOCRAWLER_PROMOTION_EVAL_PASSES` | e.g. `3` | held-out eval passes averaged before a §4.11 promotion/adoption decision (noise control) |
 | `AUTOCRAWLER_OPTIMIZE_LOCK` | `optimize.lock` | single-flight lockfile for the out-of-band optimize job (§4.11) |
@@ -841,7 +841,7 @@ stays for manual one-shot runs and CI.
 | `FLARESOLVERR_URL` | — | FlareSolverr endpoint when that backend is selected |
 | `AUTOCRAWLER_CLEARANCE_TTL` | e.g. `30m` | how long a cached `cf_clearance` cookie is reused |
 | `AUTOCRAWLER_EGRESS_PROXY` | — | shared egress proxy for solver + cheap requests (IP/UA pinning) |
-| `AUTOCRAWLER_REVIEW_GATE` | `on \| auto \| off` | self-heal delivery: stage for human `promote` / auto-promote with backup+`rollback` / live no-backup (§4.8/§14.2) |
+| `AUTOCRAWLER_REVIEW_GATE` | `auto` (default) `\| on \| off` | self-heal & cold-start delivery: auto-promote with backup+`rollback` (default) / stage for human `promote` / live no-backup (§4.8/§4.2) |
 | `AUTOCRAWLER_AUTONOMY` | `on` | master kill-switch over every self-modifying action — self-heal, auto-promote, reopt dispatch, auto-adopt (§8) |
 | `AUTOCRAWLER_NOTIFY_WEBHOOK` | — | http(s) URL POSTed a JSON payload on every autonomous action (§4.8/§4.11) |
 | `AUTOCRAWLER_NOTIFY_TIMEOUT` | e.g. `10` | per-POST timeout (s) for the notify webhook |

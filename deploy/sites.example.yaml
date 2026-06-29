@@ -13,9 +13,10 @@
 #            let the §4.9 hit-rate controller learn the cadence from how often the
 #            source actually posts (bounded by AUTOCRAWLER_MIN_SCHEDULE /
 #            AUTOCRAWLER_MAX_SCHEDULE, tuned by AUTOCRAWLER_ADAPTIVE_TARGET_N).
-#            Omit to use AUTOCRAWLER_DEFAULT_SCHEDULE (30m), unless
-#            AUTOCRAWLER_ADAPTIVE_DEFAULT=on makes adaptive the default. (Cron
-#            expressions are not supported yet and are rejected.)
+#            Omit to use the fleet default, which is adaptive
+#            (AUTOCRAWLER_ADAPTIVE_DEFAULT defaults true); set it false to fall back
+#            to the fixed AUTOCRAWLER_DEFAULT_SCHEDULE (30m). (Cron expressions are
+#            not supported yet and are rejected.)
 #   adaptive equivalently, `adaptive: true` (the `schedule: adaptive` shorthand
 #            just sets this and clears the fixed cadence).
 #   enabled  crawl on/off without deleting the entry.

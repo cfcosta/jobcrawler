@@ -409,8 +409,10 @@ def adaptive_target_n() -> float:
 
 def adaptive_default() -> bool:
     """When true, a site with no explicit ``schedule`` is adaptive rather than using
-    the fixed ``default_schedule``. Default false (opt-in per source)."""
-    return _bool("AUTOCRAWLER_ADAPTIVE_DEFAULT", False)
+    the fixed ``default_schedule``. Default true — the fleet self-tunes each source's
+    cadence to its hit-rate; pin ``schedule:`` or ``adaptive: false`` on a site to opt
+    out."""
+    return _bool("AUTOCRAWLER_ADAPTIVE_DEFAULT", True)
 
 
 def adaptive_window() -> int:
@@ -486,7 +488,12 @@ def genfail_backoff_cap() -> float:
 
 
 def reopt_check() -> str:
-    return _str("AUTOCRAWLER_REOPT_CHECK", "off")
+    """How often the scheduler checks whether to dispatch the offline §4.11 GEPA
+    self-improvement job (out-of-band; ``.compile()`` never runs in-band). Default 24h;
+    ``off`` disables it. A check only *dispatches* when the readiness gates (trainset
+    growth + pool) pass and no compile is already running, so a daily check is not a
+    daily compile — and an unconfigured optimizer model just no-ops the dispatch."""
+    return _str("AUTOCRAWLER_REOPT_CHECK", "24h")
 
 
 def optimize_lock_path() -> str:
@@ -604,24 +611,26 @@ def egress_proxy() -> str | None:
 
 
 def review_gate() -> str:
-    """Tri-state §14.2/§4.8 self-heal delivery policy (default ``on``):
+    """Tri-state §4.8 self-heal & §4.2 cold-start delivery policy (default ``auto``):
 
-      * ``on`` — stage a healed crawler to ``crawlers/_pending/<slug>.py`` and mark the
-        site pending-review; an operator runs ``autocrawl promote``. A human approves
-        every live change (most conservative).
-      * ``auto`` — auto-promote: back up the current live crawler to
+      * ``auto`` — auto-promote (the default): back up the current live crawler to
         ``crawlers/_history/<slug>/`` then write the new one live, so the site
-        self-heals unattended. Safety is the §6 gates plus versioned rollback
-        (``autocrawl rollback``), not a human (the §4.8 "full-auto, gated by proof").
+        self-heals — and a brand-new site bootstraps — unattended. Safety is the §6
+        gates plus versioned rollback (``autocrawl rollback``), not a human (the §4.8
+        "full-auto, gated by proof").
+      * ``on`` — stage a crawler to ``crawlers/_pending/<slug>.py`` and mark the site
+        pending-review; an operator runs ``autocrawl promote``. A human approves every
+        live change (most conservative).
       * ``off`` — write live with no backup (operator-trusted; no rollback copy).
 
     The legacy boolean values are still accepted: truthy ⇒ ``on`` (the prior staging
-    default), falsy ⇒ ``off`` (the prior go-live), so an existing deployment keeps its
-    behavior. An unrecognized value falls back to ``on`` (the safe, human-gated path).
+    behavior), falsy ⇒ ``off`` (the prior go-live), so a deployment that set those keeps
+    its behavior. An *unset* gate now defaults to ``auto`` (autonomous); an unrecognized
+    value still falls back to ``on`` (the safe, human-gated path).
     """
     raw = os.getenv("AUTOCRAWLER_REVIEW_GATE")
     if raw is None:
-        return "on"
+        return "auto"
     value = raw.strip().lower()
     if value in {"on", "auto", "off"}:
         return value
