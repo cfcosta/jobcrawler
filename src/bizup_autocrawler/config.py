@@ -466,6 +466,25 @@ def reopt_check() -> str:
     return _str("AUTOCRAWLER_REOPT_CHECK", "off")
 
 
+def optimize_lock_path() -> str:
+    """Single-flight lockfile for the offline §4.11 optimize job (held for its run).
+
+    The GEPA compile is multi-hour; ``optimize_job`` holds an advisory lock on this
+    file for the whole run so a reopt tick that fires while a previous compile is
+    still going is a no-op rather than a pile-up of concurrent runs fighting over the
+    same trainset and generator dir. CWD-relative by default, like the trainset."""
+    return _str("AUTOCRAWLER_OPTIMIZE_LOCK", "optimize.lock")
+
+
+def optimize_log_path() -> str:
+    """Where the detached out-of-band optimize subprocess appends its stdout/stderr.
+
+    The §4.11 hand-off runs ``autocrawl optimize`` detached (it outlives the daemon),
+    so its progress and the final PROMOTED / not-promoted line land here rather than
+    on the daemon's console. CWD-relative by default, like the trainset."""
+    return _str("AUTOCRAWLER_OPTIMIZE_LOG", "optimize.log")
+
+
 def trainset_stable_runs() -> int:
     return _int("AUTOCRAWLER_TRAINSET_STABLE_RUNS", 3)
 

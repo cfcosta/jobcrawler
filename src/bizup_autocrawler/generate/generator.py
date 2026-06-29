@@ -283,11 +283,15 @@ def load_generator(
     boot (§4.11); fall back to a fresh **baseline** when the artifact is absent or
     unreadable, so the service always boots.
 
-    ``path`` defaults to the single config pointer ``AUTOCRAWLER_GENERATOR_PATH`` —
-    flipping that pointer to a prior ``generator.json`` *is* the rollback. The live
-    wiring (tools / sub_lm / interpreter / caps) is passed through to the rebuilt
-    module; only the declarative strategy *state* comes from the artifact.
+    Resolution order when ``path`` is not given: the mutable **active-generator
+    pointer** (auto-adoption writes it; re-read each boot so the daemon picks up a
+    newly-adopted generator without an env change) → else the static
+    ``AUTOCRAWLER_GENERATOR_PATH`` env var (the deploy default / fallback) → else the
+    baseline. Rolling the pointer back to a prior ``generator-N.json`` *is* the
+    rollback. The live wiring (tools / sub_lm / interpreter / caps) is passed through
+    to the rebuilt module; only the declarative strategy *state* comes from the artifact.
     """
+    from bizup_autocrawler import generator_pointer
 
     def _build() -> CrawlerGenerator:
         return CrawlerGenerator(
@@ -298,7 +302,10 @@ def load_generator(
             max_llm_calls=max_llm_calls,
         )
 
-    target = config.generator_path() if path is None else str(path)
+    if path is not None:
+        target = str(path)
+    else:
+        target = generator_pointer.active_generator_path() or config.generator_path()
     generator = _build()
     if not target or not Path(target).exists():
         return generator  # cold start — no optimized artifact pinned yet

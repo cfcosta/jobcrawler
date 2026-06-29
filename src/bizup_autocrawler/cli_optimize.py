@@ -55,6 +55,24 @@ _MIN_SITES = 3  # need at least one site each for train / val / held-out
 
 
 def optimize_command(args: argparse.Namespace) -> int:
+    """Single-flight wrapper: hold the §4.11 optimize lock for the whole run.
+
+    The offline compile is multi-hour; two concurrent runs would fight over the
+    trainset and generator dir. Acquiring the lock here makes both the manual
+    ``autocrawl optimize`` and the scheduler's out-of-band dispatch participate in
+    one single-flight — a second invocation exits cleanly instead of piling on.
+    """
+    from bizup_autocrawler.optimize_job import AlreadyRunning, optimize_lock
+
+    try:
+        with optimize_lock():
+            return _run_optimize(args)
+    except AlreadyRunning as exc:
+        print(f"optimize: {exc}; exiting")
+        return 0
+
+
+def _run_optimize(args: argparse.Namespace) -> int:
     from bizup_autocrawler.cli import _db_path  # avoid an import cycle
 
     store = StateStore(_db_path())
@@ -101,7 +119,16 @@ def optimize_command(args: argparse.Namespace) -> int:
             f"margin={_as_float(result.get('margin')):.1f}"
         )
         print(f"  wrote {out}")
-        print(f"  deploy: set AUTOCRAWLER_GENERATOR_PATH={out}")
+        if getattr(args, "adopt", False):
+            # "Full auto, gated by proof": the margin gate is the proof, --adopt flips
+            # the live pointer so a running daemon picks it up — no env change/restart.
+            from bizup_autocrawler import generator_pointer
+
+            generator_pointer.set_active(out)
+            print(f"  adopted: active generator -> {out}")
+            print("  rollback: autocrawl rollback-generator")
+        else:
+            print(f"  deploy: set AUTOCRAWLER_GENERATOR_PATH={out}")
         return 0
 
     reason = result.get("reason") or "held-out did not beat the incumbent by the margin"

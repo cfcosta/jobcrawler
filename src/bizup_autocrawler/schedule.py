@@ -148,6 +148,8 @@ class Scheduler:
         jitter: Callable[[], float] | None = None,
         healer: Healer | None = None,
         regen_check: str | None = None,
+        reopt_check: str | None = None,
+        reopt_dispatch: Callable[[], bool] | None = None,
         heal_cooldown: str | None = None,
         body_quality_floor: float | None = None,
         min_schedule: float | None = None,
@@ -171,6 +173,16 @@ class Scheduler:
             config.regen_check() if regen_check is None else regen_check
         )
         self._next_regen: datetime | None = None
+        # §4.11 out-of-band re-optimization timer: like the regen timer, but instead of
+        # assessing sites it *dispatches* the detached, single-flight optimize job — the
+        # multi-hour GEPA compile never runs in-band. Off by default (reopt_check "off").
+        # The dispatch is injectable for tests; production uses the real detached
+        # `optimize --adopt` ("full auto, gated by proof" — adoption still margin-gated).
+        self._reopt_interval = _optional_interval(
+            config.reopt_check() if reopt_check is None else reopt_check
+        )
+        self._reopt_dispatch = reopt_dispatch
+        self._next_reopt: datetime | None = None
         # §4.8 event-driven healing: a drifted crawl assesses immediately (not waiting
         # for the periodic sweep), rate-limited per-site by this cooldown (None = off).
         self._heal_cooldown = _optional_interval(
@@ -401,17 +413,62 @@ class Scheduler:
             _log.info("regen sweep assessed=%d %s", len(states), _state_summary(states))
         return states
 
+    def reopt_due(self, now: datetime) -> bool:
+        """True if an out-of-band §4.11 re-opt is due (per ``AUTOCRAWLER_REOPT_CHECK``)."""
+        if self._reopt_interval is None:
+            return False
+        return self._next_reopt is None or now >= self._next_reopt
+
+    def mark_reopt(self, now: datetime) -> None:
+        """Record that a reopt dispatch ran at ``now``; the next is one interval later."""
+        if self._reopt_interval is not None:
+            self._next_reopt = now + self._reopt_interval
+
+    def reopt_tick(self) -> bool:
+        """Dispatch the offline §4.11 self-improvement job out-of-band — never in-band.
+
+        The GEPA compile is multi-hour, so this only *spawns* the detached, single-flight
+        ``autocrawl optimize --adopt`` job and returns at once (a dispatch while one is
+        already running is a no-op). ``--adopt`` is the §4.11 "full auto, gated by proof"
+        path: the child still adopts the optimized generator *only* if it clears the
+        frozen held-out margin — the scheduler never makes that promotion call itself,
+        and never blocks the crawl loop on the compile. Isolated like :meth:`regen_tick`
+        so a dispatch error can't abort the run loop. Returns True if a job was launched.
+        """
+        try:
+            launched = self._dispatch_reopt()
+        except Exception:
+            _log.exception("reopt dispatch failed; continuing")
+            return False
+        _log.info(
+            "reopt: %s",
+            "dispatched out-of-band optimize job (§4.11)"
+            if launched
+            else "optimize job already running; skipping",
+        )
+        return launched
+
+    def _dispatch_reopt(self) -> bool:
+        """Call the injected dispatch, else the real detached ``optimize --adopt``."""
+        if self._reopt_dispatch is not None:
+            return self._reopt_dispatch()
+        from bizup_autocrawler.optimize_job import dispatch_optimize
+
+        return dispatch_optimize(adopt=True)
+
     async def run(self, *, stop: asyncio.Event, interval: float = 60.0) -> None:
         """Loop ticks until ``stop`` is set; each tick drains before the next.
 
-        The slow §4.8 regeneration sweep hangs off the same loop on its own cadence
-        — never ``.compile()`` in-band (that offline GEPA work is §4.11's hand-off).
+        The slow §4.8 regeneration sweep and the §4.11 re-optimization *dispatch* hang
+        off the same loop on their own cadences — never ``.compile()`` in-band (that
+        offline GEPA work is handed off to a detached single-flight subprocess).
         """
         _log.info(
-            "scheduler starting sites=%d interval=%ss regen=%s",
+            "scheduler starting sites=%d interval=%ss regen=%s reopt=%s",
             len(self._sites),
             interval,
             "off" if self._regen_interval is None else self._regen_interval,
+            "off" if self._reopt_interval is None else self._reopt_interval,
         )
         while not stop.is_set():
             try:
@@ -420,6 +477,9 @@ class Scheduler:
                 if self.regen_due(now):
                     await self.regen_tick()
                     self.mark_regen(now)
+                if self.reopt_due(now):
+                    self.reopt_tick()
+                    self.mark_reopt(now)
             except Exception:
                 # Last-resort guard: an unexpected error in a tick or sweep must not
                 # terminate the daemon — log it and carry on to the next interval.

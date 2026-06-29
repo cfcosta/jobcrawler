@@ -18,3 +18,9 @@ __pycache__/
 *.db-shm
 *.db-wal
 err.txt
+# §4.11 optimize artifacts + CWD-relative state defaults (created when run from the
+# repo root; production points the AUTOCRAWLER_* paths at /var/lib instead).
+optimize.lock
+optimize.log
+trainset.jsonl
+/generators/

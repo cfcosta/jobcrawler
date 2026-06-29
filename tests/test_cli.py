@@ -32,6 +32,7 @@ from bizup_autocrawler.cli import (
     cmd_list,
     cmd_promote,
     cmd_rollback,
+    cmd_rollback_generator,
     cmd_run,
     cmd_status,
     cmd_validate,
@@ -70,6 +71,13 @@ def test_parser_dispatches_each_command() -> None:
     rolled_back = parser.parse_args(["rollback", "techcrunch"])
     assert rolled_back.func is cmd_rollback
     assert rolled_back.slug == "techcrunch"
+
+    assert parser.parse_args(["rollback-generator"]).func is cmd_rollback_generator
+
+    # --adopt is opt-in: off by default (cautious manual optimize), on when asked
+    # (the path the autonomous reopt dispatch takes to flip the live pointer, §4.11).
+    assert parser.parse_args(["optimize"]).adopt is False
+    assert parser.parse_args(["optimize", "--adopt"]).adopt is True
 
     assert parser.parse_args(["status"]).func is cmd_status
 
@@ -120,6 +128,38 @@ def test_cmd_rollback_returns_one_when_no_backup(monkeypatch: MonkeyPatch) -> No
         lambda slug: (False, f"no backup to roll back to for {slug}"),
     )
     assert cmd_rollback(build_parser().parse_args(["rollback", "ghost"])) == 1
+
+
+def test_cmd_rollback_generator_returns_zero_on_success(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    # cmd_rollback_generator undoes the last generator adoption via the pointer's
+    # rollback_active and maps the (ok, restored) result to an exit code. A prior
+    # adoption found → reverted → exit 0 (the unwind mechanics live in
+    # test_generator_pointer).
+    from bizup_autocrawler import generator_pointer
+
+    monkeypatch.setattr(
+        generator_pointer,
+        "rollback_active",
+        lambda: (True, "generators/generator-1.json"),
+    )
+    assert (
+        cmd_rollback_generator(build_parser().parse_args(["rollback-generator"])) == 0
+    )
+
+
+def test_cmd_rollback_generator_returns_one_when_nothing_to_roll_back(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    # No prior adoption (already at baseline) → non-zero exit so an operator/script
+    # sees there was nothing to undo.
+    from bizup_autocrawler import generator_pointer
+
+    monkeypatch.setattr(generator_pointer, "rollback_active", lambda: (False, None))
+    assert (
+        cmd_rollback_generator(build_parser().parse_args(["rollback-generator"])) == 1
+    )
 
 
 def test_site_url_of_reads_the_constant() -> None:

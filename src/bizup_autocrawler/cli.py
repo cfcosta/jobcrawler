@@ -605,6 +605,22 @@ def cmd_optimize(args: argparse.Namespace) -> int:
     return optimize_command(args)
 
 
+def cmd_rollback_generator(args: argparse.Namespace) -> int:
+    # Undo the last generator adoption (the §4.11 versioned rollback). Flips the
+    # active-generator pointer back to the prior version (or baseline); cheap, no LM.
+    from bizup_autocrawler import generator_pointer
+
+    ok, restored = generator_pointer.rollback_active()
+    if not ok:
+        print("rollback-generator: no prior generator adoption to roll back to")
+        return 1
+    if restored is None:
+        print("rolled back generator to baseline (pointer cleared)")
+    else:
+        print(f"rolled back active generator to {restored}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="autocrawl", description="RLM autocrawler")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -648,10 +664,22 @@ def build_parser() -> argparse.ArgumentParser:
         "status", help="show per-site run aggregates, fleet health, drift MTTR (M4)"
     ).set_defaults(func=cmd_status)
 
-    sub.add_parser(
+    opt = sub.add_parser(
         "optimize",
         help="offline §4.11 self-improvement: build trainset, optimize, promote",
-    ).set_defaults(func=cmd_optimize)
+    )
+    opt.add_argument(
+        "--adopt",
+        action="store_true",
+        help="on promotion, flip the active-generator pointer to the new artifact "
+        "(§4.11 auto-adopt; reversible via rollback-generator)",
+    )
+    opt.set_defaults(func=cmd_optimize)
+
+    sub.add_parser(
+        "rollback-generator",
+        help="revert the active generator to the previously-adopted version (§4.11)",
+    ).set_defaults(func=cmd_rollback_generator)
     return parser
 
 

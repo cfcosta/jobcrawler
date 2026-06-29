@@ -17,6 +17,7 @@ from dspy.primitives import FinalOutput
 from dspy.utils import DummyLM
 from pytest import MonkeyPatch
 
+from bizup_autocrawler import config, generator_pointer
 from bizup_autocrawler.generate.generator import (
     CrawlerGenerator,
     best_of_n,
@@ -316,6 +317,55 @@ def test_rollback_flips_the_config_pointer_to_the_prior_artifact(
     # ...and rollback is just flipping it back to the kept prior generator.json.
     monkeypatch.setenv("AUTOCRAWLER_GENERATOR_PATH", str(prior))
     assert "PRIOR RULES" in _instruction_of(load_generator())
+
+
+def test_load_generator_prefers_the_pointer_over_the_env_var(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    # Resolution order is arg > pointer > env > baseline: an adopted generator (pointer)
+    # must win over the static deploy default (env), so a live daemon picks up an
+    # auto-adoption without an env change/restart (§4.11).
+    adopted = tmp_path / "generator-2.json"
+    deploy_default = tmp_path / "generator-1.json"
+    save_generator(_optimized_generator("ADOPTED RULES"), adopted)
+    save_generator(_optimized_generator("DEPLOY DEFAULT RULES"), deploy_default)
+    monkeypatch.setattr(config, "generator_dir", lambda: str(tmp_path))
+    monkeypatch.setenv("AUTOCRAWLER_GENERATOR_PATH", str(deploy_default))
+    generator_pointer.set_active(str(adopted))
+
+    assert "ADOPTED RULES" in _instruction_of(load_generator())
+
+
+def test_load_generator_uses_the_env_var_when_no_pointer_is_set(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    # No pointer (an existing deploy that never adopted) ⇒ the env var is the fallback,
+    # so systemd units that only set AUTOCRAWLER_GENERATOR_PATH still boot from it.
+    deploy_default = tmp_path / "generator-1.json"
+    save_generator(_optimized_generator("DEPLOY DEFAULT RULES"), deploy_default)
+    monkeypatch.setattr(config, "generator_dir", lambda: str(tmp_path))
+    monkeypatch.setenv("AUTOCRAWLER_GENERATOR_PATH", str(deploy_default))
+    assert generator_pointer.active_generator_path() is None
+
+    assert "DEPLOY DEFAULT RULES" in _instruction_of(load_generator())
+
+
+def test_load_generator_explicit_arg_beats_pointer_and_env(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    # An explicit path arg (the optimize job re-scoring a specific artifact) is the
+    # top of the resolution order — neither the pointer nor the env can override it.
+    explicit = tmp_path / "generator-3.json"
+    adopted = tmp_path / "generator-2.json"
+    deploy_default = tmp_path / "generator-1.json"
+    save_generator(_optimized_generator("EXPLICIT RULES"), explicit)
+    save_generator(_optimized_generator("ADOPTED RULES"), adopted)
+    save_generator(_optimized_generator("DEPLOY DEFAULT RULES"), deploy_default)
+    monkeypatch.setattr(config, "generator_dir", lambda: str(tmp_path))
+    monkeypatch.setenv("AUTOCRAWLER_GENERATOR_PATH", str(deploy_default))
+    generator_pointer.set_active(str(adopted))
+
+    assert "EXPLICIT RULES" in _instruction_of(load_generator(explicit))
 
 
 class _RecordingRLM:

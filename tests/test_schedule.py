@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -395,6 +396,91 @@ def test_regen_disabled_without_a_healer() -> None:
     assert sched.regen_due(T0) is False
 
 
+# -- §4.11 out-of-band re-optimization dispatch timer ------------------------
+
+
+def _reopt_sched(
+    *,
+    reopt_check: str | None = None,
+    reopt_dispatch: Callable[[], bool] | None = None,
+) -> Scheduler:
+    return Scheduler(
+        [Site(slug="s0", url="https://x.com")],
+        store=StateStore(":memory:", clock=lambda: T0),
+        crawl=_ok_crawl,
+        clock=lambda: T0,
+        reopt_check=reopt_check,
+        reopt_dispatch=reopt_dispatch,
+    )
+
+
+def test_reopt_due_respects_the_cadence() -> None:
+    sched = _reopt_sched(reopt_check="24h")
+    assert sched.reopt_due(T0) is True  # never dispatched yet → due immediately
+    sched.mark_reopt(T0)
+    assert sched.reopt_due(T0 + timedelta(hours=1)) is False
+    assert sched.reopt_due(T0 + timedelta(hours=25)) is True
+
+
+def test_reopt_off_is_never_due() -> None:
+    # Off by default — the multi-hour compile is opt-in, never fires unconfigured.
+    assert _reopt_sched(reopt_check="off").reopt_due(T0) is False
+    assert _reopt_sched(reopt_check=None).reopt_due(T0) is False
+
+
+def test_reopt_tick_dispatches_via_the_injected_callable() -> None:
+    calls: list[bool] = []
+
+    def dispatch() -> bool:
+        calls.append(True)
+        return True
+
+    sched = _reopt_sched(reopt_check="24h", reopt_dispatch=dispatch)
+    assert sched.reopt_tick() is True
+    assert calls == [True]  # the detached optimize dispatch was spawned exactly once
+
+
+def test_reopt_tick_reports_a_skip_when_a_job_is_already_running() -> None:
+    # The single-flight dispatch returns False when a compile is still running; the
+    # tick surfaces that as a no-op skip (not a second concurrent multi-hour run).
+    sched = _reopt_sched(reopt_check="24h", reopt_dispatch=lambda: False)
+    assert sched.reopt_tick() is False
+
+
+def test_reopt_tick_isolates_a_dispatch_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A dispatch error (the optimize module failed to spawn) must not abort the run
+    # loop — reopt_tick swallows it like regen_tick, returning False after logging.
+    def boom() -> bool:
+        raise RuntimeError("spawn failed")
+
+    sched = _reopt_sched(reopt_check="24h", reopt_dispatch=boom)
+    with caplog.at_level(logging.ERROR, logger="bizup_autocrawler.schedule"):
+        assert sched.reopt_tick() is False  # must not raise
+    assert any("reopt dispatch failed" in r.getMessage() for r in caplog.records)
+
+
+async def test_run_invokes_reopt_at_least_once() -> None:
+    calls: list[bool] = []
+
+    def dispatch() -> bool:
+        calls.append(True)
+        return True
+
+    sched = _reopt_sched(reopt_check="24h", reopt_dispatch=dispatch)
+    stop = asyncio.Event()
+
+    async def stopper() -> None:
+        await asyncio.sleep(0.02)
+        stop.set()
+
+    await asyncio.gather(sched.run(stop=stop, interval=0.005), stopper())
+    # The frozen clock makes reopt due exactly once; the loop dispatched it then marked
+    # the next one a full interval out, so it never re-fires within this window.
+    assert calls == [True]
+
+
 def _two_site_stale_store() -> StateStore:
     store = StateStore(":memory:", clock=lambda: T0)
     for slug in ("s0", "s1"):
@@ -636,7 +722,9 @@ class _Clock:
 
 
 async def _blackout(site: Site) -> CrawlSummary:
-    return CrawlSummary(site.slug, items_found=0, new_items=0, errors=1, pages_fetched=1)
+    return CrawlSummary(
+        site.slug, items_found=0, new_items=0, errors=1, pages_fetched=1
+    )
 
 
 async def _teasers(site: Site) -> CrawlSummary:
@@ -737,7 +825,11 @@ async def test_a_raising_heal_does_not_abort_the_tick() -> None:
 def test_drift_signal_boundary_is_the_floor() -> None:
     # body_quality exactly at the floor is healthy; just below it is drift.
     sched = _heal_sched(crawl=_healthy, healer=None, clock=_Clock(T0))
-    at_floor = CrawlSummary("s0", items_found=10, new_items=0, errors=0, pages_fetched=1, incomplete=5)
-    below = CrawlSummary("s0", items_found=10, new_items=0, errors=0, pages_fetched=1, incomplete=6)
+    at_floor = CrawlSummary(
+        "s0", items_found=10, new_items=0, errors=0, pages_fetched=1, incomplete=5
+    )
+    below = CrawlSummary(
+        "s0", items_found=10, new_items=0, errors=0, pages_fetched=1, incomplete=6
+    )
     assert not sched._drift_signal(at_floor)  # 0.5 == floor → healthy
     assert sched._drift_signal(below)  # 0.4 < floor → drift
