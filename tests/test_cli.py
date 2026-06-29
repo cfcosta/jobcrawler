@@ -17,12 +17,13 @@ from pytest import MonkeyPatch
 
 from bizup_autocrawler.ingest import NewsClient
 
-from bizup_autocrawler import config
+from bizup_autocrawler import config, generator_pointer
 from bizup_autocrawler.cli import (
     PreflightError,
     _build_healer,
     _configure_logging,
     _db_path,
+    _humanize_secs,
     _probe,
     _record_site_failure,
     _site_url_of,
@@ -343,6 +344,61 @@ def test_render_list_surfaces_persisted_pending_review(tmp_path: Path) -> None:
     store.close()
 
 
+# -- list: §4.9 learned-cadence column (P4d) ---------------------------------
+
+
+def test_render_list_shows_the_learned_adaptive_interval(tmp_path: Path) -> None:
+    # An adaptive site whose controller has learned an interval shows it humanized, so
+    # an operator can see how often the source is actually being polled.
+    store = StateStore(":memory:")
+    store.set_interval("techcrunch", 7200.0)  # 2h
+
+    lines = render_list(
+        [Site(slug="techcrunch", url="https://t.com", adaptive=True)],
+        store,
+        crawlers_dir=tmp_path,
+    )
+
+    assert "every=2h" in lines[0]
+    store.close()
+
+
+def test_render_list_shows_adaptive_before_an_interval_is_learned(
+    tmp_path: Path,
+) -> None:
+    # An adaptive source with no learned interval yet reads `adaptive` (it seeds from a
+    # default until the first crawl), not a fabricated number.
+    store = StateStore(":memory:")
+
+    lines = render_list(
+        [Site(slug="techcrunch", url="https://t.com", adaptive=True)],
+        store,
+        crawlers_dir=tmp_path,
+    )
+
+    assert "every=adaptive" in lines[0]
+    store.close()
+
+
+def test_render_list_shows_fixed_for_a_non_adaptive_site(tmp_path: Path) -> None:
+    store = StateStore(":memory:")
+
+    lines = render_list(
+        [Site(slug="techcrunch", url="https://t.com")], store, crawlers_dir=tmp_path
+    )
+
+    assert "every=fixed" in lines[0]
+    store.close()
+
+
+def test_humanize_secs_uses_compact_units() -> None:
+    assert _humanize_secs(45) == "45s"
+    assert _humanize_secs(900) == "15m"
+    assert _humanize_secs(7200) == "2h"
+    assert _humanize_secs(5400) == "1.5h"  # arbitrary controller floats round cleanly
+    assert _humanize_secs(86400) == "1d"
+
+
 # -- status (M4 observability surface) ---------------------------------------
 
 
@@ -474,6 +530,104 @@ def test_render_status_surfaces_mean_body_quality() -> None:
 
     assert "body_q=0.75" in site_line
     store.close()
+
+
+# -- status: §4.11 self-improvement state + drift churn (P4d) -----------------
+
+
+def test_render_status_shows_per_site_transition_count() -> None:
+    # Each per-site line carries how many health-log rows the site has accrued — its
+    # drift churn — so a repeatedly-flapping site is visible at a glance.
+    times = iter(
+        [
+            datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc),  # None -> healthy
+            datetime(2026, 1, 1, 1, 0, tzinfo=timezone.utc),  # healthy -> stale
+            datetime(2026, 1, 1, 2, 0, tzinfo=timezone.utc),  # stale -> healthy
+        ]
+    )
+    store = StateStore(":memory:", clock=lambda: next(times))
+    store.set_health("techcrunch", HealthState.HEALTHY.value)
+    store.set_health("techcrunch", HealthState.STALE.value)
+    store.set_health("techcrunch", HealthState.HEALTHY.value)
+
+    lines = render_status([Site(slug="techcrunch", url="https://t.com")], store)
+    site_line = next(line for line in lines if "techcrunch" in line)
+
+    assert "transitions=3" in site_line
+    store.close()
+
+
+def test_render_status_generator_line_is_baseline_without_a_pointer(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setattr(config, "generator_dir", lambda: str(tmp_path))
+    store = StateStore(":memory:")
+
+    gen_line = next(
+        line for line in render_status([], store) if line.startswith("generator:")
+    )
+
+    assert gen_line == "generator: baseline"
+    store.close()
+
+
+def test_render_status_generator_line_shows_version_and_heldout(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    # With a generator adopted, status names the live versioned artifact and the
+    # held-out margin it cleared — the §4.11 provenance an operator can't otherwise see.
+    monkeypatch.setattr(config, "generator_dir", lambda: str(tmp_path))
+    (tmp_path / "generator-2.json").write_text("{}")
+    (tmp_path / "generator-2.meta.json").write_text('{"heldout_score": 3.5}')
+    generator_pointer.set_active(str(tmp_path / "generator-2.json"))
+    store = StateStore(":memory:")
+
+    gen_line = next(
+        line for line in render_status([], store) if line.startswith("generator:")
+    )
+
+    assert "generator-2.json" in gen_line
+    assert "heldout=3.50" in gen_line
+    assert "probation" not in gen_line  # no marker → not under probation
+    store.close()
+
+
+def test_render_status_generator_line_flags_probation(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    # While the P4c watcher still holds an adoption under probation, status flags it so
+    # an operator knows the daemon may yet auto-roll it back on its own.
+    monkeypatch.setattr(config, "generator_dir", lambda: str(tmp_path))
+    (tmp_path / "generator-2.json").write_text("{}")
+    generator_pointer.set_active(str(tmp_path / "generator-2.json"))
+    generator_pointer.record_adoption(
+        str(tmp_path / "generator-2.json"),
+        at=datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc),
+    )
+    store = StateStore(":memory:")
+
+    gen_line = next(
+        line for line in render_status([], store) if line.startswith("generator:")
+    )
+
+    assert "under probation" in gen_line
+    assert "2026-01-10T12:00:00" in gen_line
+    store.close()
+
+
+def test_render_status_surfaces_the_autonomy_brake(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    # The master kill-switch state is fleet-wide context: `OFF` (uppercased to catch
+    # the eye) means the daemon is still crawling but self-modification is frozen.
+    monkeypatch.setattr(config, "generator_dir", lambda: str(tmp_path))
+    store = StateStore(":memory:")
+
+    monkeypatch.setattr(config, "autonomy", lambda: True)
+    assert "autonomy: on" in render_status([], store)
+
+    monkeypatch.setattr(config, "autonomy", lambda: False)
+    assert "autonomy: OFF" in render_status([], store)
     store.close()
 
 

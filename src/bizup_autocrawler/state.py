@@ -353,6 +353,32 @@ class StateStore:
             ).fetchall()
         return [_to_transition(r) for r in rows]
 
+    def count_transitions_to(
+        self, state: str, *, since: datetime, until: datetime | None = None
+    ) -> int:
+        """Count health_log rows that entered ``state`` in a window, across *all* sites.
+
+        ``since`` is inclusive, ``until`` (if given) exclusive. Unlike
+        :meth:`transitions_for` this is fleet-wide, not per-site: the §4.11
+        post-adoption regression watcher uses it to compare how many sites newly
+        entered ``generation_failed`` in the window after a generator adoption against
+        the equal window before it (an adopted generator that regresses produces more
+        new failures). Timestamps are stored as UTC isoformat, which sorts
+        chronologically as text, so the bounds compare correctly without parsing.
+        """
+        if until is not None:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM health_log "
+                "WHERE to_state = ? AND ts >= ? AND ts < ?",
+                (state, since.isoformat(), until.isoformat()),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM health_log WHERE to_state = ? AND ts >= ?",
+                (state, since.isoformat()),
+            ).fetchone()
+        return int(row["n"])
+
     # -- adaptive cadence (§4.9 hit-rate controller) -------------------------
 
     def get_interval(self, site: str) -> float | None:

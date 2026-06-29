@@ -23,13 +23,17 @@ issued mid-optimize from corrupting either file.
 
 from __future__ import annotations
 
+import json
 import os
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from bizup_autocrawler import config
 
 _ACTIVE = "ACTIVE"
 _HISTORY = "ACTIVE.history"
+_ADOPTION = "ADOPTION"
 
 
 def _active_file() -> Path:
@@ -47,6 +51,27 @@ def active_generator_path() -> str | None:
     except OSError:
         return None
     return raw or None
+
+
+def active_generator_meta() -> dict[str, object]:
+    """The active generator's provenance sidecar (held-out score, snapshot…), or ``{}``.
+
+    Reads the ``<stem>.meta.json`` sidecar that
+    :func:`bizup_autocrawler.generate.generator.save_generator` writes — but inline
+    here (the convention is one line) rather than importing that dspy-heavy module, so
+    the operator ``status`` surface that calls this stays fast and dependency-light.
+    ``{}`` for baseline (no pointer) or a missing/corrupt sidecar, so the surface
+    degrades to "n/a" rather than crashing the read."""
+    active = active_generator_path()
+    if active is None:
+        return {}
+    p = Path(active)
+    meta = p.with_name(f"{p.stem}.meta.json")
+    try:
+        data = json.loads(meta.read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -120,3 +145,68 @@ def rollback_active() -> tuple[bool, str | None]:
         return (True, None)
     _atomic_write(_active_file(), prev)
     return (True, prev)
+
+
+# --- adoption-under-probation marker (§4.11 P4c) ---------------------------
+# A sibling ``ADOPTION`` file recording the *latest* adoption and when it went live,
+# so the post-adoption regression watcher can wait out a probation window and then
+# judge it. Distinct from the pointer/history (which track *which* generator is live):
+# this is a one-shot probation record the watcher consumes once it renders a verdict.
+
+
+@dataclass(frozen=True, slots=True)
+class AdoptionMarker:
+    """A generator adoption under probation: which artifact, and when it went live.
+
+    Written by ``optimize --adopt`` right after it flips the pointer; read back by the
+    §4.11 regression watcher, which compares fleet health before vs after ``adopted_at``
+    once the probation window elapses, then clears the marker.
+    """
+
+    path: str
+    adopted_at: datetime
+
+
+def _adoption_file() -> Path:
+    return Path(config.generator_dir()) / _ADOPTION
+
+
+def record_adoption(path: str | Path, *, at: datetime) -> None:
+    """Mark ``path`` as a generator adoption under probation as of ``at`` (§4.11 P4c).
+
+    Atomic, and overwrites any prior marker: adoptions are serialized by the optimize
+    single-flight lock, so the latest is the only one under probation. The §4.11
+    rollback watcher reads this after the probation window to judge the adoption.
+    """
+    payload = json.dumps({"path": str(path), "adopted_at": at.isoformat()})
+    _atomic_write(_adoption_file(), payload)
+
+
+def read_adoption() -> AdoptionMarker | None:
+    """The current adoption-under-probation marker, or None when there is none.
+
+    None on a missing, blank, or corrupt marker — a hand-truncated file must leave the
+    watcher with simply nothing to judge rather than crashing the run loop.
+    """
+    try:
+        raw = _adoption_file().read_text().strip()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        return AdoptionMarker(
+            path=str(data["path"]),
+            adopted_at=datetime.fromisoformat(data["adopted_at"]),
+        )
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def clear_adoption() -> None:
+    """Consume the adoption marker once the watcher has rendered a verdict (§4.11)."""
+    try:
+        _adoption_file().unlink()
+    except FileNotFoundError:
+        pass

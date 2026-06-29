@@ -9,6 +9,7 @@ wrappers over a few typed parsers.
 from __future__ import annotations
 
 import os
+from datetime import timedelta
 from pathlib import Path
 
 from bizup_autocrawler.durations import parse_duration
@@ -418,6 +419,28 @@ def adaptive_window() -> int:
     return max(1, _int("AUTOCRAWLER_ADAPTIVE_WINDOW", 8))
 
 
+# --- master autonomy switch (§4.8/§4.11) -----------------------------------
+
+
+def autonomy() -> bool:
+    """Master kill-switch over every self-modifying autonomous action (default on).
+
+    The single operator brake on the daemon's self-modification: the §4.8 periodic
+    regen sweep and event-driven self-heal (including auto-promotion), and the §4.11
+    out-of-band re-optimization dispatch (including auto-adoption). ``off`` freezes all
+    of them at once — the daemon still crawls, ingests, and records run/health signals
+    (so it keeps gathering the data the loop uses once re-enabled), but never rewrites a
+    crawler or swaps the generator on its own.
+
+    It deliberately does *not* touch crawl scheduling (adaptive cadence is timing, not
+    code, and bounded by the politeness band) or any *operator-initiated* command —
+    ``promote``, ``optimize --adopt``, ``rollback`` and ``rollback-generator`` stay
+    available, because the brake is on the daemon's initiative, not the operator's. Read
+    once at scheduler start like the other §4.9 knobs; flip it and restart to apply (the
+    loop is restart-idempotent, so a restart loses no state)."""
+    return _bool("AUTOCRAWLER_AUTONOMY", True)
+
+
 def regen_check() -> str:
     return _str("AUTOCRAWLER_REGEN_CHECK", "24h")
 
@@ -517,6 +540,43 @@ def generator_path() -> str | None:
     return _opt("AUTOCRAWLER_GENERATOR_PATH")
 
 
+def adopt_probation() -> timedelta | None:
+    """Probation window after a generator adoption before the §4.11 rollback watcher
+    judges it (``off`` disables the watcher entirely). Default 48h.
+
+    "Full auto, gated by proof" adopts a generator the instant it clears the frozen
+    held-out margin — but that held-out is a proxy, so a generator can pass it and
+    still regress on the live fleet, where it drives every §4.8 self-heal. This is the
+    window the watcher waits before comparing post-adoption generation failures against
+    the equal window before adoption: long enough for the new generator to actually be
+    exercised on a few regenerations, short enough to revert a bad one promptly. A
+    malformed value falls back to the default so a typo can't wedge the watcher; ``off``
+    (or empty) returns None, leaving auto-adoption protected only by the margin gate.
+    Host-side (§8) — the watcher never surfaces anything to the generator/RLM."""
+    raw = _str("AUTOCRAWLER_ADOPT_PROBATION", "48h")
+    if raw.strip().lower() in {"off", ""}:
+        return None
+    try:
+        return parse_duration(raw)
+    except ValueError:
+        return parse_duration("48h")
+
+
+def adopt_regression_delta() -> int:
+    """How many *more* sites must newly enter ``generation_failed`` in the window after
+    a generator adoption than in the equal window before it for the §4.11 watcher to
+    call it a regression and roll the pointer back. Default 2.
+
+    An adopted generator only affects *new* regenerations, so a regression shows up as
+    post-adoption self-heals failing to produce a gate-passing crawler more often than
+    the prior generator did. Comparing against the pre-adoption baseline (not an
+    absolute count) normalizes for a fleet's ambient flakiness; the delta is the noise
+    margin on top — one extra failure can be chance, a sustained increase of two
+    distinct sites is the rollback signal. Floored at 1 so a 0/negative value can't make
+    every adoption trip. Host-side (§8)."""
+    return max(1, _int("AUTOCRAWLER_ADOPT_REGRESSION_DELTA", 2))
+
+
 # --- Cloudflare / solver (§4.10) -------------------------------------------
 
 
@@ -581,3 +641,23 @@ def log_level() -> str:
     Upper-cased so a lowercase value still names a level ``logging.setLevel`` accepts.
     """
     return _str("AUTOCRAWLER_LOG_LEVEL", "INFO").upper()
+
+
+def notify_webhook() -> str | None:
+    """Optional webhook for operator alerts on autonomous actions (None = log only).
+
+    When ``AUTOCRAWLER_NOTIFY_WEBHOOK`` is an ``http(s)`` URL, every self-modifying
+    action (§4.8 heal/promote, §4.11 adopt, generator rollback) POSTs a small JSON
+    payload there in addition to the log line, so an operator gets pushed an alert
+    when the daemon changes its own code without having to tail logs. Best-effort and
+    fire-and-forget: a webhook that is slow or down never blocks or aborts the action
+    (see :mod:`bizup_autocrawler.notify`). Unset → notifications are logged only."""
+    return _opt("AUTOCRAWLER_NOTIFY_WEBHOOK")
+
+
+def notify_timeout() -> float:
+    """Per-POST timeout (seconds) for the notify webhook (``AUTOCRAWLER_NOTIFY_TIMEOUT``).
+
+    Bounds how long a single best-effort delivery attempt waits before giving up, so a
+    hung receiver can't pile up background threads. Default 10s."""
+    return _float("AUTOCRAWLER_NOTIFY_TIMEOUT", 10.0)

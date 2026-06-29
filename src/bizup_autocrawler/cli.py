@@ -6,8 +6,10 @@ script through the §4.4 sandbox with **no ingest**; ``generate`` runs the RLM a
 gates before writing ``crawlers/<slug>.py`` (it needs a configured LM + Deno, so
 its heavy deps are imported lazily); ``promote`` moves a self-heal crawler staged
 under ``crawlers/_pending`` (§14.2) to live; ``list`` shows sites, script presence,
-and last-run health; ``status`` is the M4 observability read — per-site run
-aggregates, fleet health distribution, and observed drift-recovery MTTR. The
+last-run health, and the §4.9 learned crawl cadence; ``status`` is the M4
+observability read — per-site run aggregates + drift-transition counts, fleet health
+distribution, drift-recovery MTTR, and the §4.11 self-improvement state (active
+generator + held-out score, any adoption probation, and the autonomy brake). The
 list/validate/crawl/status wiring is thin over already-tested backends; the live
 paths are correct-by-construction.
 """
@@ -28,7 +30,7 @@ from urllib.parse import urlparse
 import yaml
 from pydantic import ValidationError
 
-from bizup_autocrawler import config
+from bizup_autocrawler import config, generator_pointer
 from bizup_autocrawler.generate.scoring import CandidateResult
 from bizup_autocrawler.governor import RateGovernor
 from bizup_autocrawler.health import (
@@ -99,6 +101,19 @@ def _db_path() -> str:
     return url.removeprefix("sqlite:///") if url.startswith("sqlite:") else url
 
 
+def _humanize_secs(secs: float) -> str:
+    """A compact human form for a learned interval (e.g. ``5400.0`` → ``"1.5h"``).
+
+    The adaptive controller learns arbitrary float intervals, so this rounds to the
+    largest sensible unit for the ``list`` surface rather than printing raw seconds."""
+    if secs < 60:
+        return f"{secs:.0f}s"
+    for size, unit in ((86400, "d"), (3600, "h"), (60, "m")):
+        if secs >= size:
+            return f"{secs / size:.1f}".rstrip("0").rstrip(".") + unit
+    return f"{secs:.0f}s"  # unreachable (secs >= 60 always matches above)
+
+
 # -- list --------------------------------------------------------------------
 
 
@@ -122,10 +137,25 @@ def _health_label(
     return "ok" if has_run else "new"
 
 
+def _cadence_label(store: StateStore, site: Site) -> str:
+    """The site's crawl cadence for the ``list`` surface (§4.9 adaptive observability).
+
+    A learned interval (the AIMD hit-rate controller has written one) wins and is shown
+    humanized; an adaptive source with no learned value yet reads ``adaptive`` (it falls
+    back to a seed until the first crawl); a fixed-cadence source reads ``fixed``."""
+    interval = store.get_interval(site.slug)
+    if interval is not None:
+        return _humanize_secs(interval)
+    return "adaptive" if site.adaptive else "fixed"
+
+
 def render_list(
     sites: Sequence[Site], store: StateStore, *, crawlers_dir: Path = _CRAWLERS_DIR
 ) -> list[str]:
-    """One line per site: enabled flag, committed-script presence, last item count."""
+    """One line per site: enabled flag, script presence, last item count, health, cadence.
+
+    ``every=`` surfaces the §4.9 learned adaptive interval (or ``adaptive``/``fixed``)
+    so an operator can see at a glance how often each source is actually being polled."""
     rows: list[str] = []
     for site in sites:
         has_script = _crawler_file(site.slug, crawlers_dir).exists()
@@ -136,7 +166,8 @@ def render_list(
         rows.append(
             f"{site.slug:24} {'on' if site.enabled else 'off':3} "
             f"{'script' if has_script else 'no-script':9} "
-            f"last_items={items:>4} health={health}"
+            f"last_items={items:>4} health={health:<14} "
+            f"every={_cadence_label(store, site)}"
         )
     return rows
 
@@ -159,6 +190,29 @@ def _coerce_health(value: str | None) -> HealthState:
         return HealthState.HEALTHY
 
 
+def _generator_line() -> str:
+    """The active §4.11 generator version + held-out score, plus any probation note.
+
+    Surfaces the auto-adoption state an operator otherwise can't see: which versioned
+    artifact the live daemon resolves (or ``baseline``), the held-out margin it cleared
+    on adoption, and — when the P4c regression watcher is still holding it under
+    probation — that the daemon may yet auto-roll it back."""
+    active = generator_pointer.active_generator_path()
+    if active is None:
+        line = "generator: baseline"
+    else:
+        score = generator_pointer.active_generator_meta().get("heldout_score")
+        score_str = f"{score:.2f}" if isinstance(score, (int, float)) else "n/a"
+        line = f"generator: {Path(active).name} heldout={score_str}"
+    marker = generator_pointer.read_adoption()
+    if marker is not None:
+        line += (
+            f" (under probation, adopted "
+            f"{marker.adopted_at.isoformat(timespec='seconds')})"
+        )
+    return line
+
+
 def render_status(sites: Sequence[Site], store: StateStore) -> list[str]:
     """Operator status surface (M4): per-site run totals, fleet health, drift MTTR.
 
@@ -171,6 +225,12 @@ def render_status(sites: Sequence[Site], store: StateStore) -> list[str]:
     replacement enabled"). When no transitions are recorded yet (e.g. a DB predating
     the log), it falls back to reconstructing item-level dark→recovered from run
     history (``recovery_events``), labeled *observed* to flag the approximation.
+
+    Each per-site line also carries ``transitions=`` — how many health-log rows the
+    site has accrued, i.e. how churny its drift lifecycle has been. Two fleet-wide
+    footer lines surface the §4.11 self-improvement state: the active generator
+    (version + held-out score, plus any probation the P4c watcher still holds it under)
+    and the master ``autonomy`` brake (``on``/``OFF``).
     """
     lines: list[str] = []
     states: list[HealthState] = []
@@ -198,7 +258,7 @@ def render_status(sites: Sequence[Site], store: StateStore) -> list[str]:
             f"{site.slug:24} health={health.value:<16} "
             f"runs={agg.runs} found={agg.items_found} new={agg.new_items} "
             f"errors={agg.errors} errs/run={agg.error_rate:.2f} "
-            f"body_q={bq_str} last={last}"
+            f"body_q={bq_str} transitions={len(transitions)} last={last}"
         )
     dist = health_distribution(states)
     lines.append(
@@ -212,6 +272,12 @@ def render_status(sites: Sequence[Site], store: StateStore) -> list[str]:
         lines.append(
             f"drift recovery MTTR (observed): {'n/a' if mttr is None else mttr}"
         )
+    # Fleet-wide self-improvement state (§4.11): the active generator + held-out score,
+    # any probation the watcher is still holding it under, and whether the master
+    # autonomy brake is engaged (OFF = the daemon is crawling but self-modification —
+    # heal/regen/promote/reopt/adopt/rollback — is frozen).
+    lines.append(_generator_line())
+    lines.append(f"autonomy: {'on' if config.autonomy() else 'OFF'}")
     return lines
 
 

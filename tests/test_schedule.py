@@ -833,3 +833,151 @@ def test_drift_signal_boundary_is_the_floor() -> None:
     )
     assert not sched._drift_signal(at_floor)  # 0.5 == floor → healthy
     assert sched._drift_signal(below)  # 0.4 < floor → drift
+
+
+# -- §4.8/§4.11 master autonomy kill-switch ----------------------------------
+#
+# AUTOCRAWLER_AUTONOMY=off is the single operator brake: it must freeze every
+# self-*modifying* action (periodic regen, event-driven heal, out-of-band reopt —
+# and the auto-promote / auto-adopt those gate) while leaving crawl + ingest, and
+# adaptive cadence (timing, not code), fully live. Each test pins ``autonomy``
+# explicitly so it is hermetic regardless of the ambient env.
+
+
+def _autonomy_sched(
+    *,
+    autonomy: bool,
+    crawl: CrawlFn = _ok_crawl,
+    healer: _RecordingHealer | None = None,
+    clock: Callable[[], datetime] = lambda: T0,
+    regen_check: str = "6h",
+    reopt_check: str = "24h",
+    heal_cooldown: str = "6h",
+) -> Scheduler:
+    return Scheduler(
+        [Site(slug="s0", url="https://x.com")],
+        store=StateStore(":memory:", clock=clock),
+        crawl=crawl,
+        healer=healer,
+        clock=clock,
+        autonomy=autonomy,
+        regen_check=regen_check,
+        reopt_check=reopt_check,
+        heal_cooldown=heal_cooldown,
+    )
+
+
+def test_autonomy_off_freezes_the_regen_sweep() -> None:
+    # Healer wired and regen configured, yet the master switch freezes the sweep.
+    healer = _RecordingHealer()
+    assert _autonomy_sched(autonomy=False, healer=healer).regen_due(T0) is False
+    # Same config with the switch on *is* due — proving the switch is the cause.
+    assert _autonomy_sched(autonomy=True, healer=healer).regen_due(T0) is True
+
+
+def test_autonomy_off_freezes_the_reopt_dispatch() -> None:
+    assert _autonomy_sched(autonomy=False).reopt_due(T0) is False
+    assert _autonomy_sched(autonomy=True).reopt_due(T0) is True
+
+
+async def test_autonomy_off_freezes_event_healing_but_keeps_crawling() -> None:
+    # A blackout would normally trigger an immediate heal; with the switch off the
+    # crawl still completes (data keeps flowing) but no self-heal is attempted —
+    # the loop keeps gathering the signal it will act on once re-enabled.
+    healer = _RecordingHealer()
+    sched = _autonomy_sched(autonomy=False, crawl=_blackout, healer=healer)
+    summaries = await sched.tick()
+    assert [s.site for s in summaries] == ["s0"]  # still crawls + ingests
+    assert healer.assessed == []  # but never self-modifies
+
+
+async def test_autonomy_off_still_learns_adaptive_cadence() -> None:
+    # The brake governs self-*modification* (code), not scheduling (timing): an
+    # adaptive site keeps retuning + persisting its interval while frozen.
+    clock = _Clock(T0)
+    store = StateStore(":memory:", clock=clock)
+    sched = Scheduler(
+        [Site(slug="s0", url="https://x.com", adaptive=True)],
+        store=store,
+        crawl=_ok_crawl,
+        clock=clock,
+        autonomy=False,
+    )
+    await sched.tick()
+    assert store.get_interval("s0") is not None  # cadence still learned while frozen
+
+
+async def test_autonomy_off_is_announced_at_startup(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # An operator scanning logs must be able to confirm the daemon came up frozen.
+    sched = _autonomy_sched(autonomy=False)
+    stop = asyncio.Event()
+    stop.set()
+    with caplog.at_level(logging.INFO, logger="bizup_autocrawler.schedule"):
+        await sched.run(stop=stop, interval=0.001)
+    assert any("autonomy=OFF" in r.getMessage() for r in caplog.records)
+
+
+# -- §4.11 P4c post-adoption regression watcher wiring -----------------------
+#
+# The watcher policy is tested in test_adopt_watch.py; here we pin only the scheduler
+# wiring: that the run loop drives it, the autonomy switch freezes it (an auto-rollback
+# is self-modification), and a watcher error can't abort the loop. The watcher is
+# injected so these stay hermetic (no marker files, no real generator dir).
+
+
+def _adopt_sched(
+    *,
+    autonomy: bool = True,
+    adopt_watch: Callable[[datetime], None],
+) -> Scheduler:
+    return Scheduler(
+        [Site(slug="s0", url="https://x.com")],
+        store=StateStore(":memory:", clock=lambda: T0),
+        crawl=_ok_crawl,
+        clock=lambda: T0,
+        autonomy=autonomy,
+        adopt_watch=adopt_watch,
+    )
+
+
+def test_adopt_watch_tick_runs_the_injected_watcher() -> None:
+    seen: list[datetime] = []
+    sched = _adopt_sched(adopt_watch=lambda now: seen.append(now))
+    sched.adopt_watch_tick(T0)
+    assert seen == [T0]
+
+
+def test_adopt_watch_tick_is_frozen_when_autonomy_off() -> None:
+    seen: list[datetime] = []
+    sched = _adopt_sched(autonomy=False, adopt_watch=lambda now: seen.append(now))
+    sched.adopt_watch_tick(T0)
+    assert seen == []  # an auto-rollback is self-modification → frozen by the switch
+
+
+def test_adopt_watch_tick_isolates_a_watcher_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def boom(now: datetime) -> None:
+        raise RuntimeError("watcher blew up")
+
+    sched = _adopt_sched(adopt_watch=boom)
+    with caplog.at_level(logging.ERROR, logger="bizup_autocrawler.schedule"):
+        sched.adopt_watch_tick(T0)  # must not raise
+    assert any(
+        "adoption regression watch failed" in r.getMessage() for r in caplog.records
+    )
+
+
+async def test_run_invokes_the_adopt_watch() -> None:
+    seen: list[datetime] = []
+    sched = _adopt_sched(adopt_watch=lambda now: seen.append(now))
+    stop = asyncio.Event()
+
+    async def stopper() -> None:
+        await asyncio.sleep(0.02)
+        stop.set()
+
+    await asyncio.gather(sched.run(stop=stop, interval=0.005), stopper())
+    assert seen  # the watcher rode the run loop at least once

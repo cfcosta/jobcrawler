@@ -147,9 +147,11 @@ class Scheduler:
         backoff_base: float = 1.0,
         jitter: Callable[[], float] | None = None,
         healer: Healer | None = None,
+        autonomy: bool | None = None,
         regen_check: str | None = None,
         reopt_check: str | None = None,
         reopt_dispatch: Callable[[], bool] | None = None,
+        adopt_watch: Callable[[datetime], None] | None = None,
         heal_cooldown: str | None = None,
         body_quality_floor: float | None = None,
         min_schedule: float | None = None,
@@ -169,6 +171,13 @@ class Scheduler:
         self._jitter = jitter or (lambda: random.uniform(0, 0.5))
         self._inflight: set[str] = set()
         self._healer = healer
+        # §4.8/§4.11 master autonomy switch: when off, every self-*modifying* action
+        # (periodic regen, event-driven heal, out-of-band reopt — and the auto-promote /
+        # auto-adopt they gate) is frozen, while crawl + ingest keep running so the loop
+        # still gathers signal. Read once here; flip + restart to apply. Governs the
+        # daemon's own initiative only — operator commands (promote/optimize/rollback)
+        # stay live, and adaptive cadence is untouched (it's timing, not code).
+        self._autonomy = config.autonomy() if autonomy is None else autonomy
         self._regen_interval = _regen_interval(
             config.regen_check() if regen_check is None else regen_check
         )
@@ -183,6 +192,11 @@ class Scheduler:
         )
         self._reopt_dispatch = reopt_dispatch
         self._next_reopt: datetime | None = None
+        # §4.11 P4c post-adoption regression watcher: marker-gated and cheap, so it runs
+        # every loop iteration (no timer) rather than on a cadence; injectable for tests,
+        # production uses the real `adopt_watch.check_adoption`. Frozen by the autonomy
+        # switch like the other self-modifying actions (an auto-rollback rewrites state).
+        self._adopt_watch = adopt_watch
         # §4.8 event-driven healing: a drifted crawl assesses immediately (not waiting
         # for the periodic sweep), rate-limited per-site by this cooldown (None = off).
         self._heal_cooldown = _optional_interval(
@@ -303,6 +317,8 @@ class Scheduler:
 
     def _should_event_heal(self, summary: CrawlSummary, now: datetime) -> bool:
         """True if ``summary`` warrants an immediate heal and the site is off cooldown."""
+        if not self._autonomy:
+            return False  # master switch off: freeze all self-modification (§4.8)
         if self._healer is None or self._heal_cooldown is None:
             return False  # no healer, or event-driven healing disabled (cooldown off)
         if not self._drift_signal(summary):
@@ -381,6 +397,8 @@ class Scheduler:
 
     def regen_due(self, now: datetime) -> bool:
         """True if a §4.8 staleness sweep is due (per ``AUTOCRAWLER_REGEN_CHECK``)."""
+        if not self._autonomy:
+            return False  # master switch off: freeze all self-modification (§4.8)
         if self._healer is None or self._regen_interval is None:
             return False
         return self._next_regen is None or now >= self._next_regen
@@ -415,6 +433,8 @@ class Scheduler:
 
     def reopt_due(self, now: datetime) -> bool:
         """True if an out-of-band §4.11 re-opt is due (per ``AUTOCRAWLER_REOPT_CHECK``)."""
+        if not self._autonomy:
+            return False  # master switch off: freeze all self-modification (§4.11)
         if self._reopt_interval is None:
             return False
         return self._next_reopt is None or now >= self._next_reopt
@@ -456,17 +476,45 @@ class Scheduler:
 
         return dispatch_optimize(adopt=True)
 
+    def adopt_watch_tick(self, now: datetime) -> None:
+        """Run the §4.11 post-adoption regression watcher once (P4c), if autonomy is on.
+
+        Marker-gated and cheap (a file read when there's no adoption under probation),
+        so it runs every loop iteration rather than on its own timer; the probation
+        window lives in the marker, not a scheduler cadence. Frozen by the master
+        autonomy switch — an auto-rollback is self-modification — and isolated so a
+        watcher error can't abort the run loop.
+        """
+        if not self._autonomy:
+            return  # master switch off: freeze all self-modification (§4.11)
+        try:
+            self._run_adopt_watch(now)
+        except Exception:
+            _log.exception("adoption regression watch failed; continuing")
+
+    def _run_adopt_watch(self, now: datetime) -> None:
+        """Call the injected watcher, else the real :func:`adopt_watch.check_adoption`."""
+        if self._adopt_watch is not None:
+            self._adopt_watch(now)
+            return
+        from bizup_autocrawler import adopt_watch
+
+        adopt_watch.check_adoption(self._store, now)
+
     async def run(self, *, stop: asyncio.Event, interval: float = 60.0) -> None:
         """Loop ticks until ``stop`` is set; each tick drains before the next.
 
         The slow §4.8 regeneration sweep and the §4.11 re-optimization *dispatch* hang
         off the same loop on their own cadences — never ``.compile()`` in-band (that
-        offline GEPA work is handed off to a detached single-flight subprocess).
+        offline GEPA work is handed off to a detached single-flight subprocess). The
+        §4.11 P4c post-adoption regression watcher rides every iteration (marker-gated,
+        so it's a cheap no-op until an adoption is under probation).
         """
         _log.info(
-            "scheduler starting sites=%d interval=%ss regen=%s reopt=%s",
+            "scheduler starting sites=%d interval=%ss autonomy=%s regen=%s reopt=%s",
             len(self._sites),
             interval,
+            "on" if self._autonomy else "OFF",
             "off" if self._regen_interval is None else self._regen_interval,
             "off" if self._reopt_interval is None else self._reopt_interval,
         )
@@ -480,6 +528,7 @@ class Scheduler:
                 if self.reopt_due(now):
                     self.reopt_tick()
                     self.mark_reopt(now)
+                self.adopt_watch_tick(now)
             except Exception:
                 # Last-resort guard: an unexpected error in a tick or sweep must not
                 # terminate the daemon — log it and carry on to the next interval.

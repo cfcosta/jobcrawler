@@ -122,9 +122,21 @@ def _run_optimize(args: argparse.Namespace) -> int:
         if getattr(args, "adopt", False):
             # "Full auto, gated by proof": the margin gate is the proof, --adopt flips
             # the live pointer so a running daemon picks it up — no env change/restart.
+            from datetime import datetime, timezone
+
             from bizup_autocrawler import generator_pointer
+            from bizup_autocrawler.notify import notify
 
             generator_pointer.set_active(out)
+            # Put it under §4.11 probation: the daemon's regression watcher rolls it
+            # back automatically if post-adoption self-heals start failing more (P4c).
+            generator_pointer.record_adoption(out, at=datetime.now(timezone.utc))
+            notify(
+                "generator.adopted",
+                f"adopted optimized generator (held-out margin cleared): {out}",
+                path=str(out),
+                margin=round(_as_float(result.get("margin")), 1),
+            )
             print(f"  adopted: active generator -> {out}")
             print("  rollback: autocrawl rollback-generator")
         else:

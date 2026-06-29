@@ -336,6 +336,62 @@ def test_transitions_persist_across_reopen(tmp_path: object) -> None:
     s2.close()
 
 
+# -- fleet-wide transition counts (§4.11 P4c regression watcher) -------------
+
+
+def test_count_transitions_to_is_fleet_wide() -> None:
+    # Distinct sites entering the same state are all counted (the watcher asks "how many
+    # sites newly failed generation", across the whole fleet, not per-site).
+    times = iter([datetime(2026, 1, d, tzinfo=timezone.utc) for d in range(1, 6)])
+    s = StateStore(":memory:", clock=lambda: next(times))
+    s.set_health("a", "generation_failed")
+    s.set_health("b", "generation_failed")
+    s.set_health("c", "healthy")  # a different to_state — not counted
+    since = datetime(2025, 12, 31, tzinfo=timezone.utc)
+    assert s.count_transitions_to("generation_failed", since=since) == 2
+    assert s.count_transitions_to("healthy", since=since) == 1
+    s.close()
+
+
+def test_count_transitions_to_windows_since_inclusive_until_exclusive() -> None:
+    times = iter(
+        [
+            datetime(2026, 1, 1, tzinfo=timezone.utc),  # before the window
+            datetime(2026, 1, 5, tzinfo=timezone.utc),  # == since → inside
+            datetime(2026, 1, 8, tzinfo=timezone.utc),  # inside
+            datetime(2026, 1, 10, tzinfo=timezone.utc),  # == until → excluded
+        ]
+    )
+    s = StateStore(":memory:", clock=lambda: next(times))
+    for site in ("a", "b", "c", "d"):
+        s.set_health(site, "generation_failed")
+    n = s.count_transitions_to(
+        "generation_failed",
+        since=datetime(2026, 1, 5, tzinfo=timezone.utc),
+        until=datetime(2026, 1, 10, tzinfo=timezone.utc),
+    )
+    assert n == 2  # Jan 5 (inclusive) + Jan 8; Jan 1 before, Jan 10 (until) excluded
+    s.close()
+
+
+def test_count_transitions_to_is_zero_with_no_matching_rows(store: StateStore) -> None:
+    since = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    assert store.count_transitions_to("generation_failed", since=since) == 0
+
+
+def test_count_transitions_to_ignores_a_reasserted_state() -> None:
+    # set_health logs a row only on a real change, so a site that stays failed across
+    # several sweeps is counted once — the watcher measures *newly* failing sites.
+    fixed = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    s = StateStore(":memory:", clock=lambda: fixed)
+    s.set_health("a", "generation_failed")
+    s.set_health("a", "generation_failed", bump_attempts=True)
+    s.set_health("a", "generation_failed", bump_attempts=True)
+    since = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    assert s.count_transitions_to("generation_failed", since=since) == 1
+    s.close()
+
+
 # -- run signals (§4.8 partial-drift telemetry, P0) --------------------------
 
 

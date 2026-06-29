@@ -40,6 +40,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 
+from bizup_autocrawler.notify import notify
 from bizup_autocrawler.state import HealthRecord, RunRecord, StateStore
 
 
@@ -128,6 +129,28 @@ def regeneration_state(outcome: RegenOutcome) -> HealthState:
     return _REGEN_STATE[outcome]
 
 
+_REGEN_NOTICE = {
+    RegenOutcome.PROMOTED: (
+        "heal.promoted",
+        "self-healed {slug}: regenerated crawler promoted live",
+    ),
+    RegenOutcome.STAGED: (
+        "heal.staged",
+        "self-healed {slug}: regenerated crawler staged for review",
+    ),
+    RegenOutcome.FAILED: (
+        "heal.failed",
+        "self-heal of {slug} failed: no gate-passing crawler produced",
+    ),
+}
+
+
+def _notify_regen(slug: str, outcome: RegenOutcome) -> None:
+    """Push an operator alert for a completed self-heal (§4.8 autonomous action)."""
+    event, template = _REGEN_NOTICE[outcome]
+    notify(event, template.format(slug=slug), slug=slug, outcome=outcome.value)
+
+
 class SelfHealer:
     def __init__(
         self,
@@ -188,7 +211,9 @@ class SelfHealer:
         # §4.11 hard case (the optimizer learns from failures) before self-healing.
         if self._on_confirmed_failure is not None:
             self._on_confirmed_failure(slug)
-        return self._record(slug, regeneration_state(await self._regenerate(slug)))
+        outcome = await self._regenerate(slug)
+        _notify_regen(slug, outcome)
+        return self._record(slug, regeneration_state(outcome))
 
     async def _handle_pending(self, slug: str) -> HealthState:
         """A held pending-review site: hold for a human under ``on``, else auto-promote.
@@ -202,6 +227,12 @@ class SelfHealer:
         if self._review_mode() == "on" or self._promote is None:
             return HealthState.PENDING_REVIEW
         if await self._promote(slug):
+            notify(
+                "heal.promoted",
+                f"auto-promoted staged crawler for {slug} "
+                "(review gate no longer human-gated)",
+                slug=slug,
+            )
             return self._record(slug, HealthState.HEALTHY)
         return HealthState.PENDING_REVIEW
 

@@ -151,3 +151,102 @@ def test_build_factory_mipro_falls_forward_to_gepa_with_notice(
     factory = _factory("mipro", train=[_ex(f"t{i}") for i in range(3)])
     assert "MIPRO" in capsys.readouterr().out
     assert factory() == "GEPA"
+
+
+# -- autonomous adoption notifies the operator (§4.11, P4b) ------------------
+
+
+def test_adopt_notifies_after_flipping_the_pointer(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    # The autonomous --adopt path ("full auto, gated by proof") must push an operator
+    # alert right after it swaps the live generator pointer — and the pointer must
+    # actually move. Everything upstream of the adopt branch is faked.
+    from bizup_autocrawler import cli, cli_optimize, config, generator_pointer, notify
+
+    monkeypatch.setattr(config, "generator_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(cli, "_db_path", lambda: ":memory:")
+    monkeypatch.setattr(cli_optimize, "load_records", lambda path: [])
+    monkeypatch.setattr(
+        cli_optimize,
+        "optimization_pool",
+        lambda *a, **k: [_ex("a"), _ex("b"), _ex("c")],
+    )
+    monkeypatch.setattr(
+        cli_optimize,
+        "split_by_site",
+        lambda examples, holdout, val: ([_ex("a")], [_ex("b")], [_ex("c")]),
+    )
+    out = tmp_path / "generator-1.json"
+    monkeypatch.setattr(
+        cli_optimize,
+        "_optimize",
+        lambda train, val, holdout: {
+            "promoted": True,
+            "optimized_program": cast("CrawlerGenerator", "PROG"),
+            "baseline": 1.0,
+            "optimized": 2.5,
+            "margin": 1.5,
+        },
+    )
+    monkeypatch.setattr(cli_optimize, "save_generator", lambda *a, **k: out)
+
+    events: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        notify,
+        "notify",
+        lambda event, message, **fields: events.append((event, fields)),
+    )
+
+    assert cli_optimize._run_optimize(argparse.Namespace(adopt=True)) == 0
+    assert events == [("generator.adopted", {"path": str(out), "margin": 1.5})]
+    assert generator_pointer.active_generator_path() == str(out)  # pointer moved
+    # ...and put under §4.11 probation so the daemon's regression watcher can revert it.
+    marker = generator_pointer.read_adoption()
+    assert marker is not None and marker.path == str(out)
+
+
+def test_no_adopt_does_not_flip_the_pointer_or_notify(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    # Without --adopt the manual default only writes + prints a deploy hint: no live
+    # pointer flip, and nothing to alert on (the operator chose to stay hands-on).
+    from bizup_autocrawler import cli, cli_optimize, config, generator_pointer, notify
+
+    monkeypatch.setattr(config, "generator_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(cli, "_db_path", lambda: ":memory:")
+    monkeypatch.setattr(cli_optimize, "load_records", lambda path: [])
+    monkeypatch.setattr(
+        cli_optimize,
+        "optimization_pool",
+        lambda *a, **k: [_ex("a"), _ex("b"), _ex("c")],
+    )
+    monkeypatch.setattr(
+        cli_optimize,
+        "split_by_site",
+        lambda examples, holdout, val: ([_ex("a")], [_ex("b")], [_ex("c")]),
+    )
+    out = tmp_path / "generator-1.json"
+    monkeypatch.setattr(
+        cli_optimize,
+        "_optimize",
+        lambda train, val, holdout: {
+            "promoted": True,
+            "optimized_program": cast("CrawlerGenerator", "PROG"),
+            "baseline": 1.0,
+            "optimized": 2.5,
+            "margin": 1.5,
+        },
+    )
+    monkeypatch.setattr(cli_optimize, "save_generator", lambda *a, **k: out)
+    events: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        notify,
+        "notify",
+        lambda event, message, **fields: events.append((event, fields)),
+    )
+
+    assert cli_optimize._run_optimize(argparse.Namespace(adopt=False)) == 0
+    assert events == []
+    assert generator_pointer.active_generator_path() is None  # pointer untouched
+    assert generator_pointer.read_adoption() is None  # no probation marker either

@@ -7,6 +7,7 @@ the parsing behavior plus a representative sample of getters.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -36,9 +37,7 @@ def test_float_knob_parses_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.parametrize("raw", ["on", "auto", "off"])
-def test_review_gate_tristate_values(
-    monkeypatch: pytest.MonkeyPatch, raw: str
-) -> None:
+def test_review_gate_tristate_values(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
     monkeypatch.setenv("AUTOCRAWLER_REVIEW_GATE", raw)
     assert config.review_gate() == raw
 
@@ -359,6 +358,73 @@ def test_heal_cooldown_defaults_to_6h(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_heal_cooldown_honors_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AUTOCRAWLER_HEAL_COOLDOWN", "off")
     assert config.heal_cooldown() == "off"
+
+
+def test_autonomy_on_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The daemon self-improves out of the box; the kill-switch is an opt-out brake.
+    monkeypatch.delenv("AUTOCRAWLER_AUTONOMY", raising=False)
+    assert config.autonomy() is True
+
+
+def test_autonomy_honors_env_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTOCRAWLER_AUTONOMY", "off")
+    assert config.autonomy() is False
+
+
+@pytest.mark.parametrize("raw", ["0", "false", "no"])
+def test_autonomy_other_falsey_values_freeze(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    monkeypatch.setenv("AUTOCRAWLER_AUTONOMY", raw)
+    assert config.autonomy() is False
+
+
+def test_adopt_probation_defaults_to_48h(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AUTOCRAWLER_ADOPT_PROBATION", raising=False)
+    assert config.adopt_probation() == timedelta(hours=48)
+
+
+def test_adopt_probation_parses_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTOCRAWLER_ADOPT_PROBATION", "12h")
+    assert config.adopt_probation() == timedelta(hours=12)
+
+
+@pytest.mark.parametrize("raw", ["off", "OFF", ""])
+def test_adopt_probation_off_disables_the_watcher(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    monkeypatch.setenv("AUTOCRAWLER_ADOPT_PROBATION", raw)
+    assert config.adopt_probation() is None
+
+
+def test_adopt_probation_malformed_falls_back_to_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A typo must not wedge the watcher (or crash the daemon) — fall back to 48h.
+    monkeypatch.setenv("AUTOCRAWLER_ADOPT_PROBATION", "not-a-duration")
+    assert config.adopt_probation() == timedelta(hours=48)
+
+
+def test_adopt_regression_delta_defaults_to_two(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AUTOCRAWLER_ADOPT_REGRESSION_DELTA", raising=False)
+    assert config.adopt_regression_delta() == 2
+
+
+def test_adopt_regression_delta_parses_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTOCRAWLER_ADOPT_REGRESSION_DELTA", "5")
+    assert config.adopt_regression_delta() == 5
+
+
+@pytest.mark.parametrize("raw", ["0", "-3"])
+def test_adopt_regression_delta_is_floored_at_one(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    # A 0/negative delta would make every adoption "regress" (post-pre ≥ 0 always) and
+    # roll back instantly — floor it at 1 so the watcher can never self-trigger.
+    monkeypatch.setenv("AUTOCRAWLER_ADOPT_REGRESSION_DELTA", raw)
+    assert config.adopt_regression_delta() == 1
 
 
 def test_body_quality_floor_defaults_to_half(monkeypatch: pytest.MonkeyPatch) -> None:

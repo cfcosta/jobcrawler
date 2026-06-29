@@ -13,6 +13,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
+from bizup_autocrawler import health as health_mod
 from bizup_autocrawler.health import (
     HealthState,
     RegenOutcome,
@@ -246,6 +249,91 @@ async def test_regeneration_exhaustion_is_generation_failed() -> None:
         _stale_store(), reprobe_items=0, regen_outcome=RegenOutcome.FAILED
     )
     assert await healer.assess("s") is HealthState.GENERATION_FAILED
+
+
+# -- operator notifications on autonomous self-heal (§4.8, P4b) --------------
+
+
+def _capture_notifications(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[str, str, dict[str, object]]]:
+    """Replace ``health.notify`` with a recorder so call sites are asserted in-process."""
+    events: list[tuple[str, str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        health_mod,
+        "notify",
+        lambda event, message, **fields: events.append((event, message, fields)),
+    )
+    return events
+
+
+async def test_live_heal_notifies_promoted(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = _capture_notifications(monkeypatch)
+    healer = await _healer(
+        _stale_store(), reprobe_items=0, regen_outcome=RegenOutcome.PROMOTED
+    )
+    await healer.assess("s")
+    assert [(e, f) for e, _m, f in events] == [
+        ("heal.promoted", {"slug": "s", "outcome": "promoted"})
+    ]
+
+
+async def test_staged_heal_notifies_staged(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = _capture_notifications(monkeypatch)
+    healer = await _healer(
+        _stale_store(), reprobe_items=0, regen_outcome=RegenOutcome.STAGED
+    )
+    await healer.assess("s")
+    assert [e for e, _m, _f in events] == ["heal.staged"]
+
+
+async def test_failed_heal_notifies_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = _capture_notifications(monkeypatch)
+    healer = await _healer(
+        _stale_store(), reprobe_items=0, regen_outcome=RegenOutcome.FAILED
+    )
+    await healer.assess("s")
+    assert [e for e, _m, _f in events] == ["heal.failed"]
+
+
+async def test_a_reprobe_cleared_blip_does_not_notify(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A blackout the re-probe clears never regenerated → no autonomous action to report.
+    events = _capture_notifications(monkeypatch)
+    healer = await _healer(
+        _stale_store(), reprobe_items=3, regen_outcome=RegenOutcome.PROMOTED
+    )
+    assert await healer.assess("s") is HealthState.HEALTHY
+    assert events == []
+
+
+async def test_auto_promoted_strand_notifies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = _capture_notifications(monkeypatch)
+    store = _stale_store()
+    store.set_health("s", HealthState.PENDING_REVIEW.value)
+
+    async def reprobe(slug: str) -> int:
+        raise AssertionError("a pending strand must not be re-probed")
+
+    async def regenerate(slug: str) -> RegenOutcome:
+        raise AssertionError("a pending strand promotes the staged crawler, not regen")
+
+    async def promote(slug: str) -> bool:
+        return True
+
+    healer = SelfHealer(
+        store,
+        reprobe=reprobe,
+        regenerate=regenerate,
+        clock=lambda: T0,
+        review_mode=lambda: "auto",
+        promote=promote,
+    )
+    await healer.assess("s")
+    assert [(e, f) for e, _m, f in events] == [("heal.promoted", {"slug": "s"})]
 
 
 # -- persistence & no-spin (§4.8) --------------------------------------------
