@@ -35,25 +35,54 @@ def test_float_knob_parses_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.stability_jaccard() == 0.75
 
 
+@pytest.mark.parametrize("raw", ["on", "auto", "off"])
+def test_review_gate_tristate_values(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    monkeypatch.setenv("AUTOCRAWLER_REVIEW_GATE", raw)
+    assert config.review_gate() == raw
+
+
+@pytest.mark.parametrize("raw", ["ON", " Auto ", "OFF"])
+def test_review_gate_is_case_and_space_insensitive(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    monkeypatch.setenv("AUTOCRAWLER_REVIEW_GATE", raw)
+    assert config.review_gate() == raw.strip().lower()
+
+
 @pytest.mark.parametrize(
     "raw,expected",
     [
-        ("on", True),
-        ("1", True),
-        ("true", True),
-        ("off", False),
-        ("0", False),
-        ("no", False),
+        ("1", "on"),
+        ("true", "on"),
+        ("yes", "on"),
+        ("0", "off"),
+        ("false", "off"),
+        ("no", "off"),
     ],
 )
-def test_bool_knob(monkeypatch: pytest.MonkeyPatch, raw: str, expected: bool) -> None:
+def test_review_gate_legacy_boolean_back_compat(
+    monkeypatch: pytest.MonkeyPatch, raw: str, expected: str
+) -> None:
+    # Pre-tri-state deployments set the gate with boolean-ish strings; truthy maps to the
+    # safe staging mode ("on"), falsy to "off". "auto" is opt-in only, never inferred.
     monkeypatch.setenv("AUTOCRAWLER_REVIEW_GATE", raw)
-    assert config.review_gate() is expected
+    assert config.review_gate() == expected
+
+
+def test_review_gate_unknown_value_falls_back_to_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An unrecognized value must fail safe to the most conservative mode, not silently
+    # auto-promote untrusted generated code.
+    monkeypatch.setenv("AUTOCRAWLER_REVIEW_GATE", "banana")
+    assert config.review_gate() == "on"
 
 
 def test_review_gate_defaults_on(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AUTOCRAWLER_REVIEW_GATE", raising=False)
-    assert config.review_gate() is True
+    assert config.review_gate() == "on"
 
 
 def test_log_level_defaults_to_info(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -320,3 +349,33 @@ def test_adaptive_window_defaults_to_eight(monkeypatch: pytest.MonkeyPatch) -> N
 def test_adaptive_window_floors_at_one(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AUTOCRAWLER_ADAPTIVE_WINDOW", "0")
     assert config.adaptive_window() == 1
+
+
+def test_heal_cooldown_defaults_to_6h(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AUTOCRAWLER_HEAL_COOLDOWN", raising=False)
+    assert config.heal_cooldown() == "6h"
+
+
+def test_heal_cooldown_honors_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTOCRAWLER_HEAL_COOLDOWN", "off")
+    assert config.heal_cooldown() == "off"
+
+
+def test_body_quality_floor_defaults_to_half(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AUTOCRAWLER_BODY_QUALITY_FLOOR", raising=False)
+    assert config.body_quality_floor() == 0.5
+
+
+def test_body_quality_floor_parses_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTOCRAWLER_BODY_QUALITY_FLOOR", "0.7")
+    assert config.body_quality_floor() == 0.7
+
+
+@pytest.mark.parametrize("raw", ["0", "0.0", "1.5", "-0.2"])
+def test_body_quality_floor_rejects_out_of_range(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    # A nonsensical floor (≤0 would heal nothing, >1 would heal always) falls back to
+    # the safe default rather than disabling or over-triggering partial-drift healing.
+    monkeypatch.setenv("AUTOCRAWLER_BODY_QUALITY_FLOOR", raw)
+    assert config.body_quality_floor() == 0.5

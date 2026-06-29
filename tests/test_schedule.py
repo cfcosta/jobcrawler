@@ -606,3 +606,138 @@ async def test_adaptive_interval_converges_over_repeated_busy_ticks() -> None:
         await sched._dispatch(sched._sites[0])
         sched._update_cadence(sched._sites[0])
     assert store.get_interval("s0") == 900.0  # pinned at the politeness floor
+
+
+# -- §4.8 event-driven healing from tick() (P2b) -----------------------------
+
+
+class _RecordingHealer:
+    """A §4.8 healer stub that records which slugs were assessed (and how often)."""
+
+    def __init__(self, *, raises: bool = False) -> None:
+        self.assessed: list[str] = []
+        self._raises = raises
+
+    async def assess(self, slug: str) -> HealthState:
+        self.assessed.append(slug)
+        if self._raises:
+            raise RuntimeError("regenerate blew up")
+        return HealthState.HEALTHY
+
+
+class _Clock:
+    """A hand-advanced clock so cooldown windows are tested deterministically."""
+
+    def __init__(self, now: datetime) -> None:
+        self.now = now
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
+async def _blackout(site: Site) -> CrawlSummary:
+    return CrawlSummary(site.slug, items_found=0, new_items=0, errors=1, pages_fetched=1)
+
+
+async def _teasers(site: Site) -> CrawlSummary:
+    # 10 items found, 9 below the completeness bar → body_quality 0.1 (< floor 0.5).
+    return CrawlSummary(
+        site.slug, items_found=10, new_items=2, errors=0, pages_fetched=1, incomplete=9
+    )
+
+
+async def _healthy(site: Site) -> CrawlSummary:
+    return CrawlSummary(
+        site.slug, items_found=10, new_items=2, errors=0, pages_fetched=1, incomplete=0
+    )
+
+
+def _heal_sched(
+    *,
+    crawl: CrawlFn,
+    healer: _RecordingHealer | None,
+    clock: _Clock,
+    heal_cooldown: str = "6h",
+    body_quality_floor: float = 0.5,
+) -> Scheduler:
+    return Scheduler(
+        [Site(slug="s0", url="https://x.com")],
+        store=StateStore(":memory:", clock=clock),
+        crawl=crawl,
+        healer=healer,
+        clock=clock,
+        regen_check="off",  # isolate the event path from the periodic sweep
+        heal_cooldown=heal_cooldown,
+        body_quality_floor=body_quality_floor,
+    )
+
+
+async def test_blackout_crawl_triggers_an_immediate_heal() -> None:
+    healer = _RecordingHealer()
+    sched = _heal_sched(crawl=_blackout, healer=healer, clock=_Clock(T0))
+    await sched.tick()
+    assert healer.assessed == ["s0"]
+
+
+async def test_body_quality_collapse_crawl_triggers_an_immediate_heal() -> None:
+    healer = _RecordingHealer()
+    sched = _heal_sched(crawl=_teasers, healer=healer, clock=_Clock(T0))
+    await sched.tick()
+    assert healer.assessed == ["s0"]
+
+
+async def test_healthy_crawl_does_not_trigger_a_heal() -> None:
+    healer = _RecordingHealer()
+    sched = _heal_sched(crawl=_healthy, healer=healer, clock=_Clock(T0))
+    await sched.tick()
+    assert healer.assessed == []
+
+
+async def test_event_heal_respects_the_per_site_cooldown() -> None:
+    healer = _RecordingHealer()
+    clock = _Clock(T0)
+    sched = _heal_sched(crawl=_blackout, healer=healer, clock=clock, heal_cooldown="6h")
+
+    await sched.tick()  # T0: first blackout → heals
+    clock.now = T0 + timedelta(hours=1)
+    await sched.tick()  # +1h: still within cooldown → suppressed
+    assert healer.assessed == ["s0"]
+
+    clock.now = T0 + timedelta(hours=7)
+    await sched.tick()  # +7h: cooldown elapsed → heals again
+    assert healer.assessed == ["s0", "s0"]
+
+
+async def test_event_heal_off_disables_the_fast_path() -> None:
+    healer = _RecordingHealer()
+    sched = _heal_sched(
+        crawl=_blackout, healer=healer, clock=_Clock(T0), heal_cooldown="off"
+    )
+    await sched.tick()
+    assert healer.assessed == []  # only the periodic sweep would heal now
+
+
+async def test_event_heal_without_a_healer_is_a_noop() -> None:
+    # No healer wired → a drifted crawl still completes the tick without raising.
+    sched = _heal_sched(crawl=_blackout, healer=None, clock=_Clock(T0))
+    summaries = await sched.tick()
+    assert [s.site for s in summaries] == ["s0"]
+
+
+async def test_a_raising_heal_does_not_abort_the_tick() -> None:
+    # assess() raising (LM/Deno/network) must be isolated like the periodic sweep —
+    # the tick still returns its crawl summaries.
+    healer = _RecordingHealer(raises=True)
+    sched = _heal_sched(crawl=_blackout, healer=healer, clock=_Clock(T0))
+    summaries = await sched.tick()
+    assert [s.site for s in summaries] == ["s0"]
+    assert healer.assessed == ["s0"]  # it was attempted, the failure swallowed
+
+
+def test_drift_signal_boundary_is_the_floor() -> None:
+    # body_quality exactly at the floor is healthy; just below it is drift.
+    sched = _heal_sched(crawl=_healthy, healer=None, clock=_Clock(T0))
+    at_floor = CrawlSummary("s0", items_found=10, new_items=0, errors=0, pages_fetched=1, incomplete=5)
+    below = CrawlSummary("s0", items_found=10, new_items=0, errors=0, pages_fetched=1, incomplete=6)
+    assert not sched._drift_signal(at_floor)  # 0.5 == floor → healthy
+    assert sched._drift_signal(below)  # 0.4 < floor → drift

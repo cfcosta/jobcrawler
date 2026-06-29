@@ -111,14 +111,19 @@ CrawlFn = Callable[[Site], Awaitable[CrawlSummary]]
 Sleep = Callable[[float], Awaitable[None]]
 
 
-def _regen_interval(raw: str) -> timedelta | None:
-    """Parse ``AUTOCRAWLER_REGEN_CHECK``; ``off`` (or unparseable) disables it."""
+def _optional_interval(raw: str) -> timedelta | None:
+    """Parse an ``AUTOCRAWLER_*`` duration; ``off`` (or unparseable) → None (disabled)."""
     if raw.strip().lower() == "off":
         return None
     try:
         return parse_duration(raw)
     except ValueError:
         return None
+
+
+def _regen_interval(raw: str) -> timedelta | None:
+    """Parse ``AUTOCRAWLER_REGEN_CHECK``; ``off`` (or unparseable) disables it."""
+    return _optional_interval(raw)
 
 
 def _state_summary(states: dict[str, HealthState]) -> str:
@@ -143,6 +148,8 @@ class Scheduler:
         jitter: Callable[[], float] | None = None,
         healer: Healer | None = None,
         regen_check: str | None = None,
+        heal_cooldown: str | None = None,
+        body_quality_floor: float | None = None,
         min_schedule: float | None = None,
         max_schedule: float | None = None,
         adaptive_window: int | None = None,
@@ -164,6 +171,17 @@ class Scheduler:
             config.regen_check() if regen_check is None else regen_check
         )
         self._next_regen: datetime | None = None
+        # §4.8 event-driven healing: a drifted crawl assesses immediately (not waiting
+        # for the periodic sweep), rate-limited per-site by this cooldown (None = off).
+        self._heal_cooldown = _optional_interval(
+            config.heal_cooldown() if heal_cooldown is None else heal_cooldown
+        )
+        self._body_quality_floor = (
+            body_quality_floor
+            if body_quality_floor is not None
+            else config.body_quality_floor()
+        )
+        self._last_heal: dict[str, datetime] = {}
         # §4.9 adaptive cadence bounds/tuning (host-side; never sent to the generator).
         self._min_schedule = (
             min_schedule if min_schedule is not None else config.min_schedule()
@@ -258,12 +276,56 @@ class Scheduler:
             )
         self._store.set_interval(site.slug, nxt)
 
+    def _drift_signal(self, summary: CrawlSummary) -> bool:
+        """True if this crawl's outcome looks like §4.8 drift worth assessing now.
+
+        Two host-side signals, computed straight from the run counters: a blackout
+        (zero items found) or a body-quality collapse (items came back but a large
+        share fell below the completeness bar — teasers/paywalls). ``body_quality`` is
+        ``(found - incomplete) / found``, matching the runner's persisted signal.
+        """
+        if summary.items_found == 0:
+            return True
+        body_quality = (summary.items_found - summary.incomplete) / summary.items_found
+        return body_quality < self._body_quality_floor
+
+    def _should_event_heal(self, summary: CrawlSummary, now: datetime) -> bool:
+        """True if ``summary`` warrants an immediate heal and the site is off cooldown."""
+        if self._healer is None or self._heal_cooldown is None:
+            return False  # no healer, or event-driven healing disabled (cooldown off)
+        if not self._drift_signal(summary):
+            return False
+        last = self._last_heal.get(summary.site)
+        return last is None or now - last >= self._heal_cooldown
+
+    async def _event_heal(self, slugs: list[str]) -> dict[str, HealthState]:
+        """Assess drifted sites immediately (§4.8 event path), isolating each failure.
+
+        Mirrors :meth:`regen_tick`'s robustness — one site's regenerate raising (LM /
+        Deno / network) must not abort the tick — but is triggered by a bad crawl
+        rather than the periodic timer, so drift is acted on within one cadence.
+        """
+        healer = self._healer
+        if healer is None:  # pragma: no cover - gated by _should_event_heal
+            return {}
+        states: dict[str, HealthState] = {}
+        for slug in slugs:
+            try:
+                states[slug] = await healer.assess(slug)
+            except Exception:
+                _log.exception("event-driven heal failed for %s; skipping", slug)
+        if states:
+            _log.info("event heal assessed=%d %s", len(states), _state_summary(states))
+        return states
+
     async def tick(self) -> list[CrawlSummary]:
         """Dispatch every currently-due site (bounded), returning the successes.
 
         Each dispatched crawl logs its outcome (the daemon's operational heartbeat,
         §4.9): item counts at INFO on success, a WARNING when a site is dropped after
-        exhausting its retries so the lost work isn't invisible.
+        exhausting its retries so the lost work isn't invisible. A crawl that comes back
+        drifted (blackout or body-quality collapse) triggers an immediate §4.8 heal,
+        rate-limited per-site by the heal cooldown.
         """
         due = self.due_sites()
         if due:
@@ -276,6 +338,8 @@ class Scheduler:
             *(self._dispatch(s) for s in due), return_exceptions=True
         )
         summaries: list[CrawlSummary] = []
+        to_heal: list[str] = []
+        now = self._clock()
         for site, result in zip(due, results):
             if isinstance(result, CrawlSummary):
                 _log.info(
@@ -290,12 +354,17 @@ class Scheduler:
                 # Retune an adaptive site's interval from this (now-persisted) crawl's
                 # outcome plus its recent history (§4.9); a no-op for fixed sites.
                 self._update_cadence(site)
+                if self._should_event_heal(result, now):
+                    self._last_heal[site.slug] = now  # start the per-site cooldown
+                    to_heal.append(site.slug)
             else:
                 # Persistent failure after the bounded retries — dropped as a §4.8
                 # health signal (the regen sweep handles it), but surfaced, not silent.
                 _log.warning(
                     "crawl dropped slug=%s after retries: %r", site.slug, result
                 )
+        if to_heal:
+            await self._event_heal(to_heal)
         return summaries
 
     def regen_due(self, now: datetime) -> bool:

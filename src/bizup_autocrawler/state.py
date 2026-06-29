@@ -67,6 +67,21 @@ class HealthTransition:
     ts: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class HealthRecord:
+    """A site's current health row: state + when it was set + the attempt counter.
+
+    ``attempts`` counts consecutive generation failures (§4.8 retry-with-backoff):
+    it increments each time the site is re-recorded ``generation_failed`` and resets
+    to 0 on any other state, so ``updated_at`` + ``attempts`` give the healer the
+    backoff schedule for re-trying a failed generation with the current generator.
+    """
+
+    state: str
+    updated_at: datetime
+    attempts: int
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS items (
     site        TEXT NOT NULL,
@@ -91,7 +106,8 @@ CREATE INDEX IF NOT EXISTS runs_by_site ON runs (site, id DESC);
 CREATE TABLE IF NOT EXISTS site_health (
     site       TEXT PRIMARY KEY,
     state      TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    attempts   INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS health_log (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -136,6 +152,13 @@ class StateStore:
         }
         if "signals" not in run_cols:
             self._conn.execute("ALTER TABLE runs ADD COLUMN signals TEXT")
+        health_cols = {
+            row["name"] for row in self._conn.execute("PRAGMA table_info(site_health)")
+        }
+        if "attempts" not in health_cols:
+            self._conn.execute(
+                "ALTER TABLE site_health ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0"
+            )
 
     # -- item state (dedup) --------------------------------------------------
 
@@ -254,20 +277,45 @@ class StateStore:
         ).fetchone()
         return row["state"] if row is not None else None
 
-    def set_health(self, site: str, state: str) -> None:
+    def get_health_record(self, site: str) -> HealthRecord | None:
+        """``site``'s full health row (state + updated_at + attempts), or None.
+
+        Used by the §4.8 retry-with-backoff: ``updated_at`` is when the current
+        state was last set and ``attempts`` is the consecutive generation-failure
+        count, which together fix when a failed generation may be re-tried.
+        """
+        row = self._conn.execute(
+            "SELECT state, updated_at, attempts FROM site_health WHERE site = ?",
+            (site,),
+        ).fetchone()
+        if row is None:
+            return None
+        return HealthRecord(
+            state=row["state"],
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+            attempts=row["attempts"],
+        )
+
+    def set_health(self, site: str, state: str, *, bump_attempts: bool = False) -> None:
         """Upsert ``site``'s health state, logging a transition on real change.
 
         ``site_health`` keeps only the latest state (overwritten each call); the
         append-only ``health_log`` gains a row only when the state actually changes
         (prior != new), so the §4.8 drift lifecycle is recorded with measured
         timestamps. A no-op re-assert of the same state writes no log row.
+
+        ``bump_attempts`` increments the consecutive-failure counter (the caller sets
+        it when recording another ``generation_failed``); otherwise the counter resets
+        to 0. The §4.8 retry-with-backoff reads it back via :meth:`get_health_record`.
         """
         now = self._clock().isoformat()
         with self._lock:
             prior = self._conn.execute(
-                "SELECT state FROM site_health WHERE site = ?", (site,)
+                "SELECT state, attempts FROM site_health WHERE site = ?", (site,)
             ).fetchone()
             prior_state = prior["state"] if prior is not None else None
+            prior_attempts = prior["attempts"] if prior is not None else 0
+            attempts = prior_attempts + 1 if bump_attempts else 0
             if prior_state != state:
                 self._conn.execute(
                     "INSERT INTO health_log (site, from_state, to_state, ts) "
@@ -275,9 +323,11 @@ class StateStore:
                     (site, prior_state, state, now),
                 )
             self._conn.execute(
-                "INSERT INTO site_health (site, state, updated_at) VALUES (?, ?, ?) "
-                "ON CONFLICT (site) DO UPDATE SET state = ?, updated_at = ?",
-                (site, state, now, state, now),
+                "INSERT INTO site_health (site, state, updated_at, attempts) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (site) DO UPDATE SET state = ?, updated_at = ?, "
+                "attempts = ?",
+                (site, state, now, attempts, state, now, attempts),
             )
             self._conn.commit()
 

@@ -1,4 +1,4 @@
-"""Operator CLI (§10): ``autocrawl run | generate | validate | crawl | promote | list | status``.
+"""Operator CLI (§10): ``run | generate | validate | crawl | promote | rollback | list | status``.
 
 ``run`` is the primary deployment entrypoint (the service schedules itself, §4.9);
 ``crawl`` is for manual one-shot runs and CI; ``validate`` dry-runs a committed
@@ -495,15 +495,29 @@ def _build_healer(store: StateStore, sites: Sequence[Site]) -> SelfHealer:
     async def regenerate(slug: str) -> RegenOutcome:
         from bizup_autocrawler.cli_generate import regenerate_one
 
-        # regenerate_one honors AUTOCRAWLER_REVIEW_GATE: by default it stages the new
-        # crawler (RegenOutcome.STAGED → pending-review, §14.2) rather than going live.
+        # regenerate_one honors the tri-state AUTOCRAWLER_REVIEW_GATE: `on` (default)
+        # stages the crawler (RegenOutcome.STAGED → pending-review, §14.2); `auto`
+        # backs up + promotes it live (reversible); `off` writes live with no backup.
         return await asyncio.to_thread(regenerate_one, slug)
+
+    async def promote(slug: str) -> bool:
+        # Auto-clear a pending-review strand (§4.8): move the staged crawler live when
+        # the gate is no longer `on`. Pure filesystem, run off the loop like the rest.
+        from bizup_autocrawler.cli_generate import promote_one
+
+        ok, _ = await asyncio.to_thread(promote_one, slug)
+        return ok
 
     return SelfHealer(
         store,
         reprobe=reprobe,
         regenerate=regenerate,
         on_confirmed_failure=lambda slug: _record_site_failure(sites, slug),
+        body_quality_floor=config.body_quality_floor(),
+        genfail_backoff=config.genfail_backoff(),
+        genfail_backoff_cap=config.genfail_backoff_cap(),
+        review_mode=config.review_gate,
+        promote=promote,
     )
 
 
@@ -572,6 +586,17 @@ def cmd_promote(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def cmd_rollback(args: argparse.Namespace) -> int:
+    # Restore a site's prior crawler from its crawlers/_history backup — the undo for
+    # an `auto` self-heal promotion (§4.8). Pure filesystem, but it shares crawlers/
+    # paths with generate, so import it lazily to keep cli.py free of dspy at start.
+    from bizup_autocrawler.cli_generate import rollback_one
+
+    ok, message = rollback_one(args.slug)
+    print(message)
+    return 0 if ok else 1
+
+
 def cmd_optimize(args: argparse.Namespace) -> int:
     # The offline §4.11 self-improvement job (build trainset → optimize → promote);
     # its deps (dspy + the sandbox) are heavy, so import lazily.
@@ -608,6 +633,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     prom.add_argument("slug")
     prom.set_defaults(func=cmd_promote)
+
+    rb = sub.add_parser(
+        "rollback", help="revert a site to its prior crawler from _history (§4.8)"
+    )
+    rb.add_argument("slug")
+    rb.set_defaults(func=cmd_rollback)
 
     sub.add_parser("list", help="show sites, script presence, health").set_defaults(
         func=cmd_list

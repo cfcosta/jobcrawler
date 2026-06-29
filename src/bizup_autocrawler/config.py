@@ -422,6 +422,46 @@ def regen_check() -> str:
     return _str("AUTOCRAWLER_REGEN_CHECK", "24h")
 
 
+def heal_cooldown() -> str:
+    """Minimum spacing between *event-driven* self-heals of one site (§4.8).
+
+    A crawl that comes back blacked-out (zero items) or with collapsed body quality
+    triggers an immediate staleness assessment from the run loop, instead of waiting
+    for the next periodic ``AUTOCRAWLER_REGEN_CHECK`` sweep. This cooldown rate-limits
+    that fast path per-site so a quick adaptive cadence (or an auto-promote that keeps
+    re-drifting) can't re-run the generator every crawl. ``off`` disables event-driven
+    healing entirely, leaving only the periodic sweep. Default 6h."""
+    return _str("AUTOCRAWLER_HEAL_COOLDOWN", "6h")
+
+
+def body_quality_floor() -> float:
+    """Fraction of complete-bodied items below which a crawl is a partial-drift signal.
+
+    ``body_quality`` is the share of fetched items whose body cleared the completeness
+    bar (§4.6); it sags when a site starts serving teasers/paywalls even while item
+    counts stay healthy. A crawl at or above this floor is fine; below it (with items
+    found) is a drift candidate. Host-side only — never surfaced to the generator (§8).
+    Default 0.5. Clamped to (0, 1]; an out-of-range value falls back to the default."""
+    value = _float("AUTOCRAWLER_BODY_QUALITY_FLOOR", 0.5)
+    return value if 0.0 < value <= 1.0 else 0.5
+
+
+def genfail_backoff() -> float:
+    """Base delay (seconds) before a generation-failed site is re-tried (§4.8).
+
+    A site whose regeneration exhausted its budget is held, not abandoned: after this
+    backoff it is re-tried with the *current* generator (which the offline §4.11 loop
+    keeps improving). The delay grows geometrically per consecutive failure (×2 each)
+    up to ``genfail_backoff_cap``, so a chronically broken site backs off without ever
+    giving up. Default 6h."""
+    return _duration_secs("AUTOCRAWLER_GENFAIL_BACKOFF", "6h")
+
+
+def genfail_backoff_cap() -> float:
+    """Ceiling (seconds) for the generation-failed retry backoff. Default 7d."""
+    return _duration_secs("AUTOCRAWLER_GENFAIL_BACKOFF_CAP", "7d")
+
+
 def reopt_check() -> str:
     return _str("AUTOCRAWLER_REOPT_CHECK", "off")
 
@@ -484,8 +524,33 @@ def egress_proxy() -> str | None:
 # --- review (§8) -----------------------------------------------------------
 
 
-def review_gate() -> bool:
-    return _bool("AUTOCRAWLER_REVIEW_GATE", True)
+def review_gate() -> str:
+    """Tri-state §14.2/§4.8 self-heal delivery policy (default ``on``):
+
+      * ``on`` — stage a healed crawler to ``crawlers/_pending/<slug>.py`` and mark the
+        site pending-review; an operator runs ``autocrawl promote``. A human approves
+        every live change (most conservative).
+      * ``auto`` — auto-promote: back up the current live crawler to
+        ``crawlers/_history/<slug>/`` then write the new one live, so the site
+        self-heals unattended. Safety is the §6 gates plus versioned rollback
+        (``autocrawl rollback``), not a human (the §4.8 "full-auto, gated by proof").
+      * ``off`` — write live with no backup (operator-trusted; no rollback copy).
+
+    The legacy boolean values are still accepted: truthy ⇒ ``on`` (the prior staging
+    default), falsy ⇒ ``off`` (the prior go-live), so an existing deployment keeps its
+    behavior. An unrecognized value falls back to ``on`` (the safe, human-gated path).
+    """
+    raw = os.getenv("AUTOCRAWLER_REVIEW_GATE")
+    if raw is None:
+        return "on"
+    value = raw.strip().lower()
+    if value in {"on", "auto", "off"}:
+        return value
+    if value in {"1", "true", "yes"}:
+        return "on"
+    if value in {"0", "false", "no"}:
+        return "off"
+    return "on"
 
 
 # --- observability (§4.9) --------------------------------------------------

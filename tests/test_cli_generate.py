@@ -19,6 +19,7 @@ from bizup_autocrawler.cli_generate import (
     gate_winner,
     promote_one,
     regenerate_one,
+    rollback_one,
 )
 from bizup_autocrawler.health import RegenOutcome
 from bizup_autocrawler.schedule import Site
@@ -91,25 +92,26 @@ def test_too_few_items_fails_completeness() -> None:
 _SRC = "SITE='x'\ndef crawl(ctx):\n    yield None\n"
 
 
-def test_deliver_stages_to_pending_when_gated(tmp_path: Path) -> None:
-    outcome = _deliver("acme", _SRC, stage=True, crawlers_dir=tmp_path)
+def test_deliver_stages_to_pending_when_gate_on(tmp_path: Path) -> None:
+    outcome = _deliver("acme", _SRC, mode="on", crawlers_dir=tmp_path)
     assert outcome is RegenOutcome.STAGED
     assert (tmp_path / "_pending" / "acme.py").read_text() == _SRC
     assert not (tmp_path / "acme.py").exists()  # live crawler not created
 
 
-def test_deliver_writes_live_when_not_gated(tmp_path: Path) -> None:
-    outcome = _deliver("acme", _SRC, stage=False, crawlers_dir=tmp_path)
+def test_deliver_writes_live_when_gate_off(tmp_path: Path) -> None:
+    outcome = _deliver("acme", _SRC, mode="off", crawlers_dir=tmp_path)
     assert outcome is RegenOutcome.PROMOTED
     assert (tmp_path / "acme.py").read_text() == _SRC
     assert not (tmp_path / "_pending").exists()
+    assert not (tmp_path / "_history").exists()  # off → no backup
 
 
 def test_deliver_creates_crawlers_dir_when_missing(tmp_path: Path) -> None:
     # A relocated AUTOCRAWLER_CRAWLERS_DIR (e.g. a fresh /data/crawlers volume) doesn't
     # exist yet on first run; live delivery must create it, not FileNotFoundError (§11).
     target = tmp_path / "crawlers"  # does not exist yet
-    outcome = _deliver("acme", _SRC, stage=False, crawlers_dir=target)
+    outcome = _deliver("acme", _SRC, mode="off", crawlers_dir=target)
     assert outcome is RegenOutcome.PROMOTED
     assert (target / "acme.py").read_text() == _SRC
 
@@ -118,8 +120,58 @@ def test_staged_delivery_never_clobbers_the_live_crawler(tmp_path: Path) -> None
     # The core safety guarantee: with review_gate on, the daemon keeps running the old
     # (known) crawler until a human promotes — self-heal cannot silently replace it.
     (tmp_path / "acme.py").write_text("LIVE")
-    _deliver("acme", _SRC, stage=True, crawlers_dir=tmp_path)
+    _deliver("acme", _SRC, mode="on", crawlers_dir=tmp_path)
     assert (tmp_path / "acme.py").read_text() == "LIVE"
+
+
+def test_deliver_auto_backs_up_incumbent_then_promotes(tmp_path: Path) -> None:
+    # `auto`: the §4.8 full-auto path — snapshot the live crawler, then overwrite it.
+    (tmp_path / "acme.py").write_text("OLD")
+    outcome = _deliver("acme", _SRC, mode="auto", crawlers_dir=tmp_path)
+    assert outcome is RegenOutcome.PROMOTED
+    assert (tmp_path / "acme.py").read_text() == _SRC  # new crawler is live
+    backups = list((tmp_path / "_history" / "acme").glob("*.py"))
+    assert [b.read_text() for b in backups] == ["OLD"]  # incumbent preserved
+
+
+def test_deliver_auto_with_no_incumbent_just_promotes(tmp_path: Path) -> None:
+    # First-ever delivery: nothing to back up, so auto degenerates to a plain live write.
+    outcome = _deliver("acme", _SRC, mode="auto", crawlers_dir=tmp_path)
+    assert outcome is RegenOutcome.PROMOTED
+    assert (tmp_path / "acme.py").read_text() == _SRC
+    assert not (tmp_path / "_history" / "acme").exists()
+
+
+def test_rollback_restores_prior_crawler(tmp_path: Path) -> None:
+    # An auto promotion then a rollback returns the live crawler to the prior version.
+    (tmp_path / "acme.py").write_text("OLD")
+    _deliver("acme", _SRC, mode="auto", crawlers_dir=tmp_path)
+    ok, msg = rollback_one("acme", crawlers_dir=tmp_path)
+    assert ok and "acme" in msg
+    assert (tmp_path / "acme.py").read_text() == "OLD"  # incumbent restored
+    assert list((tmp_path / "_history" / "acme").glob("*.py")) == []  # consumed
+
+
+def test_rollback_without_a_backup_is_an_error(tmp_path: Path) -> None:
+    ok, msg = rollback_one("ghost", crawlers_dir=tmp_path)
+    assert not ok and "ghost" in msg
+    assert not (tmp_path / "ghost.py").exists()
+
+
+def test_rollback_walks_back_through_versions(tmp_path: Path) -> None:
+    # Two successive auto promotions stack two backups; two rollbacks walk back through
+    # them in reverse chronological order (newest restored first).
+    (tmp_path / "acme.py").write_text("V0")
+    _deliver("acme", "V1", mode="auto", crawlers_dir=tmp_path)  # backs up V0, live=V1
+    _deliver("acme", "V2", mode="auto", crawlers_dir=tmp_path)  # backs up V1, live=V2
+    assert (tmp_path / "acme.py").read_text() == "V2"
+
+    ok, _ = rollback_one("acme", crawlers_dir=tmp_path)
+    assert ok and (tmp_path / "acme.py").read_text() == "V1"  # newest backup first
+    ok, _ = rollback_one("acme", crawlers_dir=tmp_path)
+    assert ok and (tmp_path / "acme.py").read_text() == "V0"  # then the older one
+    ok, _ = rollback_one("acme", crawlers_dir=tmp_path)
+    assert not ok  # history exhausted
 
 
 def test_promote_moves_staged_crawler_live(tmp_path: Path) -> None:
@@ -147,14 +199,14 @@ def test_regenerate_one_unknown_slug_is_failed(
 
 
 def _fake_generation(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
-    """Stub the live generation so only the review_gate→stage wiring is exercised."""
+    """Stub the live generation so only the review_gate→mode wiring is exercised."""
     seen: dict[str, object] = {}
 
     async def fake_generate_one(
-        site: Site, root_lm: object, sub_lm: object, *, stage: bool = False
+        site: Site, root_lm: object, sub_lm: object, *, mode: str = "off"
     ) -> RegenOutcome:
-        seen["stage"] = stage
-        return RegenOutcome.STAGED if stage else RegenOutcome.PROMOTED
+        seen["mode"] = mode
+        return RegenOutcome.STAGED if mode == "on" else RegenOutcome.PROMOTED
 
     monkeypatch.setattr(
         cli_generate,
@@ -172,7 +224,16 @@ def test_regenerate_one_stages_when_review_gate_on(
     seen = _fake_generation(monkeypatch)
     monkeypatch.setenv("AUTOCRAWLER_REVIEW_GATE", "on")
     assert regenerate_one("acme") is RegenOutcome.STAGED
-    assert seen["stage"] is True
+    assert seen["mode"] == "on"
+
+
+def test_regenerate_one_auto_promotes_when_review_gate_auto(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _fake_generation(monkeypatch)
+    monkeypatch.setenv("AUTOCRAWLER_REVIEW_GATE", "auto")
+    assert regenerate_one("acme") is RegenOutcome.PROMOTED
+    assert seen["mode"] == "auto"
 
 
 def test_regenerate_one_goes_live_when_review_gate_off(
@@ -181,7 +242,7 @@ def test_regenerate_one_goes_live_when_review_gate_off(
     seen = _fake_generation(monkeypatch)
     monkeypatch.setenv("AUTOCRAWLER_REVIEW_GATE", "off")
     assert regenerate_one("acme") is RegenOutcome.PROMOTED
-    assert seen["stage"] is False
+    assert seen["mode"] == "off"
 
 
 def test_crawlers_dir_default_is_config_driven() -> None:

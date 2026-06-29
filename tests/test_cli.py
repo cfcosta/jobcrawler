@@ -31,6 +31,7 @@ from bizup_autocrawler.cli import (
     cmd_generate,
     cmd_list,
     cmd_promote,
+    cmd_rollback,
     cmd_run,
     cmd_status,
     cmd_validate,
@@ -66,6 +67,10 @@ def test_parser_dispatches_each_command() -> None:
     assert promoted.func is cmd_promote
     assert promoted.slug == "techcrunch"
 
+    rolled_back = parser.parse_args(["rollback", "techcrunch"])
+    assert rolled_back.func is cmd_rollback
+    assert rolled_back.slug == "techcrunch"
+
     assert parser.parse_args(["status"]).func is cmd_status
 
 
@@ -91,6 +96,30 @@ def test_cmd_promote_returns_one_when_nothing_staged(monkeypatch: MonkeyPatch) -
         lambda slug: (False, f"no staged crawler for {slug}"),
     )
     assert cmd_promote(build_parser().parse_args(["promote", "ghost"])) == 1
+
+
+def test_cmd_rollback_returns_zero_on_success(monkeypatch: MonkeyPatch) -> None:
+    # cmd_rollback wires the slug through cli_generate.rollback_one and maps the
+    # (ok, message) result to a shell exit code; the restore mechanics live in
+    # test_cli_generate. A backup found → restored → exit 0.
+    from bizup_autocrawler import cli_generate
+
+    monkeypatch.setattr(
+        cli_generate, "rollback_one", lambda slug: (True, f"rolled back {slug}")
+    )
+    assert cmd_rollback(build_parser().parse_args(["rollback", "acme"])) == 0
+
+
+def test_cmd_rollback_returns_one_when_no_backup(monkeypatch: MonkeyPatch) -> None:
+    # No backup snapshot for the slug → non-zero exit so an operator/script sees the miss.
+    from bizup_autocrawler import cli_generate
+
+    monkeypatch.setattr(
+        cli_generate,
+        "rollback_one",
+        lambda slug: (False, f"no backup to roll back to for {slug}"),
+    )
+    assert cmd_rollback(build_parser().parse_args(["rollback", "ghost"])) == 1
 
 
 def test_site_url_of_reads_the_constant() -> None:

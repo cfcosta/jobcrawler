@@ -11,12 +11,13 @@ re-enqueue (which would spin).
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from bizup_autocrawler.health import (
     HealthState,
     RegenOutcome,
     SelfHealer,
+    body_quality_collapse,
     regeneration_state,
     staleness_candidate,
 )
@@ -26,7 +27,20 @@ UTC = timezone.utc
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 
 
-def _run(items: int, new: int = 0) -> RunRecord:
+class _Clock:
+    """A hand-advanced clock so backoff windows are tested deterministically."""
+
+    def __init__(self, now: datetime) -> None:
+        self.now = now
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
+def _run(items: int, new: int = 0, *, body_quality: float | None = None) -> RunRecord:
+    signals: dict[str, object] | None = None
+    if body_quality is not None:
+        signals = {"body_quality": body_quality}
     return RunRecord(
         id=1,
         site="s",
@@ -36,6 +50,7 @@ def _run(items: int, new: int = 0) -> RunRecord:
         new_items=new,
         errors=0,
         pages_fetched=1,
+        signals=signals,
     )
 
 
@@ -58,6 +73,58 @@ def test_zero_new_items_is_not_staleness() -> None:
 
 def test_empty_history_is_not_a_candidate() -> None:
     assert not staleness_candidate([])
+
+
+# -- partial drift: body-quality collapse (§4.8) -----------------------------
+
+_FLOOR = 0.5
+
+
+def test_two_sub_floor_runs_after_a_healthy_baseline_collapse() -> None:
+    # newest-first: latest two runs are thin, an earlier one was full → real drift.
+    history = [
+        _run(8, body_quality=0.1),
+        _run(8, body_quality=0.2),
+        _run(8, body_quality=0.9),
+    ]
+    assert body_quality_collapse(history, floor=_FLOOR)
+
+
+def test_a_single_sub_floor_run_is_tolerated() -> None:
+    # One thin run is a one-off truncation, not confirmed drift (needs two).
+    history = [_run(8, body_quality=0.1), _run(8, body_quality=0.9)]
+    assert not body_quality_collapse(history, floor=_FLOOR)
+
+
+def test_collapse_without_a_healthy_baseline_is_not_drift() -> None:
+    # A site that was always thin never "collapsed" — nothing to regress from.
+    history = [_run(8, body_quality=0.1), _run(8, body_quality=0.2)]
+    assert not body_quality_collapse(history, floor=_FLOOR)
+
+
+def test_healthy_body_quality_is_not_a_collapse() -> None:
+    history = [_run(8, body_quality=0.9), _run(8, body_quality=0.8)]
+    assert not body_quality_collapse(history, floor=_FLOOR)
+
+
+def test_at_floor_is_healthy_not_collapsed() -> None:
+    # The floor is inclusive-healthy: exactly at the floor does not count as drift.
+    history = [
+        _run(8, body_quality=_FLOOR),
+        _run(8, body_quality=_FLOOR),
+        _run(8, body_quality=0.9),
+    ]
+    assert not body_quality_collapse(history, floor=_FLOOR)
+
+
+def test_zero_yield_run_is_not_a_body_quality_collapse() -> None:
+    # A blackout run records no body_quality; it is the staleness path, not this one.
+    history = [_run(0), _run(0), _run(8, body_quality=0.9)]
+    assert not body_quality_collapse(history, floor=_FLOOR)
+
+
+def test_collapse_needs_at_least_two_runs() -> None:
+    assert not body_quality_collapse([_run(8, body_quality=0.1)], floor=_FLOOR)
 
 
 def test_regeneration_state_maps_outcome() -> None:
@@ -191,10 +258,11 @@ async def test_assess_persists_the_resulting_state() -> None:
     assert store.get_health("s") == HealthState.GENERATION_FAILED.value
 
 
-async def test_generation_failed_site_is_not_re_regenerated() -> None:
+async def test_generation_failed_site_is_not_re_regenerated_within_backoff() -> None:
     # The "not silently re-enqueued into the same failing generation" rule: once a
-    # stale site has failed generation, a later assessment must surface the failed
-    # state without driving the (expensive) generator again — otherwise it spins.
+    # stale site has failed generation, a later assessment *within the backoff window*
+    # must surface the failed state without driving the (expensive) generator again —
+    # otherwise it spins. (The retry after the backoff elapses is its own test below.)
     store = _stale_store()
     regen_calls = 0
 
@@ -206,10 +274,211 @@ async def test_generation_failed_site_is_not_re_regenerated() -> None:
         regen_calls += 1
         return RegenOutcome.FAILED
 
-    healer = SelfHealer(store, reprobe=reprobe, regenerate=regenerate)
+    # Clock pinned to the store's clock (T0) → the 6h default backoff never elapses.
+    healer = SelfHealer(store, reprobe=reprobe, regenerate=regenerate, clock=lambda: T0)
     assert await healer.assess("s") is HealthState.GENERATION_FAILED
     assert await healer.assess("s") is HealthState.GENERATION_FAILED
     assert regen_calls == 1
+
+
+# -- generation-failed retry with geometric backoff (§4.8, P2c) --------------
+
+
+async def test_generation_failed_is_retried_after_backoff() -> None:
+    # Held is not forever: once the geometric backoff elapses the site is re-tried with
+    # the (offline-improved) generator, so the §4.11 loop eventually gets another shot.
+    clock = _Clock(T0)
+    store = StateStore(":memory:", clock=clock)
+    baseline = store.start_run("s")
+    store.finish_run(baseline, items_found=8, new_items=8, errors=0, pages_fetched=2)
+    latest = store.start_run("s")
+    store.finish_run(latest, items_found=0, new_items=0, errors=1, pages_fetched=1)
+    regen_calls = 0
+
+    async def reprobe(slug: str) -> int:
+        return 0
+
+    async def regenerate(slug: str) -> RegenOutcome:
+        nonlocal regen_calls
+        regen_calls += 1
+        return RegenOutcome.FAILED
+
+    healer = SelfHealer(
+        store,
+        reprobe=reprobe,
+        regenerate=regenerate,
+        clock=clock,
+        genfail_backoff=6 * 3600.0,
+        genfail_backoff_cap=7 * 86400.0,
+    )
+    assert await healer.assess("s") is HealthState.GENERATION_FAILED  # attempt 1
+    assert regen_calls == 1
+    # Still inside the 6h window → held, no new generation.
+    clock.now = T0 + timedelta(hours=1)
+    assert await healer.assess("s") is HealthState.GENERATION_FAILED
+    assert regen_calls == 1
+    # Past the 6h backoff → retried with the current generator.
+    clock.now = T0 + timedelta(hours=7)
+    assert await healer.assess("s") is HealthState.GENERATION_FAILED
+    assert regen_calls == 2
+
+
+async def test_backoff_grows_geometrically_with_attempts() -> None:
+    # Each consecutive failure doubles the wait: attempt 1 → 6h, attempt 2 → 12h.
+    clock = _Clock(T0)
+    store = StateStore(":memory:", clock=clock)
+    baseline = store.start_run("s")
+    store.finish_run(baseline, items_found=8, new_items=8, errors=0, pages_fetched=2)
+    latest = store.start_run("s")
+    store.finish_run(latest, items_found=0, new_items=0, errors=1, pages_fetched=1)
+    regen_calls = 0
+
+    async def reprobe(slug: str) -> int:
+        return 0
+
+    async def regenerate(slug: str) -> RegenOutcome:
+        nonlocal regen_calls
+        regen_calls += 1
+        return RegenOutcome.FAILED
+
+    healer = SelfHealer(
+        store,
+        reprobe=reprobe,
+        regenerate=regenerate,
+        clock=clock,
+        genfail_backoff=6 * 3600.0,
+        genfail_backoff_cap=7 * 86400.0,
+    )
+    assert await healer.assess("s") is HealthState.GENERATION_FAILED  # attempt 1
+    clock.now = T0 + timedelta(hours=7)
+    assert await healer.assess("s") is HealthState.GENERATION_FAILED  # attempt 2
+    assert regen_calls == 2
+    # 7h after the second failure is < the now-doubled 12h window → still held.
+    clock.now = clock.now + timedelta(hours=7)
+    assert await healer.assess("s") is HealthState.GENERATION_FAILED
+    assert regen_calls == 2
+    # Past 12h → attempt 3.
+    clock.now = clock.now + timedelta(hours=6)
+    assert await healer.assess("s") is HealthState.GENERATION_FAILED
+    assert regen_calls == 3
+
+
+async def test_backoff_is_capped() -> None:
+    # The geometric growth is clamped: a tiny cap means even attempt 1 is immediately due.
+    clock = _Clock(T0)
+    store = StateStore(":memory:", clock=clock)
+    baseline = store.start_run("s")
+    store.finish_run(baseline, items_found=8, new_items=8, errors=0, pages_fetched=2)
+    latest = store.start_run("s")
+    store.finish_run(latest, items_found=0, new_items=0, errors=1, pages_fetched=1)
+    regen_calls = 0
+
+    async def reprobe(slug: str) -> int:
+        return 0
+
+    async def regenerate(slug: str) -> RegenOutcome:
+        nonlocal regen_calls
+        regen_calls += 1
+        return RegenOutcome.FAILED
+
+    healer = SelfHealer(
+        store,
+        reprobe=reprobe,
+        regenerate=regenerate,
+        clock=clock,
+        genfail_backoff=6 * 3600.0,
+        genfail_backoff_cap=1.0,  # 1 second cap → retry essentially immediately
+    )
+    assert await healer.assess("s") is HealthState.GENERATION_FAILED
+    clock.now = T0 + timedelta(seconds=2)
+    assert await healer.assess("s") is HealthState.GENERATION_FAILED
+    assert regen_calls == 2
+
+
+# -- stranded pending-review auto-clear (§14.2, P2c) -------------------------
+
+
+async def test_pending_review_auto_promotes_when_gate_is_auto() -> None:
+    # An operator switched the gate from "on" to "auto" after a crawler was staged: the
+    # strand is cleared by promoting the already-gate-passing crawler live (no regen).
+    store = _stale_store()
+    store.set_health("s", HealthState.PENDING_REVIEW.value)
+    promoted: list[str] = []
+
+    async def reprobe(slug: str) -> int:
+        raise AssertionError("a pending strand must not be re-probed")
+
+    async def regenerate(slug: str) -> RegenOutcome:
+        raise AssertionError("a pending strand promotes the staged crawler, not regen")
+
+    async def promote(slug: str) -> bool:
+        promoted.append(slug)
+        return True
+
+    healer = SelfHealer(
+        store,
+        reprobe=reprobe,
+        regenerate=regenerate,
+        clock=lambda: T0,
+        review_mode=lambda: "auto",
+        promote=promote,
+    )
+    assert await healer.assess("s") is HealthState.HEALTHY
+    assert promoted == ["s"]
+    assert store.get_health("s") == HealthState.HEALTHY.value
+
+
+async def test_pending_review_holds_for_a_human_when_gate_is_on() -> None:
+    # With the gate still "on" the staged crawler awaits autocrawl promote — held, and
+    # the promote hook must never fire (no auto-promotion behind a human's back).
+    store = _stale_store()
+    store.set_health("s", HealthState.PENDING_REVIEW.value)
+
+    async def reprobe(slug: str) -> int:
+        raise AssertionError("a pending strand must not be re-probed")
+
+    async def regenerate(slug: str) -> RegenOutcome:
+        raise AssertionError("a held pending site must not regenerate")
+
+    async def promote(slug: str) -> bool:
+        raise AssertionError("must not auto-promote while the gate is on")
+
+    healer = SelfHealer(
+        store,
+        reprobe=reprobe,
+        regenerate=regenerate,
+        clock=lambda: T0,
+        review_mode=lambda: "on",
+        promote=promote,
+    )
+    assert await healer.assess("s") is HealthState.PENDING_REVIEW
+    assert store.get_health("s") == HealthState.PENDING_REVIEW.value
+
+
+async def test_pending_review_stays_pending_when_promotion_fails() -> None:
+    # Gate is "auto" but there's nothing to promote (promote returns False) → leave it
+    # pending rather than spinning the generator.
+    store = _stale_store()
+    store.set_health("s", HealthState.PENDING_REVIEW.value)
+
+    async def reprobe(slug: str) -> int:
+        raise AssertionError("a pending strand must not be re-probed")
+
+    async def regenerate(slug: str) -> RegenOutcome:
+        raise AssertionError("a failed promotion must not fall through to regen")
+
+    async def promote(slug: str) -> bool:
+        return False
+
+    healer = SelfHealer(
+        store,
+        reprobe=reprobe,
+        regenerate=regenerate,
+        clock=lambda: T0,
+        review_mode=lambda: "off",
+        promote=promote,
+    )
+    assert await healer.assess("s") is HealthState.PENDING_REVIEW
 
 
 async def test_recovered_site_clears_generation_failed() -> None:
@@ -271,3 +540,107 @@ async def test_promoted_site_clears_pending_review() -> None:
     healer = SelfHealer(store, reprobe=reprobe, regenerate=regenerate)
     assert await healer.assess("s") is HealthState.HEALTHY
     assert store.get_health("s") == HealthState.HEALTHY.value
+
+
+# -- partial-drift regeneration path (§4.8) ----------------------------------
+
+
+def _collapsed_store() -> StateStore:
+    # A healthy baseline (full bodies) followed by two thin runs → a confirmed collapse.
+    store = StateStore(":memory:", clock=lambda: T0)
+    baseline = store.start_run("s")
+    store.finish_run(
+        baseline,
+        items_found=8,
+        new_items=8,
+        errors=0,
+        pages_fetched=2,
+        signals={"body_quality": 0.9},
+    )
+    for _ in range(2):
+        thin = store.start_run("s")
+        store.finish_run(
+            thin,
+            items_found=8,
+            new_items=1,
+            errors=0,
+            pages_fetched=2,
+            signals={"body_quality": 0.1},
+        )
+    return store
+
+
+async def test_body_quality_collapse_regenerates_without_a_reprobe() -> None:
+    # The collapse is confirmed by two consecutive sub-floor runs (a markup change, not
+    # a network blip), so assess regenerates directly — a re-probe returning items must
+    # NOT be consulted (that would wrongly clear a real partial drift as a blip).
+    store = _collapsed_store()
+    probed = False
+
+    async def reprobe(slug: str) -> int:
+        nonlocal probed
+        probed = True
+        return 5
+
+    async def regenerate(slug: str) -> RegenOutcome:
+        return RegenOutcome.STAGED
+
+    healer = SelfHealer(
+        store, reprobe=reprobe, regenerate=regenerate, body_quality_floor=0.5
+    )
+    assert await healer.assess("s") is HealthState.PENDING_REVIEW
+    assert not probed
+
+
+async def test_body_quality_collapse_captures_a_hard_case() -> None:
+    store = _collapsed_store()
+    captured: list[str] = []
+
+    async def reprobe(slug: str) -> int:
+        return 5
+
+    async def regenerate(slug: str) -> RegenOutcome:
+        return RegenOutcome.FAILED
+
+    healer = SelfHealer(
+        store,
+        reprobe=reprobe,
+        regenerate=regenerate,
+        on_confirmed_failure=captured.append,
+        body_quality_floor=0.5,
+    )
+    await healer.assess("s")
+    assert captured == ["s"]
+
+
+async def test_a_single_thin_run_is_healthy_not_healed() -> None:
+    store = StateStore(":memory:", clock=lambda: T0)
+    baseline = store.start_run("s")
+    store.finish_run(
+        baseline,
+        items_found=8,
+        new_items=8,
+        errors=0,
+        pages_fetched=2,
+        signals={"body_quality": 0.9},
+    )
+    thin = store.start_run("s")
+    store.finish_run(
+        thin,
+        items_found=8,
+        new_items=1,
+        errors=0,
+        pages_fetched=2,
+        signals={"body_quality": 0.1},
+    )
+
+    async def reprobe(slug: str) -> int:
+        raise AssertionError("a single thin run must not be re-probed")
+
+    async def regenerate(slug: str) -> RegenOutcome:
+        raise AssertionError("a single thin run must not regenerate")
+
+    healer = SelfHealer(
+        store, reprobe=reprobe, regenerate=regenerate, body_quality_floor=0.5
+    )
+    assert await healer.assess("s") is HealthState.HEALTHY

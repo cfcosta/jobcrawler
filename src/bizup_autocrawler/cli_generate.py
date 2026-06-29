@@ -14,9 +14,11 @@ machinery runs here:
      / consult-feeds-before-scrape, read off the trajectory) → runtime completeness
      → two-run Jaccard stability — and, only on a pass, *deliver* the crawler: an
      operator-run ``generate`` writes ``crawlers/<slug>.py`` directly, but the
-     unattended §4.8 self-heal (``regenerate_one``) honors ``AUTOCRAWLER_REVIEW_GATE``
-     — on by default — and instead *stages* it to ``crawlers/_pending/<slug>.py`` for
-     a human to ``promote`` (§14.2), never silently replacing the live crawler.
+     unattended §4.8 self-heal (``regenerate_one``) honors the tri-state
+     ``AUTOCRAWLER_REVIEW_GATE``: ``on`` (default) *stages* it to
+     ``crawlers/_pending/<slug>.py`` for a human to ``promote`` (§14.2); ``auto``
+     backs the live crawler up to ``crawlers/_history/`` and promotes it itself
+     (reversible via ``rollback``); ``off`` writes live with no backup.
 
 The whole path is live (LM, Deno, network); the gating + delivery logic is unit-tested.
 """
@@ -80,7 +82,7 @@ def regenerate_one(slug: str) -> RegenOutcome:
     if site is None:
         return RegenOutcome.FAILED
     root_lm, sub_lm = _build_lms()
-    return asyncio.run(_generate_one(site, root_lm, sub_lm, stage=config.review_gate()))
+    return asyncio.run(_generate_one(site, root_lm, sub_lm, mode=config.review_gate()))
 
 
 def _build_lms() -> tuple[dspy.LM, dspy.LM]:
@@ -123,7 +125,7 @@ async def _run(targets: list[Site]) -> int:
 
 
 async def _generate_one(
-    site: Site, root_lm: dspy.LM, sub_lm: dspy.LM, *, stage: bool = False
+    site: Site, root_lm: dspy.LM, sub_lm: dspy.LM, *, mode: str = "off"
 ) -> RegenOutcome:
     hosts = {normalize_host(site.url)}
     ctx = Ctx(hosts)
@@ -187,11 +189,17 @@ async def _generate_one(
     if not ok:
         print(f"FAIL {site.slug}: {reason}")
         return RegenOutcome.FAILED
-    outcome = _deliver(site.slug, source, stage=stage)
+    outcome = _deliver(site.slug, source, mode=mode)
     if outcome is RegenOutcome.STAGED:
         print(
             f"OK {site.slug}: staged crawlers/_pending/{site.slug}.py (score "
             f"{score:.2f}) — run `autocrawl promote {site.slug}` to go live (§14.2)"
+        )
+    elif mode == "auto":
+        print(
+            f"OK {site.slug}: auto-promoted crawlers/{site.slug}.py (score "
+            f"{score:.2f}); prior crawler backed up — "
+            f"`autocrawl rollback {site.slug}` to revert (§4.8)"
         )
     else:
         print(f"OK {site.slug}: wrote crawlers/{site.slug}.py (score {score:.2f})")
@@ -200,26 +208,55 @@ async def _generate_one(
 
 
 def _deliver(
-    slug: str, source: str, *, stage: bool, crawlers_dir: Path = _CRAWLERS_DIR
+    slug: str, source: str, *, mode: str, crawlers_dir: Path = _CRAWLERS_DIR
 ) -> RegenOutcome:
-    """Write a gate-passing crawler to its destination and report the outcome (§14.2).
+    """Write a gate-passing crawler per the §14.2 review-gate ``mode`` and report it.
 
-    With ``stage`` (the self-heal default — ``AUTOCRAWLER_REVIEW_GATE`` on) the crawler
-    lands in ``crawlers/_pending/<slug>.py`` for a human to ``promote``; the live
-    crawler the daemon runs is deliberately left untouched. Otherwise it goes live.
+    ``mode`` is the tri-state ``AUTOCRAWLER_REVIEW_GATE`` (see ``config.review_gate``):
+
+      * ``on`` — stage to ``crawlers/_pending/<slug>.py`` for a human to ``promote``;
+        the live crawler the daemon runs is left untouched (→ STAGED → pending-review).
+      * ``auto`` — back up the current live crawler to ``crawlers/_history/<slug>/``
+        then overwrite it live, so an unattended §4.8 self-heal is still reversible via
+        ``rollback_one`` (→ PROMOTED). The §6 gates already proved the new crawler;
+        the dark incumbent (0 items, which is why the site is stale) it trivially beats.
+      * ``off`` — write live with no backup (operator-trusted; → PROMOTED).
 
     The crawlers dir is created if absent: a relocated ``AUTOCRAWLER_CRAWLERS_DIR``
     (e.g. a fresh ``/data/crawlers`` volume) won't exist on first delivery, and a live
     write must not ``FileNotFoundError`` on it.
     """
     crawlers_dir.mkdir(parents=True, exist_ok=True)
-    if stage:
+    if mode == "on":
         pending = crawlers_dir / "_pending"
         pending.mkdir(parents=True, exist_ok=True)
         (pending / f"{slug}.py").write_text(source)
         return RegenOutcome.STAGED
+    if mode == "auto":
+        _backup_live(slug, crawlers_dir)  # snapshot the incumbent so rollback can undo
     (crawlers_dir / f"{slug}.py").write_text(source)
     return RegenOutcome.PROMOTED
+
+
+def _backup_live(slug: str, crawlers_dir: Path) -> Path | None:
+    """Snapshot the current live crawler into a versioned ``_history/<slug>/`` copy.
+
+    Called before an ``auto`` self-heal overwrites the live crawler so the prior version
+    can be restored by :func:`rollback_one`. Snapshots use zero-padded, monotonically
+    increasing indices, so they sort chronologically and a rollback walks back through
+    them. Returns the snapshot path, or None when no live crawler exists yet (the
+    first-ever delivery — there is nothing to preserve).
+    """
+    live = crawlers_dir / f"{slug}.py"
+    if not live.exists():
+        return None
+    history = crawlers_dir / "_history" / slug
+    history.mkdir(parents=True, exist_ok=True)
+    existing = [int(p.stem) for p in history.glob("*.py") if p.stem.isdigit()]
+    nxt = (max(existing) + 1) if existing else 0
+    dest = history / f"{nxt:04d}.py"
+    dest.write_text(live.read_text())
+    return dest
 
 
 def promote_one(slug: str, *, crawlers_dir: Path = _CRAWLERS_DIR) -> tuple[bool, str]:
@@ -235,6 +272,31 @@ def promote_one(slug: str, *, crawlers_dir: Path = _CRAWLERS_DIR) -> tuple[bool,
     (crawlers_dir / f"{slug}.py").write_text(pending.read_text())
     pending.unlink()
     return True, f"promoted {slug}: crawlers/_pending/{slug}.py → crawlers/{slug}.py"
+
+
+def rollback_one(slug: str, *, crawlers_dir: Path = _CRAWLERS_DIR) -> tuple[bool, str]:
+    """Restore the most recent ``_history/<slug>/`` snapshot over the live crawler.
+
+    The undo for an ``auto`` self-heal promotion (§4.8): it restores the newest backup
+    and consumes it, so repeated rollbacks walk back through prior versions. Returns
+    ``(ok, message)``; ``ok`` is False (nothing written) when no snapshot exists.
+    """
+    history = crawlers_dir / "_history" / slug
+    snapshots = sorted(history.glob("*.py")) if history.exists() else []
+    if not snapshots:
+        return (
+            False,
+            f"no backup to roll back to for {slug!r} "
+            f"(crawlers/_history/{slug}/ is empty)",
+        )
+    latest = snapshots[-1]
+    (crawlers_dir / f"{slug}.py").write_text(latest.read_text())
+    latest.unlink()  # consume so a second rollback goes one version further back
+    return (
+        True,
+        f"rolled back {slug}: restored crawlers/{slug}.py "
+        f"from _history/{slug}/{latest.name}",
+    )
 
 
 def gate_winner(

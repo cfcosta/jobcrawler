@@ -176,6 +176,94 @@ def test_health_persists_across_reopen(tmp_path: object) -> None:
     s2.close()
 
 
+# -- health record: updated_at + attempts (§4.8 retry-with-backoff, P2c) ------
+
+
+def test_health_record_is_none_until_set(store: StateStore) -> None:
+    assert store.get_health_record("acme") is None
+
+
+def test_health_record_carries_state_time_and_attempts() -> None:
+    fixed = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+    s = StateStore(":memory:", clock=lambda: fixed)
+    s.set_health("acme", "generation_failed")
+    rec = s.get_health_record("acme")
+    assert rec is not None
+    assert rec.state == "generation_failed"
+    assert rec.updated_at == fixed
+    assert rec.attempts == 0  # no bump → counter starts at 0
+    s.close()
+
+
+def test_bump_attempts_increments_the_counter(store: StateStore) -> None:
+    store.set_health("acme", "generation_failed", bump_attempts=True)
+    store.set_health("acme", "generation_failed", bump_attempts=True)
+    store.set_health("acme", "generation_failed", bump_attempts=True)
+    rec = store.get_health_record("acme")
+    assert rec is not None and rec.attempts == 3
+
+
+def test_attempts_reset_when_not_bumped(store: StateStore) -> None:
+    store.set_health("acme", "generation_failed", bump_attempts=True)
+    store.set_health("acme", "generation_failed", bump_attempts=True)
+    bumped = store.get_health_record("acme")
+    assert bumped is not None and bumped.attempts == 2
+    # A non-bumping set (e.g. recovering to healthy) zeroes the consecutive count.
+    store.set_health("acme", "healthy")
+    rec = store.get_health_record("acme")
+    assert rec is not None and rec.state == "healthy" and rec.attempts == 0
+
+
+def test_attempts_persist_across_reopen(tmp_path: object) -> None:
+    db = f"{tmp_path}/state.db"  # type: ignore[str-bytes-safe]
+    s1 = StateStore(db)
+    s1.set_health("acme", "generation_failed", bump_attempts=True)
+    s1.set_health("acme", "generation_failed", bump_attempts=True)
+    s1.close()
+
+    s2 = StateStore(db)
+    rec = s2.get_health_record("acme")
+    assert rec is not None and rec.attempts == 2
+    s2.close()
+
+
+def test_migration_adds_attempts_column_to_legacy_db(tmp_path: object) -> None:
+    # A DB created before the `attempts` column existed: build site_health by hand
+    # without it, then open a StateStore and confirm the column is backfilled.
+    db = f"{tmp_path}/legacy.db"  # type: ignore[str-bytes-safe]
+    raw = sqlite3.connect(db)
+    raw.executescript(
+        """
+        CREATE TABLE site_health (
+            site       TEXT PRIMARY KEY,
+            state      TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        INSERT INTO site_health (site, state, updated_at)
+        VALUES ('acme', 'generation_failed', '2026-01-01T00:00:00+00:00');
+        """
+    )
+    raw.commit()
+    raw.close()
+
+    s = StateStore(db)
+    rec = s.get_health_record("acme")  # legacy row reads back with attempts defaulted
+    assert rec is not None and rec.state == "generation_failed" and rec.attempts == 0
+    s.set_health("acme", "generation_failed", bump_attempts=True)
+    bumped = s.get_health_record("acme")
+    assert bumped is not None and bumped.attempts == 1
+    s.close()
+
+
+def test_attempts_migration_is_idempotent(tmp_path: object) -> None:
+    db = f"{tmp_path}/state.db"  # type: ignore[str-bytes-safe]
+    StateStore(db).close()
+    s = StateStore(db)  # re-open re-runs _migrate
+    cols = [row["name"] for row in s._conn.execute("PRAGMA table_info(site_health)")]
+    assert cols.count("attempts") == 1
+    s.close()
+
+
 # -- health-transition log (§4.8 observability, P0) --------------------------
 
 
