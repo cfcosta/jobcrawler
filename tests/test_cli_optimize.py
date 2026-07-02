@@ -1,4 +1,4 @@
-"""Tests for the `autocrawl optimize` offline job wiring (§4.11).
+"""Tests for the `jobcrawl optimize` offline job wiring (§4.11).
 
 The live compile path (LM + Deno + sandbox) is not unit-tested; the cheap guards
 and the stability-run accounting are. The command must no-op cleanly when there is
@@ -15,14 +15,14 @@ import dspy
 import pytest
 from pytest import CaptureFixture, MonkeyPatch
 
-from bizup_autocrawler.cli_optimize import (
+from jobcrawler.cli_optimize import (
     _build_factory,
     _split_sizes,
     _stable_runs,
     optimize_command,
 )
-from bizup_autocrawler.generate.generator import CrawlerGenerator
-from bizup_autocrawler.state import StateStore
+from jobcrawler.generate.generator import CrawlerGenerator
+from jobcrawler.state import StateStore
 
 
 def _ex(site: str) -> dspy.Example:
@@ -52,8 +52,8 @@ def _finish(store: StateStore, slug: str, items: int) -> None:
 def test_optimize_no_ops_without_an_admitted_trainset(
     tmp_path: Path, monkeypatch: MonkeyPatch, capsys: CaptureFixture[str]
 ) -> None:
-    monkeypatch.setenv("AUTOCRAWLER_TRAINSET_PATH", str(tmp_path / "trainset.jsonl"))
-    monkeypatch.setenv("AUTOCRAWLER_STATE_URL", f"sqlite:///{tmp_path}/state.db")
+    monkeypatch.setenv("JOBCRAWLER_TRAINSET_PATH", str(tmp_path / "trainset.jsonl"))
+    monkeypatch.setenv("JOBCRAWLER_STATE_URL", f"sqlite:///{tmp_path}/state.db")
 
     rc = optimize_command(argparse.Namespace())
 
@@ -103,23 +103,21 @@ def test_build_factory_bootstrap_rung_calls_bootstrap_compile(
         seen["which"] = "bootstrap"
         return "BOOT"
 
-    monkeypatch.setattr(
-        "bizup_autocrawler.cli_optimize.bootstrap_compile", fake_bootstrap
-    )
+    monkeypatch.setattr("jobcrawler.cli_optimize.bootstrap_compile", fake_bootstrap)
     factory = _factory("bootstrap_fewshot")
     assert factory() == "BOOT"
     assert seen["which"] == "bootstrap"
 
 
 def test_build_factory_gepa_rung_calls_gepa_compile(monkeypatch: MonkeyPatch) -> None:
-    monkeypatch.setenv("AUTOCRAWLER_REFLECTION_MODEL", "openrouter/strong/reflector")
+    monkeypatch.setenv("JOBCRAWLER_REFLECTION_MODEL", "openrouter/strong/reflector")
     seen: dict[str, str] = {}
 
     def fake_gepa(baseline: object, **kwargs: object) -> str:
         seen["which"] = "gepa"
         return "GEPA"
 
-    monkeypatch.setattr("bizup_autocrawler.cli_optimize.gepa_compile", fake_gepa)
+    monkeypatch.setattr("jobcrawler.cli_optimize.gepa_compile", fake_gepa)
     factory = _factory("gepa")
     assert factory() == "GEPA"
     assert seen["which"] == "gepa"
@@ -130,8 +128,8 @@ def test_build_factory_gepa_rung_requires_reflection_model_eagerly(
 ) -> None:
     # The reflection model is validated when the factory is *built* (before the
     # expensive minibatch scoring), not deferred into the compile.
-    monkeypatch.delenv("AUTOCRAWLER_REFLECTION_MODEL", raising=False)
-    with pytest.raises(RuntimeError, match="AUTOCRAWLER_REFLECTION_MODEL"):
+    monkeypatch.delenv("JOBCRAWLER_REFLECTION_MODEL", raising=False)
+    with pytest.raises(RuntimeError, match="JOBCRAWLER_REFLECTION_MODEL"):
         _factory("gepa")
 
 
@@ -140,12 +138,10 @@ def test_build_factory_mipro_falls_forward_to_gepa_with_notice(
 ) -> None:
     # MIPRO is documented-not-built in v1 → use the strongest built rung (GEPA),
     # loudly — never a silent drop to bootstrap.
-    monkeypatch.setenv("AUTOCRAWLER_REFLECTION_MODEL", "openrouter/strong/reflector")
+    monkeypatch.setenv("JOBCRAWLER_REFLECTION_MODEL", "openrouter/strong/reflector")
+    monkeypatch.setattr("jobcrawler.cli_optimize.gepa_compile", lambda *a, **k: "GEPA")
     monkeypatch.setattr(
-        "bizup_autocrawler.cli_optimize.gepa_compile", lambda *a, **k: "GEPA"
-    )
-    monkeypatch.setattr(
-        "bizup_autocrawler.cli_optimize.bootstrap_compile",
+        "jobcrawler.cli_optimize.bootstrap_compile",
         lambda *a, **k: pytest.fail("mipro must not fall through to bootstrap"),
     )
     factory = _factory("mipro", train=[_ex(f"t{i}") for i in range(3)])
@@ -162,7 +158,7 @@ def test_adopt_notifies_after_flipping_the_pointer(
     # The autonomous --adopt path ("full auto, gated by proof") must push an operator
     # alert right after it swaps the live generator pointer — and the pointer must
     # actually move. Everything upstream of the adopt branch is faked.
-    from bizup_autocrawler import cli, cli_optimize, config, generator_pointer, notify
+    from jobcrawler import cli, cli_optimize, config, generator_pointer, notify
 
     monkeypatch.setattr(config, "generator_dir", lambda: str(tmp_path))
     monkeypatch.setattr(cli, "_db_path", lambda: ":memory:")
@@ -211,7 +207,7 @@ def test_no_adopt_does_not_flip_the_pointer_or_notify(
 ) -> None:
     # Without --adopt the manual default only writes + prints a deploy hint: no live
     # pointer flip, and nothing to alert on (the operator chose to stay hands-on).
-    from bizup_autocrawler import cli, cli_optimize, config, generator_pointer, notify
+    from jobcrawler import cli, cli_optimize, config, generator_pointer, notify
 
     monkeypatch.setattr(config, "generator_dir", lambda: str(tmp_path))
     monkeypatch.setattr(cli, "_db_path", lambda: ":memory:")

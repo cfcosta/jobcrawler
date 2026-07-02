@@ -3,16 +3,16 @@
 Combine the quality axes by **shape-by-necessity**, not a flat product: a
 ``min``/AND **veto** for the axes where near-zero means worthless (on-domain-URL
 validity, field presence) gates a **bounded weighted sum** of the graded axes
-(items-yielded ratio, body-length rate, discovery-method quality). So
+(positions-yielded ratio, description-length rate, discovery-method quality). So
 ``item_count`` can never buy back an off-domain or empty-field crawler (veto →
 0), while a single weak-but-acceptable graded axis cannot multiplicatively
 crater an otherwise-good one (the failure a flat product invites).
 
 Every axis is bounded to ``[0, 1]`` before it enters the scalar — the items
 axis clamps at 1 (exceeding the target N buys nothing). The weights are seed
-placeholders (precision body > recall items > process discovery), calibrated
-against a downstream label per §14 Q8; the *combine form* is itself A/B'd vs a
-flat product on the held-out.
+placeholders (precision description > recall positions > process discovery),
+calibrated against a downstream label per §14 Q8; the *combine form* is itself
+A/B'd vs a flat product on the held-out.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from bizup_autocrawler.urls import normalize_host, valid_on_domain_url
+from jobcrawler.urls import normalize_host, valid_on_domain_url
 
 if TYPE_CHECKING:  # heavy (litellm/tokenizers); only the metric needs it, lazily
     import dspy
@@ -54,20 +54,20 @@ class CandidateResult(BaseModel):
     exception: ExceptionInfo | None = None
 
 
-# Discovery-method quality (feed > sitemap > scrape): a feed/sitemap enumerates,
-# a homepage scrape only samples "recent".
+# Discovery-method quality (feed > sitemap > scrape): a feed/sitemap/ATS content
+# API enumerates the whole board, a homepage scrape only samples what's on view.
 DISCOVERY_QUALITY: dict[str, float] = {"feed": 1.0, "sitemap": 0.7, "scrape": 0.4}
 
 
 class GradedWeights(BaseModel):
     items: float = Field(ge=0, le=1)
-    body: float = Field(ge=0, le=1)
+    description: float = Field(ge=0, le=1)
     discovery: float = Field(ge=0, le=1)
 
 
 # Seed weights (placeholders; calibrate per §14 Q8). Sum to 1 so a perfect
 # candidate scores exactly 1.0.
-DEFAULT_WEIGHTS = GradedWeights(items=0.40, body=0.45, discovery=0.15)
+DEFAULT_WEIGHTS = GradedWeights(items=0.40, description=0.45, discovery=0.15)
 
 
 class QualityAxes(BaseModel):
@@ -75,7 +75,7 @@ class QualityAxes(BaseModel):
 
     items_ratio: float = Field(ge=0, le=1)
     field_presence: float = Field(ge=0, le=1)
-    body_quality: float = Field(ge=0, le=1)
+    description_quality: float = Field(ge=0, le=1)
     url_validity: float = Field(ge=0, le=1)
     discovery_quality: float = Field(ge=0, le=1)
 
@@ -94,7 +94,7 @@ def graded_score(
     veto = min(axes.url_validity, axes.field_presence)
     graded = (
         weights.items * axes.items_ratio
-        + weights.body * axes.body_quality
+        + weights.description * axes.description_quality
         + weights.discovery * axes.discovery_quality
     )
     return veto * graded
@@ -127,26 +127,27 @@ def compute_axes(
     *,
     target_n: int,
     allowed_hosts: Collection[str],
-    min_body_chars: int,
+    min_description_chars: int,
     discovery_method: str,
     max_replacement_ratio: float = 0.02,
 ) -> QualityAxes:
     """Measure the five bounded [0,1] axes from a ``CandidateResult`` (§6).
 
-    The veto axes (field presence, url validity) and the body axis are sampled
-    rates over ``result.samples``; no samples means they are 0 (the veto fires).
+    The veto axes (field presence, url validity) and the description axis are
+    sampled rates over ``result.samples``; no samples means they are 0 (the veto
+    fires).
     """
     samples = result.samples
     n = len(samples)
     if n == 0:
-        field_presence = body_quality = url_validity = 0.0
+        field_presence = description_quality = url_validity = 0.0
     else:
         field_presence = sum(1 for s in samples if _has_fields(s)) / n
-        body_quality = (
+        description_quality = (
             sum(
                 1
                 for s in samples
-                if _good_body(s, min_body_chars, max_replacement_ratio)
+                if _good_description(s, min_description_chars, max_replacement_ratio)
             )
             / n
         )
@@ -154,7 +155,7 @@ def compute_axes(
     return QualityAxes(
         items_ratio=items_axis(result.item_count, target_n),
         field_presence=field_presence,
-        body_quality=body_quality,
+        description_quality=description_quality,
         url_validity=url_validity,
         discovery_quality=DISCOVERY_QUALITY.get(discovery_method, 0.0),
     )
@@ -165,7 +166,7 @@ def score_candidate(
     *,
     target_n: int,
     allowed_hosts: Collection[str],
-    min_body_chars: int,
+    min_description_chars: int,
     discovery_method: str,
     forced: bool = False,
     weights: GradedWeights = DEFAULT_WEIGHTS,
@@ -175,23 +176,30 @@ def score_candidate(
         result,
         target_n=target_n,
         allowed_hosts=allowed_hosts,
-        min_body_chars=min_body_chars,
+        min_description_chars=min_description_chars,
         discovery_method=discovery_method,
     )
     return score_from_axes(axes, forced=forced, weights=weights)
 
 
 def _has_fields(sample: Mapping[str, object]) -> bool:
-    return all(str(sample.get(k) or "").strip() for k in ("url", "title", "body"))
+    # A trackable posting needs its full identity: url + the four required content
+    # strings the §4.6 Job contract mandates (title/company/location/description).
+    return all(
+        str(sample.get(k) or "").strip()
+        for k in ("url", "title", "company", "location", "description")
+    )
 
 
-def _good_body(
-    sample: Mapping[str, object], min_body_chars: int, max_replacement_ratio: float
+def _good_description(
+    sample: Mapping[str, object],
+    min_description_chars: int,
+    max_replacement_ratio: float,
 ) -> bool:
-    body = str(sample.get("body") or "").strip()
-    if len(body) < min_body_chars:
+    description = str(sample.get("description") or "").strip()
+    if len(description) < min_description_chars:
         return False
-    return body.count("�") / max(len(body), 1) <= max_replacement_ratio
+    return description.count("�") / max(len(description), 1) <= max_replacement_ratio
 
 
 def _valid_url(sample: Mapping[str, object], allowed_hosts: Collection[str]) -> bool:
@@ -207,30 +215,33 @@ def _valid_url(sample: Mapping[str, object], allowed_hosts: Collection[str]) -> 
 # loop learns *what to improve*, never the hidden bar. Phrased as "how the response
 # could be better" (GEPA meta-prompt, Appendix 10).
 _AXIS_LABEL: dict[str, str] = {
-    "items_ratio": "item coverage",
+    "items_ratio": "opening coverage",
     "field_presence": "field completeness",
-    "body_quality": "body text",
+    "description_quality": "description text",
     "url_validity": "url validity",
     "discovery_quality": "discovery method",
 }
 _AXIS_GUIDANCE: dict[str, str] = {
     "items_ratio": (
-        "few articles enumerated — find a source that lists ALL recent articles "
-        "(a content API, RSS/Atom feed, or sitemap) rather than scraping one page"
+        "few openings enumerated — find a source that lists ALL of the board's "
+        "current openings (an ATS/careers content API, RSS/Atom feed, or sitemap) "
+        "rather than scraping one page"
     ),
     "field_presence": (
-        "some items are missing a title, body, or url — yield every item with all three"
+        "some postings are missing a title, company, location, description, or url "
+        "— yield every posting with all of them"
     ),
-    "body_quality": (
-        "article bodies are short or garbled — extract the FULL article text and "
+    "description_quality": (
+        "job descriptions are short or garbled — extract the FULL posting text and "
         "drop nav/boilerplate and encoding artefacts"
     ),
     "url_validity": (
-        "some item urls are off-domain or malformed — yield only absolute, "
-        "on-domain article urls"
+        "some posting urls are off-domain or malformed — yield only absolute, "
+        "on-domain posting urls"
     ),
     "discovery_quality": (
-        "prefer a content API, RSS/Atom feed, or sitemap over scraping HTML pages"
+        "prefer an ATS/careers content API, RSS/Atom feed, or sitemap over scraping "
+        "HTML pages"
     ),
 }
 # The order axes are considered for the breakdown when several tie on value: the
@@ -238,7 +249,7 @@ _AXIS_GUIDANCE: dict[str, str] = {
 _AXIS_ORDER = (
     "url_validity",
     "field_presence",
-    "body_quality",
+    "description_quality",
     "items_ratio",
     "discovery_quality",
 )
@@ -337,7 +348,7 @@ def make_reward_fn(
     core: ScoringCore,
     *,
     target_n: int,
-    min_body_chars: int,
+    min_description_chars: int,
     weights: GradedWeights = DEFAULT_WEIGHTS,
 ) -> Callable[[Mapping[str, object], object], float]:
     """The BestOfN/Refine adapter (the outlier): ``reward_fn(kwargs, pred) -> float``."""
@@ -348,7 +359,7 @@ def make_reward_fn(
             result,
             target_n=target_n,
             allowed_hosts=_hosts(kwargs),
-            min_body_chars=min_body_chars,
+            min_description_chars=min_description_chars,
             discovery_method=_discovery(pred),
             forced=_forced(pred),
             weights=weights,
@@ -362,7 +373,7 @@ def make_metric(
     *,
     target_n: int,
     min_items: int,
-    min_body_chars: int,
+    min_description_chars: int,
     weights: GradedWeights = DEFAULT_WEIGHTS,
 ) -> Callable[..., dspy.Prediction]:
     """The unified Evaluate/GEPA metric (signature-compatible — verified in 3.2.1).
@@ -381,7 +392,7 @@ def make_metric(
         pred_trace: object = None,
     ) -> dspy.Prediction:
         import dspy  # lazy: heavy import, and only the metric constructs Prediction
-        from bizup_autocrawler.generate import gates  # lazy: break the import cycle
+        from jobcrawler.generate import gates  # lazy: break the import cycle
 
         source = _source_text(pred)
         ast_result = gates.check_ast(source)
@@ -395,7 +406,7 @@ def make_metric(
         completeness = gates.check_completeness(
             result,
             min_items=min_items,
-            min_body_chars=min_body_chars,
+            min_description_chars=min_description_chars,
             allowed_hosts=hosts,
         )
         # One axis pass feeds both the scalar and the per-axis remediation, so a
@@ -406,7 +417,7 @@ def make_metric(
             result,
             target_n=target_n,
             allowed_hosts=hosts,
-            min_body_chars=min_body_chars,
+            min_description_chars=min_description_chars,
             discovery_method=_discovery(pred),
         )
         score = score_from_axes(axes, forced=forced, weights=weights)
@@ -424,7 +435,7 @@ def make_bootstrap_metric(
     core: ScoringCore,
     *,
     target_n: int,
-    min_body_chars: int,
+    min_description_chars: int,
     weights: GradedWeights = DEFAULT_WEIGHTS,
 ) -> Callable[..., float]:
     """The BootstrapFewShot adapter (§4.11 / M5a): a bare **float** score.
@@ -439,7 +450,7 @@ def make_bootstrap_metric(
     def metric(
         gold: object, pred: object, trace: object = None, *_extra: object
     ) -> float:
-        from bizup_autocrawler.generate import gates  # lazy: break the import cycle
+        from jobcrawler.generate import gates  # lazy: break the import cycle
 
         source = _source_text(pred)
         if not gates.check_ast(source).passed:
@@ -449,7 +460,7 @@ def make_bootstrap_metric(
             result,
             target_n=target_n,
             allowed_hosts=_hosts(gold),
-            min_body_chars=min_body_chars,
+            min_description_chars=min_description_chars,
             discovery_method=_discovery(pred),
             forced=_forced(pred),
             weights=weights,

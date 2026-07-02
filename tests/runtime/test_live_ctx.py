@@ -17,9 +17,9 @@ import httpx
 import pytest
 from pytest import MonkeyPatch
 
-from bizup_autocrawler.runtime.live_ctx import build_live_ctx
-from bizup_autocrawler.runtime.politeness import RobotsDisallowedError
-from bizup_autocrawler.runtime.solver import Clearance
+from jobcrawler.runtime.live_ctx import build_live_ctx
+from jobcrawler.runtime.politeness import RobotsDisallowedError
+from jobcrawler.runtime.solver import Clearance
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
@@ -34,18 +34,18 @@ def test_build_live_ctx_is_robots_gated_and_paced_by_default(
     # The release-safety guarantee: a production crawl is polite out of the box, with
     # no extra config. robots.txt is fetched through the same client and enforced — a
     # Disallow path raises before any request — and the per-host pacer is attached.
-    monkeypatch.setenv("AUTOCRAWLER_RATE_LIMIT", "1000/s/host")  # keep the test fast
+    monkeypatch.setenv("JOBCRAWLER_RATE_LIMIT", "1000/s/host")  # keep the test fast
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/robots.txt":
             return httpx.Response(200, text="User-agent: *\nDisallow: /private\n")
         return httpx.Response(200, text="body")
 
-    ctx = build_live_ctx({"news.example"}, client=_client(handler))
+    ctx = build_live_ctx({"jobs.example"}, client=_client(handler))
 
-    assert ctx.fetch("https://news.example/ok") == "body"
+    assert ctx.fetch("https://jobs.example/ok") == "body"
     with pytest.raises(RobotsDisallowedError):
-        ctx.fetch("https://news.example/private")
+        ctx.fetch("https://jobs.example/private")
 
 
 def test_build_live_ctx_does_not_solve_challenges_by_default(
@@ -54,7 +54,7 @@ def test_build_live_ctx_does_not_solve_challenges_by_default(
     # With no solver configured (the default), a Cloudflare challenge is left as-is —
     # the factory must not silently enable a solver. The challenge response surfaces
     # (raise_for_status on the 503) rather than being transparently cleared.
-    monkeypatch.delenv("AUTOCRAWLER_SOLVER", raising=False)
+    monkeypatch.delenv("JOBCRAWLER_SOLVER", raising=False)
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/robots.txt":
@@ -63,10 +63,10 @@ def test_build_live_ctx_does_not_solve_challenges_by_default(
             503, headers={"server": "cloudflare"}, text="Just a moment..."
         )
 
-    ctx = build_live_ctx({"news.example"}, client=_client(handler))
+    ctx = build_live_ctx({"jobs.example"}, client=_client(handler))
 
     with pytest.raises(httpx.HTTPStatusError):
-        ctx.fetch("https://news.example/x")
+        ctx.fetch("https://jobs.example/x")
 
 
 def test_build_live_ctx_clears_challenges_through_the_configured_solver(
@@ -76,7 +76,7 @@ def test_build_live_ctx_clears_challenges_through_the_configured_solver(
     # the Ctx, so a challenge is solved once and the cleared response replayed.
     # (make_solver's backend gating is tested in test_solver; here we assert
     # build_live_ctx wires whatever solver make_solver returns.)
-    monkeypatch.setenv("AUTOCRAWLER_RATE_LIMIT", "1000/s/host")
+    monkeypatch.setenv("JOBCRAWLER_RATE_LIMIT", "1000/s/host")
     solved = {"n": 0}
 
     class _FakeSolver:
@@ -85,7 +85,7 @@ def test_build_live_ctx_clears_challenges_through_the_configured_solver(
             return Clearance(cookies={"cf_clearance": "x"}, user_agent="UA")
 
     monkeypatch.setattr(
-        "bizup_autocrawler.runtime.live_ctx.make_solver", lambda: _FakeSolver()
+        "jobcrawler.runtime.live_ctx.make_solver", lambda: _FakeSolver()
     )
 
     state = {"cleared": False}
@@ -100,17 +100,17 @@ def test_build_live_ctx_clears_challenges_through_the_configured_solver(
             )
         return httpx.Response(200, text="cleared body")
 
-    ctx = build_live_ctx({"news.example"}, client=_client(handler))
+    ctx = build_live_ctx({"jobs.example"}, client=_client(handler))
 
-    assert ctx.fetch("https://news.example/x") == "cleared body"
+    assert ctx.fetch("https://jobs.example/x") == "cleared body"
     assert solved["n"] == 1  # solved once, then replayed from the clearance cache
 
 
 def test_build_live_ctx_routes_through_the_egress_proxy(
     monkeypatch: MonkeyPatch,
 ) -> None:
-    # cf_clearance binds to egress IP, so the live client must honor AUTOCRAWLER_EGRESS_PROXY.
-    monkeypatch.setenv("AUTOCRAWLER_EGRESS_PROXY", "http://egress.local:8080")
+    # cf_clearance binds to egress IP, so the live client must honor JOBCRAWLER_EGRESS_PROXY.
+    monkeypatch.setenv("JOBCRAWLER_EGRESS_PROXY", "http://egress.local:8080")
     seen: dict[str, object] = {}
     real_client = httpx.Client
 
@@ -118,8 +118,8 @@ def test_build_live_ctx_routes_through_the_egress_proxy(
         seen.update(kwargs)  # the factory builds its client with keyword args only
         return real_client()  # the test inspects the captured kwargs, not this client
 
-    monkeypatch.setattr("bizup_autocrawler.runtime.live_ctx.httpx.Client", spy_client)
+    monkeypatch.setattr("jobcrawler.runtime.live_ctx.httpx.Client", spy_client)
 
-    build_live_ctx({"news.example"})  # builds its own (proxied) client
+    build_live_ctx({"jobs.example"})  # builds its own (proxied) client
 
     assert seen.get("proxy") == "http://egress.local:8080"

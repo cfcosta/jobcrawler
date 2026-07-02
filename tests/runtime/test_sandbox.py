@@ -9,17 +9,18 @@ are captured (not crashes), and the wall-clock timeout hard-stops a hang.
 
 from __future__ import annotations
 
-from bizup_autocrawler.runtime.sandbox import validate_crawler
+from jobcrawler.runtime.sandbox import validate_crawler
 
 _GOOD = """
-from bizup_autocrawler.runtime.contract import Item
+from jobcrawler.runtime.contract import Job
 
 SITE = "https://example.com"
 
 def crawl(ctx):
     ctx.fetch(SITE + "/feed")
     for i in range(3):
-        yield Item(url=f"{SITE}/a{i}", title=f"T{i}", body="x" * 500, source="example")
+        yield Job(url=f"{SITE}/a{i}", title=f"T{i}", company="Acme", location="Remote",
+                  description="x" * 500, source="example")
 """
 
 _REPLAY = {"https://example.com/feed": {"status": 200, "text": "<feed/>"}}
@@ -38,16 +39,17 @@ def test_good_candidate_yields_items() -> None:
 
 def test_samples_and_bodies_are_size_bounded() -> None:
     big = """
-from bizup_autocrawler.runtime.contract import Item
+from jobcrawler.runtime.contract import Job
 SITE = "https://example.com"
 def crawl(ctx):
     for i in range(50):
-        yield Item(url=f"{SITE}/{i}", title="T", body="y" * 5000, source="s")
+        yield Job(url=f"{SITE}/{i}", title="T", company="Acme", location="Remote",
+                  description="y" * 5000, source="s")
 """
     result = validate_crawler(big, allowed_hosts={"example.com"}, timeout=20.0)
     assert result.item_count == 50
     assert len(result.samples) == 5  # capped
-    assert len(result.samples[0]["body"]) == 600  # truncated
+    assert len(result.samples[0]["description"]) == 600  # truncated
 
 
 def test_ast_gate_blocks_banned_code_before_running() -> None:
@@ -131,7 +133,7 @@ def test_sandbox_allows_benign_stdlib_xml_parsing() -> None:
     # a well-formed feed parses and yields normally.
     good = """
 import xml.etree.ElementTree as ET
-from bizup_autocrawler.runtime.contract import Item
+from jobcrawler.runtime.contract import Job
 SITE = "https://example.com"
 def crawl(ctx):
     doc = ctx.fetch(SITE + "/feed")
@@ -139,7 +141,8 @@ def crawl(ctx):
     for item in root.findall("channel/item"):
         title = item.findtext("title") or ""
         link = item.findtext("link") or ""
-        yield Item(url=link, title=title, body="x" * 500, source="example")
+        yield Job(url=link, title=title, company="Acme", location="Remote",
+                  description="x" * 500, source="example")
 """
     replay = {
         "https://example.com/feed": {
@@ -171,7 +174,7 @@ def test_build_ctx_live_is_bare_by_default() -> None:
     # Offline generation/scoring keeps a bare live Ctx (no pacer/robots): its restraint
     # comes from the replay map and the page budget, not §4.5 throttling — so the RLM's
     # exploration is not silently reshaped by robots/pacing.
-    from bizup_autocrawler.runtime._sandbox_entry import _build_ctx
+    from jobcrawler.runtime._sandbox_entry import _build_ctx
 
     ctx = _build_ctx({"example.com"}, None, polite=False)
     assert ctx._pacer is None
@@ -179,10 +182,10 @@ def test_build_ctx_live_is_bare_by_default() -> None:
 
 
 def test_build_ctx_live_polite_mirrors_the_production_crawl() -> None:
-    # `autocrawl validate` opts in (polite=True), so its live ctx is assembled by the
+    # `jobcrawl validate` opts in (polite=True), so its live ctx is assembled by the
     # SAME build_live_ctx factory the scheduled crawl uses — per-host pacer + robots on,
     # so a dry-run reflects exactly what production will (and won't) fetch.
-    from bizup_autocrawler.runtime._sandbox_entry import _build_ctx
+    from jobcrawler.runtime._sandbox_entry import _build_ctx
 
     ctx = _build_ctx({"example.com"}, None, polite=True)
     assert ctx._pacer is not None

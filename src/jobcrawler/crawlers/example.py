@@ -1,30 +1,52 @@
-"""Hand-written reference crawler (M0 path proof, §4.4).
+"""Hand-written reference crawler — the M0 "no LLM" path proof (§4.4).
 
-This is the M0 "no LLM" artifact: a committed ``crawlers/<slug>.py`` that the
-runner imports and executes exactly as it will execute a generated one. It
-doubles as a contract test for the import → crawl → normalize → dedup → ingest
-path. It parses a tiny article-index with the allowlisted stdlib only (``re`` —
-no parser deps, no ``os``/``socket``/``open``), and fetches solely through
-``ctx`` so the §8 SSRF guard and §4.5 politeness apply.
+This is the committed artifact that proves the whole pipeline end to end with
+zero generation: the runner imports and executes it exactly as it will execute a
+generated ``crawlers/<slug>.py``, so a green run here means
+import → crawl → normalize → lifecycle (dedup / close-missing) → match works
+before any LLM is involved. It stands in for the simplest real shape — a single
+ATS-style JSON endpoint that returns the whole board in one call — and is
+deliberately dependency-minimal: the allowlisted ``json`` module only (no parser
+deps, no ``os`` / ``socket`` / ``open``), every fetch through ``ctx`` so the §8
+SSRF guard and §4.5 politeness apply, and it passes the §6 AST gate unchanged.
 """
 
 from __future__ import annotations
 
-import re
+import json
 from collections.abc import Iterable
 
-from bizup_autocrawler.runtime.contract import Ctx, Item
+from jobcrawler.runtime.contract import Ctx, Job
 
 SITE = "https://example.com"
-
-_LINK = re.compile(r'<a[^>]+href="(/news/[^"#?]+)"[^>]*>([^<]+)</a>')
-_TAGS = re.compile(r"<[^>]+>")
-_WS = re.compile(r"\s+")
+_API = f"{SITE}/api/jobs"
 
 
-def crawl(ctx: Ctx) -> Iterable[Item]:
-    index = ctx.fetch(f"{SITE}/news")
-    for path, title in _LINK.findall(index):
-        url = f"{SITE}{path}"
-        body = _WS.sub(" ", _TAGS.sub(" ", ctx.fetch(url))).strip()
-        yield Item(url=url, title=title.strip(), body=body, source="example")
+def crawl(ctx: Ctx) -> Iterable[Job]:
+    # One GET returns the whole board as JSON — ``{"jobs": [{...}, ...]}``. ``json``
+    # is on the sandbox allowlist; ``ctx.fetch`` hands back the decoded body as text.
+    payload = json.loads(ctx.fetch(_API))
+    for row in payload.get("jobs", []):
+        external_id = str(row.get("id") or "").strip()
+        title = str(row.get("title") or "").strip()
+        company = str(row.get("company") or "").strip()
+        location = str(row.get("location") or "").strip()
+        description = str(row.get("description") or "").strip()
+        # The five content strings are required and non-empty (§4.6): skip a row
+        # missing any rather than yield a Job that would fail validation downstream.
+        if not (external_id and title and company and location and description):
+            continue
+        yield Job(
+            url=f"{SITE}/jobs/{external_id}",
+            title=title,
+            company=company,
+            location=location,
+            description=description,
+            # Optional enrichment — set only when the row states it, left None
+            # otherwise. ``posted_at`` is an ISO-8601 string; pydantic coerces it
+            # to a datetime (the crawler never parses dates itself, §4.6).
+            employment_type=row.get("employment_type"),
+            posted_at=row.get("posted_at"),
+            external_id=external_id,
+            source="example",
+        )

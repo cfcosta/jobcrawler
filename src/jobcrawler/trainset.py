@@ -5,7 +5,7 @@ inputs with ``.with_inputs`` (mandatory). It is **reference-free**: the metric
 scores by *running a fresh crawler*, so the recorded ``discovery_*`` /
 ``crawler_source`` are provenance, not labels. A pair is admitted iff §6 gates
 1–3 pass, the §8 adversarial cross-validation passes, and the site stayed
-non-stale for ``AUTOCRAWLER_TRAINSET_STABLE_RUNS`` runs (more conservative than
+non-stale for ``JOBCRAWLER_TRAINSET_STABLE_RUNS`` runs (more conservative than
 the §4.8 single-run regen trigger — a stale site yields a misleading reward and
 pollutes GEPA's frontier). The frozen ``corpus`` is persisted per example as
 plain JSON so generation replays reproducibly. The trainset is its own logical

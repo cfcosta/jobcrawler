@@ -1,4 +1,4 @@
-"""Runtime configuration for bizup-autocrawler, read from the environment (§11).
+"""Runtime configuration for jobcrawler, read from the environment (§11).
 
 Every env knob the service reads lives here, so the full configuration surface
 is visible in one place. All thresholds are host-side constants — never exposed
@@ -12,8 +12,8 @@ import os
 from datetime import timedelta
 from pathlib import Path
 
-from bizup_autocrawler.durations import parse_duration
-from bizup_autocrawler.urls import DEFAULT_TRACKING_PARAMS
+from jobcrawler.durations import parse_duration
+from jobcrawler.urls import DEFAULT_TRACKING_PARAMS
 
 # This module lives at the package root, so its directory *is* the package dir —
 # used to default the committed-crawlers location to the in-package crawlers/ dir.
@@ -54,13 +54,13 @@ def model() -> str | None:
     """RLM root planner/extractor — a strong, code-capable model. Required: there is
     no safe default (a placeholder slug fails opaque at the provider), so generation
     call sites use :func:`require_model`, never a fabricated default."""
-    return _opt("AUTOCRAWLER_MODEL")
+    return _opt("JOBCRAWLER_MODEL")
 
 
 def require_model() -> str:
     """The root planner model, erroring if unset (§4.2/§11).
 
-    ``AUTOCRAWLER_MODEL`` names the provider model slug for ``dspy.LM``; there is no
+    ``JOBCRAWLER_MODEL`` names the provider model slug for ``dspy.LM``; there is no
     sensible default (the old ``openrouter/qwen/qwen3.7-plus`` was a non-existent
     slug that failed deep in litellm), so the generation/optimize path errors loud
     and early rather than surfacing an opaque provider 404 mid-run.
@@ -68,7 +68,7 @@ def require_model() -> str:
     value = model()
     if value is None:
         raise RuntimeError(
-            "AUTOCRAWLER_MODEL is required (§4.2): the RLM root planner needs a real "
+            "JOBCRAWLER_MODEL is required (§4.2): the RLM root planner needs a real "
             "provider model slug (e.g. openrouter/<vendor>/<model>). Set it to a "
             "strong, code-capable model."
         )
@@ -78,7 +78,7 @@ def require_model() -> str:
 def sub_model() -> str | None:
     """RLM ``sub_lm``. Required: unset ⇒ every ``llm_query`` bills at root rates,
     so callers must error rather than silently fall back (§4.2)."""
-    return _opt("AUTOCRAWLER_SUB_MODEL")
+    return _opt("JOBCRAWLER_SUB_MODEL")
 
 
 def require_sub_model() -> str:
@@ -86,14 +86,14 @@ def require_sub_model() -> str:
 
     An unset ``sub_lm`` silently falls back to the *root* planner LM inside
     ``dspy.RLM``, billing every in-sandbox ``llm_query`` at planner rates. The spec
-    makes ``AUTOCRAWLER_SUB_MODEL`` **required** precisely so this fails loud instead
+    makes ``JOBCRAWLER_SUB_MODEL`` **required** precisely so this fails loud instead
     of quietly overspending — generation call sites must use this, never the
     ``sub_model() or model()`` fallback it replaces.
     """
     value = sub_model()
     if value is None:
         raise RuntimeError(
-            "AUTOCRAWLER_SUB_MODEL is required (§4.2): unset, every in-sandbox "
+            "JOBCRAWLER_SUB_MODEL is required (§4.2): unset, every in-sandbox "
             "llm_query silently bills at the root planner's rate. Set it to a cheap, "
             "code-capable model (e.g. a small/instruct tier)."
         )
@@ -102,7 +102,7 @@ def require_sub_model() -> str:
 
 def reflection_model() -> str | None:
     """GEPA ``reflection_lm`` (strong, ideally a different family); §4.11/M5."""
-    return _opt("AUTOCRAWLER_REFLECTION_MODEL")
+    return _opt("JOBCRAWLER_REFLECTION_MODEL")
 
 
 def require_reflection_model() -> str:
@@ -119,31 +119,115 @@ def require_reflection_model() -> str:
     value = reflection_model()
     if value is None:
         raise RuntimeError(
-            "AUTOCRAWLER_REFLECTION_MODEL is required for the GEPA optimizer rung "
+            "JOBCRAWLER_REFLECTION_MODEL is required for the GEPA optimizer rung "
             "(§4.11): GEPA mutates the strategy prompt by reflecting on candidate "
             "feedback with this LM. Set it to a strong model, ideally a different "
-            "family than AUTOCRAWLER_MODEL."
+            "family than JOBCRAWLER_MODEL."
         )
     return value
+
+
+# --- profile & host-side matcher (§4.7) ------------------------------------
+# The profile matcher is the ONLY new LLM surface, and it runs *host-side*,
+# outside the crawl sandbox — batched and cache-keyed — so the committed crawl
+# loop stays plain, deterministic Python (the no-LLM-in-the-loop invariant).
+# Every knob here bounds that surface's token spend or its match strictness.
+
+
+def profile_path() -> str:
+    """Path to ``PROFILE.md`` — the operator's YAML-frontmatter + markdown profile the
+    §4.7 matcher scores every job against. CWD-relative by default so a checkout is
+    self-describing; :func:`jobcrawler.profile.load_profile` raises a create-me hint
+    when it's absent (no profile ⇒ nothing to match, so the daemon must say so loudly
+    rather than silently score against an empty preference set)."""
+    return _str("JOBCRAWLER_PROFILE", "PROFILE.md")
+
+
+def match_model() -> str | None:
+    """The host-side §4.7 match LM slug (``JOBCRAWLER_MATCH_MODEL``). Optional: unset,
+    matching falls back to the cheap ``sub_lm`` via :func:`require_match_model` rather
+    than the root planner — so a deployment need only name a dedicated match model when
+    it wants one distinct from ``sub_lm``."""
+    return _opt("JOBCRAWLER_MATCH_MODEL")
+
+
+def require_match_model() -> str:
+    """The §4.7 matcher LM, erroring only if *no* usable model is configured at all.
+
+    Matching bills real tokens per scored job, so it must run on a *cheap* model: this
+    resolves ``JOBCRAWLER_MATCH_MODEL`` first, then falls back to the ``sub_lm``
+    (:func:`sub_model`) — deliberately **never** the root planner (:func:`model`), whose
+    per-token rate would make scoring the daily job fleet ruinous. It errors loud (like
+    :func:`require_model`) only when neither is set, naming both env vars, rather than
+    silently defaulting to an expensive or non-existent slug that fails opaque at the
+    provider mid-batch.
+    """
+    value = match_model() or sub_model()
+    if value is None:
+        raise RuntimeError(
+            "no match model configured (§4.7): set JOBCRAWLER_MATCH_MODEL for the "
+            "host-side profile matcher, or JOBCRAWLER_SUB_MODEL (the cheap fallback it "
+            "borrows). The matcher deliberately never falls back to the root "
+            "JOBCRAWLER_MODEL planner — its per-token rate would make scoring the daily "
+            "job fleet ruinous."
+        )
+    return value
+
+
+def match_batch() -> int:
+    """How many jobs ride in ONE ``dspy.Predict(MatchJobs)`` call (§4.7). Batching
+    amortizes the profile+rubric prompt prefix across many jobs (each job is a compact
+    digest — the description head plus structured fields), the dominant token cost. Too
+    large and a single malformed batch response strands more jobs to ``match_pending``
+    on a length-mismatch; 10 balances prompt amortization against that blast radius."""
+    return _int("JOBCRAWLER_MATCH_BATCH", 10)
+
+
+def match_min_score() -> int:
+    """The 0-100 score at or above which a match is worth an operator notification (§4.7
+    'match' event). The matcher scores *everything* it is given and stores the verdict;
+    this is purely the notify/surface threshold, not a drop — a 60 still lands in the
+    store for the ``matches`` view, it just doesn't ping. Default 70 (a solid 'good'+
+    fit); raise it for fewer, stronger alerts."""
+    return _int("JOBCRAWLER_MATCH_MIN_SCORE", 70)
+
+
+def match_daily_cap() -> int:
+    """Hard per-UTC-day ceiling on the number of jobs sent to the match LM — the
+    token-budget backstop (§4.7/§8). Only *LLM-scored* jobs count: a cache hit (a job
+    whose ``content_hash`` + ``profile_hash`` was already scored) is FREE and never
+    charged against it. Jobs past the cap are ``set_match_pending``, NEVER dropped — a
+    later run or the recheck loop drains them within budget. Default 400: bounds a bad
+    crawl or a fresh-profile rematch storm from blowing the daily spend. Raise it only
+    with the token bill in view."""
+    return _int("JOBCRAWLER_MATCH_DAILY_CAP", 400)
+
+
+def match_rate() -> str:
+    """Governor pacing for the §4.7 match LM calls (``requests/interval``, e.g. the
+    default ``10/m``). Smooths the batched match calls so a big new-position sweep can't
+    burst the provider into rate-limit errors; it paces *calls*, orthogonal to the daily
+    token cap which bounds *volume*. Same governor grammar as the crawl rate limit."""
+    return _str("JOBCRAWLER_MATCH_RATE", "10/m")
 
 
 # --- generation caps (§4.2) ------------------------------------------------
 
 
 def max_iterations() -> int:
-    return _int("AUTOCRAWLER_MAX_ITERATIONS", 20)
+    return _int("JOBCRAWLER_MAX_ITERATIONS", 20)
 
 
 def max_llm_calls() -> int:
-    return _int("AUTOCRAWLER_MAX_LLM_CALLS", 40)
+    return _int("JOBCRAWLER_MAX_LLM_CALLS", 40)
 
 
 def max_subcalls() -> int:
-    return _int("AUTOCRAWLER_MAX_SUBCALLS", 60)
+    return _int("JOBCRAWLER_MAX_SUBCALLS", 60)
 
 
 def fanout_spend_cap() -> str:
-    return _str("AUTOCRAWLER_FANOUT_SPEND_CAP", "$8/site")
+    return _str("JOBCRAWLER_FANOUT_SPEND_CAP", "$8/site")
 
 
 def fanout_spend_cap_usd() -> float:
@@ -159,7 +243,7 @@ def fanout_spend_cap_usd() -> float:
 
 def fanout_n() -> int:
     """Number of candidates the §6 best-of-N generates (default N≈4–8)."""
-    return _int("AUTOCRAWLER_FANOUT_N", 4)
+    return _int("JOBCRAWLER_FANOUT_N", 4)
 
 
 def max_tokens() -> int:
@@ -167,31 +251,27 @@ def max_tokens() -> int:
     both its thinking and the answer on the long RLM action prompt — too low and
     a reasoning model spends the whole budget thinking and returns empty content.
     """
-    return _int("AUTOCRAWLER_MAX_TOKENS", 16000)
+    return _int("JOBCRAWLER_MAX_TOKENS", 16000)
 
 
 def corpus_homepage_chars() -> int:
     """Cap on homepage HTML kept in the §9 snapshot. Raw pages run to 100s of KB;
     unbounded, the corpus blows past the model's context and a reasoning LM burns
     its whole token budget (empty output). Link discovery still uses the full page."""
-    return _int("AUTOCRAWLER_CORPUS_HOMEPAGE_CHARS", 60000)
+    return _int("JOBCRAWLER_CORPUS_HOMEPAGE_CHARS", 60000)
 
 
 def corpus_article_chars() -> int:
     """Cap on each article sample kept in the snapshot (enough to learn the body
     selector; a content-heavy page is otherwise 100s of KB of cruft)."""
-    return _int("AUTOCRAWLER_CORPUS_ARTICLE_CHARS", 20000)
+    return _int("JOBCRAWLER_CORPUS_ARTICLE_CHARS", 20000)
 
 
-# --- ingest / news (§4.7) --------------------------------------------------
-
-
-def news_api_url() -> str:
-    return _str("NEWS_API_URL", "http://localhost:8000")
+# --- sites & crawlers ------------------------------------------------------
 
 
 def sites_path() -> str:
-    return _str("AUTOCRAWLER_SITES", "sites.yaml")
+    return _str("JOBCRAWLER_SITES", "sites.yaml")
 
 
 def crawlers_dir() -> str:
@@ -201,68 +281,42 @@ def crawlers_dir() -> str:
 
     Defaults to the in-package ``crawlers/`` dir, where the editable dev install
     resolves them and the baked example crawler lives. A production deploy must point
-    ``AUTOCRAWLER_CRAWLERS_DIR`` at a writable, persistent path (e.g. a mounted
+    ``JOBCRAWLER_CRAWLERS_DIR`` at a writable, persistent path (e.g. a mounted
     ``/data/crawlers``): the in-package dir is read-only on a native Nix-store install
     (so generate/promote/self-heal can't write) and ephemeral in a container layer (so
     generated crawlers vanish on restart). The crawl loader reads the script *text*
     (never imports the package), so an out-of-package dir works for the whole
     crawl/probe/generate/promote surface.
     """
-    return _str("AUTOCRAWLER_CRAWLERS_DIR", str(_PKG_DIR / "crawlers"))
+    return _str("JOBCRAWLER_CRAWLERS_DIR", str(_PKG_DIR / "crawlers"))
 
 
 def first_crawl_cap() -> int:
-    return _int("AUTOCRAWLER_FIRST_CRAWL_CAP", 30)
-
-
-def ingest_rate() -> str:
-    return _str("AUTOCRAWLER_INGEST_RATE", "2/s")
-
-
-def ingest_timeout() -> float:
-    """POST /news client timeout. Each ingest drives server-side LLM summarization +
-    tagging, which on a long body runs to tens of seconds — too tight a timeout
-    spuriously trips the TERMINAL path (the row often lands server-side anyway), so
-    default generously. Lower it only if the news API is fast."""
-    return _float("AUTOCRAWLER_INGEST_TIMEOUT", 120.0)
-
-
-# Substrings (case-insensitive) that mark a body as a paywall teaser, not a
-# complete article. A teaser (standfirst + one paragraph + a "subscribe" pitch)
-# can exceed min_body_chars, so the length floor alone misses it (§4.6). Confirmed
-# on valor.globo.com; extend per deployment with AUTOCRAWLER_PAYWALL_MARKERS.
-_DEFAULT_PAYWALL_MARKERS = (
-    "exclusiva para assinantes",
-    "para ter acesso completo",
-)
-
-
-def paywall_markers() -> tuple[str, ...]:
-    """Paywall-teaser markers dropped at ingest even above the length floor (§4.6).
-    Override with ``AUTOCRAWLER_PAYWALL_MARKERS`` (``|``-separated; empty disables)."""
-    raw = os.getenv("AUTOCRAWLER_PAYWALL_MARKERS")
-    if raw is None:
-        return _DEFAULT_PAYWALL_MARKERS
-    return tuple(m.strip() for m in raw.split("|") if m.strip())
+    """On a site's first-ever position-yielding crawl, only the newest ``cap`` jobs (by
+    ``posted_at``, discovery order as fallback) go to the §4.7 matcher now; the backlog
+    tail is ``set_match_pending`` and drained by later runs. A brand-new board can list
+    hundreds of standing roles — without this, a first crawl would burn the whole
+    ``match_daily_cap`` scoring stale backlog instead of fresh postings. Default 30."""
+    return _int("JOBCRAWLER_FIRST_CRAWL_CAP", 30)
 
 
 # --- crawl / politeness (§4.5) ---------------------------------------------
 
 
 def state_url() -> str:
-    return _str("AUTOCRAWLER_STATE_URL", "sqlite:///autocrawler.db")
+    return _str("JOBCRAWLER_STATE_URL", "sqlite:///jobcrawler.db")
 
 
 def user_agent() -> str:
-    return _str("AUTOCRAWLER_USER_AGENT", "bizup-autocrawler/0.1 (+news aggregator)")
+    return _str("JOBCRAWLER_USER_AGENT", "jobcrawler/0.1 (+job tracker)")
 
 
 def rate_limit() -> str:
-    return _str("AUTOCRAWLER_RATE_LIMIT", "1/s/host")
+    return _str("JOBCRAWLER_RATE_LIMIT", "1/s/host")
 
 
 def max_pages() -> int:
-    return _int("AUTOCRAWLER_MAX_PAGES", 200)
+    return _int("JOBCRAWLER_MAX_PAGES", 200)
 
 
 def fetch_timeout() -> float:
@@ -271,26 +325,26 @@ def fetch_timeout() -> float:
     Bounds a single hung fetch so one stuck socket can't eat the whole subprocess
     wall-clock budget (:func:`crawl_timeout`); kept well under it. The validation
     sandbox keeps its own tight default — this is the live crawl/robots client."""
-    return _float("AUTOCRAWLER_FETCH_TIMEOUT", 20.0)
+    return _float("JOBCRAWLER_FETCH_TIMEOUT", 20.0)
 
 
 def fetch_retries() -> int:
     """Extra attempts after the first for a *transient* fetch failure (§4.5) — a
     429/503/502/504 or a dropped connection. ``0`` disables retry. A Cloudflare
     challenge is never counted here (it escalates to the solver, not a blind retry)."""
-    return _int("AUTOCRAWLER_FETCH_RETRIES", 2)
+    return _int("JOBCRAWLER_FETCH_RETRIES", 2)
 
 
 def fetch_backoff() -> float:
     """Base seconds for the exponential backoff (base·2ⁿ) between transient retries."""
-    return _float("AUTOCRAWLER_FETCH_BACKOFF", 0.5)
+    return _float("JOBCRAWLER_FETCH_BACKOFF", 0.5)
 
 
 def fetch_retry_cap() -> float:
     """Ceiling on any single retry wait (§4.5), in seconds. Also the longest server
     ``Retry-After`` we'll honor: a larger one is refused rather than parking the crawl
     budget, and the response is surfaced as an error instead."""
-    return _float("AUTOCRAWLER_FETCH_RETRY_CAP", 30.0)
+    return _float("JOBCRAWLER_FETCH_RETRY_CAP", 30.0)
 
 
 # --- committed-crawl isolation (§4.4) --------------------------------------
@@ -306,7 +360,7 @@ def crawl_timeout() -> float:
     per-host interval plus fetch latency. It bounds a *hung* crawl (a stuck socket,
     a sleep); a compute spin is caught sooner and tighter by the CPU cap. Raise it
     if you crawl large sites under slow per-host pacing."""
-    return _float("AUTOCRAWLER_CRAWL_TIMEOUT", 600.0)
+    return _float("JOBCRAWLER_CRAWL_TIMEOUT", 600.0)
 
 
 def crawl_cpu_seconds() -> float:
@@ -316,17 +370,17 @@ def crawl_cpu_seconds() -> float:
     little CPU even over a long wall-clock, so this stays tight to kill a compute
     spin (an infinite ``while`` loop blows past any finite CPU budget) without
     mistaking a slow-but-paced crawl for a runaway."""
-    return _float("AUTOCRAWLER_CRAWL_CPU_SECONDS", 120.0)
+    return _float("JOBCRAWLER_CRAWL_CPU_SECONDS", 120.0)
 
 
 def crawl_mem_mb() -> int:
     """RLIMIT_AS (MB) for one committed crawl's subprocess — caps a memory blowup
     so one bad crawler can't OOM the daemon. Matches the validation sandbox."""
-    return _int("AUTOCRAWLER_CRAWL_MEM_MB", 1024)
+    return _int("JOBCRAWLER_CRAWL_MEM_MB", 1024)
 
 
 def tracking_param_denylist() -> frozenset[str]:
-    raw = os.getenv("AUTOCRAWLER_TRACKING_PARAM_DENYLIST")
+    raw = os.getenv("JOBCRAWLER_TRACKING_PARAM_DENYLIST")
     if raw is None:
         return DEFAULT_TRACKING_PARAMS
     return frozenset(p.strip() for p in raw.split(",") if p.strip())
@@ -336,48 +390,142 @@ def tracking_param_denylist() -> frozenset[str]:
 
 
 def min_items() -> int:
-    return _int("AUTOCRAWLER_MIN_ITEMS", 5)
+    """Minimum positions a crawl must yield to clear the §6 completeness gate. Default 1
+    (dropped from the old 5): a two-role startup careers page is a legitimate, complete
+    board, so an absolute floor of 1 only rejects the truly empty crawl. Completeness is
+    instead carried by the relative §6 enum-floor (did we get roughly as many as the
+    board advertises?) and the run-to-run stability gate — both of which a genuinely
+    small board passes and a broken selector fails."""
+    return _int("JOBCRAWLER_MIN_ITEMS", 1)
 
 
-def min_body_chars() -> int:
-    return _int("AUTOCRAWLER_MIN_BODY_CHARS", 400)
+def min_description_chars() -> int:
+    """Length floor (chars) a job description must clear to count as complete (§4.6/§6).
+    Default 300 (down from the news-era 400): a tight but real engineering posting — a
+    few responsibilities plus requirements — clears 300, while a bare title-only stub or
+    a "see our site" redirect does not. Shared by the §6 generation gate and the runtime
+    completeness filter, so generation is never stricter than what runtime keeps."""
+    return _int("JOBCRAWLER_MIN_DESCRIPTION_CHARS", 300)
 
 
-def min_body_quality() -> float:
-    """Fraction of sampled bodies that must clear ``min_body_chars`` for the §6
-    completeness gate to pass. < 1.0 tolerates a minority of genuinely-short posts
-    (a news brief), which the runtime completeness filter drops at ingest anyway —
-    so generation isn't stricter than runtime. A mostly-summary crawler still fails."""
-    return _float("AUTOCRAWLER_MIN_BODY_QUALITY", 0.6)
+def min_description_quality() -> float:
+    """Fraction of sampled descriptions that must clear ``min_description_chars`` for the
+    §6 completeness gate to pass. < 1.0 tolerates a minority of genuinely-terse postings
+    (a one-line contract role), which the runtime completeness filter drops at ingest
+    anyway — so generation isn't stricter than runtime. A crawler that scrapes only
+    title + teaser instead of the full description still fails."""
+    return _float("JOBCRAWLER_MIN_DESCRIPTION_QUALITY", 0.6)
 
 
 def stability_jaccard() -> float:
-    return _float("AUTOCRAWLER_STABILITY_JACCARD", 0.6)
+    return _float("JOBCRAWLER_STABILITY_JACCARD", 0.6)
 
 
 def enum_floor_ratio() -> float:
-    return _float("AUTOCRAWLER_ENUM_FLOOR_RATIO", 0.5)
+    return _float("JOBCRAWLER_ENUM_FLOOR_RATIO", 0.5)
+
+
+# --- completeness / freshness (§4.6) ---------------------------------------
+# Runtime filters on a job's description, applied at ingest before it is hashed
+# and stored. Host-side only (§8): the generator never sees these thresholds, so
+# it can't tune a crawler to just barely clear them.
+
+
+def min_unique_description_chars() -> int:
+    """Minimum count of *distinct* characters a description must contain to count as
+    real content (§4.6). Catches a description that clears ``min_description_chars`` on
+    length alone but is boilerplate padding — a repeated company blurb, a wall of one
+    punctuation char, an ATS placeholder — where the set of unique characters stays
+    tiny. Default 150: high enough to demand genuinely varied prose, low enough that any
+    real multi-sentence posting passes. Conservative — a borderline real posting is
+    kept, not dropped."""
+    return _int("JOBCRAWLER_MIN_UNIQUE_DESCRIPTION_CHARS", 150)
+
+
+# Substrings (case-insensitive) that mark a posting as already closed even though the
+# board still serves the page — a race the enumerate-diff closure (§4.7) can't catch on
+# its own, since the URL is still present. A description carrying one is dropped at
+# ingest as 'expired'. EN + pt-BR defaults from live boards; extend/override per
+# deployment. Mirrors the old paywall-marker pattern this replaces.
+_DEFAULT_EXPIRED_MARKERS = (
+    "no longer accepting applications",
+    "this position has been filled",
+    "position is no longer available",
+    "vaga encerrada",
+    "vaga indisponível",
+)
+
+
+def expired_markers() -> tuple[str, ...]:
+    """Closed-posting markers that drop a job at ingest even when the board still lists
+    it (§4.6/§4.7). A page can outlive the opening (an ATS keeps serving "this position
+    has been filled"); the enumerate-diff closure only fires when the URL *disappears*,
+    so these catch the still-present-but-dead case. Override with
+    ``JOBCRAWLER_EXPIRED_MARKERS`` (``|``-separated; empty disables)."""
+    raw = os.getenv("JOBCRAWLER_EXPIRED_MARKERS")
+    if raw is None:
+        return _DEFAULT_EXPIRED_MARKERS
+    return tuple(m.strip() for m in raw.split("|") if m.strip())
+
+
+# --- position lifecycle: closure & recheck (§4.7, §4.9) --------------------
+# How an open position ages into 'closed', and how sources that don't enumerate
+# their whole board (``enumerates_all: false`` — an RSS/latest-N feed) get their
+# standing rows re-verified out of band. Host-side (§8).
+
+
+def close_after_misses() -> int:
+    """Consecutive crawls a position must be ABSENT from an enumerating board before it
+    is closed (§4.7 ``close_missing`` threshold). Default 2: a single miss is often a
+    transient hiccup — a paginated board that briefly drops a page, an ATS 500 — so one
+    absence only increments the row's ``missing_streak``; the second confirms the role
+    is genuinely gone before flipping it to 'closed'. Only enumerating sources
+    (``enumerates_all``) diff this way, and only after a successful, non-empty crawl (the
+    §4.7 mass-closure guard), so this can never mass-close on a failed fetch."""
+    return _int("JOBCRAWLER_CLOSE_AFTER_MISSES", 2)
+
+
+def recheck_interval() -> str:
+    """How often the §4.9 recheck loop re-fetches standing open positions to confirm
+    they're still live. This is the ONLY closure signal for non-enumerating sources
+    (``enumerates_all: false`` — an RSS or latest-N feed, where the diff is unsound
+    because the source only ever shows a recent window); it also re-verifies enumerating
+    rows against ``expired_markers`` / ``expires_at``. Default 12h — jobs churn on the
+    order of days, so twice-daily is fresh without hammering a board."""
+    return _str("JOBCRAWLER_RECHECK_INTERVAL", "12h")
+
+
+def recheck_cap() -> int:
+    """Max standing positions the §4.9 recheck loop re-fetches per pass. Bounds the extra
+    fetch (and solver/politeness) budget the loop spends on already-known rows so a fleet
+    with thousands of open positions doesn't starve fresh crawls; the oldest-checked rows
+    go first, so all rows are covered over successive passes. Default 150."""
+    return _int("JOBCRAWLER_RECHECK_CAP", 150)
 
 
 # --- scheduler (§4.9) ------------------------------------------------------
 
 
 def default_schedule() -> str:
-    return _str("AUTOCRAWLER_DEFAULT_SCHEDULE", "30m")
+    """Fixed crawl cadence for a site with no ``schedule:`` and adaptive off. Default 4h
+    (up from the news-era 30m): job boards move on the order of days, not minutes, so a
+    4h base catches a new posting the day it lands while staying polite. Adaptive cadence
+    (on by default) overrides this per-site from the observed hit rate."""
+    return _str("JOBCRAWLER_DEFAULT_SCHEDULE", "4h")
 
 
 def concurrency() -> int:
-    return _int("AUTOCRAWLER_CONCURRENCY", 4)
+    return _int("JOBCRAWLER_CONCURRENCY", 4)
 
 
 # --- adaptive cadence (§4.9, the hit-rate controller) ----------------------
 # A source flagged ``schedule: adaptive`` learns its own interval from recent
-# hit/miss outcomes (see :mod:`bizup_autocrawler.adaptive`). These bound and
+# hit/miss outcomes (see :mod:`jobcrawler.adaptive`). These bound and
 # tune that controller; all are host-side, never exposed to the generator (§8).
 
 
 def _duration_secs(name: str, default: str) -> float:
-    """An ``AUTOCRAWLER_*`` duration env var as float seconds (falls back on a
+    """An ``JOBCRAWLER_*`` duration env var as float seconds (falls back on a
     malformed value to the default, so a typo can't crash the daemon at boot)."""
     raw = os.getenv(name)
     if raw is None:
@@ -389,22 +537,26 @@ def _duration_secs(name: str, default: str) -> float:
 
 
 def min_schedule() -> float:
-    """Politeness floor (seconds) for an adaptive interval — the controller never
-    shrinks below this no matter how busy a source is. Default 15m."""
-    return _duration_secs("AUTOCRAWLER_MIN_SCHEDULE", "15m")
+    """Politeness floor (seconds) for an adaptive interval — the controller never shrinks
+    below this no matter how busy a source is. Default 1h (up from the news-era 15m): job
+    postings don't churn minute-to-minute, so an hourly floor is the fastest a board ever
+    needs to be hit, and keeps the fleet polite under a busy hit rate."""
+    return _duration_secs("JOBCRAWLER_MIN_SCHEDULE", "1h")
 
 
 def max_schedule() -> float:
-    """Staleness ceiling (seconds) for an adaptive interval — the controller never
-    grows beyond this no matter how quiet a source is. Default 1d."""
-    return _duration_secs("AUTOCRAWLER_MAX_SCHEDULE", "1d")
+    """Staleness ceiling (seconds) for an adaptive interval — the controller never grows
+    beyond this no matter how quiet a source is. Default 3d (up from the news-era 1d): a
+    job typically stays open for weeks, so even a near-silent board is fresh enough
+    checked every three days, and the longer ceiling saves fetches on quiet sources."""
+    return _duration_secs("JOBCRAWLER_MAX_SCHEDULE", "3d")
 
 
 def adaptive_target_n() -> float:
     """Desired checks-per-post for an adaptive source: the controller steers the hit
     rate toward ``1 / target_n``. Default 2 (≈ check twice per post). Clamped ≥ 1 so
     the target hit rate stays in (0, 1]."""
-    return max(1.0, _float("AUTOCRAWLER_ADAPTIVE_TARGET_N", 2.0))
+    return max(1.0, _float("JOBCRAWLER_ADAPTIVE_TARGET_N", 2.0))
 
 
 def adaptive_default() -> bool:
@@ -412,13 +564,13 @@ def adaptive_default() -> bool:
     the fixed ``default_schedule``. Default true — the fleet self-tunes each source's
     cadence to its hit-rate; pin ``schedule:`` or ``adaptive: false`` on a site to opt
     out."""
-    return _bool("AUTOCRAWLER_ADAPTIVE_DEFAULT", True)
+    return _bool("JOBCRAWLER_ADAPTIVE_DEFAULT", True)
 
 
 def adaptive_window() -> int:
     """How many recent crawls the hit-rate controller averages over. Default 8 —
     long enough to smooth single-crawl noise, short enough to track a real shift."""
-    return max(1, _int("AUTOCRAWLER_ADAPTIVE_WINDOW", 8))
+    return max(1, _int("JOBCRAWLER_ADAPTIVE_WINDOW", 8))
 
 
 # --- master autonomy switch (§4.8/§4.11) -----------------------------------
@@ -440,11 +592,11 @@ def autonomy() -> bool:
     available, because the brake is on the daemon's initiative, not the operator's. Read
     once at scheduler start like the other §4.9 knobs; flip it and restart to apply (the
     loop is restart-idempotent, so a restart loses no state)."""
-    return _bool("AUTOCRAWLER_AUTONOMY", True)
+    return _bool("JOBCRAWLER_AUTONOMY", True)
 
 
 def regen_check() -> str:
-    return _str("AUTOCRAWLER_REGEN_CHECK", "24h")
+    return _str("JOBCRAWLER_REGEN_CHECK", "24h")
 
 
 def heal_cooldown() -> str:
@@ -452,22 +604,24 @@ def heal_cooldown() -> str:
 
     A crawl that comes back blacked-out (zero items) or with collapsed body quality
     triggers an immediate staleness assessment from the run loop, instead of waiting
-    for the next periodic ``AUTOCRAWLER_REGEN_CHECK`` sweep. This cooldown rate-limits
+    for the next periodic ``JOBCRAWLER_REGEN_CHECK`` sweep. This cooldown rate-limits
     that fast path per-site so a quick adaptive cadence (or an auto-promote that keeps
     re-drifting) can't re-run the generator every crawl. ``off`` disables event-driven
     healing entirely, leaving only the periodic sweep. Default 6h."""
-    return _str("AUTOCRAWLER_HEAL_COOLDOWN", "6h")
+    return _str("JOBCRAWLER_HEAL_COOLDOWN", "6h")
 
 
-def body_quality_floor() -> float:
-    """Fraction of complete-bodied items below which a crawl is a partial-drift signal.
+def description_quality_floor() -> float:
+    """Fraction of complete-description positions below which a crawl is a partial-drift
+    signal.
 
-    ``body_quality`` is the share of fetched items whose body cleared the completeness
-    bar (§4.6); it sags when a site starts serving teasers/paywalls even while item
-    counts stay healthy. A crawl at or above this floor is fine; below it (with items
-    found) is a drift candidate. Host-side only — never surfaced to the generator (§8).
+    ``description_quality`` is the share of fetched positions whose description cleared
+    the completeness bar (§4.6); it sags when a board starts serving title-only stubs or
+    truncated postings even while position counts stay healthy. A crawl at or above this
+    floor is fine; below it (with positions found) is a drift candidate that triggers a
+    §4.8 staleness assessment. Host-side only — never surfaced to the generator (§8).
     Default 0.5. Clamped to (0, 1]; an out-of-range value falls back to the default."""
-    value = _float("AUTOCRAWLER_BODY_QUALITY_FLOOR", 0.5)
+    value = _float("JOBCRAWLER_DESCRIPTION_QUALITY_FLOOR", 0.5)
     return value if 0.0 < value <= 1.0 else 0.5
 
 
@@ -479,12 +633,12 @@ def genfail_backoff() -> float:
     keeps improving). The delay grows geometrically per consecutive failure (×2 each)
     up to ``genfail_backoff_cap``, so a chronically broken site backs off without ever
     giving up. Default 6h."""
-    return _duration_secs("AUTOCRAWLER_GENFAIL_BACKOFF", "6h")
+    return _duration_secs("JOBCRAWLER_GENFAIL_BACKOFF", "6h")
 
 
 def genfail_backoff_cap() -> float:
     """Ceiling (seconds) for the generation-failed retry backoff. Default 7d."""
-    return _duration_secs("AUTOCRAWLER_GENFAIL_BACKOFF_CAP", "7d")
+    return _duration_secs("JOBCRAWLER_GENFAIL_BACKOFF_CAP", "7d")
 
 
 def reopt_check() -> str:
@@ -493,7 +647,7 @@ def reopt_check() -> str:
     ``off`` disables it. A check only *dispatches* when the readiness gates (trainset
     growth + pool) pass and no compile is already running, so a daily check is not a
     daily compile — and an unconfigured optimizer model just no-ops the dispatch."""
-    return _str("AUTOCRAWLER_REOPT_CHECK", "24h")
+    return _str("JOBCRAWLER_REOPT_CHECK", "24h")
 
 
 def optimize_lock_path() -> str:
@@ -503,20 +657,20 @@ def optimize_lock_path() -> str:
     file for the whole run so a reopt tick that fires while a previous compile is
     still going is a no-op rather than a pile-up of concurrent runs fighting over the
     same trainset and generator dir. CWD-relative by default, like the trainset."""
-    return _str("AUTOCRAWLER_OPTIMIZE_LOCK", "optimize.lock")
+    return _str("JOBCRAWLER_OPTIMIZE_LOCK", "optimize.lock")
 
 
 def optimize_log_path() -> str:
     """Where the detached out-of-band optimize subprocess appends its stdout/stderr.
 
-    The §4.11 hand-off runs ``autocrawl optimize`` detached (it outlives the daemon),
+    The §4.11 hand-off runs ``jobcrawl optimize`` detached (it outlives the daemon),
     so its progress and the final PROMOTED / not-promoted line land here rather than
     on the daemon's console. CWD-relative by default, like the trainset."""
-    return _str("AUTOCRAWLER_OPTIMIZE_LOG", "optimize.log")
+    return _str("JOBCRAWLER_OPTIMIZE_LOG", "optimize.log")
 
 
 def trainset_stable_runs() -> int:
-    return _int("AUTOCRAWLER_TRAINSET_STABLE_RUNS", 3)
+    return _int("JOBCRAWLER_TRAINSET_STABLE_RUNS", 3)
 
 
 def promotion_eval_passes() -> int:
@@ -527,24 +681,24 @@ def promotion_eval_passes() -> int:
     luck. Averaging a few passes makes ``should_promote`` compare stable estimates.
     Default 3 (promotion rigor); set to 1 to restore single-pass (cheaper, noisier).
     """
-    return max(1, _int("AUTOCRAWLER_PROMOTION_EVAL_PASSES", 3))
+    return max(1, _int("JOBCRAWLER_PROMOTION_EVAL_PASSES", 3))
 
 
 def trainset_path() -> str:
     """The §4.11 trainset records store (one JSONL row per accepted generation)."""
-    return _str("AUTOCRAWLER_TRAINSET_PATH", "trainset.jsonl")
+    return _str("JOBCRAWLER_TRAINSET_PATH", "trainset.jsonl")
 
 
 def generator_dir() -> str:
-    """Where `autocrawl optimize` writes versioned, promoted ``generator-N.json``
-    artifacts; the operator points ``AUTOCRAWLER_GENERATOR_PATH`` at one to deploy."""
-    return _str("AUTOCRAWLER_GENERATOR_DIR", "generators")
+    """Where `jobcrawl optimize` writes versioned, promoted ``generator-N.json``
+    artifacts; the operator points ``JOBCRAWLER_GENERATOR_PATH`` at one to deploy."""
+    return _str("JOBCRAWLER_GENERATOR_DIR", "generators")
 
 
 def generator_path() -> str | None:
     """The single §4.11 config pointer to the active ``generator.json``; flipping it
     to a prior artifact is the rollback. Unset ⇒ boot from the baseline generator."""
-    return _opt("AUTOCRAWLER_GENERATOR_PATH")
+    return _opt("JOBCRAWLER_GENERATOR_PATH")
 
 
 def adopt_probation() -> timedelta | None:
@@ -560,7 +714,7 @@ def adopt_probation() -> timedelta | None:
     malformed value falls back to the default so a typo can't wedge the watcher; ``off``
     (or empty) returns None, leaving auto-adoption protected only by the margin gate.
     Host-side (§8) — the watcher never surfaces anything to the generator/RLM."""
-    raw = _str("AUTOCRAWLER_ADOPT_PROBATION", "48h")
+    raw = _str("JOBCRAWLER_ADOPT_PROBATION", "48h")
     if raw.strip().lower() in {"off", ""}:
         return None
     try:
@@ -581,7 +735,7 @@ def adopt_regression_delta() -> int:
     margin on top — one extra failure can be chance, a sustained increase of two
     distinct sites is the rollback signal. Floored at 1 so a 0/negative value can't make
     every adoption trip. Host-side (§8)."""
-    return max(1, _int("AUTOCRAWLER_ADOPT_REGRESSION_DELTA", 2))
+    return max(1, _int("JOBCRAWLER_ADOPT_REGRESSION_DELTA", 2))
 
 
 # --- Cloudflare / solver (§4.10) -------------------------------------------
@@ -592,7 +746,7 @@ def solver() -> str:
     news sites need no solver, and the in-process stealth backends aren't built, so
     a non-``none`` default would make ``make_solver`` raise on boot. ``flaresolverr``
     (+ ``FLARESOLVERR_URL``) is the opt-in backend."""
-    return _str("AUTOCRAWLER_SOLVER", "none")
+    return _str("JOBCRAWLER_SOLVER", "none")
 
 
 def flaresolverr_url() -> str | None:
@@ -600,11 +754,11 @@ def flaresolverr_url() -> str | None:
 
 
 def clearance_ttl() -> str:
-    return _str("AUTOCRAWLER_CLEARANCE_TTL", "30m")
+    return _str("JOBCRAWLER_CLEARANCE_TTL", "30m")
 
 
 def egress_proxy() -> str | None:
-    return _opt("AUTOCRAWLER_EGRESS_PROXY")
+    return _opt("JOBCRAWLER_EGRESS_PROXY")
 
 
 # --- review (§8) -----------------------------------------------------------
@@ -616,10 +770,10 @@ def review_gate() -> str:
       * ``auto`` — auto-promote (the default): back up the current live crawler to
         ``crawlers/_history/<slug>/`` then write the new one live, so the site
         self-heals — and a brand-new site bootstraps — unattended. Safety is the §6
-        gates plus versioned rollback (``autocrawl rollback``), not a human (the §4.8
+        gates plus versioned rollback (``jobcrawl rollback``), not a human (the §4.8
         "full-auto, gated by proof").
       * ``on`` — stage a crawler to ``crawlers/_pending/<slug>.py`` and mark the site
-        pending-review; an operator runs ``autocrawl promote``. A human approves every
+        pending-review; an operator runs ``jobcrawl promote``. A human approves every
         live change (most conservative).
       * ``off`` — write live with no backup (operator-trusted; no rollback copy).
 
@@ -628,7 +782,7 @@ def review_gate() -> str:
     its behavior. An *unset* gate now defaults to ``auto`` (autonomous); an unrecognized
     value still falls back to ``on`` (the safe, human-gated path).
     """
-    raw = os.getenv("AUTOCRAWLER_REVIEW_GATE")
+    raw = os.getenv("JOBCRAWLER_REVIEW_GATE")
     if raw is None:
         return "auto"
     value = raw.strip().lower()
@@ -645,28 +799,28 @@ def review_gate() -> str:
 
 
 def log_level() -> str:
-    """Root log level for the daemon/CLI (``AUTOCRAWLER_LOG_LEVEL``; default INFO).
+    """Root log level for the daemon/CLI (``JOBCRAWLER_LOG_LEVEL``; default INFO).
 
     Upper-cased so a lowercase value still names a level ``logging.setLevel`` accepts.
     """
-    return _str("AUTOCRAWLER_LOG_LEVEL", "INFO").upper()
+    return _str("JOBCRAWLER_LOG_LEVEL", "INFO").upper()
 
 
 def notify_webhook() -> str | None:
     """Optional webhook for operator alerts on autonomous actions (None = log only).
 
-    When ``AUTOCRAWLER_NOTIFY_WEBHOOK`` is an ``http(s)`` URL, every self-modifying
+    When ``JOBCRAWLER_NOTIFY_WEBHOOK`` is an ``http(s)`` URL, every self-modifying
     action (§4.8 heal/promote, §4.11 adopt, generator rollback) POSTs a small JSON
     payload there in addition to the log line, so an operator gets pushed an alert
     when the daemon changes its own code without having to tail logs. Best-effort and
     fire-and-forget: a webhook that is slow or down never blocks or aborts the action
-    (see :mod:`bizup_autocrawler.notify`). Unset → notifications are logged only."""
-    return _opt("AUTOCRAWLER_NOTIFY_WEBHOOK")
+    (see :mod:`jobcrawler.notify`). Unset → notifications are logged only."""
+    return _opt("JOBCRAWLER_NOTIFY_WEBHOOK")
 
 
 def notify_timeout() -> float:
-    """Per-POST timeout (seconds) for the notify webhook (``AUTOCRAWLER_NOTIFY_TIMEOUT``).
+    """Per-POST timeout (seconds) for the notify webhook (``JOBCRAWLER_NOTIFY_TIMEOUT``).
 
     Bounds how long a single best-effort delivery attempt waits before giving up, so a
     hung receiver can't pile up background threads. Default 10s."""
-    return _float("AUTOCRAWLER_NOTIFY_TIMEOUT", 10.0)
+    return _float("JOBCRAWLER_NOTIFY_TIMEOUT", 10.0)

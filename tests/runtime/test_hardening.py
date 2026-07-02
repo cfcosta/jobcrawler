@@ -15,7 +15,7 @@ import xml.etree.ElementTree as ET
 import pytest
 from defusedxml.common import DefusedXmlException
 
-from bizup_autocrawler.runtime.hardening import harden_xml
+from jobcrawler.runtime.hardening import harden_xml
 
 # A SYSTEM external-entity read (the classic file-exfiltration XXE).
 _XXE = (

@@ -1,18 +1,38 @@
-"""The crawl-state store (§4.7): seen/ingested dedup + run history.
+"""The crawl-state store (§4.7): position lifecycle + dedup + runs + match cache.
 
-The autocrawler owns a small state store decoupled from the news DB. SQLite is
-the v1 backend (Postgres is the §13 follow-up). It holds two things:
+The jobcrawler owns a small state store decoupled from any external sink. SQLite is
+the v1 backend (Postgres is the §13 follow-up). It carries the persistent memory that
+makes this a job *tracker* rather than a fire-and-forget ingester:
 
-  * **item state** — per (site, canonical URL): ``seen`` is set once the runner
-    has handled the URL (so it is not re-extracted), ``ingested`` is set only
-    after a 2xx from ``POST /news``. The seen-vs-ingested gap is the at-most-once
-    mitigation. mark_seen never downgrades an already-ingested URL.
-  * **run history** — one row per crawl with the §5 canonical Run record fields
-    (items_found / new_items / errors / pages_fetched), read by §4.8 health and
-    §4.9 scheduling.
+  * **position lifecycle** (the ``positions`` table) — one row per (site, canonical
+    URL). Each crawl ``upsert_position``s every job it yields, and the row remembers
+    ``first_seen`` (discovery), ``last_seen`` (every touch), a ``content_hash`` over the
+    job's identity fields (an edited posting is ``'changed'`` and gets re-matched; an
+    untouched one is ``'unchanged'`` and costs nothing), and a ``missing_streak``. Jobs
+    that stop appearing are diffed by ``close_missing`` and, after ``close_after_misses``
+    consecutive absences, marked ``closed``; ``expire_due`` closes rows past their stated
+    ``expires_at``. This open→closed lifecycle is precisely what a job *board* has and a
+    news feed does not. A closed posting that reappears REOPENS with its match verdict
+    intact, so a churned-then-returned role never re-bills the matcher.
 
-This module is persistence only. *When* to mark seen vs ingested (the §4.7
-failure-class re-attempt policy) is the runner's call, not the store's.
+  * **LLM match cache** (``match_cache`` + ``match_spend``) — the host-side profile
+    matcher (§6/§8) is the only LLM surface *outside* the crawl sandbox and it bills
+    tokens, so its verdicts are memoized by (content_hash, profile_hash, model,
+    prompt_version): an unchanged job under an unchanged profile is scored once, ever
+    (cache hits are free). ``match_spend`` is a per-UTC-day scored counter enforcing the
+    daily cap — jobs past it are flagged pending on their row (``match_pending``) and
+    drained by later runs, never dropped. Together these make matching idempotent and
+    budget-bounded.
+
+  * **item state / runs / health / schedule** — the original §4.7 surfaces are retained
+    byte-compatible (other subsystems still call them): per-(site,url) ``seen``/
+    ``ingested`` dedup that never downgrades an ingested URL, one ``RunRecord`` per crawl
+    (items/new/errors/pages + §4.8 drift ``signals``), the §4.8 health row + append-only
+    transition log, and the §4.9 learned interval.
+
+This module is persistence only. *When* to upsert, close, or match — and every threshold
+that decides it — is the runner/matcher's call, kept host-side (the §8 hidden-scorer
+invariant); the store records state and never invents policy.
 """
 
 from __future__ import annotations
@@ -20,13 +40,46 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _utc_iso(dt: datetime) -> str:
+    """Serialize a ``datetime`` as **UTC** ISO text so lexicographic compares are sound.
+
+    Every timestamp compare in this store is lexicographic on ISO text (``expire_due``'s
+    ``expires_at < now``, the health-log window). That is only correct if every value is
+    in the *same* zone: a naive datetime and an offset-aware one differ in both suffix
+    (``+00:00`` vs none) and wall-clock digits, so a Tokyo ``…T08:00+09:00`` (which is an
+    already-past ``…T23:00Z``) would sort *after* a UTC ``now`` and never expire. We
+    normalize first: a naive value is assumed UTC (the store's convention), an aware one
+    is converted to UTC, then isoformatted — so the compare is on true instants.
+    """
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.isoformat()
+
+
+def _sql_value(value: object) -> object:
+    """Coerce a crawler-supplied field value to a SQLite-storable scalar.
+
+    The only non-scalar a ``Job`` carries into ``positions`` is a ``datetime`` (its
+    ``posted_at``/``expires_at``), which we store as **UTC** ISO text (:func:`_utc_iso`)
+    like every other timestamp in this store — so ``expires_at`` compares lexicographically
+    against the clock in :meth:`StateStore.expire_due` on a true instant (a non-UTC or naive
+    expiry can't slip past the compare) and reads back through ``datetime.fromisoformat``.
+    Everything else (str/int/float/None) passes through untouched.
+    """
+    if isinstance(value, datetime):
+        return _utc_iso(value)
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +135,49 @@ class HealthRecord:
     attempts: int
 
 
+@dataclass(frozen=True, slots=True)
+class PositionRecord:
+    """One row of the ``positions`` table: a tracked job's full lifecycle state (§4.7).
+
+    Mirrors the row so the status/notify/rematch surfaces read a typed record rather
+    than a raw ``sqlite3.Row``. ISO-text timestamps are parsed back to aware
+    ``datetime`` (``None`` when unset) and the ``match_pending`` flag reads back as a
+    ``bool``, matching the ``RunRecord`` precedent. The store owns the lifecycle columns
+    (``first_seen``/``last_seen``/``missing_streak``/``status``/``closed_at``) and the
+    ``match_*`` verdict columns; the remainder are the crawler-supplied job fields
+    threaded verbatim through :meth:`StateStore.upsert_position`.
+    """
+
+    site: str
+    url: str
+    external_id: str | None
+    content_hash: str
+    title: str
+    company: str
+    location: str
+    discipline: str | None
+    level: str | None
+    workplace: str | None
+    salary_min: float | None
+    salary_max: float | None
+    salary_currency: str | None
+    salary_period: str | None
+    employment_type: str | None
+    department: str | None
+    posted_at: datetime | None
+    expires_at: datetime | None
+    first_seen: datetime
+    last_seen: datetime
+    missing_streak: int
+    status: str
+    closed_at: datetime | None
+    match_score: int | None
+    match_verdict: str | None
+    match_reasons: str | None
+    matched_at: datetime | None
+    match_pending: bool
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS items (
     site        TEXT NOT NULL,
@@ -122,7 +218,106 @@ CREATE TABLE IF NOT EXISTS schedule_state (
     interval_secs REAL NOT NULL,
     updated_at   TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS positions (
+    site            TEXT NOT NULL,
+    url             TEXT NOT NULL,
+    external_id     TEXT,
+    content_hash    TEXT NOT NULL,
+    title           TEXT NOT NULL,
+    company         TEXT NOT NULL,
+    location        TEXT NOT NULL,
+    discipline      TEXT,
+    level           TEXT,
+    workplace       TEXT,
+    salary_min      REAL,
+    salary_max      REAL,
+    salary_currency TEXT,
+    salary_period   TEXT,
+    employment_type TEXT,
+    department      TEXT,
+    posted_at       TEXT,
+    expires_at      TEXT,
+    first_seen      TEXT NOT NULL,
+    last_seen       TEXT NOT NULL,
+    missing_streak  INTEGER NOT NULL DEFAULT 0,
+    status          TEXT NOT NULL DEFAULT 'open',
+    closed_at       TEXT,
+    match_score     INTEGER,
+    match_verdict   TEXT,
+    match_reasons   TEXT,
+    matched_at      TEXT,
+    match_pending   INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (site, url)
+);
+CREATE TABLE IF NOT EXISTS match_cache (
+    content_hash   TEXT,
+    profile_hash   TEXT,
+    model          TEXT,
+    prompt_version TEXT,
+    verdict_json   TEXT NOT NULL,
+    created_at     TEXT NOT NULL,
+    PRIMARY KEY (content_hash, profile_hash, model, prompt_version)
+);
+CREATE TABLE IF NOT EXISTS match_spend (
+    day    TEXT PRIMARY KEY,
+    scored INTEGER NOT NULL DEFAULT 0
+);
 """
+
+# Columns of ``positions`` the runner supplies per crawl via ``upsert_position(fields=)``.
+# Everything else — the lifecycle (first_seen/last_seen/missing_streak/status/closed_at)
+# and the ``match_*`` verdict — is owned by the store's own methods and is never taken
+# from the caller's dict. Unknown keys are ignored, so a crawler that yields a field the
+# schema does not track (e.g. the raw ``description``, which only feeds ``content_hash``)
+# never breaks the upsert.
+_POSITION_FIELDS: frozenset[str] = frozenset(
+    {
+        "external_id",
+        "title",
+        "company",
+        "location",
+        "discipline",
+        "level",
+        "workplace",
+        "salary_min",
+        "salary_max",
+        "salary_currency",
+        "salary_period",
+        "employment_type",
+        "department",
+        "posted_at",
+        "expires_at",
+    }
+)
+
+# Additive column backfills for a ``positions`` table created before the lifecycle/match
+# columns existed (the §4.7 tracker + §6 matching layers landed on top of a base
+# site/url/hash/title/company/location/first_seen/last_seen row). Each is nullable or
+# carries a DEFAULT, so ``ALTER TABLE ADD COLUMN`` succeeds on a populated table; guarded
+# on ``PRAGMA table_info`` in ``_migrate`` so it is a no-op on a current DB. Mirrors the
+# runs.signals / site_health.attempts retrofits.
+_POSITION_ADD_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("external_id", "TEXT"),
+    ("discipline", "TEXT"),
+    ("level", "TEXT"),
+    ("workplace", "TEXT"),
+    ("salary_min", "REAL"),
+    ("salary_max", "REAL"),
+    ("salary_currency", "TEXT"),
+    ("salary_period", "TEXT"),
+    ("employment_type", "TEXT"),
+    ("department", "TEXT"),
+    ("posted_at", "TEXT"),
+    ("expires_at", "TEXT"),
+    ("missing_streak", "INTEGER NOT NULL DEFAULT 0"),
+    ("status", "TEXT NOT NULL DEFAULT 'open'"),
+    ("closed_at", "TEXT"),
+    ("match_score", "INTEGER"),
+    ("match_verdict", "TEXT"),
+    ("match_reasons", "TEXT"),
+    ("matched_at", "TEXT"),
+    ("match_pending", "INTEGER NOT NULL DEFAULT 0"),
+)
 
 
 class StateStore:
@@ -159,6 +354,18 @@ class StateStore:
             self._conn.execute(
                 "ALTER TABLE site_health ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0"
             )
+        # ``_SCHEMA`` already ran (executescript), so ``positions`` exists with its full
+        # column set on a fresh DB; on a DB that predates the lifecycle/match columns the
+        # CREATE IF NOT EXISTS left the old table alone and these ALTERs backfill the gap.
+        position_cols = {
+            row["name"] for row in self._conn.execute("PRAGMA table_info(positions)")
+        }
+        if (
+            position_cols
+        ):  # guard the empty-table_info case (table absent) belt-and-braces
+            for name, ddl in _POSITION_ADD_COLUMNS:
+                if name not in position_cols:
+                    self._conn.execute(f"ALTER TABLE positions ADD COLUMN {name} {ddl}")
 
     # -- item state (dedup) --------------------------------------------------
 
@@ -386,7 +593,7 @@ class StateStore:
 
         None means the controller has not yet recorded one (a freshly-added adaptive
         site), so the scheduler seeds from a default. Persistence only: the control
-        law lives in :mod:`bizup_autocrawler.adaptive`.
+        law lives in :mod:`jobcrawler.adaptive`.
         """
         row = self._conn.execute(
             "SELECT interval_secs FROM schedule_state WHERE site = ?", (site,)
@@ -404,6 +611,390 @@ class StateStore:
                 (site, secs, now, secs, now),
             )
             self._conn.commit()
+
+    # -- position lifecycle (§4.7 tracker) -----------------------------------
+
+    def upsert_position(
+        self, site: str, url: str, *, fields: dict[str, object], content_hash: str
+    ) -> str:
+        """Record a job seen this crawl; return ``'new'`` / ``'changed'`` / ``'unchanged'``.
+
+        The dedup key is ``content_hash`` (the runner hashes the job's identity fields —
+        title/company/location/description). Semantics the runner and matcher depend on:
+
+          * **no prior row** → insert it (``first_seen``/``last_seen`` = now) and return
+            ``'new'``.
+          * **prior row** → always touch ``last_seen`` and reset ``missing_streak`` to 0
+            (the job is present again, so any pending closure is cancelled), and refresh
+            the crawler-supplied fields (salary/expiry/etc. can drift without changing the
+            identity hash). Return ``'changed'`` iff the ``content_hash`` differs.
+          * **prior row was closed** → REOPEN it (``status='open'``, ``closed_at=NULL``)
+            and return ``'changed'`` so the reappearance is logged and re-surfaced.
+
+        The ``match_*`` columns are never touched here — the verdict *stays* across a
+        reopen or an edit. Combined with the (content_hash-keyed) match cache, a reopened
+        or unchanged job re-scores from cache for free and never re-bills the LLM; a truly
+        edited job (new hash) is collected as ``'changed'`` and re-scored, its new content
+        a cache miss. Unknown ``fields`` keys are ignored (see ``_POSITION_FIELDS``).
+        """
+        now = self._clock().isoformat()
+        cols = {k: _sql_value(v) for k, v in fields.items() if k in _POSITION_FIELDS}
+        with self._lock:
+            prior = self._conn.execute(
+                "SELECT content_hash, status FROM positions WHERE site = ? AND url = ?",
+                (site, url),
+            ).fetchone()
+            if prior is None:
+                values: dict[str, object] = {
+                    "site": site,
+                    "url": url,
+                    "content_hash": content_hash,
+                    "first_seen": now,
+                    "last_seen": now,
+                }
+                values.update(cols)
+                names = list(values)
+                self._conn.execute(
+                    f"INSERT INTO positions ({', '.join(names)}) "
+                    f"VALUES ({', '.join('?' for _ in names)})",
+                    tuple(values[n] for n in names),
+                )
+                self._conn.commit()
+                return "new"
+
+            reopening = prior["status"] == "closed"
+            changed = reopening or prior["content_hash"] != content_hash
+            assignments = [f"{k} = ?" for k in cols]
+            params: list[object] = list(cols.values())
+            assignments += ["content_hash = ?", "last_seen = ?", "missing_streak = 0"]
+            params += [content_hash, now]
+            if reopening:
+                assignments += ["status = 'open'", "closed_at = NULL"]
+            params += [site, url]
+            self._conn.execute(
+                f"UPDATE positions SET {', '.join(assignments)} "
+                "WHERE site = ? AND url = ?",
+                tuple(params),
+            )
+            self._conn.commit()
+            return "changed" if changed else "unchanged"
+
+    def close_missing(
+        self, site: str, present: set[str], *, threshold: int
+    ) -> list[str]:
+        """Age out ``site``'s open jobs absent from ``present``; return the newly closed.
+
+        ``present`` is every URL *seen alive* this crawl — the tracked (upserted) positions
+        PLUS any served-but-incomplete re-serve the completeness floor skipped (a
+        momentarily-truncated description must not age a live posting toward closure). For
+        every OPEN row of ``site`` whose URL is not in ``present``, increment
+        ``missing_streak``; a row that reaches ``threshold`` consecutive misses flips to
+        ``status='closed'`` with ``closed_at=now`` and is returned. A row that IS in
+        ``present`` is alive, so its streak is reset to 0: ``upsert_position`` already did
+        so for a tracked row, and this additionally clears a streak accrued by a row that
+        was only served incomplete this time — otherwise a truncated re-serve could silently
+        push a live posting toward closure. The streak gives a job a grace window (a
+        transient enumeration hiccup doesn't instantly close a live posting); the §4.7
+        mass-closure guard (only run this after a non-empty, error-free, enumerating crawl)
+        protects against a broken crawl closing the whole board at once.
+        """
+        now = self._clock().isoformat()
+        closed: list[str] = []
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT url, missing_streak FROM positions "
+                "WHERE site = ? AND status = 'open'",
+                (site,),
+            ).fetchall()
+            for row in rows:
+                if row["url"] in present:
+                    # Seen alive this crawl. A tracked row was already reset by
+                    # upsert_position; a served-but-incomplete re-serve was not, so clear
+                    # any accrued streak here — a truncated posting is still a live one.
+                    if row["missing_streak"]:
+                        self._conn.execute(
+                            "UPDATE positions SET missing_streak = 0 "
+                            "WHERE site = ? AND url = ?",
+                            (site, row["url"]),
+                        )
+                    continue
+                streak = row["missing_streak"] + 1
+                if streak >= threshold:
+                    self._conn.execute(
+                        "UPDATE positions SET missing_streak = ?, status = 'closed', "
+                        "closed_at = ? WHERE site = ? AND url = ?",
+                        (streak, now, site, row["url"]),
+                    )
+                    closed.append(row["url"])
+                else:
+                    self._conn.execute(
+                        "UPDATE positions SET missing_streak = ? "
+                        "WHERE site = ? AND url = ?",
+                        (streak, site, row["url"]),
+                    )
+            self._conn.commit()
+        return closed
+
+    def mark_closed(self, site: str, url: str, *, reason: str) -> None:
+        """Force-close one open position now (e.g. an expired-marker hit, an operator call).
+
+        Idempotent: only an OPEN row is closed (``closed_at`` is stamped once and not
+        re-written on a re-close). ``reason`` documents the caller's intent for the log/
+        notify line; the pinned §4.7 schema keeps no close-reason column, so it is not
+        persisted — closure is a single ``status``/``closed_at`` transition.
+        """
+        now = self._clock().isoformat()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE positions SET status = 'closed', closed_at = ? "
+                "WHERE site = ? AND url = ? AND status = 'open'",
+                (now, site, url),
+            )
+            self._conn.commit()
+
+    def expire_due(self) -> int:
+        """Close every open position whose ``expires_at`` is now past; return the count.
+
+        ``expires_at`` is ISO text and compared lexicographically against the clock, the
+        same UTC-isoformat-sorts-chronologically trick the health-log window uses — so the
+        runner must store an aware/UTC ``expires_at`` for the compare to be sound. NULL
+        expiries never match (the vast majority of postings state none).
+        """
+        now = self._clock().isoformat()
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE positions SET status = 'closed', closed_at = ? "
+                "WHERE status = 'open' AND expires_at IS NOT NULL AND expires_at < ?",
+                (now, now),
+            )
+            self._conn.commit()
+            return cur.rowcount
+
+    def open_positions(
+        self, site: str | None = None, *, limit: int = 500
+    ) -> list[PositionRecord]:
+        """Open positions, newest-discovered first — one site or the whole fleet."""
+        if site is None:
+            rows = self._conn.execute(
+                "SELECT * FROM positions WHERE status = 'open' "
+                "ORDER BY first_seen DESC, site, url LIMIT ?",
+                (limit,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM positions WHERE site = ? AND status = 'open' "
+                "ORDER BY first_seen DESC, url LIMIT ?",
+                (site, limit),
+            ).fetchall()
+        return [_to_position(r) for r in rows]
+
+    def open_urls(self, site: str, *, limit: int) -> list[str]:
+        """Open URLs for ``site``, stalest ``last_seen`` first (§4.9 recheck order).
+
+        Ordered least-recently-seen first so the recheck loop's cap spends its budget on
+        the positions most likely to have quietly closed — the ones that have fallen out
+        of a windowed source's (``enumerates_all=False``) recent view, where the
+        closure-diff is unsound and this per-URL re-verification stands in for it.
+        """
+        rows = self._conn.execute(
+            "SELECT url FROM positions WHERE site = ? AND status = 'open' "
+            "ORDER BY last_seen ASC, url LIMIT ?",
+            (site, limit),
+        ).fetchall()
+        return [row["url"] for row in rows]
+
+    def pending_urls(self, site: str, *, limit: int) -> list[str]:
+        """Open URLs for ``site`` still awaiting scoring (``match_pending = 1``), FIFO.
+
+        The runner's per-site drain seam (§4.7): a job parked over the daily/first-crawl
+        cap is a cache *miss* (never LLM-scored), so a plain re-crawl that re-yields it as
+        ``'unchanged'`` would never re-present it and it would starve. On a non-first crawl
+        the runner intersects this set with the positions re-seen this pass and hands the
+        overlap to :meth:`Matcher.score_new`, which finally scores them within budget —
+        the "drained by later runs" contract. Oldest-discovered first so the stalest
+        backlog drains first (mirrors :meth:`pending_matches`' FIFO order, scoped to one
+        site so a concurrent crawl fetches only its own backlog).
+        """
+        rows = self._conn.execute(
+            "SELECT url FROM positions WHERE site = ? AND status = 'open' "
+            "AND match_pending = 1 ORDER BY first_seen ASC, url LIMIT ?",
+            (site, limit),
+        ).fetchall()
+        return [row["url"] for row in rows]
+
+    def matches(self, min_score: int, *, limit: int = 50) -> list[PositionRecord]:
+        """Open, scored positions at or above ``min_score``, best fit first (§6)."""
+        rows = self._conn.execute(
+            "SELECT * FROM positions WHERE status = 'open' AND match_score IS NOT NULL "
+            "AND match_score >= ? ORDER BY match_score DESC, matched_at DESC, url LIMIT ?",
+            (min_score, limit),
+        ).fetchall()
+        return [_to_position(r) for r in rows]
+
+    def set_match(
+        self, site: str, url: str, *, score: int, verdict: str, reasons: str
+    ) -> None:
+        """Record a match verdict on a position and clear its pending flag (§6).
+
+        ``matched_at`` is stamped from the clock. Applied both for a fresh LLM verdict and
+        for a free cache hit — either way the row now carries the score and is no longer
+        pending. ``reasons`` is opaque text to the store (the matcher serializes its
+        rationale/concerns into it).
+        """
+        now = self._clock().isoformat()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE positions SET match_score = ?, match_verdict = ?, "
+                "match_reasons = ?, matched_at = ?, match_pending = 0 "
+                "WHERE site = ? AND url = ?",
+                (score, verdict, reasons, now, site, url),
+            )
+            self._conn.commit()
+
+    def set_match_pending(self, site: str, url: str) -> None:
+        """Flag a position as awaiting scoring — over the daily cap, or a match failure.
+
+        Deliberately does not touch ``match_score``: a job past the cap is *deferred*, not
+        rejected, and drained by :meth:`pending_matches` on a later run (fail-open — the
+        matcher never drops a job or raises into the crawl loop).
+        """
+        with self._lock:
+            self._conn.execute(
+                "UPDATE positions SET match_pending = 1 WHERE site = ? AND url = ?",
+                (site, url),
+            )
+            self._conn.commit()
+
+    def pending_matches(self, *, limit: int) -> list[PositionRecord]:
+        """Open positions awaiting scoring, oldest-discovered first (FIFO backlog drain)."""
+        rows = self._conn.execute(
+            "SELECT * FROM positions WHERE status = 'open' AND match_pending = 1 "
+            "ORDER BY first_seen ASC, site, url LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [_to_position(r) for r in rows]
+
+    def position_counts(self) -> dict[str, int]:
+        """Coarse lifecycle tallies for status surfaces.
+
+        ``matched`` counts open positions that carry a verdict (scored, any verdict incl.
+        reject); ``pending`` counts open positions still awaiting scoring. The two are
+        disjoint subsets of ``open`` (a scored row has ``match_pending=0``); an open row
+        can be in neither yet (newly discovered, not yet sent to the matcher). Callers
+        wanting only *good* matches filter with :meth:`matches`.
+        """
+
+        def _count(where: str) -> int:
+            row = self._conn.execute(
+                f"SELECT COUNT(*) AS n FROM positions WHERE {where}"
+            ).fetchone()
+            return int(row["n"])
+
+        return {
+            "open": _count("status = 'open'"),
+            "closed": _count("status = 'closed'"),
+            "matched": _count("status = 'open' AND match_score IS NOT NULL"),
+            "pending": _count("status = 'open' AND match_pending = 1"),
+        }
+
+    # -- LLM match cache & daily spend (§6/§8) --------------------------------
+
+    def cached_match(
+        self, content_hash: str, profile_hash: str, model: str, prompt_version: str
+    ) -> str | None:
+        """The cached verdict JSON for an exact (hash, profile, model, version) key, or None.
+
+        A hit means this job's content, under this profile, was already scored by this
+        model+prompt — so re-scoring it is free (no tokens). Any dimension differing (an
+        edited posting → new content_hash, an edited PROFILE.md → new profile_hash, a
+        model swap, a ``PROMPT_VERSION`` bump) misses and forces a fresh score.
+        """
+        row = self._conn.execute(
+            "SELECT verdict_json FROM match_cache WHERE content_hash = ? "
+            "AND profile_hash = ? AND model = ? AND prompt_version = ?",
+            (content_hash, profile_hash, model, prompt_version),
+        ).fetchone()
+        return row["verdict_json"] if row is not None else None
+
+    def cache_match(
+        self,
+        content_hash: str,
+        profile_hash: str,
+        model: str,
+        prompt_version: str,
+        verdict_json: str,
+    ) -> None:
+        """Memoize a fresh LLM verdict under its full cache key (upsert on the key)."""
+        now = self._clock().isoformat()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO match_cache (content_hash, profile_hash, model, "
+                "prompt_version, verdict_json, created_at) VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (content_hash, profile_hash, model, prompt_version) "
+                "DO UPDATE SET verdict_json = ?, created_at = ?",
+                (
+                    content_hash,
+                    profile_hash,
+                    model,
+                    prompt_version,
+                    verdict_json,
+                    now,
+                    verdict_json,
+                    now,
+                ),
+            )
+            self._conn.commit()
+
+    def match_spent(self, day: str) -> int:
+        """How many jobs have been LLM-scored on ``day`` (UTC ``YYYY-MM-DD``); 0 if none.
+
+        Only cache *misses* (real token spend) are counted by the matcher via
+        :meth:`bump_match_spend`; free cache hits are not, so the daily cap bounds spend,
+        not throughput.
+        """
+        row = self._conn.execute(
+            "SELECT scored FROM match_spend WHERE day = ?", (day,)
+        ).fetchone()
+        return int(row["scored"]) if row is not None else 0
+
+    def bump_match_spend(self, day: str, n: int) -> None:
+        """Add ``n`` scored jobs to ``day``'s counter (creating the day row on first use)."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO match_spend (day, scored) VALUES (?, ?) "
+                "ON CONFLICT (day) DO UPDATE SET scored = scored + ?",
+                (day, n, n),
+            )
+            self._conn.commit()
+
+    def reserve_match_spend(self, day: str, n: int, *, cap: int) -> int:
+        """Atomically claim up to ``n`` of ``day``'s remaining budget; return the grant.
+
+        The daily cap's concurrency-safe primitive (§4.7/§8). Reads the day's current spend
+        and increments it **under the same lock**, so the read-decide-write is one critical
+        section — a shared :class:`~jobcrawler.match.Matcher` fanned out across concurrent
+        ``asyncio.to_thread`` crawls can no longer each read a stale spend and collectively
+        overshoot ``cap`` by up to the concurrency (the TOCTOU the plain
+        ``match_spent`` + late ``bump_match_spend`` pair allowed). Returns
+        ``max(0, min(n, cap - current))``; the caller scores exactly that many and parks
+        the overflow pending. The grant is charged **up front** (before the LLM calls), so
+        the count reflects jobs *sent*, not just successfully scored — a failed batch still
+        burned tokens, and never under-counting is what keeps the shared cap sound.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT scored FROM match_spend WHERE day = ?", (day,)
+            ).fetchone()
+            current = int(row["scored"]) if row is not None else 0
+            granted = max(0, min(n, cap - current))
+            if granted:
+                self._conn.execute(
+                    "INSERT INTO match_spend (day, scored) VALUES (?, ?) "
+                    "ON CONFLICT (day) DO UPDATE SET scored = scored + ?",
+                    (day, granted, granted),
+                )
+                self._conn.commit()
+            return granted
 
     def close(self) -> None:
         self._conn.close()
@@ -431,4 +1022,41 @@ def _to_transition(row: sqlite3.Row) -> HealthTransition:
         from_state=row["from_state"],
         to_state=row["to_state"],
         ts=datetime.fromisoformat(row["ts"]),
+    )
+
+
+def _to_position(row: sqlite3.Row) -> PositionRecord:
+    def _dt(name: str) -> datetime | None:
+        raw = row[name]
+        return datetime.fromisoformat(raw) if raw else None
+
+    return PositionRecord(
+        site=row["site"],
+        url=row["url"],
+        external_id=row["external_id"],
+        content_hash=row["content_hash"],
+        title=row["title"],
+        company=row["company"],
+        location=row["location"],
+        discipline=row["discipline"],
+        level=row["level"],
+        workplace=row["workplace"],
+        salary_min=row["salary_min"],
+        salary_max=row["salary_max"],
+        salary_currency=row["salary_currency"],
+        salary_period=row["salary_period"],
+        employment_type=row["employment_type"],
+        department=row["department"],
+        posted_at=_dt("posted_at"),
+        expires_at=_dt("expires_at"),
+        first_seen=datetime.fromisoformat(row["first_seen"]),
+        last_seen=datetime.fromisoformat(row["last_seen"]),
+        missing_streak=row["missing_streak"],
+        status=row["status"],
+        closed_at=_dt("closed_at"),
+        match_score=row["match_score"],
+        match_verdict=row["match_verdict"],
+        match_reasons=row["match_reasons"],
+        matched_at=_dt("matched_at"),
+        match_pending=bool(row["match_pending"]),
     )

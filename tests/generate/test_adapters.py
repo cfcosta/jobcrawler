@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from bizup_autocrawler.generate.scoring import (
+from jobcrawler.generate.scoring import (
     FORCED_EXTRACTION_PENALTY,
     FORCED_FINAL_REASONING,
     CandidateResult,
@@ -28,7 +28,16 @@ _GOOD_SOURCE = 'SITE = "https://example.com"\ndef crawl(ctx):\n    yield None\n'
 
 
 def _sample(url: str = "https://example.com/a") -> dict[str, str]:
-    return {"url": url, "title": "A headline", "body": "x" * 600}
+    # A trackable posting: the §4.6 Job contract's required content fields
+    # (url + title/company/location/description) — the migrated scoring core
+    # vetoes on field presence and description length, not the old news `body`.
+    return {
+        "url": url,
+        "title": "Senior Backend Engineer",
+        "company": "Example Corp",
+        "location": "Remote",
+        "description": "x" * 600,
+    }
 
 
 def _result(
@@ -73,7 +82,7 @@ def _gold(site_url: str = "https://example.com") -> SimpleNamespace:
 
 
 def _metric(core: ScoringCore):
-    return make_metric(core, target_n=30, min_items=5, min_body_chars=400)
+    return make_metric(core, target_n=30, min_items=5, min_description_chars=400)
 
 
 def test_metric_returns_prediction_score_and_feedback() -> None:
@@ -98,11 +107,11 @@ def test_metric_completeness_failure_feeds_back_what_failed() -> None:
 def test_metric_feeds_back_axes_when_gates_pass_but_score_submaximal() -> None:
     # The bug fix: item_count=10 PASSES completeness (>= min_items 5) but is
     # sub-maximal (10/30). The old path returned feedback="" — no signal for GEPA;
-    # now the weak items axis is surfaced.
+    # now the weak opening-coverage axis is surfaced.
     out = _metric(_core(_result(item_count=10)))(_gold(), _pred())
     assert 0.0 < out.score < 1.0
     assert out.feedback != ""
-    assert "item coverage" in out.feedback
+    assert "opening coverage" in out.feedback
 
 
 def test_metric_feedback_nudges_toward_better_discovery() -> None:
@@ -155,14 +164,14 @@ def test_metric_reads_dspy_code_like_source() -> None:
 
 
 def test_reward_fn_returns_bare_float() -> None:
-    reward = make_reward_fn(_core(_result()), target_n=30, min_body_chars=400)
+    reward = make_reward_fn(_core(_result()), target_n=30, min_description_chars=400)
     value = reward({"site_url": "https://example.com"}, _pred())
     assert isinstance(value, float)
     assert value == pytest.approx(1.0)
 
 
 def test_reward_fn_applies_forced_extraction_penalty() -> None:
-    reward = make_reward_fn(_core(_result()), target_n=30, min_body_chars=400)
+    reward = make_reward_fn(_core(_result()), target_n=30, min_description_chars=400)
     clean = reward({"site_url": "https://example.com"}, _pred())
     forced = reward(
         {"site_url": "https://example.com"},
@@ -175,14 +184,16 @@ def test_reward_fn_vetoes_off_domain_items() -> None:
     reward = make_reward_fn(
         _core(_result(item_count=100, samples=[_sample("https://evil.com/x")])),
         target_n=30,
-        min_body_chars=400,
+        min_description_chars=400,
     )
     assert reward({"site_url": "https://example.com"}, _pred()) == 0.0
 
 
 def test_bootstrap_metric_returns_bare_float() -> None:
     # BootstrapFewShot compares the float against metric_threshold (not a Prediction).
-    metric = make_bootstrap_metric(_core(_result()), target_n=30, min_body_chars=400)
+    metric = make_bootstrap_metric(
+        _core(_result()), target_n=30, min_description_chars=400
+    )
     value = metric(_gold(), _pred())
     assert isinstance(value, float)
     assert value == pytest.approx(1.0)
@@ -190,11 +201,15 @@ def test_bootstrap_metric_returns_bare_float() -> None:
 
 def test_bootstrap_metric_ast_failure_is_zero_without_running_core() -> None:
     bad = 'import os\nSITE="https://example.com"\ndef crawl(ctx):\n    yield 1\n'
-    metric = make_bootstrap_metric(_exploding_core(), target_n=30, min_body_chars=400)
+    metric = make_bootstrap_metric(
+        _exploding_core(), target_n=30, min_description_chars=400
+    )
     assert metric(_gold(), _pred(bad)) == 0.0
 
 
 def test_bootstrap_metric_tolerates_the_dspy_trace_arg() -> None:
     # dspy passes (example, pred, trace) during bootstrapping; the metric must accept it.
-    metric = make_bootstrap_metric(_core(_result()), target_n=30, min_body_chars=400)
+    metric = make_bootstrap_metric(
+        _core(_result()), target_n=30, min_description_chars=400
+    )
     assert metric(_gold(), _pred(), ["a", "trace"]) == pytest.approx(1.0)

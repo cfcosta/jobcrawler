@@ -24,9 +24,9 @@ from pathlib import Path
 import dspy
 from dspy.primitives import CodeInterpreter
 
-from bizup_autocrawler import config
-from bizup_autocrawler.generate.budget import reset_subcalls
-from bizup_autocrawler.generate.signatures import DiscoveryStrategy, GenerateCrawler
+from jobcrawler import config
+from jobcrawler.generate.budget import reset_subcalls
+from jobcrawler.generate.signatures import DiscoveryStrategy, GenerateCrawler
 
 
 class CrawlerGenerator(dspy.Module):
@@ -185,30 +185,32 @@ def _steer(hints: str, discovery_plan: str) -> str:
 def site_features(corpus: Mapping[str, object]) -> str:
     """Per-site facts for the strategy predictor — to reason FROM, not memorize.
 
-    Deliberately a summary (counts + a few URLs), not the raw feed URLs, so GEPA
-    evolves generalizable strategy instead of hard-coding this site's endpoints.
+    Deliberately a summary (counts + a few URLs), not the raw ATS/feed URLs, so
+    GEPA evolves generalizable strategy instead of hard-coding this board's
+    endpoints.
     """
-    articles = corpus.get("articles") or []
+    postings = corpus.get("postings") or []
     feeds = corpus.get("feeds") or []
     apis = corpus.get("apis") or []
-    expected = corpus.get("expected_recent")
+    expected = corpus.get("expected_positions")
     lines = [
-        f"articles_in_corpus: {len(articles) if isinstance(articles, list) else 0}",
+        f"postings_in_corpus: {len(postings) if isinstance(postings, list) else 0}",
         f"feeds_found: {len(feeds) if isinstance(feeds, list) else 0}",
-        # A structured content API (e.g. WordPress REST) returns full bodies as
-        # paginated JSON — the best source; prefer it over feed/sitemap/scrape (§4.2).
-        f"structured_content_api: {bool(apis)}",
-        # The enumeration target: the plan must reach most of these, not a feed-sized
-        # sample — a feed/homepage that surfaces far fewer is under-enumerating (§6).
-        f"expected_recent_articles: {expected if isinstance(expected, int) else 0}",
+        # A known ATS (Greenhouse/Lever/Ashby/Gupy) exposes the WHOLE board as
+        # JSON — the best source; prefer it over feed/sitemap/scrape (§4.2).
+        f"ats_api: {bool(apis)}",
+        # The enumeration target: the plan must reach most of the board's open
+        # roles, not a feed-sized sample — a feed/homepage that surfaces far fewer
+        # is under-enumerating (§6).
+        f"expected_open_positions: {expected if isinstance(expected, int) else 0}",
         f"has_sitemap: {bool(corpus.get('sitemap'))}",
         f"robots_present: {bool(corpus.get('robots'))}",
     ]
-    if isinstance(articles, list):
+    if isinstance(postings, list):
         lines.extend(
-            f"article_url: {a.get('url', '')}"
-            for a in articles[:5]
-            if isinstance(a, Mapping)
+            f"posting_url: {p.get('url', '')}"
+            for p in postings[:5]
+            if isinstance(p, Mapping)
         )
     return "\n".join(lines)
 
@@ -286,12 +288,12 @@ def load_generator(
     Resolution order when ``path`` is not given: the mutable **active-generator
     pointer** (auto-adoption writes it; re-read each boot so the daemon picks up a
     newly-adopted generator without an env change) → else the static
-    ``AUTOCRAWLER_GENERATOR_PATH`` env var (the deploy default / fallback) → else the
+    ``JOBCRAWLER_GENERATOR_PATH`` env var (the deploy default / fallback) → else the
     baseline. Rolling the pointer back to a prior ``generator-N.json`` *is* the
     rollback. The live wiring (tools / sub_lm / interpreter / caps) is passed through
     to the rebuilt module; only the declarative strategy *state* comes from the artifact.
     """
-    from bizup_autocrawler import generator_pointer
+    from jobcrawler import generator_pointer
 
     def _build() -> CrawlerGenerator:
         return CrawlerGenerator(

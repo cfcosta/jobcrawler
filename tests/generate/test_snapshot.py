@@ -1,10 +1,15 @@
 """Tests for snapshot/corpus shaping (§4.2, §9).
 
-The generator reasons over a *prefetched* snapshot injected into the RLM REPL as
-a real variable. dspy serializes it as a Python literal and raises on any
+The generator reasons over a *prefetched* board snapshot injected into the RLM
+REPL as a real variable. dspy serializes it as a Python literal and raises on any
 non-JSON type, so the corpus must be an addressable dict of JSON primitives
 (addressable parts beat one blob — fewer tokens). Pyodide lacks grep/sed, so we
 ship plain-Python navigation helpers the prompt references.
+
+The job-board specifics are ATS detection: a host/URL pattern that names a known
+ATS (Greenhouse/Lever/Ashby/Gupy) becomes a candidate structured-API URL in the
+corpus, and when one answers during prefetch we sample real postings and the
+board's open-role count.
 """
 
 from __future__ import annotations
@@ -16,18 +21,18 @@ from typing import cast
 import httpx
 import pytest
 
-from bizup_autocrawler.generate.snapshot import (
+from jobcrawler.generate.snapshot import (
     REPL_HELPERS,
+    ats_api_candidates,
     build_corpus,
     count_sitemap_urls,
     ensure_json_primitive,
     on_domain_links,
-    pick_news_sitemap,
+    pick_jobs_sitemap,
     prefetch_corpus,
     sitemaps_from_robots,
-    wordpress_posts_api,
 )
-from bizup_autocrawler.runtime.ctx import Ctx
+from jobcrawler.runtime.ctx import Ctx
 
 
 def test_corpus_has_addressable_shape() -> None:
@@ -35,96 +40,128 @@ def test_corpus_has_addressable_shape() -> None:
         homepage="<html>home</html>",
         robots="User-agent: *",
         sitemap="<urlset/>",
-        articles=[{"url": "https://x.com/a", "title": "A", "text": "body"}],
+        postings=[{"url": "https://x.com/a", "title": "A", "text": "body"}],
     )
     assert set(corpus) == {
         "homepage",
         "robots",
         "sitemap",
         "sitemaps",
-        "expected_recent",
+        "expected_positions",
         "apis",
-        "articles",
+        "postings",
         "feeds",
     }
-    articles = corpus["articles"]
-    assert isinstance(articles, list)
-    assert articles[0] == {"url": "https://x.com/a", "title": "A", "text": "body"}
+    postings = corpus["postings"]
+    assert isinstance(postings, list)
+    assert postings[0] == {"url": "https://x.com/a", "title": "A", "text": "body"}
 
 
 def test_corpus_is_json_serializable() -> None:
     corpus = build_corpus(
-        homepage="h", articles=[{"url": "u", "title": "t", "text": "x"}]
+        homepage="h", postings=[{"url": "u", "title": "t", "text": "x"}]
     )
     # dspy injects it as a literal; if json.dumps works, the literal step will too.
     assert json.loads(json.dumps(corpus)) == corpus
 
 
-def test_articles_coerced_to_primitive_fields() -> None:
-    corpus = build_corpus(homepage="h", articles=[{"url": 123, "title": None}])
-    articles = corpus["articles"]
-    assert isinstance(articles, list)
-    assert articles[0] == {"url": "123", "title": "", "text": ""}
+def test_postings_coerced_to_primitive_fields() -> None:
+    corpus = build_corpus(homepage="h", postings=[{"url": 123, "title": None}])
+    postings = corpus["postings"]
+    assert isinstance(postings, list)
+    assert postings[0] == {"url": "123", "title": "", "text": ""}
 
 
 def test_defaults_are_empty_strings_and_list() -> None:
     corpus = build_corpus(homepage="h")
     assert corpus["robots"] == ""
     assert corpus["sitemap"] == ""
-    assert corpus["articles"] == []
+    assert corpus["postings"] == []
     assert corpus["sitemaps"] == []
-    assert corpus["expected_recent"] == 0
+    assert corpus["expected_positions"] == 0
     assert corpus["apis"] == []
 
 
-def test_wordpress_posts_api_detected_from_the_wp_json_link() -> None:
-    home = '<link rel="https://api.w.org/" href="https://x.com/wp-json/" />'
+# -- ATS detection -----------------------------------------------------------
+
+
+def test_ats_api_candidates_greenhouse_board_url() -> None:
+    assert ats_api_candidates("https://boards.greenhouse.io/acme") == [
+        "https://boards-api.greenhouse.io/v1/boards/acme/jobs?content=true"
+    ]
+
+
+def test_ats_api_candidates_greenhouse_from_homepage_embed() -> None:
+    # A company careers page that iframes its Greenhouse board — the token is read
+    # from the embed's for= param, not the site host.
+    home = (
+        '<iframe src="https://boards.greenhouse.io/embed/job_board?for=acmeco">'
+        "</iframe>"
+    )
+    assert ats_api_candidates("https://acme.com/careers", home) == [
+        "https://boards-api.greenhouse.io/v1/boards/acmeco/jobs?content=true"
+    ]
+
+
+def test_ats_api_candidates_lever_board_url() -> None:
+    assert ats_api_candidates("https://jobs.lever.co/acme") == [
+        "https://api.lever.co/v0/postings/acme?mode=json"
+    ]
+
+
+def test_ats_api_candidates_ashby_board_url() -> None:
+    assert ats_api_candidates("https://jobs.ashbyhq.com/acme") == [
+        "https://api.ashbyhq.com/posting-api/job-board/acme?includeCompensation=true"
+    ]
+
+
+def test_ats_api_candidates_gupy_board_url() -> None:
+    # Gupy's companyId lives in the board __NEXT_DATA__; the portal endpoint is still
+    # surfaced as the candidate the generator fills in.
+    assert ats_api_candidates("https://acme.gupy.io/") == [
+        "https://employability-portal.gupy.io/api/v1/jobs?limit=100"
+    ]
+
+
+def test_ats_api_candidates_empty_on_a_plain_careers_page() -> None:
+    # A hand-rolled careers page names no ATS — the generator gets no false candidate.
     assert (
-        wordpress_posts_api(home, "https://x.com/")
-        == "https://x.com/wp-json/wp/v2/posts"
+        ats_api_candidates("https://example.com/careers", "<html>Join our team</html>")
+        == []
     )
 
 
-def test_wordpress_posts_api_detected_from_wp_content_assets() -> None:
-    home = '<script src="/wp-content/themes/x/app.js"></script>'
-    assert (
-        wordpress_posts_api(home, "https://x.com/")
-        == "https://x.com/wp-json/wp/v2/posts"
-    )
-
-
-def test_wordpress_posts_api_absent_on_non_wordpress() -> None:
-    assert wordpress_posts_api("<html><body>hi</body></html>", "https://x.com/") is None
+# -- sitemaps / robots -------------------------------------------------------
 
 
 def test_sitemaps_from_robots_parses_sitemap_lines() -> None:
     robots = (
         "User-agent: *\nDisallow: /x\n"
-        "Sitemap: https://x.com/news.xml\n"
+        "Sitemap: https://x.com/jobs.xml\n"
         "sitemap: https://x.com/sitemap.xml\n"  # case-insensitive key
     )
     assert sitemaps_from_robots(robots) == [
-        "https://x.com/news.xml",
+        "https://x.com/jobs.xml",
         "https://x.com/sitemap.xml",
     ]
 
 
-def test_pick_news_sitemap_prefers_the_news_one() -> None:
+def test_pick_jobs_sitemap_prefers_the_jobs_one() -> None:
     assert (
-        pick_news_sitemap(["https://x.com/sitemap.xml", "https://x.com/news.xml"])
-        == "https://x.com/news.xml"
+        pick_jobs_sitemap(["https://x.com/sitemap.xml", "https://x.com/jobs.xml"])
+        == "https://x.com/jobs.xml"
     )
     assert (
-        pick_news_sitemap(["https://x.com/sitemap.xml"]) == "https://x.com/sitemap.xml"
+        pick_jobs_sitemap(["https://x.com/sitemap.xml"]) == "https://x.com/sitemap.xml"
     )
-    assert pick_news_sitemap([]) is None
+    assert pick_jobs_sitemap([]) is None
 
 
 def test_count_sitemap_urls_counts_locs_but_not_indexes() -> None:
     flat = "<urlset><url><loc>a</loc></url><url><loc>b</loc></url></urlset>"
     assert count_sitemap_urls(flat) == 2
     index = "<sitemapindex><sitemap><loc>child.xml</loc></sitemap></sitemapindex>"
-    assert count_sitemap_urls(index) == 0  # an index counts no articles
+    assert count_sitemap_urls(index) == 0  # an index counts no postings
 
 
 def test_ensure_json_primitive_accepts_nested_primitives() -> None:
@@ -167,6 +204,9 @@ def test_on_domain_links_filters_and_dedupes() -> None:
     ]
 
 
+# -- prefetch ----------------------------------------------------------------
+
+
 def test_prefetch_corpus_assembles_from_ctx() -> None:
     pages = {
         "/": (
@@ -192,16 +232,17 @@ def test_prefetch_corpus_assembles_from_ctx() -> None:
 
     assert corpus["robots"] == "User-agent: *"
     assert corpus["sitemap"] == "<urlset/>"
-    articles = cast("list[dict[str, str]]", corpus["articles"])
-    assert {a["url"] for a in articles} == {"https://x.com/a1", "https://x.com/a2"}
-    assert {a["text"] for a in articles} == {"Body of A1", "Body of A2"}
-    assert corpus["feeds"] == ["https://x.com/feed.xml"]  # feed-first discovery
+    assert corpus["apis"] == []  # not a known ATS -> scrape fallback
+    postings = cast("list[dict[str, str]]", corpus["postings"])
+    assert {p["url"] for p in postings} == {"https://x.com/a1", "https://x.com/a2"}
+    assert {p["text"] for p in postings} == {"Body of A1", "Body of A2"}
+    assert corpus["feeds"] == ["https://x.com/feed.xml"]  # feed discovery
 
 
 def test_prefetch_clips_oversized_content_but_discovers_from_the_full_page() -> None:
     # Raw pages run to 100s of KB; the snapshot must bound them (§9) or a reasoning
     # LM burns its whole token budget. Link discovery still uses the full homepage,
-    # so a clip that drops late links doesn't cost article samples.
+    # so a clip that drops late links doesn't cost posting samples.
     homepage = '<a href="/a1">A1</a>' + "x" * 200_000  # link is early, body is huge
     pages = {
         "/": homepage,
@@ -220,31 +261,31 @@ def test_prefetch_clips_oversized_content_but_discovers_from_the_full_page() -> 
         ),
     )
     corpus = prefetch_corpus(
-        "https://x.com/", ctx, homepage_chars=1000, article_chars=500
+        "https://x.com/", ctx, homepage_chars=1000, posting_chars=500
     )
 
     assert len(str(corpus["homepage"])) == 1000  # clipped
-    articles = cast("list[dict[str, str]]", corpus["articles"])
-    assert articles  # still discovered the link from the full page
-    assert all(len(a["text"]) <= 500 for a in articles)  # each sample clipped
+    postings = cast("list[dict[str, str]]", corpus["postings"])
+    assert postings  # still discovered the link from the full page
+    assert all(len(p["text"]) <= 500 for p in postings)  # each sample clipped
 
 
-def test_prefetch_discovers_news_sitemap_and_counts_expected_articles() -> None:
-    # robots advertises a news sitemap; prefetch fetches it (not the generic
+def test_prefetch_discovers_jobs_sitemap_and_counts_expected_positions() -> None:
+    # robots advertises a jobs sitemap; prefetch fetches it (not the generic
     # /sitemap.xml) and counts its <loc> entries as the enumeration target (§6).
-    news_xml = (
+    jobs_xml = (
         "<urlset>"
-        + "".join(f"<url><loc>https://x.com/n/{i}.html</loc></url>" for i in range(40))
+        + "".join(f"<url><loc>https://x.com/j/{i}.html</loc></url>" for i in range(40))
         + "</urlset>"
     )
     pages = {
         "/": "<a href='/a1'>A1</a>",
         "/robots.txt": (
             "User-agent: *\n"
-            "Sitemap: https://x.com/news.xml\n"
+            "Sitemap: https://x.com/jobs.xml\n"
             "Sitemap: https://x.com/sitemap.xml\n"
         ),
-        "/news.xml": news_xml,
+        "/jobs.xml": jobs_xml,
         "/a1": "Body",
     }
 
@@ -259,55 +300,65 @@ def test_prefetch_discovers_news_sitemap_and_counts_expected_articles() -> None:
     )
     corpus = prefetch_corpus("https://x.com/", ctx)
 
-    assert corpus["expected_recent"] == 40  # the news sitemap's article count
-    assert corpus["sitemap"] == news_xml  # the news sitemap text, for the RLM to use
+    assert corpus["expected_positions"] == 40  # the jobs sitemap's posting count
+    assert corpus["sitemap"] == jobs_xml  # the jobs sitemap text, for the RLM to use
     sitemaps = cast("list[str]", corpus["sitemaps"])
-    assert "https://x.com/news.xml" in sitemaps
+    assert "https://x.com/jobs.xml" in sitemaps
 
 
-def test_prefetch_samples_articles_from_the_wp_rest_api() -> None:
-    # A WordPress site: surface the REST API and take real article samples from it
-    # (full content.rendered), not guessed homepage links (§4.2).
-    home = '<link rel="https://api.w.org/" href="https://x.com/wp-json/" />'
-    posts = [
-        {
-            "link": "https://x.com/a-real-post",
-            "title": {"rendered": "Headline"},
-            "content": {"rendered": "<p>The full article body lives here.</p>"},
-        }
-    ]
+def test_prefetch_samples_postings_from_the_ats_api() -> None:
+    # A Greenhouse board: surface the structured API, take real posting samples from
+    # it (full content), and read meta.total as the enumeration target (§4.2, §6).
+    board = {
+        "meta": {"total": 42},
+        "jobs": [
+            {
+                "absolute_url": "https://boards.greenhouse.io/acme/jobs/1",
+                "title": "Senior Backend Engineer",
+                "content": "&lt;p&gt;Build the whole thing.&lt;/p&gt;",
+                "location": {"name": "Remote"},
+            }
+        ],
+    }
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if "/wp-json/wp/v2/posts" in str(request.url):
-            return httpx.Response(200, json=posts)
-        return httpx.Response(200, text=home if request.url.path == "/" else "")
+        if request.url.host == "boards-api.greenhouse.io":
+            return httpx.Response(200, json=board)
+        if request.url.path == "/":
+            return httpx.Response(200, text="<html>Acme careers</html>")
+        return httpx.Response(200, text="")
 
     ctx = Ctx(
-        {"x.com"},
+        {"boards.greenhouse.io", "boards-api.greenhouse.io"},
         client=httpx.Client(
             transport=httpx.MockTransport(handler), follow_redirects=False
         ),
     )
-    corpus = prefetch_corpus("https://x.com/", ctx)
+    corpus = prefetch_corpus("https://boards.greenhouse.io/acme", ctx)
 
-    assert corpus["apis"] == ["https://x.com/wp-json/wp/v2/posts"]
-    articles = cast("list[dict[str, str]]", corpus["articles"])
-    assert articles[0]["url"] == "https://x.com/a-real-post"
-    assert "full article body" in articles[0]["text"]
+    assert corpus["apis"] == [
+        "https://boards-api.greenhouse.io/v1/boards/acme/jobs?content=true"
+    ]
+    assert corpus["expected_positions"] == 42  # meta.total, the enumeration target
+    postings = cast("list[dict[str, str]]", corpus["postings"])
+    assert postings[0]["url"] == "https://boards.greenhouse.io/acme/jobs/1"
+    assert postings[0]["title"] == "Senior Backend Engineer"
+    assert "Build the whole thing" in postings[0]["text"]  # full (escaped) body
 
 
-def test_prefetch_non_wp_samples_exclude_nav_pages() -> None:
-    # Non-WordPress: fall back to homepage links, keeping article slugs and dropping
-    # tag/category/nav pages (those confuse the generator about the body location).
+def test_prefetch_scrape_samples_exclude_nav_pages() -> None:
+    # A plain (non-ATS) careers page: fall back to homepage links, keeping posting
+    # slugs and dropping about/team/nav pages (those confuse the generator about
+    # where the posting body lives).
     home = (
-        '<a href="/tag/economia">tag</a><a href="/category/news">cat</a>'
-        '<a href="/uma-noticia-real">article</a>'
+        '<a href="/about">about</a><a href="/team">team</a>'
+        '<a href="/careers/senior-backend-engineer">role</a>'
     )
     pages = {
         "/": home,
         "/robots.txt": "",
         "/sitemap.xml": "",
-        "/uma-noticia-real": "body",
+        "/careers/senior-backend-engineer": "Job body",
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -322,5 +373,7 @@ def test_prefetch_non_wp_samples_exclude_nav_pages() -> None:
     corpus = prefetch_corpus("https://x.com/", ctx)
 
     assert corpus["apis"] == []
-    articles = cast("list[dict[str, str]]", corpus["articles"])
-    assert {a["url"] for a in articles} == {"https://x.com/uma-noticia-real"}
+    postings = cast("list[dict[str, str]]", corpus["postings"])
+    assert {p["url"] for p in postings} == {
+        "https://x.com/careers/senior-backend-engineer"
+    }

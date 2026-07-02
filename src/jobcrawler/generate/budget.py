@@ -4,7 +4,7 @@
 the root loop, but ``max_llm_calls`` raises a **recoverable** in-sandbox error the
 generated code can catch and loop past — so it does not hard-bound sub-calls, and
 nothing bounds the fan-out that multiplies whole generations. The host therefore
-adds the **only unconditional** stop: a sub-call ceiling (``AUTOCRAWLER_MAX_SUBCALLS``,
+adds the **only unconditional** stop: a sub-call ceiling (``JOBCRAWLER_MAX_SUBCALLS``,
 set ≥ ``max_llm_calls``) enforced *outside* the sandbox, on the ``sub_lm`` the RLM
 calls for every ``llm_query``. The kill is a :class:`SubcallBudgetExceeded`, a
 ``BaseException`` the untrusted crawler's ``except Exception`` cannot swallow, so it
@@ -46,7 +46,7 @@ class SubcallBudget:
         if self.used > self._limit:
             raise SubcallBudgetExceeded(
                 f"sub-call budget exhausted: {self.used} > {self._limit} "
-                "(AUTOCRAWLER_MAX_SUBCALLS) — aborting the generation trajectory"
+                "(JOBCRAWLER_MAX_SUBCALLS) — aborting the generation trajectory"
             )
 
     def reset(self) -> None:

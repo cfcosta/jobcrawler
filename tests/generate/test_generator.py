@@ -17,8 +17,8 @@ from dspy.primitives import FinalOutput
 from dspy.utils import DummyLM
 from pytest import MonkeyPatch
 
-from bizup_autocrawler import config, generator_pointer
-from bizup_autocrawler.generate.generator import (
+from jobcrawler import config, generator_pointer
+from jobcrawler.generate.generator import (
     CrawlerGenerator,
     best_of_n,
     load_generator,
@@ -27,7 +27,7 @@ from bizup_autocrawler.generate.generator import (
     select_best,
     site_features,
 )
-from bizup_autocrawler.generate.snapshot import build_corpus
+from jobcrawler.generate.snapshot import build_corpus
 from tests.generate._mock_interpreter import MockInterpreter
 
 _CRAWLER = 'SITE = "https://example.com"\ndef crawl(ctx):\n    yield None\n'
@@ -63,31 +63,34 @@ def test_save_load_round_trips_the_strategy_instruction(tmp_path: object) -> Non
     assert "OPTIMIZED RULES" in reloaded_sig.instructions
 
 
-def test_site_features_summarizes_without_leaking_feed_urls() -> None:
+def test_site_features_summarizes_without_leaking_ats_urls() -> None:
     corpus = build_corpus(
         homepage="h",
         sitemap="<urlset/>",
-        articles=[{"url": "https://example.com/a", "title": "A", "text": "t"}],
+        postings=[{"url": "https://example.com/a", "title": "A", "text": "t"}],
     )
     features = site_features(corpus)
-    assert "articles_in_corpus: 1" in features
+    assert "postings_in_corpus: 1" in features
     assert "has_sitemap: True" in features
 
 
 def test_site_features_surfaces_the_enumeration_target() -> None:
-    # The generator is told how many recent articles the site has, so it reasons
-    # toward enumerating them instead of settling for a feed-sized sample (§6).
-    features = site_features(build_corpus(homepage="h", expected_recent=42))
-    assert "expected_recent_articles: 42" in features
+    # The generator is told how many open roles the board has, so it reasons toward
+    # enumerating them instead of settling for a feed-sized sample (§6).
+    features = site_features(build_corpus(homepage="h", expected_positions=42))
+    assert "expected_open_positions: 42" in features
 
 
-def test_site_features_flags_a_structured_content_api() -> None:
-    # A WordPress REST API (full bodies, paginated) is the best source — the strategy
-    # is told it exists so it prefers it over feed/sitemap/scrape (§4.2).
+def test_site_features_flags_a_structured_ats_api() -> None:
+    # A known ATS (whole board as JSON) is the best source — the strategy is told it
+    # exists so it prefers it over feed/sitemap/scrape (§4.2).
     features = site_features(
-        build_corpus(homepage="h", apis=["https://x.com/wp-json/wp/v2/posts"])
+        build_corpus(
+            homepage="h",
+            apis=["https://boards-api.greenhouse.io/v1/boards/acme/jobs?content=true"],
+        )
     )
-    assert "structured_content_api: True" in features
+    assert "ats_api: True" in features
 
 
 def test_forward_bridges_to_aforward_for_the_optimizers() -> None:
@@ -311,11 +314,11 @@ def test_rollback_flips_the_config_pointer_to_the_prior_artifact(
     save_generator(_optimized_generator("REGRESSED RULES"), current)
 
     # The single config pointer selects the active artifact (§4.11)...
-    monkeypatch.setenv("AUTOCRAWLER_GENERATOR_PATH", str(current))
+    monkeypatch.setenv("JOBCRAWLER_GENERATOR_PATH", str(current))
     assert "REGRESSED RULES" in _instruction_of(load_generator())
 
     # ...and rollback is just flipping it back to the kept prior generator.json.
-    monkeypatch.setenv("AUTOCRAWLER_GENERATOR_PATH", str(prior))
+    monkeypatch.setenv("JOBCRAWLER_GENERATOR_PATH", str(prior))
     assert "PRIOR RULES" in _instruction_of(load_generator())
 
 
@@ -330,7 +333,7 @@ def test_load_generator_prefers_the_pointer_over_the_env_var(
     save_generator(_optimized_generator("ADOPTED RULES"), adopted)
     save_generator(_optimized_generator("DEPLOY DEFAULT RULES"), deploy_default)
     monkeypatch.setattr(config, "generator_dir", lambda: str(tmp_path))
-    monkeypatch.setenv("AUTOCRAWLER_GENERATOR_PATH", str(deploy_default))
+    monkeypatch.setenv("JOBCRAWLER_GENERATOR_PATH", str(deploy_default))
     generator_pointer.set_active(str(adopted))
 
     assert "ADOPTED RULES" in _instruction_of(load_generator())
@@ -340,11 +343,11 @@ def test_load_generator_uses_the_env_var_when_no_pointer_is_set(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
     # No pointer (an existing deploy that never adopted) ⇒ the env var is the fallback,
-    # so systemd units that only set AUTOCRAWLER_GENERATOR_PATH still boot from it.
+    # so systemd units that only set JOBCRAWLER_GENERATOR_PATH still boot from it.
     deploy_default = tmp_path / "generator-1.json"
     save_generator(_optimized_generator("DEPLOY DEFAULT RULES"), deploy_default)
     monkeypatch.setattr(config, "generator_dir", lambda: str(tmp_path))
-    monkeypatch.setenv("AUTOCRAWLER_GENERATOR_PATH", str(deploy_default))
+    monkeypatch.setenv("JOBCRAWLER_GENERATOR_PATH", str(deploy_default))
     assert generator_pointer.active_generator_path() is None
 
     assert "DEPLOY DEFAULT RULES" in _instruction_of(load_generator())
@@ -362,7 +365,7 @@ def test_load_generator_explicit_arg_beats_pointer_and_env(
     save_generator(_optimized_generator("ADOPTED RULES"), adopted)
     save_generator(_optimized_generator("DEPLOY DEFAULT RULES"), deploy_default)
     monkeypatch.setattr(config, "generator_dir", lambda: str(tmp_path))
-    monkeypatch.setenv("AUTOCRAWLER_GENERATOR_PATH", str(deploy_default))
+    monkeypatch.setenv("JOBCRAWLER_GENERATOR_PATH", str(deploy_default))
     generator_pointer.set_active(str(adopted))
 
     assert "EXPLICIT RULES" in _instruction_of(load_generator(explicit))

@@ -1,9 +1,9 @@
 """Cloudflare / anti-bot challenge handling (§4.10).
 
-Most news sites use Cloudflare only as a CDN (plain httpx works) and feed-first
-discovery often sidesteps challenges, so escalation is **only on detection**.
-When a real challenge appears, ``ctx`` resolves it transparently — generated
-scripts never contain anti-bot logic.
+Most job boards / ATS endpoints sit behind Cloudflare only as a CDN (plain httpx
+works) and API-first discovery often sidesteps challenges, so escalation is
+**only on detection**. When a real challenge appears, ``ctx`` resolves it
+transparently — generated scripts never contain anti-bot logic.
 
 This module owns the pluggable pieces: challenge *detection*, the
 ``ChallengeSolver`` interface (``solve(url) -> Clearance``), the per-host
@@ -24,8 +24,8 @@ from typing import Protocol, runtime_checkable
 
 import httpx
 
-from bizup_autocrawler import config
-from bizup_autocrawler.durations import parse_duration
+from jobcrawler import config
+from jobcrawler.durations import parse_duration
 
 
 class ChallengeError(Exception):
@@ -130,7 +130,7 @@ def make_solver() -> ChallengeSolver | None:
     # stealth / nodriver / camoufox / patchright: need a real browser (not here).
     raise NotImplementedError(
         f"solver backend {backend!r} needs a stealth browser; set "
-        "AUTOCRAWLER_SOLVER=flaresolverr with FLARESOLVERR_URL, or =none"
+        "JOBCRAWLER_SOLVER=flaresolverr with FLARESOLVERR_URL, or =none"
     )
 
 

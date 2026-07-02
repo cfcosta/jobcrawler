@@ -14,7 +14,7 @@ never touches the network; omit it for live generation against the real site.
 
 The same isolation guards *committed* crawls on the production schedule:
 ``collect_crawler`` reuses the AST gate + rlimits + wall-clock machinery but emits
-**full** items (not bounded samples) so the host runner can dedup + ingest them —
+**full** jobs (not bounded samples) so the host runner can dedup + track them —
 a runaway committed crawler (infinite loop, memory blowup) is bounded and reported
 rather than allowed to wedge or OOM the daemon.
 
@@ -31,12 +31,12 @@ import sys
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 
-from bizup_autocrawler.generate.gates import check_ast
-from bizup_autocrawler.generate.scoring import CandidateResult, ExceptionInfo
-from bizup_autocrawler.runtime.contract import Item
+from jobcrawler.generate.gates import check_ast
+from jobcrawler.generate.scoring import CandidateResult, ExceptionInfo
+from jobcrawler.runtime.contract import Job
 
-_ENTRY = "bizup_autocrawler.runtime._sandbox_entry"
-_COLLECT_ENTRY = "bizup_autocrawler.runtime._collect_entry"
+_ENTRY = "jobcrawler.runtime._sandbox_entry"
+_COLLECT_ENTRY = "jobcrawler.runtime._collect_entry"
 
 
 def validate_crawler(
@@ -52,7 +52,7 @@ def validate_crawler(
 
     ``polite`` only bites on the live path (``replay is None``): when set, the child
     builds the §4.5-polite production ctx (per-host pacer + robots) via the same
-    ``build_live_ctx`` factory the scheduled crawl uses, so an ``autocrawl validate``
+    ``build_live_ctx`` factory the scheduled crawl uses, so an ``jobcrawl validate``
     dry-run mirrors exactly what production will fetch. It defaults off so offline
     generation/scoring keeps a bare ctx and is not reshaped by robots/pacing.
     """
@@ -112,12 +112,12 @@ class CollectResult:
     """The result of running a committed crawler in the §4.4 subprocess.
 
     Unlike :class:`CandidateResult` (size-bounded for the scorer), this carries
-    **every** validated :class:`Item` so the host can dedup + ingest them.
+    **every** validated :class:`Job` so the host can dedup + track them.
     ``errors`` counts contract-violating yields; ``exception`` is a top-level
     crash / timeout / gate rejection (the host folds it into the run's error count).
     """
 
-    items: list[Item]
+    items: list[Job]
     errors: int
     pages_fetched: int
     exception: ExceptionInfo | None = None
@@ -131,11 +131,11 @@ def collect_crawler(
     mem_mb: int = 1024,
     cpu_seconds: float = 120.0,
 ) -> CollectResult:
-    """Run a *committed* crawler in the §4.4 subprocess, returning FULL items.
+    """Run a *committed* crawler in the §4.4 subprocess, returning FULL jobs.
 
     Same isolation as :func:`validate_crawler` (AST gate → RLIMIT_AS / RLIMIT_CPU →
-    wall-clock timeout) but the child emits every item in full so the host can dedup
-    + ingest them. RLIMIT_CPU is decoupled from the wall-clock ``timeout``: a polite
+    wall-clock timeout) but the child emits every job in full so the host can dedup
+    + track them. RLIMIT_CPU is decoupled from the wall-clock ``timeout``: a polite
     crawl spends most of its wall-clock asleep between paced fetches, so the CPU cap
     stays tight (kills a compute spin) while the wall-clock budget stays generous
     (covers legitimately slow, paced crawls). Never raises — a hang, crash, or gate
@@ -180,12 +180,12 @@ def _collect_failed(kind: str, message: str, *, tail: str = "") -> CollectResult
 
 def _parse_collect(stdout: str) -> CollectResult:
     data = json.loads(stdout)
-    items: list[Item] = []
+    items: list[Job] = []
     errors = int(data.get("errors", 0))
     for raw in data.get("items", []):
         try:
-            items.append(Item.model_validate(raw))
-        except Exception:  # a malformed item dump from the child (should not happen)
+            items.append(Job.model_validate(raw))
+        except Exception:  # a malformed job dump from the child (should not happen)
             errors += 1
     exc = data.get("exception")
     exception = ExceptionInfo(**exc) if exc else None

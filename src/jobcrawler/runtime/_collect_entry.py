@@ -1,11 +1,12 @@
 """Subprocess entry for §4.4 isolation of a *committed* crawl — never in-process.
 
 The sibling of ``_sandbox_entry``: same isolated exec of an (already AST-gated)
-crawler through a ctx-only network path, but it emits **every** item in full
-(``url/title/body/published_at/source``) rather than 5 size-bounded samples, so
-the host runner can dedup + ingest them. A committed crawl runs against the *live*
-site (no replay) — SSRF-guarded as ever. Imports stay light (no dspy) so the child
-starts fast under the memory rlimit.
+crawler through a ctx-only network path, but it emits **every** job in full (the
+whole §4.6 ``Job``: url/title/company/location/description/source + optional
+salary/workplace/timestamps) rather than 5 size-bounded samples, so the host
+runner can dedup + track them. A committed crawl runs against the *live* site (no
+replay) — SSRF-guarded as ever. Imports stay light (no dspy) so the child starts
+fast under the memory rlimit.
 
 Reads ``{source, allowed_hosts}`` as JSON on stdin; writes
 ``{items, errors, pages_fetched, exception}`` as JSON to stdout.
@@ -19,11 +20,11 @@ import traceback
 from collections.abc import Callable, Iterable
 from typing import cast
 
-from bizup_autocrawler.runtime.contract import Item
-from bizup_autocrawler.runtime.ctx import Ctx
-from bizup_autocrawler.runtime.hardening import harden_xml
-from bizup_autocrawler.runtime.live_ctx import build_live_ctx
-from bizup_autocrawler.runtime.safe_exec import exec_crawler
+from jobcrawler.runtime.contract import Job
+from jobcrawler.runtime.ctx import Ctx
+from jobcrawler.runtime.hardening import harden_xml
+from jobcrawler.runtime.live_ctx import build_live_ctx
+from jobcrawler.runtime.safe_exec import exec_crawler
 
 
 def _build_ctx(allowed_hosts: set[str]) -> Ctx:
@@ -49,14 +50,14 @@ def main() -> None:
         namespace = exec_crawler(data["source"], filename="<crawler>")
         crawl = cast("Callable[[Ctx], Iterable[object]]", namespace["crawl"])
         for obj in crawl(ctx):
-            item = obj if isinstance(obj, Item) else None
-            if item is None:
+            job = obj if isinstance(obj, Job) else None
+            if job is None:
                 try:
-                    item = Item.model_validate(obj)
+                    job = Job.model_validate(obj)
                 except Exception:  # contract violation, not a crash
                     errors += 1
                     continue
-            items.append(item.model_dump(mode="json"))
+            items.append(job.model_dump(mode="json"))
     except Exception as exc:  # a mid-crawl raise: keep partial items, record the crash
         exception = {
             "type": type(exc).__name__,

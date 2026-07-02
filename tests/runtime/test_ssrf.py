@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import pytest
 
-from bizup_autocrawler.runtime.ssrf import SsrfError, check_url, is_on_domain
+from jobcrawler.runtime.ssrf import SsrfError, check_url, is_on_domain
 
 
 def test_on_domain_exact_and_subdomain() -> None:
     assert is_on_domain("example.com", {"example.com"})
-    assert is_on_domain("news.example.com", {"example.com"})
+    assert is_on_domain("jobs.example.com", {"example.com"})
 
 
 def test_off_domain_and_suffix_attack_rejected() -> None:
@@ -24,7 +24,7 @@ def test_off_domain_and_suffix_attack_rejected() -> None:
 
 
 def test_check_url_allows_on_domain() -> None:
-    check_url("https://news.example.com/story", {"example.com"})  # no raise
+    check_url("https://jobs.example.com/careers", {"example.com"})  # no raise
 
 
 def test_check_url_rejects_off_domain() -> None:

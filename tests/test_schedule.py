@@ -16,17 +16,27 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from pydantic import ValidationError
 
-from bizup_autocrawler.health import HealthState, RegenOutcome, SelfHealer
-from bizup_autocrawler.runtime.runner import CrawlSummary
-from bizup_autocrawler.schedule import CrawlFn, Scheduler, Site
-from bizup_autocrawler.state import StateStore
+from jobcrawler import config, schedule
+from jobcrawler.health import HealthState, RegenOutcome, SelfHealer
+from jobcrawler.profile import ProfileNotFound
+from jobcrawler.runtime.runner import CrawlSummary
+from jobcrawler.schedule import CrawlFn, Scheduler, Site, build_matcher
+from jobcrawler.state import StateStore
 
 UTC = timezone.utc
 T0 = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
 
 
 def _summary(slug: str) -> CrawlSummary:
-    return CrawlSummary(slug, items_found=1, new_items=1, errors=0, pages_fetched=1)
+    return CrawlSummary(
+        slug,
+        positions_found=1,
+        new_positions=1,
+        changed_positions=0,
+        closed_positions=0,
+        errors=0,
+        pages_fetched=1,
+    )
 
 
 async def _ok_crawl(site: Site) -> CrawlSummary:
@@ -222,7 +232,7 @@ async def test_gives_up_after_max_retries() -> None:
 
 
 def _stale_store(slug: str = "s0") -> StateStore:
-    # A baseline run that found items, then a zero-items run: a staleness candidate.
+    # A baseline run that found positions, then a zero-positions run: a staleness candidate.
     store = StateStore(":memory:", clock=lambda: T0)
     baseline = store.start_run(slug)
     store.finish_run(baseline, items_found=8, new_items=8, errors=0, pages_fetched=2)
@@ -279,7 +289,13 @@ async def test_tick_logs_each_crawl_outcome(caplog: pytest.LogCaptureFixture) ->
 
     async def crawl(site: Site) -> CrawlSummary:
         return CrawlSummary(
-            site.slug, items_found=4, new_items=2, errors=0, pages_fetched=3
+            site.slug,
+            positions_found=4,
+            new_positions=2,
+            changed_positions=0,
+            closed_positions=0,
+            errors=0,
+            pages_fetched=3,
         )
 
     sched = Scheduler(
@@ -288,7 +304,7 @@ async def test_tick_logs_each_crawl_outcome(caplog: pytest.LogCaptureFixture) ->
         crawl=crawl,
         clock=lambda: T0,
     )
-    with caplog.at_level(logging.INFO, logger="bizup_autocrawler.schedule"):
+    with caplog.at_level(logging.INFO, logger="jobcrawler.schedule"):
         await sched.tick()
 
     line = next(r.getMessage() for r in caplog.records if "slug=s0" in r.getMessage())
@@ -310,7 +326,7 @@ async def test_tick_warns_when_a_crawl_is_dropped_after_retries(
         clock=lambda: T0,
         max_retries=0,
     )
-    with caplog.at_level(logging.WARNING, logger="bizup_autocrawler.schedule"):
+    with caplog.at_level(logging.WARNING, logger="jobcrawler.schedule"):
         await sched.tick()
 
     assert any(
@@ -322,7 +338,7 @@ async def test_regen_tick_logs_a_summary(caplog: pytest.LogCaptureFixture) -> No
     # The §4.8 sweep logs a one-line state tally so a drifting fleet is visible.
     store = _stale_store()
     sched = _sched(store, healer=_healer(store, reprobe_items=0, regen_passes=False))
-    with caplog.at_level(logging.INFO, logger="bizup_autocrawler.schedule"):
+    with caplog.at_level(logging.INFO, logger="jobcrawler.schedule"):
         await sched.regen_tick()
 
     line = next(r.getMessage() for r in caplog.records if "assessed=" in r.getMessage())
@@ -340,7 +356,7 @@ async def test_run_logs_startup(caplog: pytest.LogCaptureFixture) -> None:
     )
     stop = asyncio.Event()
     stop.set()  # stop immediately; only the pre-loop startup line is under test
-    with caplog.at_level(logging.INFO, logger="bizup_autocrawler.schedule"):
+    with caplog.at_level(logging.INFO, logger="jobcrawler.schedule"):
         await sched.run(stop=stop, interval=0.001)
 
     assert any(
@@ -430,9 +446,9 @@ def test_reopt_off_disables_the_timer() -> None:
 def test_reopt_unset_uses_the_config_default_cadence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # reopt_check=None falls back to AUTOCRAWLER_REOPT_CHECK, which now defaults to a
+    # reopt_check=None falls back to JOBCRAWLER_REOPT_CHECK, which now defaults to a
     # real cadence (autonomous self-improvement on by default) → due on the first check.
-    monkeypatch.delenv("AUTOCRAWLER_REOPT_CHECK", raising=False)
+    monkeypatch.delenv("JOBCRAWLER_REOPT_CHECK", raising=False)
     assert _reopt_sched(reopt_check=None).reopt_due(T0) is True
 
 
@@ -464,7 +480,7 @@ def test_reopt_tick_isolates_a_dispatch_error(
         raise RuntimeError("spawn failed")
 
     sched = _reopt_sched(reopt_check="24h", reopt_dispatch=boom)
-    with caplog.at_level(logging.ERROR, logger="bizup_autocrawler.schedule"):
+    with caplog.at_level(logging.ERROR, logger="jobcrawler.schedule"):
         assert sched.reopt_tick() is False  # must not raise
     assert any("reopt dispatch failed" in r.getMessage() for r in caplog.records)
 
@@ -704,7 +720,15 @@ async def test_adaptive_interval_converges_over_repeated_busy_ticks() -> None:
     async def busy_crawl(site: Site) -> CrawlSummary:
         rid = store.start_run(site.slug)
         store.finish_run(rid, items_found=3, new_items=3, errors=0, pages_fetched=1)
-        return CrawlSummary(site.slug, 3, 3, 0, 1)
+        return CrawlSummary(
+            site.slug,
+            positions_found=3,
+            new_positions=3,
+            changed_positions=0,
+            closed_positions=0,
+            errors=0,
+            pages_fetched=1,
+        )
 
     sched = _adaptive_sched(store, crawl=busy_crawl)
     for _ in range(12):
@@ -743,20 +767,41 @@ class _Clock:
 
 async def _blackout(site: Site) -> CrawlSummary:
     return CrawlSummary(
-        site.slug, items_found=0, new_items=0, errors=1, pages_fetched=1
+        site.slug,
+        positions_found=0,
+        new_positions=0,
+        changed_positions=0,
+        closed_positions=0,
+        errors=1,
+        pages_fetched=1,
     )
 
 
 async def _teasers(site: Site) -> CrawlSummary:
-    # 10 items found, 9 below the completeness bar → body_quality 0.1 (< floor 0.5).
+    # 10 positions found, 9 with descriptions below the completeness bar →
+    # body_quality 0.1 (< the description-quality floor 0.5).
     return CrawlSummary(
-        site.slug, items_found=10, new_items=2, errors=0, pages_fetched=1, incomplete=9
+        site.slug,
+        positions_found=10,
+        new_positions=2,
+        changed_positions=0,
+        closed_positions=0,
+        errors=0,
+        pages_fetched=1,
+        incomplete=9,
     )
 
 
 async def _healthy(site: Site) -> CrawlSummary:
     return CrawlSummary(
-        site.slug, items_found=10, new_items=2, errors=0, pages_fetched=1, incomplete=0
+        site.slug,
+        positions_found=10,
+        new_positions=2,
+        changed_positions=0,
+        closed_positions=0,
+        errors=0,
+        pages_fetched=1,
+        incomplete=0,
     )
 
 
@@ -766,7 +811,7 @@ def _heal_sched(
     healer: _RecordingHealer | None,
     clock: _Clock,
     heal_cooldown: str = "6h",
-    body_quality_floor: float = 0.5,
+    description_quality_floor: float = 0.5,
 ) -> Scheduler:
     return Scheduler(
         [Site(slug="s0", url="https://x.com")],
@@ -776,7 +821,7 @@ def _heal_sched(
         clock=clock,
         regen_check="off",  # isolate the event path from the periodic sweep
         heal_cooldown=heal_cooldown,
-        body_quality_floor=body_quality_floor,
+        description_quality_floor=description_quality_floor,
     )
 
 
@@ -846,10 +891,24 @@ def test_drift_signal_boundary_is_the_floor() -> None:
     # body_quality exactly at the floor is healthy; just below it is drift.
     sched = _heal_sched(crawl=_healthy, healer=None, clock=_Clock(T0))
     at_floor = CrawlSummary(
-        "s0", items_found=10, new_items=0, errors=0, pages_fetched=1, incomplete=5
+        "s0",
+        positions_found=10,
+        new_positions=0,
+        changed_positions=0,
+        closed_positions=0,
+        errors=0,
+        pages_fetched=1,
+        incomplete=5,
     )
     below = CrawlSummary(
-        "s0", items_found=10, new_items=0, errors=0, pages_fetched=1, incomplete=6
+        "s0",
+        positions_found=10,
+        new_positions=0,
+        changed_positions=0,
+        closed_positions=0,
+        errors=0,
+        pages_fetched=1,
+        incomplete=6,
     )
     assert not sched._drift_signal(at_floor)  # 0.5 == floor → healthy
     assert sched._drift_signal(below)  # 0.4 < floor → drift
@@ -857,7 +916,7 @@ def test_drift_signal_boundary_is_the_floor() -> None:
 
 # -- §4.8/§4.11 master autonomy kill-switch ----------------------------------
 #
-# AUTOCRAWLER_AUTONOMY=off is the single operator brake: it must freeze every
+# JOBCRAWLER_AUTONOMY=off is the single operator brake: it must freeze every
 # self-*modifying* action (periodic regen, event-driven heal, out-of-band reopt —
 # and the auto-promote / auto-adopt those gate) while leaving crawl + ingest, and
 # adaptive cadence (timing, not code), fully live. Each test pins ``autonomy``
@@ -934,7 +993,7 @@ async def test_autonomy_off_is_announced_at_startup(
     sched = _autonomy_sched(autonomy=False)
     stop = asyncio.Event()
     stop.set()
-    with caplog.at_level(logging.INFO, logger="bizup_autocrawler.schedule"):
+    with caplog.at_level(logging.INFO, logger="jobcrawler.schedule"):
         await sched.run(stop=stop, interval=0.001)
     assert any("autonomy=OFF" in r.getMessage() for r in caplog.records)
 
@@ -983,7 +1042,7 @@ def test_adopt_watch_tick_isolates_a_watcher_error(
         raise RuntimeError("watcher blew up")
 
     sched = _adopt_sched(adopt_watch=boom)
-    with caplog.at_level(logging.ERROR, logger="bizup_autocrawler.schedule"):
+    with caplog.at_level(logging.ERROR, logger="jobcrawler.schedule"):
         sched.adopt_watch_tick(T0)  # must not raise
     assert any(
         "adoption regression watch failed" in r.getMessage() for r in caplog.records
@@ -1103,3 +1162,324 @@ async def test_a_raising_bootstrap_does_not_abort_the_tick() -> None:
 
     assert [s.site for s in summaries] == ["has"]
     assert healer.assessed == ["new"]  # attempted, raised, tick survived
+
+
+# -- Site model: job-domain fields (§4.6/§4.9) -------------------------------
+
+
+def test_site_defaults_company_none_and_enumerates_all_true() -> None:
+    # A board is assumed fully enumerable (the runner's guarded diff closes it); the
+    # display company is optional. These defaults keep every existing sites.yaml valid.
+    site = Site(slug="s", url="https://x.com")
+    assert site.company is None
+    assert site.enumerates_all is True
+
+
+def test_site_accepts_a_company_and_a_windowed_flag() -> None:
+    # RSS / latest-N feeds only ever expose a recent window, so they opt out of
+    # diff-closure (``enumerates_all=False``) and lean on the §4.9 recheck sweep instead.
+    site = Site(
+        slug="remoteok",
+        url="https://remoteok.com/remote-jobs",
+        company="RemoteOK",
+        enumerates_all=False,
+    )
+    assert site.company == "RemoteOK"
+    assert site.enumerates_all is False
+
+
+# -- §4.9 recheck timer: closure by re-verification + expiry -----------------
+#
+# Windowed sources (enumerates_all=False) can't be closed by the runner's diff, so a
+# recheck sweep re-fetches their known-open URLs and closes only the definitively-gone
+# ones (404/410 or an expired-posting marker), plus fleet-wide expiry via the store. It
+# is pure OBSERVATION, so — unlike regen/reopt — it stays live with autonomy off.
+
+
+class _RecheckStore(StateStore):
+    """A store whose §4.9 recheck surface returns canned data and records closures."""
+
+    def __init__(self, open_by_site: dict[str, list[str]], *, expired: int = 0) -> None:
+        super().__init__(":memory:")
+        self._open_by_site = open_by_site
+        self._expired = expired
+        self.closed: list[tuple[str, str, str]] = []
+
+    def expire_due(self) -> int:
+        return self._expired
+
+    def open_urls(self, site: str, *, limit: int) -> list[str]:
+        return list(self._open_by_site.get(site, [])[:limit])
+
+    def mark_closed(self, site: str, url: str, *, reason: str) -> None:
+        self.closed.append((site, url, reason))
+
+
+_MARKERS = ("no longer accepting applications", "position filled")
+
+
+def _recheck_sched(
+    store: StateStore,
+    *,
+    sites: list[Site],
+    fetch: schedule.RecheckFetch,
+    autonomy: bool = True,
+    cap: int = 150,
+) -> Scheduler:
+    return Scheduler(
+        sites,
+        store=store,
+        crawl=_ok_crawl,
+        clock=lambda: T0,
+        recheck_check="12h",
+        recheck_cap=cap,
+        recheck_fetch=fetch,
+        expired_markers=_MARKERS,
+        autonomy=autonomy,
+        regen_check="off",
+        reopt_check="off",
+    )
+
+
+async def _never_fetch(url: str) -> tuple[int, str]:  # pragma: no cover - guard
+    raise AssertionError(f"unexpected recheck fetch of {url}")
+
+
+def test_recheck_due_requires_both_a_cadence_and_a_fetch_seam() -> None:
+    store = StateStore(":memory:")
+    sites = [Site(slug="s0", url="https://x.com", enumerates_all=False)]
+    # A cadence but no fetch seam → disabled.
+    no_fetch = Scheduler(
+        sites, store=store, crawl=_ok_crawl, clock=lambda: T0, recheck_check="12h"
+    )
+    assert no_fetch.recheck_due(T0) is False
+    # A fetch seam but the cadence turned off → disabled.
+    no_cadence = Scheduler(
+        sites,
+        store=store,
+        crawl=_ok_crawl,
+        clock=lambda: T0,
+        recheck_check="off",
+        recheck_fetch=_never_fetch,
+    )
+    assert no_cadence.recheck_due(T0) is False
+    # Both wired → due on the first pass (no prior sweep recorded).
+    both = _recheck_sched(store, sites=sites, fetch=_never_fetch)
+    assert both.recheck_due(T0) is True
+
+
+def test_mark_recheck_advances_the_timer_by_one_interval() -> None:
+    sched = _recheck_sched(
+        StateStore(":memory:"),
+        sites=[Site(slug="s0", url="https://x.com", enumerates_all=False)],
+        fetch=_never_fetch,
+    )
+    assert sched.recheck_due(T0) is True
+    sched.mark_recheck(T0)
+    assert sched.recheck_due(T0) is False  # inside the 12h window now
+    assert sched.recheck_due(T0 + timedelta(hours=11, minutes=59)) is False
+    assert sched.recheck_due(T0 + timedelta(hours=12)) is True
+
+
+async def test_recheck_closes_only_definitively_gone_windowed_positions() -> None:
+    store = _RecheckStore({"remoteok": ["u1", "u2", "u3", "u4"]})
+
+    async def fetch(url: str) -> tuple[int, str]:
+        return {
+            "u1": (404, ""),  # removed → close
+            "u2": (200, "<h1>Still hiring</h1>"),  # live → keep
+            "u3": (200, "This position filled last week."),  # marker → close
+            "u4": (410, "Gone"),  # gone → close
+        }[url]
+
+    sched = _recheck_sched(
+        store,
+        sites=[Site(slug="remoteok", url="https://x.com", enumerates_all=False)],
+        fetch=fetch,
+    )
+    closed = await sched.recheck_tick()
+
+    assert closed == 3
+    assert store.closed == [
+        ("remoteok", "u1", "recheck http 404"),
+        ("remoteok", "u3", "recheck expired-marker 'position filled'"),
+        ("remoteok", "u4", "recheck http 410"),
+    ]
+
+
+async def test_recheck_skips_full_enumeration_sources() -> None:
+    # A full-enumeration board is closed by the runner's guarded diff, never re-fetched
+    # here — so even though it has open URLs, none are touched by the sweep.
+    fetched: list[str] = []
+    store = _RecheckStore({"windowed": ["w1"], "full": ["f1", "f2"]})
+
+    async def fetch(url: str) -> tuple[int, str]:
+        fetched.append(url)
+        return (404, "")
+
+    sched = _recheck_sched(
+        store,
+        sites=[
+            Site(slug="windowed", url="https://x.com", enumerates_all=False),
+            Site(slug="full", url="https://y.com", enumerates_all=True),
+        ],
+        fetch=fetch,
+    )
+    closed = await sched.recheck_tick()
+
+    assert fetched == ["w1"]  # only the windowed source was re-verified
+    assert closed == 1
+    assert store.closed == [("windowed", "w1", "recheck http 404")]
+
+
+async def test_recheck_expiry_closes_fleet_wide_and_is_counted() -> None:
+    # expire_due closes every past-``expires_at`` position across all sites (regardless of
+    # enumerates_all) and its count folds into the sweep total.
+    store = _RecheckStore({"windowed": []}, expired=4)
+    sched = _recheck_sched(
+        store,
+        sites=[Site(slug="windowed", url="https://x.com", enumerates_all=False)],
+        fetch=_never_fetch,
+    )
+    assert await sched.recheck_tick() == 4
+    assert store.closed == []  # expiry is the store's own UPDATE, not a mark_closed
+
+
+async def test_recheck_runs_with_autonomy_off() -> None:
+    # THE key invariant: recheck is observation, not self-modification, so the master
+    # autonomy brake must NOT freeze it (contrast regen/reopt, which it does freeze).
+    store = _RecheckStore({"remoteok": ["u1"]})
+
+    async def fetch(url: str) -> tuple[int, str]:
+        return (404, "")
+
+    sched = _recheck_sched(
+        store,
+        sites=[Site(slug="remoteok", url="https://x.com", enumerates_all=False)],
+        fetch=fetch,
+        autonomy=False,
+    )
+    assert sched.recheck_due(T0) is True
+    assert await sched.recheck_tick() == 1
+    assert store.closed == [("remoteok", "u1", "recheck http 404")]
+
+
+async def test_recheck_tolerates_a_transient_fetch_error() -> None:
+    # A fetch that raises is isolated and skipped — a blip must never close a live job,
+    # and one bad fetch must not abort the rest of the sweep. Closure is one-way.
+    store = _RecheckStore({"remoteok": ["boom", "u2"]})
+
+    async def fetch(url: str) -> tuple[int, str]:
+        if url == "boom":
+            raise RuntimeError("connection reset")
+        return (404, "")
+
+    sched = _recheck_sched(
+        store,
+        sites=[Site(slug="remoteok", url="https://x.com", enumerates_all=False)],
+        fetch=fetch,
+    )
+    assert await sched.recheck_tick() == 1
+    assert store.closed == [("remoteok", "u2", "recheck http 404")]
+
+
+def test_closure_reason_fires_only_on_definitive_gone_signals() -> None:
+    sched = _recheck_sched(
+        StateStore(":memory:"),
+        sites=[Site(slug="s0", url="https://x.com", enumerates_all=False)],
+        fetch=_never_fetch,
+    )
+    assert sched._closure_reason(404, "") == "recheck http 404"
+    assert sched._closure_reason(410, "") == "recheck http 410"
+    assert (
+        sched._closure_reason(200, "Sorry, this position filled.")
+        == "recheck expired-marker 'position filled'"
+    )
+    # Case-insensitive marker match.
+    assert (
+        sched._closure_reason(200, "NO LONGER ACCEPTING APPLICATIONS")
+        == "recheck expired-marker 'no longer accepting applications'"
+    )
+    # Ambiguous / live responses never close: a live 200, a server error, a 403.
+    assert sched._closure_reason(200, "<h1>Apply now</h1>") is None
+    assert sched._closure_reason(500, "") is None
+    assert sched._closure_reason(403, "") is None
+
+
+# -- build_matcher: host-side matcher wired at daemon startup (§8) ------------
+
+
+class _Pacer:
+    """A minimal §8 match-rate pacer (the Matcher's governor seam wants ``pace``)."""
+
+    def pace(self) -> None: ...
+
+
+class _FakeProfile:
+    profile_hash = "0123456789abcdeffedcba"
+
+
+def test_build_matcher_without_a_profile_disables_matching(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # No PROFILE.md → matching is disabled with a prominent warning, never a boot crash;
+    # the crawl/close loop runs unchanged.
+    def _raise(path: str) -> object:
+        raise ProfileNotFound(path)
+
+    monkeypatch.setattr(schedule, "load_profile", _raise)
+    with caplog.at_level(logging.WARNING, logger="jobcrawler.schedule"):
+        matcher = build_matcher(StateStore(":memory:"), governor=_Pacer())
+    assert matcher is None
+    assert any(
+        "matching disabled" in r.getMessage() and "PROFILE.md" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_build_matcher_without_a_model_disables_matching(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(schedule, "load_profile", lambda path: _FakeProfile())
+    monkeypatch.setattr(config, "match_model", lambda: None)
+    assert build_matcher(StateStore(":memory:"), governor=_Pacer()) is None
+
+
+def test_build_matcher_wires_the_matcher_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(schedule, "load_profile", lambda path: _FakeProfile())
+    monkeypatch.setattr(config, "match_model", lambda: "openai/gpt-x")
+    monkeypatch.setattr(config, "match_batch", lambda: 8)
+    monkeypatch.setattr(config, "match_daily_cap", lambda: 500)
+
+    captured: dict[str, object] = {}
+
+    class _StubMatcher:
+        def __init__(
+            self,
+            store: object,
+            profile: object,
+            *,
+            model: str,
+            batch: int,
+            daily_cap: int,
+            governor: object,
+            clock: object,
+        ) -> None:
+            captured.update(
+                model=model, batch=batch, daily_cap=daily_cap, governor=governor
+            )
+
+    monkeypatch.setattr("jobcrawler.match.Matcher", _StubMatcher)
+    gov = _Pacer()
+    matcher = build_matcher(
+        StateStore(":memory:"), governor=gov, profile_path="PROFILE.md"
+    )
+    assert isinstance(matcher, _StubMatcher)
+    assert captured == {
+        "model": "openai/gpt-x",
+        "batch": 8,
+        "daily_cap": 500,
+        "governor": gov,
+    }

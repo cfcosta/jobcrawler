@@ -14,7 +14,7 @@ from collections.abc import Collection
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 # Exact param names dropped as tracking junk. ``utm_*`` is always dropped by
-# prefix (below); this is the configurable remainder (AUTOCRAWLER_TRACKING_PARAM_DENYLIST).
+# prefix (below); this is the configurable remainder (JOBCRAWLER_TRACKING_PARAM_DENYLIST).
 DEFAULT_TRACKING_PARAMS: frozenset[str] = frozenset(
     {
         "fbclid",

@@ -14,16 +14,16 @@ import pytest
 
 from datetime import timedelta
 
-from bizup_autocrawler.runtime.contract import Ctx as CtxProtocol
-from bizup_autocrawler.runtime.ctx import Ctx, PageLimitError
-from bizup_autocrawler.runtime.politeness import RobotsDisallowedError
-from bizup_autocrawler.runtime.solver import (
+from jobcrawler.runtime.contract import Ctx as CtxProtocol
+from jobcrawler.runtime.ctx import Ctx, PageLimitError
+from jobcrawler.runtime.politeness import RobotsDisallowedError
+from jobcrawler.runtime.solver import (
     ChallengeError,
     ChallengeSolver,
     Clearance,
     ClearanceCache,
 )
-from bizup_autocrawler.runtime.ssrf import SsrfError
+from jobcrawler.runtime.ssrf import SsrfError
 
 Handler = Callable[[httpx.Request], httpx.Response]
 

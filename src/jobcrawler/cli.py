@@ -1,17 +1,22 @@
-"""Operator CLI (§10): ``run | generate | validate | crawl | promote | rollback | list | status``.
+"""Operator CLI (§10): ``run | generate | validate | crawl | promote | rollback |
+list | status | positions | matches | rematch | profile``.
 
 ``run`` is the primary deployment entrypoint (the service schedules itself, §4.9);
 ``crawl`` is for manual one-shot runs and CI; ``validate`` dry-runs a committed
-script through the §4.4 sandbox with **no ingest**; ``generate`` runs the RLM and
+script through the §4.4 sandbox with **no upsert**; ``generate`` runs the RLM and
 gates before writing ``crawlers/<slug>.py`` (it needs a configured LM + Deno, so
 its heavy deps are imported lazily); ``promote`` moves a self-heal crawler staged
 under ``crawlers/_pending`` (§14.2) to live; ``list`` shows sites, script presence,
 last-run health, and the §4.9 learned crawl cadence; ``status`` is the M4
 observability read — per-site run aggregates + drift-transition counts, fleet health
-distribution, drift-recovery MTTR, and the §4.11 self-improvement state (active
-generator + held-out score, any adoption probation, and the autonomy brake). The
-list/validate/crawl/status wiring is thin over already-tested backends; the live
-paths are correct-by-construction.
+distribution, drift-recovery MTTR, the §4.7 position lifecycle tallies + §4.7 match
+spend, and the §4.11 self-improvement state.
+
+The job-tracking surfaces read the §4.7 ``positions`` store host-side: ``positions``
+lists open jobs, ``matches`` ranks the scored ones by fit, ``rematch`` drains the
+pending-match backlog and re-evaluates verdicts after a ``PROFILE.md`` edit, and
+``profile`` pretty-prints the active candidate profile. The list/validate/crawl/status
+wiring is thin over already-tested backends; the live paths are correct-by-construction.
 """
 
 from __future__ import annotations
@@ -19,28 +24,28 @@ from __future__ import annotations
 import argparse
 import ast
 import asyncio
+import json
 import logging
 import os
 import signal
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from typing import TYPE_CHECKING
 
 import yaml
 from pydantic import ValidationError
 
-from bizup_autocrawler import config, generator_pointer
-from bizup_autocrawler.generate.scoring import CandidateResult
-from bizup_autocrawler.governor import RateGovernor
-from bizup_autocrawler.health import (
+from jobcrawler import config, generator_pointer
+from jobcrawler.generate.scoring import CandidateResult
+from jobcrawler.governor import RateGovernor
+from jobcrawler.health import (
     HealthState,
     RegenOutcome,
     SelfHealer,
     staleness_candidate,
 )
-from bizup_autocrawler.ingest import NewsClient
-from bizup_autocrawler.metrics import (
+from jobcrawler.metrics import (
     aggregate_runs,
     drift_mttr,
     health_distribution,
@@ -48,21 +53,25 @@ from bizup_autocrawler.metrics import (
     recovery_events,
     transition_events,
 )
-from bizup_autocrawler.runtime.runner import (
+from jobcrawler.profile import ProfileNotFound, load_profile
+from jobcrawler.runtime.runner import (
     CrawlSummary,
     crawl_site_isolated,
     probe_isolated,
 )
-from bizup_autocrawler.runtime.sandbox import validate_crawler
-from bizup_autocrawler.schedule import Scheduler, Site
-from bizup_autocrawler.sites import find_site, load_sites
-from bizup_autocrawler.state import RunRecord, StateStore
-from bizup_autocrawler.trainset import record_failure
-from bizup_autocrawler.urls import normalize_host
+from jobcrawler.runtime.sandbox import validate_crawler
+from jobcrawler.schedule import Scheduler, Site
+from jobcrawler.sites import find_site, load_sites
+from jobcrawler.state import PositionRecord, RunRecord, StateStore
+from jobcrawler.trainset import record_failure
+from jobcrawler.urls import normalize_host
+
+if TYPE_CHECKING:
+    from jobcrawler.match import Matcher
 
 _CRAWLERS_DIR = Path(config.crawlers_dir())
 
-_log = logging.getLogger("bizup_autocrawler.cli")
+_log = logging.getLogger("jobcrawler.cli")
 
 _LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
 
@@ -70,14 +79,14 @@ _LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
 def _configure_logging() -> None:
     """Route the daemon/CLI's structured logs to stderr at the configured level (§4.9).
 
-    Without this the run loop's INFO heartbeat — each crawl's item counts, the regen
+    Without this the run loop's INFO heartbeat — each crawl's position counts, the regen
     sweep tally — is swallowed and a production daemon looks dead. ``basicConfig`` is a
     no-op once the root logger has handlers, so we also set our package logger's level
-    explicitly to honor ``AUTOCRAWLER_LOG_LEVEL`` even on a second entry.
+    explicitly to honor ``JOBCRAWLER_LOG_LEVEL`` even on a second entry.
     """
     level = config.log_level()
     logging.basicConfig(level=level, format=_LOG_FORMAT)
-    logging.getLogger("bizup_autocrawler").setLevel(level)
+    logging.getLogger("jobcrawler").setLevel(level)
 
 
 def _crawler_file(slug: str, crawlers_dir: Path = _CRAWLERS_DIR) -> Path:
@@ -135,7 +144,7 @@ def _health_label(
     A generation-failed or pending-review site still *looks* like a staleness
     candidate from its run history, so re-deriving would mislabel it "stale" (implying
     it self-heals); the persisted state (§4.8, §14.2) is authoritative — gen-failed
-    needs an operator, pending-review awaits ``autocrawl promote``.
+    needs an operator, pending-review awaits ``jobcrawl promote``.
     """
     persisted = store.get_health(slug)
     if persisted == HealthState.GENERATION_FAILED.value:
@@ -162,7 +171,7 @@ def _cadence_label(store: StateStore, site: Site) -> str:
 def render_list(
     sites: Sequence[Site], store: StateStore, *, crawlers_dir: Path = _CRAWLERS_DIR
 ) -> list[str]:
-    """One line per site: enabled flag, script presence, last item count, health, cadence.
+    """One line per site: enabled flag, script presence, last position count, health, cadence.
 
     ``every=`` surfaces the §4.9 learned adaptive interval (or ``adaptive``/``fixed``)
     so an operator can see at a glance how often each source is actually being polled."""
@@ -171,12 +180,12 @@ def render_list(
         has_script = _crawler_file(site.slug, crawlers_dir).exists()
         history = store.runs_for(site.slug)
         last = history[0] if history else None
-        items = str(last.items_found) if last is not None else "-"
+        positions = str(last.items_found) if last is not None else "-"
         health = _health_label(store, site.slug, history, last is not None)
         rows.append(
             f"{site.slug:24} {'on' if site.enabled else 'off':3} "
             f"{'script' if has_script else 'no-script':9} "
-            f"last_items={items:>4} health={health:<14} "
+            f"positions={positions:>4} health={health:<14} "
             f"every={_cadence_label(store, site)}"
         )
     return rows
@@ -223,8 +232,36 @@ def _generator_line() -> str:
     return line
 
 
+def _positions_block(store: StateStore) -> list[str]:
+    """The §4.7 job-tracking footer for ``status``: lifecycle tallies, match spend
+    against the daily cap, and the current strongest match as a teaser.
+
+    Fleet-wide (not per-site): ``position_counts`` folds the whole ``positions`` table,
+    ``match_spent`` reads today's token draw against ``match_daily_cap`` (the §8 budget
+    backstop), and ``matches`` surfaces the single best open+scored fit so an operator
+    reading ``status`` sees whether anything worth acting on has landed.
+    """
+    counts = store.position_counts()
+    lines = [
+        f"positions: open={counts['open']} closed={counts['closed']} "
+        f"matched={counts['matched']} pending={counts['pending']}"
+    ]
+    day = datetime.now(timezone.utc).date().isoformat()
+    lines.append(
+        f"match spend: {store.match_spent(day)}/{config.match_daily_cap()} today"
+    )
+    top = store.matches(config.match_min_score(), limit=1)
+    if top:
+        best = top[0]
+        lines.append(f"top match: [{best.match_score}] {best.title} @ {best.company}")
+    else:
+        lines.append("top match: none")
+    return lines
+
+
 def render_status(sites: Sequence[Site], store: StateStore) -> list[str]:
-    """Operator status surface (M4): per-site run totals, fleet health, drift MTTR.
+    """Operator status surface (M4): per-site run totals, fleet health, drift MTTR, the
+    §4.7 position lifecycle + §4.7 match spend, and the §4.11 self-improvement state.
 
     Surfaces the otherwise-unwired metrics.py: ``aggregate_runs`` folds each site's run
     history (so an operator reads the fleet without touching the DB), ``health_distribution``
@@ -237,10 +274,10 @@ def render_status(sites: Sequence[Site], store: StateStore) -> list[str]:
     history (``recovery_events``), labeled *observed* to flag the approximation.
 
     Each per-site line also carries ``transitions=`` — how many health-log rows the
-    site has accrued, i.e. how churny its drift lifecycle has been. Two fleet-wide
-    footer lines surface the §4.11 self-improvement state: the active generator
-    (version + held-out score, plus any probation the P4c watcher still holds it under)
-    and the master ``autonomy`` brake (``on``/``OFF``).
+    site has accrued. A job-tracking block (open/closed/matched/pending positions,
+    today's match spend vs the daily cap, and the top open match) and two fleet-wide
+    footer lines surface the §4.11 self-improvement state: the active generator and the
+    master ``autonomy`` brake (``on``/``OFF``).
     """
     lines: list[str] = []
     states: list[HealthState] = []
@@ -282,6 +319,9 @@ def render_status(sites: Sequence[Site], store: StateStore) -> list[str]:
         lines.append(
             f"drift recovery MTTR (observed): {'n/a' if mttr is None else mttr}"
         )
+    # §4.7 job-tracking block: position lifecycle tallies, match spend vs the daily
+    # cap, and the strongest open match — the numbers a jobs operator actually reads.
+    lines.extend(_positions_block(store))
     # Fleet-wide self-improvement state (§4.11): the active generator + held-out score,
     # any probation the watcher is still holding it under, and whether the master
     # autonomy brake is engaged (OFF = the daemon is crawling but self-modification —
@@ -291,11 +331,74 @@ def render_status(sites: Sequence[Site], store: StateStore) -> list[str]:
     return lines
 
 
+# -- positions / matches -----------------------------------------------------
+
+
+def _trunc(text: str | None, width: int) -> str:
+    """Truncate to ``width`` display cells (ellipsis on overflow), for aligned columns."""
+    text = text or ""
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+def _humanize_age(dt: datetime | None, *, now: datetime | None = None) -> str:
+    """A compact age (``2h``/``3d``) since ``dt``; ``-`` when unknown, ``0s`` if future."""
+    if dt is None:
+        return "-"
+    now = now or datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    secs = (now - dt).total_seconds()
+    return _humanize_secs(max(0.0, secs))
+
+
+def render_positions(rows: Sequence[PositionRecord]) -> list[str]:
+    """Aligned columns — score, title, company, location, workplace, age — one per job.
+
+    ``score`` is the §4.7 match score (``-`` when unscored); ``age`` counts from the
+    posting's ``posted_at`` when the source stated one, else from ``first_seen``.
+    """
+    out: list[str] = []
+    for p in rows:
+        score = "-" if p.match_score is None else str(p.match_score)
+        out.append(
+            f"{score:>4}  {_trunc(p.title, 34):34}  {_trunc(p.company, 20):20}  "
+            f"{_trunc(p.location, 18):18}  {(p.workplace or '-'):8}  "
+            f"{_humanize_age(p.posted_at or p.first_seen):>5}"
+        )
+    return out
+
+
+def _reasons_text(raw: str | None) -> str:
+    """Render the stored match reasons (a JSON list) as a compact ``; ``-joined string."""
+    if not raw:
+        return ""
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return raw
+    if isinstance(data, list):
+        return "; ".join(str(x) for x in data)
+    return str(data)
+
+
+def render_matches(rows: Sequence[PositionRecord]) -> list[str]:
+    """Top matches: ``[score] verdict Title @ Company — reasons`` (best fit first)."""
+    out: list[str] = []
+    for p in rows:
+        reasons = _reasons_text(p.match_reasons)
+        head = (
+            f"[{p.match_score:>3}] {(p.match_verdict or '-'):7} "
+            f"{_trunc(p.title, 40)} @ {p.company}"
+        )
+        out.append(head + (f"  — {reasons}" if reasons else ""))
+    return out
+
+
 # -- validate ----------------------------------------------------------------
 
 
 def validate_one(slug: str, *, crawlers_dir: Path = _CRAWLERS_DIR) -> CandidateResult:
-    """Dry-run a committed script through the sandbox — no ingest (§10).
+    """Dry-run a committed script through the sandbox — no upsert (§10).
 
     ``polite=True`` runs it through the §4.5 production ctx (per-host pacer + robots),
     so the dry-run is a faithful preview of the scheduled crawl rather than a bare-ctx
@@ -311,24 +414,76 @@ def validate_one(slug: str, *, crawlers_dir: Path = _CRAWLERS_DIR) -> CandidateR
 # -- crawl -------------------------------------------------------------------
 
 
+class _MatchPacer:
+    """Adapt a :class:`RateGovernor` (``.wait``) to the matcher's governor protocol.
+
+    The §4.7 matcher paces its LLM calls through a ``.pace()`` method; the shared
+    :class:`RateGovernor` exposes ``.wait()``. This thin adapter lets the daemon hand
+    the matcher the same rate-limiter grammar (``JOBCRAWLER_MATCH_RATE``) the crawl
+    side uses, without the matcher depending on the governor's concrete API.
+    """
+
+    def __init__(self, governor: RateGovernor) -> None:
+        self._governor = governor
+
+    def pace(self) -> None:
+        self._governor.wait()
+
+
+def build_matcher(store: StateStore) -> Matcher | None:
+    """Construct the §4.7 host-side profile matcher from ``PROFILE.md``, or None (crawl-only).
+
+    A missing ``PROFILE.md`` (``ProfileNotFound``) is a valid crawl-only mode: we warn
+    and return None so the crawl still runs, just without match scoring. A configured
+    but unusable match model likewise degrades to crawl-only rather than aborting — the
+    matcher is best-effort and must never break the crawl loop (§4.7/§8). A *malformed*
+    profile is caught up-front by :func:`preflight`; were it reached here it would raise.
+    """
+    from jobcrawler.match import (
+        Matcher,
+    )  # lazy: pulls dspy, unwanted for `list`/`status`
+
+    try:
+        profile = load_profile(config.profile_path())
+    except ProfileNotFound as exc:
+        _log.warning("no PROFILE.md — crawling without match scoring: %s", exc)
+        return None
+    try:
+        model = config.require_match_model()
+    except RuntimeError as exc:
+        _log.warning("no match model — crawling without match scoring: %s", exc)
+        return None
+    return Matcher(
+        store,
+        profile,
+        model=model,
+        batch=config.match_batch(),
+        daily_cap=config.match_daily_cap(),
+        governor=_MatchPacer(RateGovernor(config.match_rate())),
+        clock=lambda: datetime.now(timezone.utc),
+    )
+
+
 def crawl_one(
     site: Site,
     *,
     store: StateStore,
-    news: NewsClient,
-    governor: RateGovernor | None = None,
+    matcher: Matcher | None = None,
     crawlers_dir: Path = _CRAWLERS_DIR,
 ) -> CrawlSummary:
-    """Run the committed crawler in a bounded subprocess, then ingest host-side (§4.4).
+    """Run the committed crawler in a bounded subprocess, then upsert host-side (§4.4/§4.7).
 
     The committed script runs unattended on the production schedule, so it executes in
     the §4.4 child (AST gate + RLIMIT_AS / RLIMIT_CPU + wall-clock): a runaway crawler
     (infinite loop, memory blowup) is bounded and reported as a failed run, never
-    allowed to wedge or OOM the daemon and take the whole fleet down with it. The
-    child only fetches + yields; the host keeps dedup, the completeness filter, and
-    governor-paced ingest. ``governor`` is the shared §4.7 ingest pacer; the caller
-    threads one instance through every site so the news-API cap holds globally across
-    concurrent crawls (a per-call governor would multiply it by fan-out).
+    allowed to wedge or OOM the daemon and take the whole fleet down with it. The child
+    only fetches + yields ``Job``s; the host keeps dedup, the completeness filter, the
+    §4.7 upsert/closure, and — when ``matcher`` is given — the §6 prefilter + LLM match.
+
+    ``matcher`` is the shared §4.7 profile matcher; the caller threads ONE instance
+    through every site so the §8 daily match cap and the match rate-limit hold globally
+    across concurrent crawls (a per-call matcher would multiply both by the fan-out).
+    ``None`` is crawl-only mode (no ``PROFILE.md``).
     """
     source = _crawler_file(site.slug, crawlers_dir).read_text()
     host = normalize_host(_site_url_of(source))
@@ -337,16 +492,18 @@ def crawl_one(
         source,
         {host} if host else set(),
         store,
-        news,
+        matcher=matcher,
         timeout=config.crawl_timeout(),  # wall-clock budget (§4.4)
         mem_mb=config.crawl_mem_mb(),  # RLIMIT_AS
         cpu_seconds=config.crawl_cpu_seconds(),  # RLIMIT_CPU (decoupled from wall clock)
-        first_crawl_cap=config.first_crawl_cap(),
-        governor=governor,
-        min_body_chars=config.min_body_chars(),  # only ingest complete (§4.6)
-        paywall_markers=config.paywall_markers(),  # drop paywall teasers (§4.6)
-        crawler_name=site.name,  # attribute each item to its source crawler
-        crawler_url=site.url,
+        first_crawl_cap=config.first_crawl_cap(),  # newest-K on a cold start (§4.7)
+        min_description_chars=config.min_description_chars(),  # completeness floor (§4.6)
+        expired_markers=config.expired_markers(),  # drop postings flagged expired (§4.7)
+        close_after_misses=config.close_after_misses(),  # closure streak (§4.7)
+        enumerates_all=getattr(
+            site, "enumerates_all", True
+        ),  # mass-closure guard (§4.7)
+        match_min_score=config.match_min_score(),  # notify threshold (§4.7)
     )
 
 
@@ -354,16 +511,11 @@ def crawl_one(
 
 
 class PreflightError(Exception):
-    """A run/crawl startup precondition (config / registry / state) failed (§4.9).
+    """A run/crawl startup precondition (config / registry / profile / state) failed (§4.9).
 
     Raised with an operator-actionable message so a misconfiguration fails fast at
     boot instead of surfacing as an opaque error deep in the run loop.
     """
-
-
-def _valid_http_url(url: str) -> bool:
-    parsed = urlparse(url)
-    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
 
 
 def _state_writability(db_path: str) -> str | None:
@@ -385,26 +537,28 @@ def preflight(
     *,
     sites_path: str | None = None,
     db_path: str | None = None,
-    news_url: str | None = None,
+    profile_path: str | None = None,
 ) -> list[Site]:
     """Validate run/crawl startup preconditions, returning the loaded registry (§4.9).
 
-    Fails fast (``PreflightError`` with an actionable message) on a missing or
-    malformed ``sites.yaml``, an invalid site entry, a malformed ``NEWS_API_URL``, or
-    an unwritable state path — the opaque mid-run failures these would otherwise
-    become. An empty *enabled* registry is a warning, not fatal (an operator may be
-    staging the list); the daemon would simply idle.
+    Fails fast (``PreflightError`` with an actionable message) on a missing or malformed
+    ``sites.yaml``, an invalid site entry, a **malformed** ``PROFILE.md``, or an
+    unwritable state path — the opaque mid-run failures these would otherwise become. An
+    empty *enabled* registry is a warning, not fatal (an operator may be staging the
+    list); the daemon would simply idle. A **missing** ``PROFILE.md`` is likewise only a
+    warning — running with no profile is a valid crawl-only mode (positions are still
+    tracked, just not match-scored), so its absence must never block a crawl.
     """
     sites_path = sites_path or config.sites_path()
     db_path = db_path or _db_path()
-    news_url = news_url or config.news_api_url()
+    profile_path = profile_path or config.profile_path()
 
     try:
         sites = load_sites(sites_path)
     except FileNotFoundError as exc:
         raise PreflightError(
             f"site registry not found at {sites_path} "
-            "(set AUTOCRAWLER_SITES or create the file)"
+            "(set JOBCRAWLER_SITES or create the file)"
         ) from exc
     except yaml.YAMLError as exc:
         raise PreflightError(
@@ -420,10 +574,25 @@ def preflight(
             "preflight: no enabled sites in %s — the daemon will idle", sites_path
         )
 
-    if not _valid_http_url(news_url):
-        raise PreflightError(
-            f"NEWS_API_URL {news_url!r} is not a valid http(s) URL "
-            "(expected e.g. http://localhost:8000)"
+    # Profile: a MISSING PROFILE.md is a valid crawl-only mode (warn and continue); a
+    # MALFORMED one — bad prefs enum, unclosed frontmatter, non-mapping YAML — is a loud
+    # fail-fast, since the operator authored broken preferences and expects matching.
+    try:
+        profile = load_profile(profile_path)
+    except ProfileNotFound:
+        _log.warning(
+            "preflight: no profile at %s — crawling without match scoring "
+            "(create PROFILE.md to enable §4.7 matching)",
+            profile_path,
+        )
+    except (ValueError, yaml.YAMLError) as exc:
+        raise PreflightError(f"profile {profile_path} is malformed: {exc}") from exc
+    else:
+        _log.info(
+            "preflight: profile ok (hash %s, %d discipline(s), %d level(s))",
+            profile.profile_hash[:12],
+            len(profile.prefs.disciplines),
+            len(profile.prefs.levels),
         )
 
     reason = _state_writability(db_path)
@@ -457,8 +626,8 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 def cmd_status(args: argparse.Namespace) -> int:
     # Read-only M4 observability surface: per-site run aggregates, fleet health
-    # distribution, and observed drift-recovery MTTR — the numbers an operator reads
-    # without touching the state DB. Pure read; opens the store, renders, closes.
+    # distribution, drift-recovery MTTR, the §4.7 position lifecycle + §4.7 match spend,
+    # and the §4.11 self-improvement state. Pure read; opens the store, renders, closes.
     store = StateStore(_db_path())
     try:
         for line in render_status(load_sites(config.sites_path()), store):
@@ -468,14 +637,199 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_positions(args: argparse.Namespace) -> int:
+    # List open positions with aligned columns (score/title/company/location/workplace/
+    # age). The pinned StateStore reader surface exposes only open positions; --status
+    # closed/all would need a reader it does not provide, so those degrade to the open
+    # set with a one-line note rather than silently showing the wrong rows.
+    store = StateStore(_db_path())
+    try:
+        rows = store.open_positions(args.site, limit=args.limit)
+        if args.status != "open":
+            print(
+                f"note: showing open positions ('{args.status}' needs a closed-position "
+                "reader the store does not expose)"
+            )
+        if args.min_score is not None:
+            rows = [
+                p
+                for p in rows
+                if p.match_score is not None and p.match_score >= args.min_score
+            ]
+        if not rows:
+            print("no open positions")
+        for line in render_positions(rows):
+            print(line)
+    finally:
+        store.close()
+    return 0
+
+
+def cmd_matches(args: argparse.Namespace) -> int:
+    # Top open positions by §4.7 match score (desc), with the LLM's reasons. --min
+    # defaults to config.match_min_score() (the notify threshold), so `matches` shows
+    # exactly what would ping an operator.
+    store = StateStore(_db_path())
+    try:
+        min_score = args.min if args.min is not None else config.match_min_score()
+        rows = store.matches(min_score, limit=args.limit)
+        if not rows:
+            print(f"no open positions scored >= {min_score}")
+        for line in render_matches(rows):
+            print(line)
+    finally:
+        store.close()
+    return 0
+
+
+def _parse_cached_verdict(cached: str | None) -> tuple[int, str, str] | None:
+    """Decode a cached verdict JSON into ``(score, verdict, reasons_json)``, or None.
+
+    Mirrors the match cache's stored shape (``{score, verdict, reasons, concerns}``) so
+    a cache-drain can apply a verdict without re-billing the LLM. A corrupt/absent entry
+    is a miss (``None``) — the cache is an optimization, never a correctness dependency.
+    """
+    if not cached:
+        return None
+    try:
+        data = json.loads(cached)
+        score = max(0, min(100, int(data["score"])))
+    except (ValueError, TypeError, KeyError):
+        return None
+    verdict = str(data.get("verdict") or "")
+    reasons = json.dumps(list(data.get("reasons") or []))
+    return score, verdict, reasons
+
+
+def cmd_rematch(args: argparse.Namespace) -> int:
+    store = StateStore(_db_path())
+    try:
+        return _run_rematch(store)
+    finally:
+        store.close()
+
+
+def _run_rematch(store: StateStore) -> int:
+    """Drain the pending-match backlog and re-evaluate verdicts after a profile edit (§4.7).
+
+    Both passes are content-addressed cache lookups keyed by the *current*
+    ``profile_hash`` — free (no tokens), and the only rescoring possible host-side
+    (the store keeps a position's ``content_hash`` but not its description, so it can't
+    re-digest for the LLM here). Editing ``PROFILE.md`` changes ``profile_hash``, so a
+    verdict cached under the old profile misses and the position is parked pending for
+    the next crawl (which re-yields a full ``Job`` to re-score). Reports scored (freshly
+    applied from cache), rescored (updated open verdicts), pending (parked), cache-hits.
+    """
+    from jobcrawler.match import PROMPT_VERSION  # lazy: pulls dspy
+
+    path = config.profile_path()
+    try:
+        profile = load_profile(path)
+    except ProfileNotFound as exc:
+        _log.error("rematch needs a profile: %s", exc)
+        return 2
+    except (ValueError, yaml.YAMLError) as exc:
+        _log.error("rematch: malformed profile at %s: %s", path, exc)
+        return 2
+    try:
+        model = config.require_match_model()
+    except RuntimeError as exc:
+        _log.error("rematch: %s", exc)
+        return 2
+
+    profile_hash = profile.profile_hash
+    scored = cache_hits = still_pending = rescored = invalidated = 0
+
+    # 1. Drain the pending backlog against the current profile's cache (free hits).
+    for rec in store.pending_matches(limit=config.recheck_cap()):
+        parsed = _parse_cached_verdict(
+            store.cached_match(rec.content_hash, profile_hash, model, PROMPT_VERSION)
+        )
+        if parsed is None:
+            still_pending += 1
+            continue
+        score, verdict, reasons = parsed
+        store.set_match(
+            rec.site, rec.url, score=score, verdict=verdict, reasons=reasons
+        )
+        scored += 1
+        cache_hits += 1
+
+    # 2. Re-evaluate already-scored open positions against the current profile_hash. A
+    #    current-profile cache hit that differs is applied for free; a miss means the
+    #    stored verdict predates the profile edit → park it pending for the next crawl.
+    for rec in store.open_positions(limit=10_000):
+        if rec.match_score is None:
+            continue
+        parsed = _parse_cached_verdict(
+            store.cached_match(rec.content_hash, profile_hash, model, PROMPT_VERSION)
+        )
+        if parsed is None:
+            store.set_match_pending(rec.site, rec.url)
+            invalidated += 1
+            continue
+        score, verdict, reasons = parsed
+        if score != rec.match_score or verdict != (rec.match_verdict or ""):
+            store.set_match(
+                rec.site, rec.url, score=score, verdict=verdict, reasons=reasons
+            )
+            rescored += 1
+            cache_hits += 1
+
+    print(
+        f"rematch: scored={scored} rescored={rescored} "
+        f"pending={still_pending + invalidated} cache_hits={cache_hits}"
+    )
+    return 0
+
+
+def _fmt_salary_floor(floor: object) -> str:
+    """Render a :class:`~jobcrawler.profile.SalaryFloor` (or None) for the profile view."""
+    if floor is None:
+        return "(none)"
+    return (
+        f"{getattr(floor, 'amount', '?')} {getattr(floor, 'currency', '')}"
+        f"/{getattr(floor, 'period', '')}"
+    )
+
+
+def cmd_profile(args: argparse.Namespace) -> int:
+    # Parse and pretty-print the active PROFILE.md: the prefilter prefs, the content
+    # hash (which keys the match cache — a change invalidates verdicts), and the LLM
+    # body length. A missing profile is a soft miss (exit 1, nothing to show); a
+    # MALFORMED one fails loud (exit 2) naming the offending value.
+    path = config.profile_path()
+    try:
+        profile = load_profile(path)
+    except ProfileNotFound as exc:
+        print(f"no active profile: {exc}")
+        return 1
+    except (ValueError, yaml.YAMLError) as exc:
+        print(f"malformed profile at {path}: {exc}")
+        return 2
+    prefs = profile.prefs
+    print(f"profile: {path}")
+    print(f"  hash:              {profile.profile_hash}")
+    print(f"  disciplines:       {', '.join(sorted(prefs.disciplines)) or '(any)'}")
+    print(f"  levels:            {', '.join(sorted(prefs.levels)) or '(any)'}")
+    print(f"  workplace:         {', '.join(sorted(prefs.workplace)) or '(any)'}")
+    print(f"  locations:         {', '.join(prefs.locations) or '(any)'}")
+    print(f"  languages:         {', '.join(prefs.languages) or '(any)'}")
+    print(f"  min_salary:        {_fmt_salary_floor(prefs.min_salary)}")
+    print(f"  exclude_keywords:  {', '.join(prefs.exclude_keywords) or '(none)'}")
+    print(f"  exclude_companies: {', '.join(prefs.exclude_companies) or '(none)'}")
+    print(f"  body:              {len(profile.body)} chars")
+    return 0
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     result = validate_one(args.slug)
     if result.exception is not None:
         print(f"FAIL {args.slug}: {result.exception.type}: {result.exception.message}")
         return 1
     print(
-        f"OK {args.slug}: {result.item_count} items, "
-        f"{len(result.schema_errors)} schema errors (no ingest)"
+        f"OK {args.slug}: {result.item_count} positions, "
+        f"{len(result.schema_errors)} schema errors (no upsert)"
     )
     return 0 if result.item_count > 0 else 1
 
@@ -494,16 +848,17 @@ def cmd_crawl(args: argparse.Namespace) -> int:
     if code != 0:
         return code
     store = StateStore(_db_path())
-    news = NewsClient(timeout=config.ingest_timeout())
-    governor = RateGovernor(
-        config.ingest_rate()
-    )  # one shared pacer for the batch (§4.7)
+    # One shared matcher for the batch: the §8 daily cap + match rate-limit are global,
+    # so every site scores through the same instance (§4.7). None → crawl-only.
+    matcher = build_matcher(store)
     try:
         for site in _crawl_targets(args):
-            summary = crawl_one(site, store=store, news=news, governor=governor)
+            summary = crawl_one(site, store=store, matcher=matcher)
             print(
-                f"{summary.site}: found={summary.items_found} "
-                f"new={summary.new_items} incomplete={summary.incomplete} "
+                f"{summary.site}: found={summary.positions_found} "
+                f"new={summary.new_positions} changed={summary.changed_positions} "
+                f"closed={summary.closed_positions} matched={summary.matched} "
+                f"pending={summary.match_pending} incomplete={summary.incomplete} "
                 f"errors={summary.errors}"
             )
     finally:
@@ -512,12 +867,12 @@ def cmd_crawl(args: argparse.Namespace) -> int:
 
 
 def _probe(slug: str, *, crawlers_dir: Path = _CRAWLERS_DIR) -> int:
-    """Re-run a committed crawler in the bounded subprocess, counting complete items (§4.8).
+    """Re-run a committed crawler in the bounded subprocess, counting complete jobs (§4.8).
 
     The §4.8 re-probe the self-healer uses to tell a real failure from a transient
     outage. It runs through the same §4.4 isolation as the live crawl — a drifted
     crawler can hang on the reprobe too, and that hang must be bounded, not block the
-    heal loop — with no ingest and no state. A site whose committed script is missing
+    heal loop — with no upsert and no state. A site whose committed script is missing
     or fails the gate probes to 0 (a confirmed failure → regenerate), never an
     exception that aborts the loop.
     """
@@ -529,8 +884,8 @@ def _probe(slug: str, *, crawlers_dir: Path = _CRAWLERS_DIR) -> int:
     return probe_isolated(
         source,
         {host} if host else set(),
-        min_body_chars=config.min_body_chars(),
-        paywall_markers=config.paywall_markers(),
+        min_description_chars=config.min_description_chars(),
+        expired_markers=config.expired_markers(),  # count only live (§4.7) postings
         timeout=config.crawl_timeout(),
         mem_mb=config.crawl_mem_mb(),
         cpu_seconds=config.crawl_cpu_seconds(),
@@ -542,7 +897,7 @@ def _record_site_failure(sites: Sequence[Site], slug: str) -> None:
 
     Only the site identity / render / hints are stored; the corpus is re-prefetched
     fresh at optimize time so the strategy is scored against the site's *current*
-    (drifted) state (:func:`bizup_autocrawler.trainset.record_failure`).
+    (drifted) state (:func:`jobcrawler.trainset.record_failure`).
     """
     site = find_site(sites, slug)
     if site is not None:
@@ -569,9 +924,9 @@ def _build_healer(store: StateStore, sites: Sequence[Site]) -> SelfHealer:
         return await asyncio.to_thread(_probe, slug)
 
     async def regenerate(slug: str) -> RegenOutcome:
-        from bizup_autocrawler.cli_generate import regenerate_one
+        from jobcrawler.cli_generate import regenerate_one
 
-        # regenerate_one honors the tri-state AUTOCRAWLER_REVIEW_GATE: `on` (default)
+        # regenerate_one honors the tri-state JOBCRAWLER_REVIEW_GATE: `on` (default)
         # stages the crawler (RegenOutcome.STAGED → pending-review, §14.2); `auto`
         # backs up + promotes it live (reversible); `off` writes live with no backup.
         return await asyncio.to_thread(regenerate_one, slug)
@@ -579,7 +934,7 @@ def _build_healer(store: StateStore, sites: Sequence[Site]) -> SelfHealer:
     async def promote(slug: str) -> bool:
         # Auto-clear a pending-review strand (§4.8): move the staged crawler live when
         # the gate is no longer `on`. Pure filesystem, run off the loop like the rest.
-        from bizup_autocrawler.cli_generate import promote_one
+        from jobcrawler.cli_generate import promote_one
 
         ok, _ = await asyncio.to_thread(promote_one, slug)
         return ok
@@ -589,7 +944,7 @@ def _build_healer(store: StateStore, sites: Sequence[Site]) -> SelfHealer:
         reprobe=reprobe,
         regenerate=regenerate,
         on_confirmed_failure=lambda slug: _record_site_failure(sites, slug),
-        body_quality_floor=config.body_quality_floor(),
+        body_quality_floor=config.description_quality_floor(),
         genfail_backoff=config.genfail_backoff(),
         genfail_backoff_cap=config.genfail_backoff_cap(),
         review_mode=config.review_gate,
@@ -604,7 +959,6 @@ def cmd_run(args: argparse.Namespace) -> int:
     if sites is None:
         return code
     store = StateStore(_db_path())
-    news = NewsClient(timeout=config.ingest_timeout())
 
     # A prior daemon killed mid-crawl leaves finished=NULL run rows; the scheduler
     # would treat those sites as perpetually in-flight and never re-dispatch them.
@@ -613,15 +967,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     if reaped:
         _log.warning("reaped %d orphaned run row(s) from a prior crash", reaped)
 
-    # One shared, thread-safe pacer (§4.7): the scheduler runs up to `concurrency`
-    # crawls at once on to_thread workers, so a per-crawl governor would let the
-    # global news-API ingest cap be exceeded by the fan-out factor.
-    governor = RateGovernor(config.ingest_rate())
+    # One shared matcher across all concurrent crawls so the §8 daily match cap and the
+    # match rate-limit hold globally: the scheduler runs up to `concurrency` crawls at
+    # once on to_thread workers, and a per-crawl matcher would let the token budget be
+    # exceeded by the fan-out factor. None → crawl-only mode (no PROFILE.md).
+    matcher = build_matcher(store)
 
     async def crawl(site: Site) -> CrawlSummary:
-        return await asyncio.to_thread(
-            crawl_one, site, store=store, news=news, governor=governor
-        )
+        return await asyncio.to_thread(crawl_one, site, store=store, matcher=matcher)
 
     scheduler = Scheduler(
         sites,
@@ -651,7 +1004,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 def cmd_generate(args: argparse.Namespace) -> int:
     # The generator needs a configured LM + Deno sandbox + live fetch; its deps
     # are heavy, so import lazily and let the runtime surface any missing setup.
-    from bizup_autocrawler.cli_generate import generate_command
+    from jobcrawler.cli_generate import generate_command
 
     return generate_command(args)
 
@@ -660,7 +1013,7 @@ def cmd_promote(args: argparse.Namespace) -> int:
     # Promote a self-heal candidate staged under crawlers/_pending (§14.2) to live.
     # promote_one is pure filesystem, but it lives beside generate (shared crawlers/
     # paths), so import it lazily to keep cli.py free of the dspy-heavy module at start.
-    from bizup_autocrawler.cli_generate import promote_one
+    from jobcrawler.cli_generate import promote_one
 
     ok, message = promote_one(args.slug)
     print(message)
@@ -671,7 +1024,7 @@ def cmd_rollback(args: argparse.Namespace) -> int:
     # Restore a site's prior crawler from its crawlers/_history backup — the undo for
     # an `auto` self-heal promotion (§4.8). Pure filesystem, but it shares crawlers/
     # paths with generate, so import it lazily to keep cli.py free of dspy at start.
-    from bizup_autocrawler.cli_generate import rollback_one
+    from jobcrawler.cli_generate import rollback_one
 
     ok, message = rollback_one(args.slug)
     print(message)
@@ -681,7 +1034,7 @@ def cmd_rollback(args: argparse.Namespace) -> int:
 def cmd_optimize(args: argparse.Namespace) -> int:
     # The offline §4.11 self-improvement job (build trainset → optimize → promote);
     # its deps (dspy + the sandbox) are heavy, so import lazily.
-    from bizup_autocrawler.cli_optimize import optimize_command
+    from jobcrawler.cli_optimize import optimize_command
 
     return optimize_command(args)
 
@@ -689,7 +1042,7 @@ def cmd_optimize(args: argparse.Namespace) -> int:
 def cmd_rollback_generator(args: argparse.Namespace) -> int:
     # Undo the last generator adoption (the §4.11 versioned rollback). Flips the
     # active-generator pointer back to the prior version (or baseline); cheap, no LM.
-    from bizup_autocrawler import generator_pointer
+    from jobcrawler import generator_pointer
 
     ok, restored = generator_pointer.rollback_active()
     if not ok:
@@ -707,7 +1060,7 @@ def cmd_rollback_generator(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="autocrawl", description="RLM autocrawler")
+    parser = argparse.ArgumentParser(prog="jobcrawl", description="RLM job tracker")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("run", help="start the scheduler daemon").set_defaults(func=cmd_run)
@@ -719,11 +1072,11 @@ def build_parser() -> argparse.ArgumentParser:
     target.add_argument("--stale", action="store_true")
     gen.set_defaults(func=cmd_generate)
 
-    val = sub.add_parser("validate", help="dry-run a script, no ingest")
+    val = sub.add_parser("validate", help="dry-run a script, no upsert")
     val.add_argument("slug")
     val.set_defaults(func=cmd_validate)
 
-    crawl = sub.add_parser("crawl", help="run committed scripts, dedup, ingest")
+    crawl = sub.add_parser("crawl", help="run committed scripts, dedup, upsert, match")
     crawl_target = crawl.add_mutually_exclusive_group(required=True)
     crawl_target.add_argument("slug", nargs="?")
     crawl_target.add_argument("--all", action="store_true")
@@ -746,8 +1099,48 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     sub.add_parser(
-        "status", help="show per-site run aggregates, fleet health, drift MTTR (M4)"
+        "status",
+        help="per-site run aggregates, fleet health, drift MTTR, positions/matches (M4)",
     ).set_defaults(func=cmd_status)
+
+    pos = sub.add_parser(
+        "positions", help="list open positions (score/title/company/…)"
+    )
+    pos.add_argument("--site", help="restrict to one site slug")
+    pos.add_argument(
+        "--status",
+        choices=["open", "closed", "all"],
+        default="open",
+        help="lifecycle filter (only 'open' is served by the store reader)",
+    )
+    pos.add_argument(
+        "--min-score",
+        type=int,
+        dest="min_score",
+        help="keep only positions scored at or above this §4.7 match score",
+    )
+    pos.add_argument("--limit", type=int, default=50)
+    pos.set_defaults(func=cmd_positions)
+
+    mat = sub.add_parser(
+        "matches", help="top open positions by §4.7 match score, with reasons"
+    )
+    mat.add_argument(
+        "--min", type=int, help="minimum match score (default: config.match_min_score)"
+    )
+    mat.add_argument("--limit", type=int, default=20)
+    mat.set_defaults(func=cmd_matches)
+
+    rem = sub.add_parser(
+        "rematch",
+        help="drain the pending-match backlog + re-evaluate verdicts after a profile edit",
+    )
+    rem.set_defaults(func=cmd_rematch)
+
+    prof = sub.add_parser(
+        "profile", help="show the active candidate profile (prefs + hash)"
+    )
+    prof.set_defaults(func=cmd_profile)
 
     opt = sub.add_parser(
         "optimize",

@@ -1,12 +1,20 @@
-"""Operator notifications for autonomous actions (§4.8/§4.11).
+"""Operator notifications for autonomous actions & board events (§4.8/§4.9/§4.11).
 
-Whenever the daemon changes its own behaviour on its own initiative — self-heals a
-crawler live, stages one for review, exhausts a self-heal, auto-adopts an optimized
-generator, or rolls one back — it calls :func:`notify`. This is the operator's window
-into the closed loop: by default each notification is one structured INFO log line, and
-if ``AUTOCRAWLER_NOTIFY_WEBHOOK`` is set a small JSON payload is *also* POSTed there, so
-an alert reaches a human (Slack/PagerDuty/an inbox) the moment the daemon rewrites its
-own code, without anyone tailing logs.
+Whenever the daemon does something on its own initiative worth a human's attention it
+calls :func:`notify`. Two families ride the same generic channel:
+
+  * **self-modification** (§4.8/§4.11) — it self-heals a crawler live, stages one for
+    review, exhausts a self-heal, auto-adopts an optimized generator, or rolls one back.
+  * **board events** (§4.6/§4.9) — a newly-tracked position scores a strong hit against
+    the operator profile (``match``), or a §4.9 recheck/expiry sweep closes a batch of
+    positions that went away (``positions_closed``). These are *observations*, not
+    self-edits, and (like the sweep that produces them) fire regardless of the autonomy
+    switch; the operator still wants the ping when a great match appears.
+
+This is the operator's window into the closed loop: by default each notification is one
+structured INFO log line, and if ``JOBCRAWLER_NOTIFY_WEBHOOK`` is set a small JSON payload
+is *also* POSTed there, so an alert reaches a human (Slack/PagerDuty/an inbox) the moment
+a match lands or the daemon rewrites its own code, without anyone tailing logs.
 
 Two hard rules:
 
@@ -27,17 +35,20 @@ import logging
 import threading
 import urllib.request
 
-from bizup_autocrawler import config
+from jobcrawler import config
 
-_log = logging.getLogger("bizup_autocrawler.notify")
+_log = logging.getLogger("jobcrawler.notify")
 
 
 def notify(event: str, message: str, **fields: object) -> None:
     """Record an autonomous-action notification: always log, optionally POST a webhook.
 
-    ``event`` is a short dotted category (e.g. ``heal.promoted``, ``generator.adopted``)
-    and ``message`` is the human sentence; ``fields`` are extra structured key/values
-    (slug, path, margin, …) folded into both the log line and the JSON payload. Returns
+    ``event`` is a short dotted category — self-modification (``heal.promoted``,
+    ``generator.adopted``) or a board event (``match`` for a strong profile hit,
+    ``positions_closed`` for a §4.9 recheck/expiry sweep) — and ``message`` is the human
+    sentence; ``fields`` are extra structured key/values (slug, url, score, closed, …)
+    folded into both the log line and the JSON payload. The payload shape is uniform
+    across every event type, so a webhook sink needs no per-event parsing. Returns
     immediately — any webhook delivery runs in the background and cannot raise.
     """
     _log.info("notify event=%s %s%s", event, message, _fmt_fields(fields))

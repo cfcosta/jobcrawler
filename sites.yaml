@@ -1,36 +1,189 @@
 # The site registry (§4.1) — the system's checked-in input.
-# One entry per site; `autocrawl run` schedules these and `autocrawl generate`
-# writes a crawler per slug into src/bizup_autocrawler/crawlers/<slug>.py.
+# One entry per source; `jobcrawl run` schedules these and `jobcrawl generate`
+# writes a crawler per slug into src/jobcrawler/crawlers/<slug>.py.
 #
-# fields: slug (stable id, names the crawler + the source on items), name,
-#   url (root/section), render (auto|static|browser|solver max tier, §4.10),
-#   hints (free-text steer for the generator), schedule (30m|6h|cron; else the
-#   global default), enabled (crawl on/off without deleting).
+# Fields:
+#   slug          stable id — names crawlers/<slug>.py and the `source` on every
+#                 Job; must be a valid Python identifier (underscores, no hyphens).
+#   name          human label for `jobcrawl list` / status.
+#   url           the endpoint/page the crawler starts from. It also fixes the
+#                 SSRF host allowlist (fetches must stay on this host), so it
+#                 points straight at the ATS API host where there is one.
+#   render        max fetch tier (auto|static|browser|solver, §4.10). All the
+#                 sources below are plain JSON/RSS, so `static` (no browser).
+#   hints         free-text steer for the generator — the probe-verified shape of
+#                 the feed (endpoint, which field holds the full description, id
+#                 location, quirks). No host-side gate/threshold is ever leaked.
+#   company       OPTIONAL. A single-company board (one employer's roles, and the
+#                 ATS feed carries no per-posting company) — the generator stamps
+#                 this onto every Job. Omit it for a multi-company aggregator,
+#                 where each posting already names its own employer.
+#   enumerates_all  OPTIONAL, default true. True ⇒ one crawl sees the WHOLE board,
+#                 so the §4.7 close-missing diff may close any URL that vanished.
+#                 False ⇒ the source shows only a recent WINDOW (an RSS feed, or
+#                 RemoteOK's latest ~100); the diff is unsound there (a role that
+#                 merely aged out of the window is not closed), so closure defers
+#                 to the §4.9 recheck loop (expires_at / expired-markers).
+#   schedule / adaptive / enabled  cadence + on-off (see schedule.Site). Left
+#                 unpinned below, so each inherits the fleet adaptive default
+#                 (§4.9 JOBCRAWLER_ADAPTIVE_DEFAULT) — the hit-rate controller
+#                 paces each source on its own churn.
+#
+# All endpoints below were probe-verified 2026-07-02.
 
-- slug: example
-  name: Example News
-  url: https://example.com/news
-  render: auto
-  enabled: true
+# --- Greenhouse boards -------------------------------------------------------
+# boards-api.greenhouse.io/v1/boards/<token>/jobs?content=true returns the whole
+# board in one call (meta.total). `content` is the full posting but HTML-entity-
+# escaped — html.unescape it, then strip tags. location.name is one flattened
+# string; there are no salary or employment-type fields on Greenhouse at all.
+# Single-company boards, so `company` is fixed per entry.
+- slug: gitlab
+  name: GitLab
+  url: https://boards-api.greenhouse.io/v1/boards/gitlab/jobs?content=true
+  render: static
+  company: GitLab
+  hints: >-
+    Greenhouse board API, token `gitlab`. One GET to the url returns every open
+    req (meta.total). Each job: stable `id`, `title`, flattened `location.name`,
+    `absolute_url` (apply_url), `updated_at`, and `content` = the full HTML-
+    ENTITY-ESCAPED description — html.unescape then strip tags. No salary or
+    employment_type fields exist on Greenhouse; leave them None.
 
-- slug: valor_globo
-  name: Valor — Globo
-  url: https://valor.globo.com/
-  render: auto
-  hints: Brazilian financial news; articles live under sections like /financas, /empresas, /brasil.
-  enabled: true
+- slug: figma
+  name: Figma
+  url: https://boards-api.greenhouse.io/v1/boards/figma/jobs?content=true
+  render: static
+  company: Figma
+  hints: >-
+    Greenhouse board API, token `figma`. Same shape as the gitlab entry: whole
+    board in one GET; `content` is html.unescape-then-strip; id in `id`,
+    apply link in `absolute_url`; no salary/employment_type fields.
 
-- slug: brazil_journal
-  name: Brazil Journal
-  url: https://braziljournal.com/
-  render: auto
-  hints: Brazilian business and finance news.
-  enabled: true
+- slug: duolingo
+  name: Duolingo
+  url: https://boards-api.greenhouse.io/v1/boards/duolingo/jobs?content=true
+  render: static
+  company: Duolingo
+  hints: >-
+    Greenhouse board API, token `duolingo`. Same shape as the gitlab entry:
+    whole board in one GET; `content` is html.unescape-then-strip; id in `id`,
+    apply link in `absolute_url`; no salary/employment_type fields.
 
-# Add real seed sites here (the M1 step-0 list, ~15–20 sites). e.g.:
-# - slug: techcrunch
-#   name: TechCrunch
-#   url: https://techcrunch.com
-#   render: auto
-#   schedule: 30m
-#   enabled: true
+# --- Lever board -------------------------------------------------------------
+- slug: spotify
+  name: Spotify
+  url: https://api.lever.co/v0/postings/spotify?mode=json
+  render: static
+  company: Spotify
+  hints: >-
+    Lever postings API — the url returns the whole board as a JSON list. The
+    `description` field is the INTRO ONLY: reconstruct the full text from
+    description + each lists[].content + `additional`. `workplaceType` is always
+    present (remote/hybrid/onsite); categories.location / .team / .commitment
+    carry location, department and employment_type; `createdAt` is epoch-ms
+    (posted_at). Stable id in `id`; apply link in `hostedUrl`. No company field —
+    it is fixed (Spotify).
+
+# --- Ashby boards ------------------------------------------------------------
+# api.ashbyhq.com/posting-api/job-board/<token>?includeCompensation=true.
+# descriptionPlain (or descriptionHtml) is the FULL text; employmentType is
+# always present; structured pay is in compensation.summaryComponents ~70% of the
+# time (minValue/maxValue/currencyCode/interval — set the salary quartet only
+# from those, never parse it). Prefer workplaceType over the coarse isRemote.
+- slug: linear
+  name: Linear
+  url: https://api.ashbyhq.com/posting-api/job-board/linear?includeCompensation=true
+  render: static
+  company: Linear
+  hints: >-
+    Ashby job board API, token `linear`. jobs[] each have stable `id`, `title`,
+    `location`, full `descriptionPlain`, always-present `employmentType`,
+    `jobUrl` (apply_url), and — ~70% of the time — compensation.summaryComponents
+    (minValue/maxValue/currencyCode/interval) for the salary quartet. Prefer
+    `workplaceType` over the coarse `isRemote`. Company is fixed (Linear).
+
+- slug: ramp
+  name: Ramp
+  url: https://api.ashbyhq.com/posting-api/job-board/ramp?includeCompensation=true
+  render: static
+  company: Ramp
+  hints: >-
+    Ashby job board API, token `ramp`. Same shape as the linear entry:
+    descriptionPlain is the full text, employmentType always present, structured
+    pay in compensation.summaryComponents when present. Company fixed (Ramp).
+
+- slug: replit
+  name: Replit
+  url: https://api.ashbyhq.com/posting-api/job-board/replit?includeCompensation=true
+  render: static
+  company: Replit
+  hints: >-
+    Ashby job board API, token `replit`. Same shape as the linear entry:
+    descriptionPlain is the full text, employmentType always present, structured
+    pay in compensation.summaryComponents when present. Company fixed (Replit).
+
+# --- Gupy board (Brazilian, pt-BR postings) ----------------------------------
+- slug: grupoboticario
+  name: Grupo Boticário
+  url: https://grupoboticario.gupy.io/
+  render: static
+  company: Grupo Boticário
+  hints: >-
+    Gupy board (Portuguese-language postings). The board page at the url embeds
+    EVERY job in the __NEXT_DATA__ <script> tag — parse that JSON (single host,
+    no pagination needed). Each job has an id, name (title), roleName, workplace/
+    city/state (location), a description, publishedDate (posted_at) and expiresAt
+    (expires_at). The `type` enum maps vacancy_type_effective→CLT /
+    vacancy_legal_entity→PJ (employment_type). No salary field. Company is fixed
+    (Grupo Boticário). (Alternative feed: employability-portal.gupy.io API
+    paginates limit<=100 — but __NEXT_DATA__ is one same-host fetch.)
+
+# --- Multi-company aggregators (windowed — enumerates_all: false) ------------
+# No `company` (each posting names its own employer). These show only a recent
+# window, so the §4.7 close-missing diff is disabled and closure comes from the
+# §4.9 recheck loop.
+- slug: remoteok
+  name: RemoteOK
+  url: https://remoteok.com/api
+  render: static
+  enumerates_all: false
+  hints: >-
+    RemoteOK JSON: the url returns ONLY the latest ~100 posts (a window — hence
+    enumerates_all:false). SKIP element[0] — it is a legal-notice object, not a
+    job. Needs a browser-like User-Agent. `salary_min`/`salary_max` keys are
+    ALWAYS 0 — ignore them (leave the salary quartet None; host-side parse_salary
+    reads pay from the description if present). Each post names its own `company`;
+    stable id in `id`, canonical link in `url`, epoch `date` (posted_at).
+
+- slug: wwr_backend
+  name: We Work Remotely — Back-End
+  url: https://weworkremotely.com/categories/remote-back-end-programming-jobs.rss
+  render: static
+  enumerates_all: false
+  hints: >-
+    We Work Remotely per-category RSS (complete for the category, unlike the
+    capped combined feed, but still a recent window — enumerates_all:false). Each
+    <item> title is "Company: Role" — split the company off the prefix (there is
+    no separate company field). The feed carries a link (url/apply_url), a full
+    description, pubDate (posted_at) and often an expiry (expires_at, feeds §4.9).
+
+- slug: wwr_fullstack
+  name: We Work Remotely — Full-Stack
+  url: https://weworkremotely.com/categories/remote-full-stack-programming-jobs.rss
+  render: static
+  enumerates_all: false
+  hints: >-
+    We Work Remotely Full-Stack category RSS. Same shape as wwr_backend: <item>
+    title is "Company: Role" (split off the company); link, full description,
+    pubDate (posted_at), expiry when present. Window feed — enumerates_all:false.
+
+- slug: wwr_devops
+  name: We Work Remotely — DevOps & Sysadmin
+  url: https://weworkremotely.com/categories/remote-devops-sysadmin-jobs.rss
+  render: static
+  enumerates_all: false
+  hints: >-
+    We Work Remotely DevOps/Sysadmin category RSS. Same shape as wwr_backend:
+    <item> title is "Company: Role" (split off the company); link, full
+    description, pubDate (posted_at), expiry when present. Window feed —
+    enumerates_all:false.

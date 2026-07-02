@@ -1,9 +1,9 @@
 """The mutable active-generator pointer (§4.11 auto-adoption + versioned rollback).
 
-``autocrawl optimize`` writes versioned ``generator-N.json`` artifacts, but the live
+``jobcrawl optimize`` writes versioned ``generator-N.json`` artifacts, but the live
 process needs to know *which* one is active — and to change it **without a restart** so
 the autonomous loop can adopt a freshly-promoted generator and roll a regressing one
-back on its own. An env var (``AUTOCRAWLER_GENERATOR_PATH``) cannot be changed under a
+back on its own. An env var (``JOBCRAWLER_GENERATOR_PATH``) cannot be changed under a
 running daemon; this pointer file can, and :func:`load_generator` re-reads it on each
 boot / regeneration.
 
@@ -13,7 +13,7 @@ prior value onto an ``ACTIVE.history`` stack, so :func:`rollback_active` is a tr
 of the last adoption — including all the way back to baseline when the first-ever
 adoption is undone. The env var is kept as the *fallback* (resolution order
 arg > pointer > env > baseline), so existing systemd deploys that only set
-``AUTOCRAWLER_GENERATOR_PATH`` and never adopt still boot from it.
+``JOBCRAWLER_GENERATOR_PATH`` and never adopt still boot from it.
 
 Adoptions are serialized by the §4.11 optimize single-flight lock (only the optimize
 job calls :func:`set_active`), so the read-then-push in :func:`set_active` is not racy
@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from bizup_autocrawler import config
+from jobcrawler import config
 
 _ACTIVE = "ACTIVE"
 _HISTORY = "ACTIVE.history"
@@ -58,7 +58,7 @@ def active_generator_meta() -> dict[str, object]:
     """The active generator's provenance sidecar (held-out score, snapshot…), or ``{}``.
 
     Reads the ``<stem>.meta.json`` sidecar that
-    :func:`bizup_autocrawler.generate.generator.save_generator` writes — but inline
+    :func:`jobcrawler.generate.generator.save_generator` writes — but inline
     here (the convention is one line) rather than importing that dspy-heavy module, so
     the operator ``status`` surface that calls this stays fast and dependency-light.
     ``{}`` for baseline (no pointer) or a missing/corrupt sidecar, so the surface
@@ -148,7 +148,7 @@ def rollback_active() -> tuple[bool, str | None]:
 
     Returns ``(True, restored)`` where ``restored`` is the path now active (``None`` if
     rolled all the way back to baseline), or ``(False, None)`` if there is no prior
-    adoption to undo. Used by ``autocrawl rollback-generator`` and the P4 auto-rollback
+    adoption to undo. Used by ``jobcrawl rollback-generator`` and the P4 auto-rollback
     watcher.
     """
     prev = _pop_history()

@@ -1,14 +1,17 @@
 """Health detection & self-healing regeneration (§4.8).
 
-"Regenerate when the site changes," made automatic. A site drifts in two ways:
+"Regenerate when the board changes," made automatic. A site drifts in two ways:
 
-  * **blackout** — a *single* zero-``items_found`` run against a baseline that
-    previously yielded items (never zero ``new_items``: a healthy low-frequency feed
-    legitimately adds nothing). A one-off network blip would trip this, so the
-    candidate is confirmed by a short **re-probe that re-parses >= 1 item** (not
-    merely network-OK); one re-probe-cleared blip is tolerated.
-  * **partial drift** — items still come back, but their bodies collapse to teasers
-    (``body_quality`` falls below the host-side floor) for the latest *two* runs
+  * **blackout** — a *single* zero-``items_found`` run (zero *positions* found) against a
+    baseline that previously yielded positions. This is **never** keyed on ``new_items``:
+    a quiet-but-healthy board legitimately adds nothing between crawls (``new_items == 0``
+    is normal), so only ``items_found == 0`` — the board returning *no open positions at
+    all* — is a blackout. A one-off network blip would trip this, so the candidate is
+    confirmed by a short **re-probe that re-parses >= 1 position** (not merely
+    network-OK); one re-probe-cleared blip is tolerated.
+  * **partial drift** — positions still come back, but their descriptions collapse to
+    boilerplate/truncated bodies (the description-completeness signal, persisted under the
+    ``body_quality`` key, falls below the host-side floor) for the latest *two* runs
     against a baseline that was above it. Two consecutive sub-floor runs already rule
     out a one-off truncation, so this path skips the re-probe and regenerates directly.
 
@@ -18,11 +21,11 @@ candidate, so the daemon *writes its first crawler* before the loop can crawl it
 delivered through the very same review gate as a self-heal.
 
 A confirmed-drifted (or never-generated) site is re-entered into §4.2 generation with
-the *current* generator. By default (``AUTOCRAWLER_REVIEW_GATE`` on) a gate-passing
+the *current* generator. By default (``JOBCRAWLER_REVIEW_GATE`` on) a gate-passing
 crawler is
 **staged for human promotion**, not delivered live — the site enters a distinct
 **pending-review** state (§14.2) and keeps running its old crawler until an operator
-runs ``autocrawl promote``. If generation exhausts its budget without a gate-passing
+runs ``jobcrawl promote``. If generation exhausts its budget without a gate-passing
 crawler — including a forced extraction — the site enters a **generation-failed**
 state instead. Both are held rather than silently re-enqueued (an immediate failed
 regen would spin; re-staging would clobber the candidate under review), but neither
@@ -46,8 +49,8 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 
-from bizup_autocrawler.notify import notify
-from bizup_autocrawler.state import HealthRecord, RunRecord, StateStore
+from jobcrawler.notify import notify
+from jobcrawler.state import HealthRecord, RunRecord, StateStore
 
 
 def _utcnow() -> datetime:
@@ -82,8 +85,11 @@ _REGEN_STATE = {
 
 
 def staleness_candidate(history: list[RunRecord]) -> bool:
-    """True if the latest run found zero items against a baseline that did (§4.8).
+    """True if the latest run found zero positions against a baseline that did (§4.8).
 
+    Keyed on ``items_found`` (the §5 count of open positions the crawl returned), never
+    on ``new_items``: a quiet board that adds nothing this crawl is healthy, so only a run
+    that returns *no positions at all* against a previously-yielding baseline is stale.
     ``history`` is newest-first (as :meth:`StateStore.runs_for` returns it).
     """
     if not history:
@@ -94,11 +100,12 @@ def staleness_candidate(history: list[RunRecord]) -> bool:
 
 
 def _body_quality(run: RunRecord) -> float | None:
-    """The run's recorded ``body_quality`` signal, or None if it carried none.
+    """The run's recorded description-completeness signal, or None if it carried none.
 
-    A zero-yield run records no ``body_quality`` (the blackout signal is the item
-    count itself), so this is None there — keeping partial-drift detection disjoint
-    from blackout detection.
+    Persisted by the runner under the ``body_quality`` signal key: the share of a crawl's
+    fetched positions whose description cleared the §4.6 completeness bar. A zero-yield run
+    records none (the blackout signal is the position count itself), so this is None there
+    — keeping partial-drift detection disjoint from blackout detection.
     """
     if not run.signals:
         return None
@@ -109,13 +116,13 @@ def _body_quality(run: RunRecord) -> float | None:
 def body_quality_collapse(
     history: list[RunRecord], *, floor: float, confirm_runs: int = 2
 ) -> bool:
-    """True if recent runs' bodies collapsed to teasers against a healthy baseline (§4.8).
+    """True if recent descriptions collapsed to boilerplate against a healthy baseline (§4.8).
 
-    Partial drift: a site keeps returning items but their bodies fall below the
-    completeness bar (``body_quality`` < ``floor``) for the latest ``confirm_runs``
-    runs, while some earlier run was at or above the floor. Requiring two consecutive
-    sub-floor runs rules out a one-off upstream truncation, which is why the caller can
-    skip the re-probe for this path. ``history`` is newest-first.
+    Partial drift: a site keeps returning positions but their descriptions fall below the
+    §4.6 completeness bar (the ``body_quality`` signal < ``floor``) for the latest
+    ``confirm_runs`` runs, while some earlier run was at or above the floor. Requiring two
+    consecutive sub-floor runs rules out a one-off upstream truncation, which is why the
+    caller can skip the re-probe for this path. ``history`` is newest-first.
     """
     recent = history[:confirm_runs]
     if len(recent) < confirm_runs:
@@ -184,7 +191,11 @@ class SelfHealer:
         # Called once a failure is confirmed real (re-probe ruled out a transient
         # outage) — the §4.11 hook that captures the site as a hard optimizer case.
         self._on_confirmed_failure = on_confirmed_failure
-        # Host-side partial-drift floor (§8: never reaches the generator/RLM).
+        # Host-side partial-drift floor: the minimum description-completeness share a
+        # crawl must clear before its descriptions count as collapsed (§8: never reaches
+        # the generator/RLM). Kept named ``body_quality_floor`` — the persisted signal key
+        # it is compared against is ``body_quality`` — while the operator-facing env knob
+        # is ``JOBCRAWLER_DESCRIPTION_QUALITY_FLOOR``.
         self._body_quality_floor = body_quality_floor
         self._clock = clock
         self._genfail_backoff = genfail_backoff
@@ -240,7 +251,7 @@ class SelfHealer:
     async def _handle_pending(self, slug: str) -> HealthState:
         """A held pending-review site: hold for a human under ``on``, else auto-promote.
 
-        With the review gate ``on`` the staged crawler awaits ``autocrawl promote`` —
+        With the review gate ``on`` the staged crawler awaits ``jobcrawl promote`` —
         surface PENDING_REVIEW unchanged. Once the gate is no longer human-gated
         (``auto``/``off``), a still-staged crawler is a strand: promote it live (it
         already passed the §6 gate) and clear to HEALTHY. A failed/absent promotion

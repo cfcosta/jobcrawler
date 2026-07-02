@@ -89,7 +89,7 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
           pythonSet = pythonSets.${system}.overrideScope editableOverlay;
-          virtualenv = pythonSet.mkVirtualEnv "bizup-autocrawler-dev-env" workspace.deps.all;
+          virtualenv = pythonSet.mkVirtualEnv "jobcrawler-dev-env" workspace.deps.all;
         in
         {
           default = pkgs.mkShell {
@@ -116,9 +116,9 @@
         system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
-          # The runtime virtualenv: `${appEnv}/bin/autocrawl` is the §10 console script
-          # (bizup_autocrawler.cli:main), with the full pinned dependency closure.
-          appEnv = pythonSets.${system}.mkVirtualEnv "bizup-autocrawler-env" workspace.deps.default;
+          # The runtime virtualenv: `${appEnv}/bin/jobcrawl` is the §10 console script
+          # (jobcrawler.cli:main), with the full pinned dependency closure.
+          appEnv = pythonSets.${system}.mkVirtualEnv "jobcrawler-env" workspace.deps.default;
         in
         {
           default = appEnv;
@@ -132,12 +132,12 @@
           # the §4.2 generation sandbox (dspy's Pyodide interpreter shells out to `deno`);
           # the run/crawl daemon itself never invokes Deno — only `generate`/`optimize` do.
           dockerImage = pkgs.dockerTools.buildLayeredImage {
-            name = "bizup-autocrawler";
+            name = "jobcrawler";
             tag = "latest";
             contents = [
-              appEnv # autocrawl console script + Python runtime closure
+              appEnv # jobcrawl console script + Python runtime closure
               pkgs.deno # §4.2 RLM Pyodide sandbox (generate/optimize only)
-              pkgs.cacert # TLS roots for httpx (live fetch + news ingest + LM API)
+              pkgs.cacert # TLS roots for httpx (crawl/board fetch + the §4.6 match LM + generate/optimize LM API)
               pkgs.coreutils # a minimal shell toolbox for debugging / exec
               pkgs.bashInteractive
             ];
@@ -145,7 +145,7 @@
               # The primary deployment entrypoint: the self-scheduling daemon (§4.9).
               # Override with `generate`/`crawl`/`status` for one-shot/CI invocations.
               Cmd = [
-                "autocrawl"
+                "jobcrawl"
                 "run"
               ];
               WorkingDir = "/data";
@@ -156,16 +156,22 @@
                 # Persist the Deno/Pyodide cache on the data volume so generation cold
                 # starts don't re-download the WASM runtime every container restart.
                 "DENO_DIR=/data/deno-cache"
-                # Default the registry + state onto the mounted /data volume; an operator
-                # mounts sites.yaml there and the sqlite run history persists alongside it.
-                "AUTOCRAWLER_SITES=/data/sites.yaml"
-                "AUTOCRAWLER_STATE_URL=sqlite:////data/autocrawler.db"
+                # Default the registry, match profile, and state onto the mounted /data
+                # volume: an operator drops sites.yaml and PROFILE.md there, and the sqlite
+                # store — run history plus the §4.7 positions ledger and the §4.6 match
+                # cache/spend — persists alongside them. PROFILE.md is the §4.6 matcher's
+                # sole input (an operator-authored persistent file, like sites.yaml); the
+                # bare "PROFILE.md" default would resolve under WorkingDir anyway, but pin it
+                # explicitly like the others so a stray cd can't relocate it.
+                "JOBCRAWLER_SITES=/data/sites.yaml"
+                "JOBCRAWLER_PROFILE=/data/PROFILE.md"
+                "JOBCRAWLER_STATE_URL=sqlite:////data/jobcrawler.db"
                 # The committed crawlers (and the §14.2 _pending staging dir) MUST live on
                 # the writable /data volume so generate/promote/self-heal persist them: the
                 # in-image package dir is part of the ephemeral container layer (lost on
                 # restart / --rm), and is read-only on a native Nix-store deploy. /data is
                 # both writable and durable.
-                "AUTOCRAWLER_CRAWLERS_DIR=/data/crawlers"
+                "JOBCRAWLER_CRAWLERS_DIR=/data/crawlers"
               ];
               # Readiness/config check (§10): `status` loads the registry + opens the state
               # store and renders the M4 surface — it catches a missing/broken sites.yaml or
@@ -174,7 +180,7 @@
               Healthcheck = {
                 Test = [
                   "CMD"
-                  "autocrawl"
+                  "jobcrawl"
                   "status"
                 ];
                 Interval = 60000000000; # 60s (ns)
@@ -192,7 +198,7 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
           pythonSet = pythonSets.${system}.overrideScope editableOverlay;
-          virtualenv = pythonSet.mkVirtualEnv "bizup-autocrawler-check-env" workspace.deps.all;
+          virtualenv = pythonSet.mkVirtualEnv "jobcrawler-check-env" workspace.deps.all;
           # Only the inputs the checks need, so unrelated changes don't bust the cache.
           # Both run against the editable install via $REPO_ROOT, so src/tests/pyproject
           # is the whole closure (the §4.4 sandbox subprocesses inherit this env).
@@ -206,7 +212,7 @@
           };
         in
         {
-          ty = pkgs.runCommandLocal "bizup-autocrawler-ty-check" { } ''
+          ty = pkgs.runCommandLocal "jobcrawler-ty-check" { } ''
             cp -r ${checkSrc} build
             chmod -R u+w build
             export HOME="$TMPDIR"
@@ -223,7 +229,7 @@
           # (test_dspy_pin) rides along here, making the version assumption a CI gate,
           # not just a runtime test. The §4.4 isolation subprocesses (sys.executable
           # `-m`) inherit REPO_ROOT, so the editable package resolves inside the child.
-          pytest = pkgs.runCommandLocal "bizup-autocrawler-pytest" { } ''
+          pytest = pkgs.runCommandLocal "jobcrawler-pytest" { } ''
             cp -r ${checkSrc} build
             chmod -R u+w build
             export HOME="$TMPDIR"

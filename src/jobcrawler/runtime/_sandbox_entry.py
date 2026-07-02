@@ -1,12 +1,13 @@
 """Subprocess entry point for the §4.4 sandbox — never imported in-process.
 
 Reads ``{source, allowed_hosts, replay}`` as JSON on stdin, execs the (already
-AST-gated) candidate, runs ``crawl(ctx)`` collecting items, and writes a
-size-bounded CandidateResult dict as JSON to stdout. The ``ctx`` is the only
-network path; with ``replay`` it serves recorded HTTP (offline metric), else it
-makes real, SSRF-guarded requests — per-host paced + robots-compliant when
-``polite`` (the ``autocrawl validate`` preview), bare otherwise. Imports stay
-light (no dspy) so the child starts fast under the memory rlimit.
+AST-gated) candidate, runs ``crawl(ctx)`` collecting the :class:`Job` postings it
+yields, and writes a size-bounded CandidateResult dict as JSON to stdout. The
+``ctx`` is the only network path; with ``replay`` it serves recorded HTTP (offline
+metric), else it makes real, SSRF-guarded requests — per-host paced +
+robots-compliant when ``polite`` (the ``jobcrawl validate`` preview), bare
+otherwise. Imports stay light (no dspy) so the child starts fast under the memory
+rlimit.
 """
 
 from __future__ import annotations
@@ -19,14 +20,14 @@ from typing import cast
 
 import httpx
 
-from bizup_autocrawler.runtime.contract import Item
-from bizup_autocrawler.runtime.ctx import Ctx
-from bizup_autocrawler.runtime.hardening import harden_xml
-from bizup_autocrawler.runtime.live_ctx import build_live_ctx
-from bizup_autocrawler.runtime.safe_exec import exec_crawler
+from jobcrawler.runtime.contract import Job
+from jobcrawler.runtime.ctx import Ctx
+from jobcrawler.runtime.hardening import harden_xml
+from jobcrawler.runtime.live_ctx import build_live_ctx
+from jobcrawler.runtime.safe_exec import exec_crawler
 
 _SAMPLE_CAP = 5
-_BODY_PREVIEW = 600
+_DESCRIPTION_PREVIEW = 600  # per-sample description head shown to the §6 scorer
 _ERROR_CAP = 10
 
 
@@ -36,7 +37,7 @@ def _build_ctx(
     polite: bool = False,
 ) -> Ctx:
     if replay is None:
-        # Live path. `polite` (set by `autocrawl validate`) assembles the same §4.5
+        # Live path. `polite` (set by `jobcrawl validate`) assembles the same §4.5
         # pacer+robots ctx the scheduled crawl uses, so a dry-run reflects production;
         # default-off keeps a bare ctx for offline generation/scoring.
         return build_live_ctx(allowed_hosts) if polite else Ctx(allowed_hosts)
@@ -80,10 +81,10 @@ def main() -> None:
         samples: list[dict[str, str]] = []
         errors: list[str] = []
         for obj in crawl(ctx):
-            item = obj if isinstance(obj, Item) else None
-            if item is None:
+            job = obj if isinstance(obj, Job) else None
+            if job is None:
                 try:
-                    item = Item.model_validate(obj)
+                    job = Job.model_validate(obj)
                 except Exception as exc:  # contract violation, not a crash
                     if len(errors) < _ERROR_CAP:
                         errors.append(str(exc)[:200])
@@ -92,9 +93,14 @@ def main() -> None:
             if len(samples) < _SAMPLE_CAP:
                 samples.append(
                     {
-                        "url": item.url,
-                        "title": item.title,
-                        "body": item.body[:_BODY_PREVIEW],
+                        "url": job.url,
+                        "title": job.title,
+                        # company/location are required Job fields the §6 completeness
+                        # gate checks per sample — omitting them here would fail every
+                        # candidate at the gate.
+                        "company": job.company,
+                        "location": job.location,
+                        "description": job.description[:_DESCRIPTION_PREVIEW],
                     }
                 )
         result["item_count"] = count

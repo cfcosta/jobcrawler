@@ -2,7 +2,7 @@
 
 The GEPA compile is multi-hour and must **never** run in-band in the §4.9 scheduler
 loop (a tick blocked for hours stops all crawling). This module hands it off as a
-*detached* ``autocrawl optimize`` subprocess and guards it with a file lock so two
+*detached* ``jobcrawl optimize`` subprocess and guards it with a file lock so two
 compiles never run at once — a slow reopt timer that fires while a previous run is
 still going is a no-op, not a pile-up of concurrent multi-hour runs all fighting over
 the same trainset and generator dir.
@@ -32,9 +32,9 @@ import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from bizup_autocrawler import config
+from jobcrawler import config
 
-_log = logging.getLogger("bizup_autocrawler.optimize_job")
+_log = logging.getLogger("jobcrawler.optimize_job")
 
 
 class AlreadyRunning(RuntimeError):
@@ -49,7 +49,7 @@ def optimize_lock(path: str | None = None) -> Iterator[None]:
     with the open fd, so a crash mid-compile releases it (no stale lock to reap). If
     another process already holds it, raises :class:`AlreadyRunning` rather than
     queueing — the offline compile is multi-hour, so a second concurrent run is never
-    wanted. Both the manual ``autocrawl optimize`` and the scheduler's detached
+    wanted. Both the manual ``jobcrawl optimize`` and the scheduler's detached
     dispatch acquire this, so they share one single-flight.
     """
     lock_path = path or config.optimize_lock_path()
@@ -97,7 +97,7 @@ def is_locked(path: str | None = None) -> bool:
 def dispatch_optimize(
     *, adopt: bool = False, lock_path: str | None = None, log_path: str | None = None
 ) -> bool:
-    """Spawn ``autocrawl optimize`` as a detached, out-of-band subprocess (§4.11).
+    """Spawn ``jobcrawl optimize`` as a detached, out-of-band subprocess (§4.11).
 
     ``adopt`` appends ``--adopt`` so a promoted generator flips the live pointer with no
     restart — the path the §4.9 reopt timer takes ("full auto, gated by proof"); the
@@ -106,7 +106,7 @@ def dispatch_optimize(
     Returns True if a job was launched, False if one is already running (the lock is
     held) — a reopt tick that fires while a previous compile is still going is a no-op.
     The child is started in its own session (``start_new_session``) so it survives a
-    daemon restart/stop, inherits the daemon's environment (the AUTOCRAWLER_* config),
+    daemon restart/stop, inherits the daemon's environment (the JOBCRAWLER_* config),
     and re-acquires the lock itself. Its cwd is pinned to the daemon's current directory
     (``cwd=os.getcwd()``) so the CWD-relative trainset / generators / lock / log paths
     resolve to the *same* files the daemon probed — the child can't drift onto a
@@ -117,7 +117,7 @@ def dispatch_optimize(
         _log.info("optimize already running; skipping dispatch")
         return False
     log_file = log_path or config.optimize_log_path()
-    cmd = [sys.executable, "-m", "bizup_autocrawler", "optimize"]
+    cmd = [sys.executable, "-m", "jobcrawler", "optimize"]
     if adopt:
         cmd.append("--adopt")
     # Line-buffered append so the child's progress is followable; the child inherits its

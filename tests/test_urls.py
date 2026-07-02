@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
-from bizup_autocrawler.urls import (
+from jobcrawler.urls import (
     canonicalize_url,
     host_on_domain,
     normalize_host,
@@ -80,6 +80,18 @@ def test_url_differing_only_by_tracking_param_canonicalizes_equal() -> None:
     with_tracking = canonicalize_url("https://example.com/story?utm_source=newsletter")
     without = canonicalize_url("https://example.com/story")
     assert with_tracking == without
+
+
+def test_greenhouse_gh_jid_query_param_survives_canonicalization() -> None:
+    # gh_jid identifies the specific posting on a company-hosted careers page that
+    # embeds a Greenhouse board (…/careers?gh_jid=1234567). It is the dedup key for
+    # that job, so it must SURVIVE canonicalization — it is neither utm_* nor on the
+    # denylist — while any real tracking param mixed in is still dropped. Stripping
+    # it would collapse every posting on that page to one URL (§4.7 dedup).
+    out = canonicalize_url(
+        "https://example.com/careers?gh_jid=1234567&utm_source=li&gclid=abc"
+    )
+    assert out == "https://example.com/careers?gh_jid=1234567"
 
 
 def test_custom_drop_params_replaces_default_but_utm_still_dropped() -> None:

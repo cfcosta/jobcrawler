@@ -14,7 +14,7 @@ regenerations, so a regression surfaces as post-adoption self-heals failing to p
 a gate-passing crawler more often than the prior generator did. If the post-adoption
 failures exceed the pre-adoption baseline by the regression delta, it rolls the pointer
 back (:func:`generator_pointer.rollback_active`, the same undo
-``autocrawl rollback-generator`` performs) and alerts the operator; otherwise the
+``jobcrawl rollback-generator`` performs) and alerts the operator; otherwise the
 adoption clears probation. Either way the marker is consumed, so the judgement runs
 exactly once per adoption.
 
@@ -29,11 +29,11 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta
 
-from bizup_autocrawler import config, generator_pointer
-from bizup_autocrawler.notify import notify
-from bizup_autocrawler.state import StateStore
+from jobcrawler import config, generator_pointer
+from jobcrawler.notify import notify
+from jobcrawler.state import StateStore
 
-_log = logging.getLogger("bizup_autocrawler.adopt_watch")
+_log = logging.getLogger("jobcrawler.adopt_watch")
 
 # The §4.8 generation-failed health state, by value (the store keeps states as the
 # strings ``HealthState`` owns; this module deliberately does not import the enum).
@@ -71,7 +71,7 @@ def check_adoption(
     """
     window = config.adopt_probation() if probation is None else probation
     if window is None:
-        return None  # watcher disabled (AUTOCRAWLER_ADOPT_PROBATION=off)
+        return None  # watcher disabled (JOBCRAWLER_ADOPT_PROBATION=off)
     marker = generator_pointer.read_adoption()
     if marker is None:
         return None  # no adoption under probation

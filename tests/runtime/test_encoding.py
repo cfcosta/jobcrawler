@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import codecs
 
-from bizup_autocrawler.runtime.encoding import (
+from jobcrawler.runtime.encoding import (
     http_charset_from_content_type,
     resolve_text,
 )

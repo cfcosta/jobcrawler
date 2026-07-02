@@ -1,0 +1,73 @@
+# jobcrawler — native (non-container) deployment (systemd + Nix).
+#
+# Runs the daemon straight from the Nix-built console script — no container
+# runtime. The crawl daemon (`run`/`crawl`) never shells out to Deno, so a native
+# run host does NOT need Deno on PATH; only `generate`/`optimize` (the §4.2 RLM
+# Pyodide sandbox) do, and those are typically run interactively, not by this unit.
+#
+# Install:
+#   nix build .#default --out-link /var/lib/jobcrawler/app   # → app/bin/jobcrawl
+#   sudo install -d -m 700 /var/lib/jobcrawler
+#   sudo install -d -m 700 /etc/jobcrawler
+#   sudo install -m 600 deploy/jobcrawler.env.example /etc/jobcrawler/jobcrawler.env
+#   sudo $EDITOR /etc/jobcrawler/jobcrawler.env       # fill REQUIRED values
+#   sudo install -m 644 deploy/sites.example.yaml /var/lib/jobcrawler/sites.yaml
+#   sudo $EDITOR /var/lib/jobcrawler/sites.yaml
+#   sudo install -m 644 PROFILE.md /var/lib/jobcrawler/PROFILE.md
+#   sudo $EDITOR /var/lib/jobcrawler/PROFILE.md       # your skills + what to match (§4.6)
+#   sudo useradd --system --home-dir /var/lib/jobcrawler --shell /usr/sbin/nologin jobcrawler || true
+#   sudo chown -R jobcrawler:jobcrawler /var/lib/jobcrawler
+#   sudo install -m 644 deploy/jobcrawler-native.service \
+#     /etc/systemd/system/jobcrawler.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now jobcrawler
+#
+# `nix build .#default` pins the exact dependency closure from uv.lock, so a redeploy
+# is: rebuild the out-link, then `systemctl restart jobcrawler`.
+
+[Unit]
+Description=jobcrawler — self-scheduling job-posting tracker daemon (native)
+Documentation=file:///etc/jobcrawler https://github.com/cfcosta/jobcrawler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jobcrawler
+Group=jobcrawler
+WorkingDirectory=/var/lib/jobcrawler
+EnvironmentFile=/etc/jobcrawler/jobcrawler.env
+# Absolute state/registry/profile paths (the relative defaults resolve against
+# WorkingDirectory, but be explicit so a stray `cd` can't relocate the DB).
+Environment=JOBCRAWLER_SITES=/var/lib/jobcrawler/sites.yaml
+# The §4.6 match profile — an operator-authored persistent input like sites.yaml.
+Environment=JOBCRAWLER_PROFILE=/var/lib/jobcrawler/PROFILE.md
+# The state DB now also holds the positions ledger and the match cache/spend.
+Environment=JOBCRAWLER_STATE_URL=sqlite:////var/lib/jobcrawler/jobcrawler.db
+# Committed crawlers must live on a writable path — the Nix-store package is read-only,
+# so generate/promote/self-heal write here, and crawl reads committed scripts from here.
+Environment=JOBCRAWLER_CRAWLERS_DIR=/var/lib/jobcrawler/crawlers
+Environment=JOBCRAWLER_GENERATOR_DIR=/var/lib/jobcrawler/generators
+Environment=JOBCRAWLER_TRAINSET_PATH=/var/lib/jobcrawler/trainset.jsonl
+ExecStart=/var/lib/jobcrawler/app/bin/jobcrawl run
+Restart=on-failure
+RestartSec=10s
+StartLimitIntervalSec=300
+StartLimitBurst=5
+TimeoutStartSec=120
+
+# --- hardening (it runs on the host, so confine it) ---
+# The store path is read-only anyway; lock the rest of the FS down to the state dir.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/jobcrawler
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+# Outbound HTTPS only (crawl/board fetches + the §4.6 match LM + generate/optimize
+# LM API); no inbound listener.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

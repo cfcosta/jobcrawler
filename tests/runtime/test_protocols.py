@@ -1,7 +1,7 @@
 """Tests for the generated-crawler contract (§4.3).
 
 A committed ``crawlers/<slug>.py`` exposes ``SITE: str`` and ``crawl(ctx) ->
-Iterable[Item]``; ``ctx`` is the single fetch boundary. ``load_crawler``
+Iterable[Job]``; ``ctx`` is the single fetch boundary. ``load_crawler``
 validates a loaded module before the runner calls it.
 """
 
@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from bizup_autocrawler.runtime.contract import Ctx, Item, load_crawler
+from jobcrawler.runtime.contract import Ctx, Job, load_crawler
 
 
 class _StubCtx:
@@ -39,7 +39,7 @@ def test_incomplete_ctx_is_not_a_ctx() -> None:
 
 
 def test_load_crawler_accepts_a_conforming_module() -> None:
-    def crawl(ctx: Ctx) -> Iterable[Item]:
+    def crawl(ctx: Ctx) -> Iterable[Job]:
         return []
 
     module = SimpleNamespace(SITE="https://example.com", crawl=crawl)

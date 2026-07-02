@@ -12,7 +12,7 @@ from __future__ import annotations
 import dspy
 import pytest
 
-from bizup_autocrawler.generate.budget import (
+from jobcrawler.generate.budget import (
     CappedLM,
     SubcallBudget,
     SubcallBudgetExceeded,

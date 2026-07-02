@@ -8,15 +8,15 @@ clamps, hysteresis, cold-start) so the scheduler integration can rely on it.
 
 from __future__ import annotations
 
-from bizup_autocrawler.adaptive import next_interval
+from jobcrawler.adaptive import next_interval
 
 FLOOR = 900.0  # 15m politeness floor
 CEILING = 86400.0  # 1d staleness ceiling
-TARGET = 0.5  # target_n = 2 → check ~twice per post
+TARGET = 0.5  # target_n = 2 → check ~twice per posting
 
 
 def test_busy_source_shrinks_interval() -> None:
-    # Every recent crawl found new items → we are under-checking → shrink (fast).
+    # Every recent crawl found new positions → we are under-checking → shrink (fast).
     nxt = next_interval(
         3600.0,
         [True] * 8,

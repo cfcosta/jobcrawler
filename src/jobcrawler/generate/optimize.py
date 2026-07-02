@@ -22,8 +22,8 @@ from typing import Literal
 import dspy
 from dspy.teleprompt import GEPA, BootstrapFewShotWithRandomSearch
 
-from bizup_autocrawler.generate.evaluate import evaluate_generator
-from bizup_autocrawler.trainset import assert_disjoint
+from jobcrawler.generate.evaluate import evaluate_generator
+from jobcrawler.trainset import assert_disjoint
 
 
 def select_optimizer(trainset_size: int) -> str:

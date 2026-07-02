@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from bizup_autocrawler.durations import parse_duration, parse_retry_after
+from jobcrawler.durations import parse_duration, parse_retry_after
 
 _NOW = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
 

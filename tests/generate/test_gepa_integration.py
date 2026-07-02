@@ -35,7 +35,7 @@ import dspy
 import pytest
 from dspy.utils import DummyLM
 
-from bizup_autocrawler.generate.optimize import (
+from jobcrawler.generate.optimize import (
     _budget_health_note,
     _pareto_health_note,
     gepa_compile,

@@ -7,20 +7,33 @@ pure, parser-side tool logic; the network/sandbox/Playwright bindings
 sandbox + §8 hardening work, since feed/sitemap parsing consumes
 attacker-influenced markup on the hot path.
 
-``find_feeds_in`` is the discovery primitive: ``<link rel="alternate">`` RSS /
-Atom / JSON feeds, resolved to absolute URLs. Feed-first discovery enumerates
-articles (a homepage scrape only samples "recent"), so this is what gate-2
-must-observe pushes the generator to consult before choosing ``scrape``.
+``find_feeds_in`` is the HTML discovery primitive: ``<link rel="alternate">`` RSS
+/ Atom / JSON feeds, resolved to absolute URLs. ``ats_api_candidates`` is its
+job-board sibling: the documented whole-board JSON endpoints of the handful of
+ATS platforms most careers pages run on (Greenhouse / Lever / Ashby / Gupy),
+derived from the host. Both surface *enumerate-the-whole-board* sources — a feed
+or a board API lists every open posting, whereas scraping a paginated HTML
+listing only samples a window — so together they are what gate-2(a) must-observe
+pushes the generator to consult before falling back to ``scrape`` (now covering
+job-board APIs, not just RSS).
+
+The §4.4 sandbox binding (``validate_crawler``) is imported lazily inside the
+tool so importing this module for the pure discovery helpers — the §4.2 corpus
+build calls ``find_feeds_in`` on the hot path — does not drag in the
+subprocess-sandbox machinery.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Iterable
 from html.parser import HTMLParser
-from urllib.parse import urljoin
+from typing import TYPE_CHECKING
+from urllib.parse import urljoin, urlsplit
 
-from bizup_autocrawler.runtime.contract import Ctx
-from bizup_autocrawler.runtime.sandbox import validate_crawler as _run_in_sandbox
+from jobcrawler.runtime.contract import Ctx
+
+if TYPE_CHECKING:  # type-only: keeps this module import-light (no scoring at runtime)
+    from jobcrawler.generate.scoring import CandidateResult
 
 _FEED_TYPES = frozenset(
     {
@@ -48,25 +61,194 @@ class _FeedLinkParser(HTMLParser):
             self.hrefs.append(href)
 
 
-def find_feeds_in(html: str, base_url: str) -> list[str]:
-    """Discover ``<link rel="alternate">`` feeds in ``html`` as absolute URLs.
-
-    Order-preserving and de-duplicated (a page often declares the same feed twice).
-    """
-    parser = _FeedLinkParser()
-    parser.feed(html)
+def _ordered_unique(urls: Iterable[str]) -> list[str]:
+    """Order-preserving de-duplication (a page declares the same feed twice)."""
     out: list[str] = []
     seen: set[str] = set()
-    for href in parser.hrefs:
-        url = urljoin(base_url, href)
+    for url in urls:
         if url not in seen:
             seen.add(url)
             out.append(url)
     return out
 
 
+def find_feeds_in(html: str, base_url: str) -> list[str]:
+    """Discover ``<link rel="alternate">`` feeds in ``html`` as absolute URLs.
+
+    Order-preserving and de-duplicated. A feed enumerates every posting; scraping
+    a homepage only samples the "recent" window — which is why feed-first
+    discovery is the §6 gate-2(a) discipline.
+    """
+    parser = _FeedLinkParser()
+    parser.feed(html)
+    return _ordered_unique(urljoin(base_url, href) for href in parser.hrefs)
+
+
+# -- known-ATS whole-board API discovery (§4.2) ------------------------------
+#
+# Empirically probed 2026-07-02: each endpoint returns the ENTIRE board in one
+# (or a cleanly paginated) call, so surfacing them lets the generator prefer an
+# enumerate-the-board API over scraping a paginated HTML listing — and lets
+# gate-2(a)'s "consult discovery before scraping" cover API boards, not just RSS.
+# Every URL is a *candidate*: the crawler still fetches and validates it, so a
+# wrong guess simply 404s rather than fabricating anything.
+
+
+def _greenhouse_api(token: str) -> str:
+    # boards-api.greenhouse.io/v1/boards/<token>/jobs?content=true — the whole
+    # board in one call (meta.total); content is the FULL, HTML-entity-escaped
+    # description (html.unescape then strip tags).
+    return f"https://boards-api.greenhouse.io/v1/boards/{token}/jobs?content=true"
+
+
+def _lever_api(token: str) -> str:
+    # api.lever.co/v0/postings/<token>?mode=json — full text is description +
+    # lists[].content + additional; workplaceType is always present.
+    return f"https://api.lever.co/v0/postings/{token}?mode=json"
+
+
+def _ashby_api(token: str) -> str:
+    # api.ashbyhq.com/posting-api/job-board/<token>?includeCompensation=true —
+    # full descriptionPlain + structured compensation ~70% of the time.
+    return (
+        "https://api.ashbyhq.com/posting-api/job-board/"
+        f"{token}?includeCompensation=true"
+    )
+
+
+def _gupy_board(token: str) -> str:
+    # <token>.gupy.io embeds every job in __NEXT_DATA__ (the employability-portal
+    # API paginates the same data) — the board page is the single fetch to parse.
+    return f"https://{token}.gupy.io/"
+
+
+# Careers-y subdomain labels stripped before guessing an org slug from a company
+# host (``careers.acme.com`` / ``jobs.acme.com`` both -> ``acme``).
+_SUBDOMAIN_NOISE = frozenset(
+    {
+        "www",
+        "careers",
+        "career",
+        "jobs",
+        "job",
+        "boards",
+        "board",
+        "job-boards",
+        "apply",
+        "work",
+        "hiring",
+        "talent",
+        "recruiting",
+        "join",
+    }
+)
+
+
+def _first_path_segment(path: str) -> str:
+    for segment in path.split("/"):
+        if segment:
+            return segment
+    return ""
+
+
+def _subdomain_label(host: str, suffix: str) -> str:
+    """The single sub-label of ``host`` under ``suffix`` (``acme.gupy.io`` -> ``acme``).
+
+    Empty when ``host`` is the bare suffix or carries more than one sub-label — we
+    only trust an unambiguous ``<token>.<suffix>`` vhost as a board token.
+    """
+    dotted = "." + suffix
+    if not host.endswith(dotted):
+        return ""
+    label = host[: -len(dotted)]
+    return label if label and "." not in label else ""
+
+
+def _org_slug(host: str) -> str:
+    """A best-effort org slug from a company/careers host (``careers.acme.com`` -> ``acme``).
+
+    No public-suffix list is shipped, so this approximates: drop a leading
+    careers-y subdomain, then take the registrable label. It only ever feeds
+    *candidate* endpoints the generator probes, never an assertion — so a rough
+    guess is fine (a wrong slug just 404s). Empty for a bare/loopback/numeric host.
+    """
+    labels = [label for label in host.split(".") if label]
+    while len(labels) > 2 and labels[0] in _SUBDOMAIN_NOISE:
+        labels = labels[1:]
+    if len(labels) < 2:
+        return ""
+    slug = labels[0]
+    return "" if slug.isdigit() else slug
+
+
+def ats_api_candidates(base_url: str) -> list[str]:
+    """Candidate whole-board ATS API endpoints for ``base_url``'s host (§4.2).
+
+    Most job boards run on a few ATS platforms whose documented JSON endpoints
+    return the entire board at once (Greenhouse / Lever / Ashby) or embed it in
+    the board page (Gupy) — the enumerate-everything sources the §6 gates push the
+    generator toward over scraping a paginated listing. When the URL already *is*
+    a known ATS board host the platform is known, so we emit its single exact
+    endpoint; for a company's own careers domain the platform is unknown, so we
+    guess the org slug and offer one candidate per platform to probe. A host with
+    no derivable slug yields ``[]``.
+    """
+    parts = urlsplit(base_url.strip())
+    host = (parts.hostname or "").lower()
+    if not host:
+        return []
+    path_token = _first_path_segment(parts.path)
+
+    # Mode A — the URL already IS an ATS board host: the platform is known, so emit
+    # the single high-signal endpoint. The token lives in the path for the
+    # path-style boards (boards.greenhouse.io/<t>, jobs.lever.co/<t>,
+    # jobs.ashbyhq.com/<t>) and in the subdomain for the vhost-style ones.
+    if host.endswith("greenhouse.io"):
+        token = path_token or _subdomain_label(host, "greenhouse.io")
+        return [_greenhouse_api(token)] if token else []
+    if host.endswith("lever.co"):
+        token = path_token or _subdomain_label(host, "lever.co")
+        return [_lever_api(token)] if token else []
+    if host.endswith("ashbyhq.com"):
+        token = path_token or _subdomain_label(host, "ashbyhq.com")
+        return [_ashby_api(token)] if token else []
+    if host.endswith("gupy.io"):
+        token = _subdomain_label(host, "gupy.io")
+        return [_gupy_board(token)] if token else []
+
+    # Mode B — a company/careers domain: the platform is unknown, so guess the org
+    # slug and offer one candidate per platform (the generator probes; wrong 404).
+    slug = _org_slug(host)
+    if not slug:
+        return []
+    return [
+        _greenhouse_api(slug),
+        _lever_api(slug),
+        _ashby_api(slug),
+        _gupy_board(slug),
+    ]
+
+
+def _sandbox_validate() -> Callable[..., CandidateResult]:
+    """Bind the §4.4 sandbox validator lazily (keeps this module import-light).
+
+    Deferred to first use so importing ``tools`` for the pure discovery helpers
+    never drags in the subprocess-sandbox machinery, and so a caller can inject a
+    fake instead (``make_host_tools(..., validate_fn=...)``) — the same "inject the
+    scoring core so the wiring is testable without a live sandbox" idiom scoring.py
+    uses.
+    """
+    from jobcrawler.runtime.sandbox import validate_crawler
+
+    return validate_crawler
+
+
 def make_host_tools(
-    ctx: Ctx, allowed_hosts: Collection[str], *, validate_timeout: float = 10.0
+    ctx: Ctx,
+    allowed_hosts: Collection[str],
+    *,
+    validate_timeout: float = 10.0,
+    validate_fn: Callable[..., CandidateResult] | None = None,
 ) -> list[Callable[..., object]]:
     """The §4.2 host tools handed to ``dspy.RLM(tools=...)``.
 
@@ -75,6 +257,9 @@ def make_host_tools(
     corpus missed, and ``validate_crawler`` is the bridge to the §4.4 execution
     sandbox so the model can write → validate → fix before SUBMIT. Each is a plain
     named callable with a docstring (RLM uses these as the tool descriptions).
+
+    ``validate_fn`` overrides the §4.4 sandbox validator (default: bound lazily) so
+    the reshaping is testable without spawning the subprocess.
     """
     hosts = set(allowed_hosts)
 
@@ -83,16 +268,27 @@ def make_host_tools(
         return ctx.fetch(url)
 
     def find_feeds(url: str) -> list[str]:
-        """Return RSS/Atom/JSON feed URLs linked from the page at `url`."""
-        return find_feeds_in(ctx.fetch(url), url)
+        """Discovery candidates for `url`: RSS/Atom/JSON feeds linked from the page,
+        plus known-ATS whole-board API endpoints (Greenhouse/Lever/Ashby/Gupy) for
+        the host — the enumerate-every-posting sources to prefer over scraping."""
+        feeds = find_feeds_in(ctx.fetch(url), url)
+        return _ordered_unique([*feeds, *ats_api_candidates(url)])
 
     def get_sitemap(url: str) -> str:
         """Fetch the sitemap XML at `url` (e.g. https://site/sitemap.xml)."""
         return ctx.fetch(url)
 
     def validate_crawler(source: str) -> dict[str, object]:
-        """Run a candidate crawler in the sandbox; returns items found + samples + any error."""
-        result = _run_in_sandbox(source, allowed_hosts=hosts, timeout=validate_timeout)
+        """Run a candidate crawler in the §4.4 sandbox and report what it yielded.
+
+        Returns the positions found (``item_count`` + capped ``samples``), any
+        ``schema_errors`` naming missing or invalid Job fields (url / title /
+        company / location / description / source), and any top-level
+        ``exception`` — the write → validate → fix signal to use before SUBMIT."""
+        # Bind the sandbox validator at call time (not construction) so building the
+        # tools for pure discovery never imports the subprocess-sandbox machinery.
+        run_in_sandbox = validate_fn or _sandbox_validate()
+        result = run_in_sandbox(source, allowed_hosts=hosts, timeout=validate_timeout)
         return {
             "item_count": result.item_count,
             "samples": result.samples,

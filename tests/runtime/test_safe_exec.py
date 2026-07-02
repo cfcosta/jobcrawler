@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from bizup_autocrawler.runtime.safe_exec import (
+from jobcrawler.runtime.safe_exec import (
     BANNED_BUILTINS,
     exec_crawler,
     module_allowed,
@@ -60,9 +60,10 @@ def test_module_allowed_admits_the_allowlist_and_rejects_the_rest() -> None:
     for ok in (
         "re",
         "json",
+        "base64",  # ATS payloads (e.g. Gupy __NEXT_DATA__ tokens) are base64
         "urllib.parse",
         "collections.abc",
-        "bizup_autocrawler.runtime.contract",
+        "jobcrawler.runtime.contract",
         "lxml.etree",
         "selectolax.parser",
         "feedparser",

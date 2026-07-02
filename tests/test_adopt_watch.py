@@ -21,8 +21,8 @@ from pathlib import Path
 import pytest
 from pytest import MonkeyPatch
 
-from bizup_autocrawler import adopt_watch, config, generator_pointer
-from bizup_autocrawler.state import StateStore
+from jobcrawler import adopt_watch, config, generator_pointer
+from jobcrawler.state import StateStore
 
 T_ADOPT = datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc)
 WINDOW = timedelta(hours=48)
@@ -110,7 +110,7 @@ def test_disabled_watcher_is_a_noop(
     monkeypatch: MonkeyPatch,
     events: list[tuple[str, dict[str, object]]],
 ) -> None:
-    # AUTOCRAWLER_ADOPT_PROBATION=off ⇒ config returns None; even a ripe, regressing
+    # JOBCRAWLER_ADOPT_PROBATION=off ⇒ config returns None; even a ripe, regressing
     # marker is left strictly alone (the margin gate is the only protection then).
     monkeypatch.setattr(config, "adopt_probation", lambda: None)
     generator_pointer.set_active("generators/generator-1.json")

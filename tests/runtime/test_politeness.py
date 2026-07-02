@@ -1,15 +1,16 @@
 """Tests for the §4.5 politeness layer: per-host pacing and robots.txt.
 
-The pacer throttles fetches *per crawled host* (distinct from the §4.7 ingest
-governor, which protects the news API); robots.txt compliance gates which paths
-may be fetched and can raise a host's pacing floor via ``Crawl-delay``. Clock and
-sleep are injected so the pacing is asserted deterministically, and robots.txt is
-fed through an injected fetcher so no real network is touched.
+The pacer throttles fetches *per crawled host* (distinct from the match governor,
+which paces the host-side profile matcher's LLM calls); robots.txt compliance
+gates which paths may be fetched and can raise a host's pacing floor via
+``Crawl-delay``. Clock and sleep are injected so the pacing is asserted
+deterministically, and robots.txt is fed through an injected fetcher so no real
+network is touched.
 """
 
 from __future__ import annotations
 
-from bizup_autocrawler.runtime.politeness import (
+from jobcrawler.runtime.politeness import (
     PerHostPacer,
     RobotsPolicy,
     host_rate_interval,
@@ -118,13 +119,13 @@ class _RecordingFetcher:
         return self.body
 
 
-def _robots(body: str | None, ua: str = "bizup-autocrawler") -> RobotsPolicy:
+def _robots(body: str | None, ua: str = "jobcrawler") -> RobotsPolicy:
     return RobotsPolicy(_RecordingFetcher(body), user_agent=ua)
 
 
 def test_robots_disallows_a_blocked_path() -> None:
     policy = _robots(_ROBOTS)
-    assert policy.allowed("https://x.com/public/article") is True
+    assert policy.allowed("https://x.com/public/jobs") is True
     assert policy.allowed("https://x.com/private/secret") is False
 
 
@@ -150,13 +151,13 @@ def test_robots_fails_open_when_unfetchable() -> None:
     def boom(url: str) -> str | None:
         raise RuntimeError("connection reset")
 
-    policy = RobotsPolicy(boom, user_agent="bizup-autocrawler")
+    policy = RobotsPolicy(boom, user_agent="jobcrawler")
     assert policy.allowed("https://x.com/private/secret") is True
 
 
 def test_robots_is_fetched_once_per_host() -> None:
     fetcher = _RecordingFetcher(_ROBOTS)
-    policy = RobotsPolicy(fetcher, user_agent="bizup-autocrawler")
+    policy = RobotsPolicy(fetcher, user_agent="jobcrawler")
     policy.allowed("https://x.com/a")
     policy.allowed("https://x.com/b")
     policy.crawl_delay("https://x.com/c")
@@ -165,7 +166,7 @@ def test_robots_is_fetched_once_per_host() -> None:
 
 def test_robots_fetches_the_host_root_robots_path() -> None:
     fetcher = _RecordingFetcher(_ROBOTS)
-    RobotsPolicy(fetcher, user_agent="bizup-autocrawler").allowed(
+    RobotsPolicy(fetcher, user_agent="jobcrawler").allowed(
         "https://x.com/deep/nested/page?q=1"
     )
     assert fetcher.urls == ["https://x.com/robots.txt"]

@@ -1,4 +1,4 @@
-"""The ``autocrawl optimize`` offline self-improvement job (§4.11) — out-of-band.
+"""The ``jobcrawl optimize`` offline self-improvement job (§4.11) — out-of-band.
 
 This is the manual surface that *closes* the §4.11 loop. It:
 
@@ -24,33 +24,33 @@ from typing import cast
 
 import dspy
 
-from bizup_autocrawler import config
-from bizup_autocrawler.generate.budget import CappedLM
-from bizup_autocrawler.generate.evaluate import evaluate_generator
-from bizup_autocrawler.generate.generator import (
+from jobcrawler import config
+from jobcrawler.generate.budget import CappedLM
+from jobcrawler.generate.evaluate import evaluate_generator
+from jobcrawler.generate.generator import (
     CrawlerGenerator,
     load_generator,
     save_generator,
 )
-from bizup_autocrawler.generate.optimize import (
+from jobcrawler.generate.optimize import (
     bootstrap_compile,
     gepa_compile,
     run_optimization,
     select_optimizer,
 )
-from bizup_autocrawler.generate.scoring import (
+from jobcrawler.generate.scoring import (
     CandidateResult,
     make_bootstrap_metric,
     make_metric,
 )
-from bizup_autocrawler.generate.snapshot import prefetch_corpus
-from bizup_autocrawler.runtime.ctx import Ctx
-from bizup_autocrawler.runtime.sandbox import validate_crawler
-from bizup_autocrawler.state import StateStore
-from bizup_autocrawler.trainset import load_records, optimization_pool, split_by_site
-from bizup_autocrawler.urls import normalize_host
+from jobcrawler.generate.snapshot import prefetch_corpus
+from jobcrawler.runtime.ctx import Ctx
+from jobcrawler.runtime.sandbox import validate_crawler
+from jobcrawler.state import StateStore
+from jobcrawler.trainset import load_records, optimization_pool, split_by_site
+from jobcrawler.urls import normalize_host
 
-_TARGET_ITEMS = 30  # the items-axis saturation target (mirrors cli_generate)
+_TARGET_ITEMS = 30  # the positions-axis saturation target (mirrors cli_generate)
 _MIN_SITES = 3  # need at least one site each for train / val / held-out
 
 
@@ -59,10 +59,10 @@ def optimize_command(args: argparse.Namespace) -> int:
 
     The offline compile is multi-hour; two concurrent runs would fight over the
     trainset and generator dir. Acquiring the lock here makes both the manual
-    ``autocrawl optimize`` and the scheduler's out-of-band dispatch participate in
+    ``jobcrawl optimize`` and the scheduler's out-of-band dispatch participate in
     one single-flight — a second invocation exits cleanly instead of piling on.
     """
-    from bizup_autocrawler.optimize_job import AlreadyRunning, optimize_lock
+    from jobcrawler.optimize_job import AlreadyRunning, optimize_lock
 
     try:
         with optimize_lock():
@@ -73,7 +73,7 @@ def optimize_command(args: argparse.Namespace) -> int:
 
 
 def _run_optimize(args: argparse.Namespace) -> int:
-    from bizup_autocrawler.cli import _db_path  # avoid an import cycle
+    from jobcrawler.cli import _db_path  # avoid an import cycle
 
     store = StateStore(_db_path())
     try:
@@ -124,8 +124,8 @@ def _run_optimize(args: argparse.Namespace) -> int:
             # the live pointer so a running daemon picks it up — no env change/restart.
             from datetime import datetime, timezone
 
-            from bizup_autocrawler import generator_pointer
-            from bizup_autocrawler.notify import notify
+            from jobcrawler import generator_pointer
+            from jobcrawler.notify import notify
 
             generator_pointer.set_active(out)
             # Put it under §4.11 probation: the daemon's regression watcher rolls it
@@ -138,9 +138,9 @@ def _run_optimize(args: argparse.Namespace) -> int:
                 margin=round(_as_float(result.get("margin")), 1),
             )
             print(f"  adopted: active generator -> {out}")
-            print("  rollback: autocrawl rollback-generator")
+            print("  rollback: jobcrawl rollback-generator")
         else:
-            print(f"  deploy: set AUTOCRAWLER_GENERATOR_PATH={out}")
+            print(f"  deploy: set JOBCRAWLER_GENERATOR_PATH={out}")
         return 0
 
     reason = result.get("reason") or "held-out did not beat the incumbent by the margin"
@@ -169,13 +169,15 @@ def _optimize(
         return validate_crawler(source, allowed_hosts={host} if host else set())
 
     bootstrap_metric = make_bootstrap_metric(
-        core, target_n=_TARGET_ITEMS, min_body_chars=config.min_body_chars()
+        core,
+        target_n=_TARGET_ITEMS,
+        min_description_chars=config.min_description_chars(),
     )
     eval_metric = make_metric(
         core,
         target_n=_TARGET_ITEMS,
         min_items=config.min_items(),
-        min_body_chars=config.min_body_chars(),
+        min_description_chars=config.min_description_chars(),
     )
     # The incumbent: the pinned generator.json if any, else baseline (§4.11 boot-load).
     baseline = load_generator(
@@ -299,7 +301,7 @@ def _prefetch_corpus(site_url: str) -> dict[str, object]:
 
 
 def _stable_runs(store: StateStore, slug: str) -> int:
-    """Consecutive most-recent *finished* runs that found items (non-stale, §4.8)."""
+    """Consecutive most-recent *finished* runs that found positions (non-stale, §4.8)."""
     count = 0
     for run in store.runs_for(slug):
         if run.finished is None:

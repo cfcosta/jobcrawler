@@ -1,6 +1,6 @@
 """Restricted exec environment for untrusted crawler code (§8 trusted computing base).
 
-The §6 AST gate (:mod:`bizup_autocrawler.generate.gates`) statically rejects
+The §6 AST gate (:mod:`jobcrawler.generate.gates`) statically rejects
 dangerous imports and builtins, but the host must never rely on the gate alone: a
 committed or self-healed crawler is still model-written, untrusted code. So both
 subprocess entries (:mod:`._sandbox_entry`, :mod:`._collect_entry`) exec it with a
@@ -27,12 +27,17 @@ from typing import Any
 # -- module allowlist (shared with the §6 AST gate) --------------------------
 # Exact module names a generated crawler may import. urllib is intentionally
 # narrowed to ``urllib.parse`` (``urllib.request`` would be a network egress path
-# outside ctx). __future__ is the harmless annotations directive.
+# outside ctx). __future__ is the harmless annotations directive. ``base64`` is
+# admitted because some ATS boards ship their payload base64-encoded — Gupy embeds
+# each posting's token in ``__NEXT_DATA__`` as base64 — and it is pure stdlib
+# string↔bytes transcoding with no filesystem or network I/O, so it opens no
+# escape the SSRF/ctx boundary doesn't already cover.
 ALLOWED_EXACT = frozenset(
     {
         "__future__",
         "re",
         "json",
+        "base64",
         "datetime",
         "urllib.parse",
         "collections",
@@ -43,7 +48,7 @@ ALLOWED_EXACT = frozenset(
         "string",
         "typing",
         "dataclasses",
-        "bizup_autocrawler.runtime.contract",
+        "jobcrawler.runtime.contract",
     }
 )
 # Parser packages: the package and any submodule (lxml.etree, selectolax.parser).

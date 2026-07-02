@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 from pytest import MonkeyPatch
 
-from bizup_autocrawler import config, generator_pointer
+from jobcrawler import config, generator_pointer
 
 
 @pytest.fixture(autouse=True)

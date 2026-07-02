@@ -1,4 +1,4 @@
-"""The ``autocrawl generate`` orchestration (§4.2, §6) — needs a live LM + Deno.
+"""The ``jobcrawl generate`` orchestration (§4.2, §6) — needs a live LM + Deno.
 
 Kept separate from ``cli.py`` so importing the CLI never pulls dspy. The full §6
 machinery runs here:
@@ -15,7 +15,7 @@ machinery runs here:
      → two-run Jaccard stability — and, only on a pass, *deliver* the crawler: an
      operator-run ``generate`` writes ``crawlers/<slug>.py`` directly, but the
      unattended §4.8 self-heal (``regenerate_one``) honors the tri-state
-     ``AUTOCRAWLER_REVIEW_GATE``: ``on`` (default) *stages* it to
+     ``JOBCRAWLER_REVIEW_GATE``: ``on`` (default) *stages* it to
      ``crawlers/_pending/<slug>.py`` for a human to ``promote`` (§14.2); ``auto``
      backs the live crawler up to ``crawlers/_history/`` and promotes it itself
      (reversible via ``rollback``); ``off`` writes live with no backup.
@@ -32,32 +32,32 @@ from pathlib import Path
 
 import dspy
 
-from bizup_autocrawler import config
-from bizup_autocrawler.generate.gates import (
+from jobcrawler import config
+from jobcrawler.generate.gates import (
     StabilityVerdict,
     check_ast,
     check_completeness,
     must_observe_failure,
     stability_verdict,
 )
-from bizup_autocrawler.generate.adversarial import cross_validate
-from bizup_autocrawler.generate.budget import CappedLM
-from bizup_autocrawler.generate.generator import best_of_n, load_generator
-from bizup_autocrawler.generate.scoring import CandidateResult, make_reward_fn
-from bizup_autocrawler.generate.snapshot import prefetch_corpus
-from bizup_autocrawler.generate.tools import make_host_tools
-from bizup_autocrawler.health import RegenOutcome
-from bizup_autocrawler.runtime.ctx import Ctx
-from bizup_autocrawler.runtime.sandbox import validate_crawler
-from bizup_autocrawler.schedule import Site
-from bizup_autocrawler.sites import find_site, load_sites
-from bizup_autocrawler.trainset import append_record, make_example
-from bizup_autocrawler.urls import normalize_host
+from jobcrawler.generate.adversarial import cross_validate
+from jobcrawler.generate.budget import CappedLM
+from jobcrawler.generate.generator import best_of_n, load_generator
+from jobcrawler.generate.scoring import CandidateResult, make_reward_fn
+from jobcrawler.generate.snapshot import prefetch_corpus
+from jobcrawler.generate.tools import make_host_tools
+from jobcrawler.health import RegenOutcome
+from jobcrawler.runtime.ctx import Ctx
+from jobcrawler.runtime.sandbox import validate_crawler
+from jobcrawler.schedule import Site
+from jobcrawler.sites import find_site, load_sites
+from jobcrawler.trainset import append_record, make_example
+from jobcrawler.urls import normalize_host
 
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 
 _CRAWLERS_DIR = Path(config.crawlers_dir())
-_TARGET_ITEMS = 30  # items-axis saturation for the graded scalar
+_TARGET_ITEMS = 30  # positions-axis saturation for the §6 graded scalar (target_n)
 
 
 def generate_command(args: argparse.Namespace) -> int:
@@ -73,7 +73,7 @@ def regenerate_one(slug: str) -> RegenOutcome:
 
     The self-healing entry point — the scheduler's regen timer calls this for a
     confirmed-stale site. Runs the full §6 generation for that one site, then honors
-    ``AUTOCRAWLER_REVIEW_GATE`` (on by default): a gate-passing crawler is *staged* to
+    ``JOBCRAWLER_REVIEW_GATE`` (on by default): a gate-passing crawler is *staged* to
     crawlers/_pending/<slug>.py for human promotion rather than overwriting the live
     crawler the daemon is running. With the gate off it goes live (auto-heal). A
     missing site or an exhausted generation reports ``FAILED``.
@@ -88,7 +88,7 @@ def regenerate_one(slug: str) -> RegenOutcome:
 def _build_lms() -> tuple[dspy.LM, dspy.LM]:
     """The §4.2 LM pair: a strong root planner + the cheap, host-capped ``sub_lm``.
 
-    ``require_sub_model()`` errors when ``AUTOCRAWLER_SUB_MODEL`` is unset rather than
+    ``require_sub_model()`` errors when ``JOBCRAWLER_SUB_MODEL`` is unset rather than
     silently billing every in-sandbox ``llm_query`` at the root planner's rate, and
     ``CappedLM`` adds the unconditional sub-call kill (the only hard stop on a
     catch-and-continue loop). Both caps are host-side, never seen by the generator.
@@ -107,7 +107,7 @@ def _select(sites: list[Site], args: argparse.Namespace) -> list[Site]:
     if args.all:
         return [s for s in sites if s.enabled]
     if args.stale:
-        print("--stale is driven by `autocrawl run`'s health loop (§4.8)")
+        print("--stale is driven by `jobcrawl run`'s health loop (§4.8)")
         return []
     site = find_site(sites, args.slug)
     return [site] if site is not None else []
@@ -150,7 +150,9 @@ async def _generate_one(
         return validate_crawler(source, allowed_hosts=hosts)
 
     reward_fn = make_reward_fn(
-        core, target_n=_TARGET_ITEMS, min_body_chars=config.min_body_chars()
+        core,
+        target_n=_TARGET_ITEMS,
+        min_description_chars=config.min_description_chars(),
     )
 
     async def make_attempt(i: int) -> object:
@@ -193,13 +195,13 @@ async def _generate_one(
     if outcome is RegenOutcome.STAGED:
         print(
             f"OK {site.slug}: staged crawlers/_pending/{site.slug}.py (score "
-            f"{score:.2f}) — run `autocrawl promote {site.slug}` to go live (§14.2)"
+            f"{score:.2f}) — run `jobcrawl promote {site.slug}` to go live (§14.2)"
         )
     elif mode == "auto":
         print(
             f"OK {site.slug}: auto-promoted crawlers/{site.slug}.py (score "
             f"{score:.2f}); prior crawler backed up — "
-            f"`autocrawl rollback {site.slug}` to revert (§4.8)"
+            f"`jobcrawl rollback {site.slug}` to revert (§4.8)"
         )
     else:
         print(f"OK {site.slug}: wrote crawlers/{site.slug}.py (score {score:.2f})")
@@ -212,7 +214,7 @@ def _deliver(
 ) -> RegenOutcome:
     """Write a gate-passing crawler per the §14.2 review-gate ``mode`` and report it.
 
-    ``mode`` is the tri-state ``AUTOCRAWLER_REVIEW_GATE`` (see ``config.review_gate``):
+    ``mode`` is the tri-state ``JOBCRAWLER_REVIEW_GATE`` (see ``config.review_gate``):
 
       * ``on`` — stage to ``crawlers/_pending/<slug>.py`` for a human to ``promote``;
         the live crawler the daemon runs is left untouched (→ STAGED → pending-review).
@@ -222,7 +224,7 @@ def _deliver(
         the dark incumbent (0 items, which is why the site is stale) it trivially beats.
       * ``off`` — write live with no backup (operator-trusted; → PROMOTED).
 
-    The crawlers dir is created if absent: a relocated ``AUTOCRAWLER_CRAWLERS_DIR``
+    The crawlers dir is created if absent: a relocated ``JOBCRAWLER_CRAWLERS_DIR``
     (e.g. a fresh ``/data/crawlers`` volume) won't exist on first delivery, and a live
     write must not ``FileNotFoundError`` on it.
     """
@@ -304,8 +306,8 @@ def gate_winner(
 ) -> tuple[bool, str]:
     """The full §6 gate set on the selected winner; returns (passed, reason).
 
-    ``expected_items`` (the site's recent-article count, from its news sitemap)
-    activates the enumeration floor — a feed-sized sample of a far larger site is
+    ``expected_items`` (the site's open-posting count, from its listing/sitemap)
+    activates the enumeration floor — a feed-sized sample of a far larger board is
     rejected as under-enumeration (§6).
     """
     ast_result = check_ast(source)
@@ -324,11 +326,11 @@ def gate_winner(
     completeness = check_completeness(
         first,
         min_items=config.min_items(),
-        min_body_chars=config.min_body_chars(),
+        min_description_chars=config.min_description_chars(),
         allowed_hosts=hosts,
         expected_items=expected_items,
         enum_floor_ratio=config.enum_floor_ratio(),
-        min_body_quality=config.min_body_quality(),
+        min_description_quality=config.min_description_quality(),
     )
     if not completeness.passed:
         return False, f"completeness: {completeness.reason}"

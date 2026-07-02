@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from bizup_autocrawler.generate.scoring import CandidateResult, ExceptionInfo
+from jobcrawler.generate.scoring import CandidateResult, ExceptionInfo
 
 
 def test_minimal_result() -> None:
@@ -27,12 +27,20 @@ def test_carries_samples_errors_and_exception() -> None:
     r = CandidateResult(
         item_count=0,
         pages_fetched=2,
-        samples=[{"title": "T", "body": "B", "url": "u"}],
-        schema_errors=["missing body"],
+        samples=[
+            {
+                "title": "T",
+                "company": "C",
+                "location": "L",
+                "description": "D",
+                "url": "u",
+            }
+        ],
+        schema_errors=["missing description"],
         exception=exc,
     )
     assert r.samples[0]["title"] == "T"
-    assert r.schema_errors == ["missing body"]
+    assert r.schema_errors == ["missing description"]
     assert r.exception is not None
     assert r.exception.type == "ValueError"
 

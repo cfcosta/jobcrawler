@@ -1,0 +1,62 @@
+# jobcrawler — container deployment (systemd + podman/docker).
+#
+# Runs the self-scheduling crawl daemon (§4.9) from the OCI image built by
+# `nix build .#dockerImage` (a loadable layered image; no Docker daemon needed
+# to *build* it). The image bakes the /data contract:
+#   JOBCRAWLER_SITES=/data/sites.yaml
+#   JOBCRAWLER_PROFILE=/data/PROFILE.md  (the §4.6 match profile — persistent input)
+#   JOBCRAWLER_STATE_URL=sqlite:////data/jobcrawler.db  (runs + positions + match cache)
+#   JOBCRAWLER_CRAWLERS_DIR=/data/crawlers  (committed crawlers + _pending staging)
+#   DENO_DIR=/data/deno-cache            (Pyodide WASM cache, generate/optimize only)
+# so the only host-side wiring is: bind-mount /data and supply the env file. Both
+# operator-authored inputs — sites.yaml AND PROFILE.md — must live on the /data
+# volume (they persist; the daemon reloads them, and editing PROFILE.md lazily
+# re-scores matches).
+#
+# Install (podman shown; substitute `docker` 1:1):
+#   nix build .#packages.x86_64-linux.dockerImage
+#   podman load < result                              # → jobcrawler:latest
+#   sudo install -d -m 700 /var/lib/jobcrawler
+#   sudo install -d -m 700 /etc/jobcrawler
+#   sudo install -m 600 deploy/jobcrawler.env.example /etc/jobcrawler/jobcrawler.env
+#   sudo $EDITOR /etc/jobcrawler/jobcrawler.env     # fill REQUIRED values
+#   sudo install -m 644 deploy/sites.example.yaml /var/lib/jobcrawler/sites.yaml
+#   sudo $EDITOR /var/lib/jobcrawler/sites.yaml      # your real seed list
+#   sudo install -m 644 PROFILE.md /var/lib/jobcrawler/PROFILE.md
+#   sudo $EDITOR /var/lib/jobcrawler/PROFILE.md      # your skills + what to match (§4.6)
+#   sudo install -m 644 deploy/jobcrawler.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now jobcrawler
+#
+# Before first run, generate the per-site crawlers once. With the /data bind-mount
+# they land in JOBCRAWLER_CRAWLERS_DIR=/data/crawlers on the volume, so they persist
+# across restarts and --rm — no image rebuild to add or self-heal a crawler (see
+# ../README.md):
+#   podman run --rm --env-file /etc/jobcrawler/jobcrawler.env \
+#     -v /var/lib/jobcrawler:/data jobcrawler:latest jobcrawl generate --all
+
+[Unit]
+Description=jobcrawler — self-scheduling job-posting tracker daemon
+Documentation=file:///etc/jobcrawler https://github.com/cfcosta/jobcrawler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# `--rm` so a crash never leaves a dead container blocking the next start; the
+# baked image Healthcheck (`jobcrawl status`, 60s) is honored by podman/docker
+# and surfaced in `podman ps` / `podman healthcheck run jobcrawler`.
+ExecStartPre=-/usr/bin/podman rm -f jobcrawler
+ExecStart=/usr/bin/podman run --rm --name jobcrawler \
+    --env-file /etc/jobcrawler/jobcrawler.env \
+    --volume /var/lib/jobcrawler:/data \
+    jobcrawler:latest
+ExecStop=/usr/bin/podman stop --time 20 jobcrawler
+# The daemon is meant to stay up; restart it on crash but rate-limit a crash loop.
+Restart=on-failure
+RestartSec=10s
+StartLimitIntervalSec=300
+StartLimitBurst=5
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

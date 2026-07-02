@@ -1,16 +1,22 @@
 """Snapshot / corpus shaping for the RLM generator (§4.2, §9).
 
-The generator is kept *idiomatic* RLM by handing it a prefetched site snapshot
+The generator is kept *idiomatic* RLM by handing it a prefetched board snapshot
 as the large input it reasons over in-REPL, using host tools only for follow-up
 fetches. dspy injects ``corpus`` into the Pyodide REPL as a real variable by
 serializing it as a Python literal, and **raises on any non-JSON type** — so the
 corpus is an addressable dict of JSON primitives:
 
-    {homepage, robots, sitemap, articles: [{url, title, text}, ...]}
+    {homepage, robots, sitemap, apis, feeds, postings: [{url, title, text}, ...]}
 
 Addressable parts (the model slices what it needs) beat one opaque blob — up to
 8x fewer tokens. Pyodide ships no grep/sed, so ``REPL_HELPERS`` provides plain
 navigation functions the generator prompt tells the model are available.
+
+The job-board specifics live in ATS detection: a host/URL pattern that names a
+known ATS (Greenhouse/Lever/Ashby/Gupy) is turned into candidate structured-API
+URLs surfaced in ``apis`` — the generator sees *candidates* to probe, never
+conclusions. When one answers during prefetch we take real posting samples and
+the board's total open-role count (the enumeration target the §6 floor keys off).
 """
 
 from __future__ import annotations
@@ -22,23 +28,72 @@ from html.parser import HTMLParser
 from typing import TYPE_CHECKING
 from urllib.parse import urljoin, urlparse
 
-from bizup_autocrawler import config
-from bizup_autocrawler.urls import normalize_host, valid_on_domain_url
+from jobcrawler import config
+from jobcrawler.urls import normalize_host, valid_on_domain_url
 
 if TYPE_CHECKING:
-    from bizup_autocrawler.runtime.contract import Ctx
+    from jobcrawler.runtime.contract import Ctx
 
 _JSON_SCALARS = (str, int, float, bool, type(None))
 _LOC_RE = re.compile(r"<loc\b", re.IGNORECASE)
-# A link whose href is the WordPress REST base (…/wp-json/) — the api.w.org rel
-# link declares it; failing that, any /wp-json/ href on the page does.
-_WP_JSON_HREF = re.compile(r'href=["\']([^"\']*/wp-json/)["\']', re.IGNORECASE)
-# Path segments that are never an article (nav, taxonomy, WP plumbing) — excluded
-# from the article samples so the generator isn't shown tag/category pages.
-_NON_ARTICLE = re.compile(
-    r"/(tag|category|categoria|topico|topics?|author|autor|page|feed|wp-json|"
-    r"wp-admin|wp-content|wp-includes|comments?|search|busca|newsletter|assine|"
-    r"sobre|about|contato|contact|privacidade|termos)(/|$|\?)",
+
+# -- ATS detection -----------------------------------------------------------
+# A known ATS exposes the WHOLE board as structured JSON — the anti-under-
+# enumeration source. Detection is host/URL-pattern first (the board token lives
+# in the URL) with a homepage-embed fallback (a company careers page iframing or
+# linking its ATS board). Empirical endpoints (live probes 2026-07-02):
+#   Greenhouse: boards-api.greenhouse.io/v1/boards/<token>/jobs?content=true
+#   Lever:      api.lever.co/v0/postings/<token>?mode=json
+#   Ashby:      api.ashbyhq.com/posting-api/job-board/<token>?includeCompensation=true
+#   Gupy (BR):  employability-portal.gupy.io/api/v1/jobs?companyId=..&limit=100
+#               (companyId lives in the board's __NEXT_DATA__, not the URL)
+_ATS_TOKEN = r"([A-Za-z0-9][A-Za-z0-9._-]*)"
+_GH_FOR = re.compile(
+    r"greenhouse\.io/embed/job_board\?(?:[^\"'>\s]*&)?for=" + _ATS_TOKEN, re.IGNORECASE
+)
+_GH_API_REF = re.compile(
+    r"boards-api\.greenhouse\.io/v1/boards/" + _ATS_TOKEN, re.IGNORECASE
+)
+_GH_BOARD = re.compile(
+    r"(?:boards|job-boards)\.greenhouse\.io/" + _ATS_TOKEN, re.IGNORECASE
+)
+_LEVER_REF = re.compile(
+    r"(?:jobs\.lever\.co|api\.lever\.co/v0/postings)/" + _ATS_TOKEN, re.IGNORECASE
+)
+_ASHBY_REF = re.compile(
+    r"(?:jobs\.ashbyhq\.com|api\.ashbyhq\.com/posting-api/job-board)/" + _ATS_TOKEN,
+    re.IGNORECASE,
+)
+_GUPY_REF = re.compile(r"\bgupy\.io\b", re.IGNORECASE)
+
+_GH_API = "https://boards-api.greenhouse.io/v1/boards/{token}/jobs?content=true"
+_LEVER_API = "https://api.lever.co/v0/postings/{token}?mode=json"
+_ASHBY_API = (
+    "https://api.ashbyhq.com/posting-api/job-board/{token}?includeCompensation=true"
+)
+_GUPY_API = "https://employability-portal.gupy.io/api/v1/jobs?limit=100"
+
+# Posting-shape keys probed tolerantly across the ATS JSON dialects for samples.
+_ATS_URL_KEYS = (
+    "absolute_url",
+    "hostedUrl",
+    "jobUrl",
+    "applyUrl",
+    "applicationUrl",
+    "url",
+)
+_ATS_TITLE_KEYS = ("title", "text")
+_ATS_TEXT_KEYS = ("content", "descriptionPlain", "descriptionHtml", "description")
+
+# Path segments on a plain careers page that are never a posting (nav, marketing,
+# auth, legal) — excluded from the scrape-fallback samples so the generator isn't
+# shown an about/benefits page as if it were a job. ``vaga``/``vagas`` (pt-BR for
+# "job") is deliberately NOT excluded — that is where postings live.
+_NON_POSTING = re.compile(
+    r"/(about|sobre|contact|contato|team|equipe|time|blog|news|noticias?|press|"
+    r"imprensa|privacy|privacidade|terms|termos|cookies?|login|sign-?in|signup|"
+    r"sign-?up|entrar|cadastr\w*|benefits?|beneficios?|culture|cultura|faq|"
+    r"perguntas|help|ajuda|home|inicio)(/|$|\?)",
     re.IGNORECASE,
 )
 
@@ -49,8 +104,8 @@ def build_corpus(
     robots: str = "",
     sitemap: str = "",
     sitemaps: Iterable[str] | None = None,
-    expected_recent: int = 0,
-    articles: Iterable[Mapping[str, object]] | None = None,
+    expected_positions: int = 0,
+    postings: Iterable[Mapping[str, object]] | None = None,
     feeds: Iterable[str] | None = None,
     apis: Iterable[str] | None = None,
 ) -> dict[str, object]:
@@ -58,94 +113,143 @@ def build_corpus(
 
     ``feeds`` carries the discovered RSS/Atom/JSON feed URLs — the feed-first
     signal the strategy reasons over — so the model needn't rediscover them.
-    ``apis`` carries discovered structured content APIs (e.g. the WordPress REST
-    ``/wp-json/wp/v2/posts``) that return *full* article bodies as paginated JSON —
-    the best source when present. ``sitemaps`` are the sitemap URLs advertised in
-    robots (the news sitemap first) and ``expected_recent`` is the host's estimate
-    of how many recent articles the site publishes — the enumeration target the
-    generator reasons toward so it doesn't settle for a feed-sized sample (§4.2, §6).
+    ``apis`` carries the candidate structured ATS API URLs (Greenhouse/Lever/
+    Ashby/Gupy) that enumerate the *whole* board as JSON — the best source when
+    present. ``sitemaps`` are the sitemap URLs advertised in robots and
+    ``expected_positions`` is the host's estimate of how many open roles the board
+    has (the ATS total when an API answered, else the jobs-sitemap count) — the
+    enumeration target the generator reasons toward so it doesn't settle for a
+    feed-sized sample (§4.2, §6).
     """
     corpus: dict[str, object] = {
         "homepage": homepage,
         "robots": robots,
         "sitemap": sitemap,
         "sitemaps": [str(s) for s in (sitemaps or [])],
-        "expected_recent": int(expected_recent),
+        "expected_positions": int(expected_positions),
         "apis": [str(a) for a in (apis or [])],
-        "articles": [_article(a) for a in (articles or [])],
+        "postings": [_posting(p) for p in (postings or [])],
         "feeds": [str(f) for f in (feeds or [])],
     }
     ensure_json_primitive(corpus)
     return corpus
 
 
-def wordpress_posts_api(homepage: str, base_url: str) -> str | None:
-    """The WordPress REST posts endpoint if ``homepage`` is WordPress, else None.
+def ats_api_candidates(site_url: str, homepage: str = "") -> list[str]:
+    """Candidate structured ATS JSON API URLs for ``site_url`` (empty if none).
 
-    WordPress exposes every post — with the **full** ``content.rendered`` body — as
-    paginated JSON at ``/wp-json/wp/v2/posts?per_page=100``, a far better source
-    than scraping or a 10-item RSS. Detected from the ``…/wp-json/`` link the page
-    advertises, or failing that the ``/wp-content/`` asset path / generator meta.
+    Detects a known ATS from the board URL itself or from a homepage embed (a
+    company careers page iframing/linking its ATS board), and turns the extracted
+    board token into the empirical enumerate-the-whole-board endpoint. These are
+    *candidates* the generator probes and verifies — never conclusions. Gupy is
+    surfaced by its portal endpoint even though the ``companyId`` lives in the
+    board's ``__NEXT_DATA__`` (the generator fills it in).
     """
-    match = _WP_JSON_HREF.search(homepage)
+    haystack = f"{site_url}\n{homepage}"
+    out: list[str] = []
+
+    def add(url: str) -> None:
+        if url not in out:
+            out.append(url)
+
+    token = _greenhouse_token(haystack)
+    if token:
+        add(_GH_API.format(token=token))
+    match = _LEVER_REF.search(haystack)
     if match:
-        wp_json = urljoin(base_url, match.group(1))
-    elif _looks_like_wordpress(homepage):
-        wp_json = urljoin(base_url, "/wp-json/")
-    else:
-        return None
-    return urljoin(wp_json, "wp/v2/posts")
+        add(_LEVER_API.format(token=match.group(1)))
+    match = _ASHBY_REF.search(haystack)
+    if match:
+        add(_ASHBY_API.format(token=match.group(1)))
+    if _GUPY_REF.search(haystack):
+        add(_GUPY_API)
+    return out
 
 
-def _looks_like_wordpress(homepage: str) -> bool:
-    low = homepage.lower()
-    return "/wp-content/" in low or "/wp-json/" in low or 'content="wordpress' in low
+def _greenhouse_token(haystack: str) -> str | None:
+    """The Greenhouse board token from an embed ``for=``, an API ref, or a board
+    path — preferring the unambiguous forms so ``/embed/job_board`` isn't mistaken
+    for the token."""
+    for rx in (_GH_FOR, _GH_API_REF):
+        match = rx.search(haystack)
+        if match:
+            return match.group(1)
+    for match in _GH_BOARD.finditer(haystack):
+        if match.group(1).lower() not in ("embed", "job_board"):
+            return match.group(1)
+    return None
 
 
-def _looks_like_article(url: str) -> bool:
-    """A homepage link that plausibly points at an article (not nav/taxonomy).
+def _ats_posting_samples(
+    ctx: Ctx, api_url: str, count: int, clip_chars: int
+) -> tuple[list[dict[str, str]], int]:
+    """Real posting samples + the board's total open-role count from an ATS API.
 
-    Excludes WP/taxonomy plumbing, then keeps only links whose final path segment
-    reads like an article *slug* — multi-word/hyphenated, dated, or long — so a bare
-    section landing page (``/economia/``, ``/play/``) is not sampled as an article.
+    Tolerant across the ATS JSON dialects (Greenhouse ``{meta, jobs}``, Lever's
+    bare array, Ashby ``{jobs}``): the samples ground the generator in the real
+    shape and the count is the enumeration target the §6 floor keys off.
+    Best-effort — a non-answering or unparseable endpoint yields ``([], 0)``.
     """
-    if _NON_ARTICLE.search(url):
+    raw = _try_fetch(ctx, api_url)
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return [], 0
+    postings, total = _ats_postings(data)
+    out: list[dict[str, str]] = []
+    for posting in postings[:count]:
+        if not isinstance(posting, Mapping):
+            continue
+        url = _ats_field(posting, _ATS_URL_KEYS)
+        text = _ats_field(posting, _ATS_TEXT_KEYS)
+        if url and text:
+            out.append(
+                {
+                    "url": url,
+                    "title": _ats_field(posting, _ATS_TITLE_KEYS),
+                    "text": _clip(text, clip_chars),
+                }
+            )
+    return out, total
+
+
+def _ats_postings(data: object) -> tuple[list, int]:
+    """The postings list + total from a parsed ATS payload (Lever is a bare array;
+    Greenhouse/Ashby wrap them under ``jobs`` with a ``meta.total`` for Greenhouse)."""
+    if isinstance(data, list):
+        return data, len(data)
+    if isinstance(data, Mapping):
+        jobs = data.get("jobs")
+        if isinstance(jobs, list):
+            meta = data.get("meta")
+            total = meta.get("total") if isinstance(meta, Mapping) else None
+            return jobs, total if isinstance(total, int) and total > 0 else len(jobs)
+    return [], 0
+
+
+def _ats_field(mapping: Mapping[object, object], keys: tuple[str, ...]) -> str:
+    """The first non-empty string value among ``keys`` (ATS dialects vary)."""
+    for key in keys:
+        value = mapping.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
+def _looks_like_posting(url: str) -> bool:
+    """A homepage link that plausibly points at one job posting (not nav/marketing).
+
+    Excludes obvious careers-page chrome, then keeps only links whose final path
+    segment reads like a posting *slug* — multi-word/hyphenated, an id with digits,
+    or long — so a bare section landing page (``/careers/``, ``/vagas/``) is not
+    sampled as a posting.
+    """
+    if _NON_POSTING.search(url):
         return False
     slug = urlparse(url).path.strip("/").rsplit("/", 1)[-1]
     if not slug:
         return False
     return "-" in slug or len(slug) > 20 or any(ch.isdigit() for ch in slug)
-
-
-def _wp_article_samples(
-    ctx: Ctx, posts_api: str, count: int, clip_chars: int
-) -> list[dict[str, str]]:
-    """Real article samples straight from the WP REST API — full ``content.rendered``
-    bodies, so the generator sees genuine articles (not guessed homepage links) and
-    that the API itself works."""
-    raw = _try_fetch(ctx, f"{posts_api}?per_page={count}&_fields=link,title,content")
-    try:
-        posts = json.loads(raw)
-    except (ValueError, TypeError):
-        return []
-    out: list[dict[str, str]] = []
-    for post in posts if isinstance(posts, list) else []:
-        if not isinstance(post, Mapping):
-            continue
-        title = post.get("title")
-        content = post.get("content")
-        text = content.get("rendered") if isinstance(content, Mapping) else ""
-        if str(post.get("link") or "") and str(text or ""):
-            out.append(
-                {
-                    "url": str(post.get("link")),
-                    "title": str(title.get("rendered") or "")
-                    if isinstance(title, Mapping)
-                    else "",
-                    "text": _clip(str(text), clip_chars),
-                }
-            )
-    return out
 
 
 def sitemaps_from_robots(robots: str) -> list[str]:
@@ -158,33 +262,33 @@ def sitemaps_from_robots(robots: str) -> list[str]:
     return out
 
 
-def pick_news_sitemap(sitemaps: list[str]) -> str | None:
-    """Prefer a *news* sitemap — it enumerates recent articles, the count we want."""
+def pick_jobs_sitemap(sitemaps: list[str]) -> str | None:
+    """Prefer a *jobs* sitemap — it enumerates the open roles, the count we want."""
     for url in sitemaps:
-        if "news" in url.lower():
+        low = url.lower()
+        if any(marker in low for marker in ("job", "career", "vaga", "position")):
             return url
     return sitemaps[0] if sitemaps else None
 
 
 def count_sitemap_urls(sitemap_xml: str) -> int:
-    """Count article URL entries in a (news) sitemap; 0 for an index or empty.
+    """Count posting URL entries in a (jobs) sitemap; 0 for an index or empty.
 
-    A flat news sitemap lists one ``<loc>`` per recent article — the natural
-    estimate of how many articles the site is currently publishing. A
-    ``<sitemapindex>`` points to child sitemaps, not articles, so it yields no
-    article estimate here (the enumeration gate then stays dormant rather than
-    keying off a wrong, tiny count).
+    A flat jobs sitemap lists one ``<loc>`` per open role — the natural estimate
+    of how many postings the board currently has. A ``<sitemapindex>`` points to
+    child sitemaps, not postings, so it yields no estimate here (the enumeration
+    gate then stays dormant rather than keying off a wrong, tiny count).
     """
     if "<sitemapindex" in sitemap_xml.lower():
         return 0
     return len(_LOC_RE.findall(sitemap_xml))
 
 
-def _article(article: Mapping[str, object]) -> dict[str, str]:
+def _posting(posting: Mapping[str, object]) -> dict[str, str]:
     return {
-        "url": str(article.get("url") or ""),
-        "title": str(article.get("title") or ""),
-        "text": str(article.get("text") or ""),
+        "url": str(posting.get("url") or ""),
+        "title": str(posting.get("title") or ""),
+        "text": str(posting.get("text") or ""),
     }
 
 
@@ -221,7 +325,7 @@ class _LinkParser(HTMLParser):
 
 
 def on_domain_links(html: str, base_url: str) -> list[str]:
-    """On-domain absolute article-ish links from ``html`` (deduped, base excluded)."""
+    """On-domain absolute posting-ish links from ``html`` (deduped, base excluded)."""
     allowed = {normalize_host(base_url)}
     parser = _LinkParser()
     parser.feed(html)
@@ -239,47 +343,57 @@ def prefetch_corpus(
     site_url: str,
     ctx: Ctx,
     *,
-    max_articles: int = 5,
+    max_postings: int = 5,
     homepage_chars: int | None = None,
-    article_chars: int | None = None,
+    posting_chars: int | None = None,
 ) -> dict[str, object]:
-    """Fetch a site's snapshot through ``ctx`` into the addressable corpus (§4.2).
+    """Fetch a board's snapshot through ``ctx`` into the addressable corpus (§4.2).
 
     The homepage drives discovery; robots/sitemap are best-effort (missing ones
-    become empty). A few on-domain links are pulled as article samples. All
-    fetching goes through ``ctx`` so SSRF + politeness apply. Fetched HTML is
-    **clipped** (§9) — raw pages run to 100s of KB, and an unbounded corpus blows
-    past the model's context so a reasoning LM exhausts its tokens on nothing.
-    Link discovery uses the *full* homepage, so clipping never costs a sample.
+    become empty). When a known ATS API answers, real postings are sampled from it
+    and its total open-role count becomes ``expected_positions``; otherwise a few
+    on-domain posting-slug links are pulled as samples. All fetching goes through
+    ``ctx`` so SSRF + politeness apply. Fetched HTML is **clipped** (§9) — raw
+    pages run to 100s of KB, and an unbounded corpus blows past the model's
+    context so a reasoning LM exhausts its tokens on nothing. Link discovery uses
+    the *full* homepage, so clipping never costs a sample.
     """
-    from bizup_autocrawler.generate.tools import find_feeds_in  # avoid an import cycle
+    from jobcrawler.generate.tools import find_feeds_in  # avoid an import cycle
 
     hp_cap = (
         config.corpus_homepage_chars() if homepage_chars is None else homepage_chars
     )
-    art_cap = config.corpus_article_chars() if article_chars is None else article_chars
+    post_cap = config.corpus_article_chars() if posting_chars is None else posting_chars
 
     homepage = ctx.fetch(site_url)
     robots = _try_fetch(ctx, urljoin(site_url, "/robots.txt"))
-    # Discover the news sitemap from robots (it enumerates recent articles); fall
-    # back to /sitemap.xml when robots advertises none, so the count is best-effort.
+    # Discover a jobs sitemap from robots (it enumerates the open roles); fall back
+    # to /sitemap.xml when robots advertises none, so the count is best-effort.
     sitemaps = sitemaps_from_robots(robots)
-    sitemap_url = pick_news_sitemap(sitemaps) or urljoin(site_url, "/sitemap.xml")
+    sitemap_url = pick_jobs_sitemap(sitemaps) or urljoin(site_url, "/sitemap.xml")
     sitemap = _try_fetch(ctx, sitemap_url)
-    # Article samples: from the WP REST API when present (real articles, full body),
-    # else on-domain links that look like article slugs (not tag/category/nav pages,
-    # which confuse the generator about where the body lives).
-    wp_api = wordpress_posts_api(homepage, site_url)
-    if wp_api:
-        articles = _wp_article_samples(ctx, wp_api, max_articles, art_cap)
-    else:
+    # A known ATS (Greenhouse/Lever/Ashby/Gupy) exposes the whole board as JSON —
+    # detected from the board URL or a homepage embed. Surface the candidate API
+    # URLs so the generator can probe them, and when one answers, take real posting
+    # samples + the board's total (the enumeration target the §6 floor keys off).
+    apis = ats_api_candidates(site_url, homepage)
+    postings: list[dict[str, str]] = []
+    ats_total = 0
+    for api in apis:
+        samples, total = _ats_posting_samples(ctx, api, max_postings, post_cap)
+        if samples or total:
+            postings, ats_total = samples, total
+            break
+    if not postings and not ats_total:
+        # No ATS answered: sample posting-slug links from the homepage (skipping
+        # nav/marketing pages, which confuse the generator about where the body is).
         links = [
             url
             for url in on_domain_links(homepage, site_url)
-            if _looks_like_article(url)
-        ][:max_articles]
-        articles = [
-            {"url": url, "title": "", "text": _clip(_try_fetch(ctx, url), art_cap)}
+            if _looks_like_posting(url)
+        ][:max_postings]
+        postings = [
+            {"url": url, "title": "", "text": _clip(_try_fetch(ctx, url), post_cap)}
             for url in links
         ]
     return build_corpus(
@@ -287,10 +401,10 @@ def prefetch_corpus(
         robots=robots,
         sitemap=sitemap,
         sitemaps=sitemaps or ([sitemap_url] if sitemap else []),
-        expected_recent=count_sitemap_urls(sitemap),
-        apis=[wp_api] if wp_api else [],
-        articles=articles,
-        feeds=find_feeds_in(homepage, site_url),  # feed-first discovery (§4.2)
+        expected_positions=ats_total or count_sitemap_urls(sitemap),
+        apis=apis,
+        postings=postings,
+        feeds=find_feeds_in(homepage, site_url),  # feed discovery (§4.2)
     )
 
 
@@ -302,7 +416,7 @@ def _try_fetch(ctx: Ctx, url: str) -> str:
     try:
         return ctx.fetch(url)
     except Exception:
-        return ""  # robots/sitemap/article fetch is best-effort
+        return ""  # robots/sitemap/api/posting fetch is best-effort
 
 
 # Navigation helpers the generator prompt advertises (Pyodide lacks grep/sed).

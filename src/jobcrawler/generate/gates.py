@@ -10,7 +10,8 @@ failed, never the predicate/threshold a candidate could target), and are run
     plus the §4.3 contract shape; a non-parsing source is treated as a truncated
     FINAL channel.
   * Gate 2 ``check_completeness`` — the hard half of runtime validation over a
-    ``CandidateResult`` (item floor, per-sample title/body/url, mojibake). The
+    ``CandidateResult`` (position floor + §6 enum floor, per-sample
+    title/company/location/description/url, mojibake, boilerplate residual). The
     *graded* axes for selection live in ``scoring.py``.
   * Gate 2(a) ``must_observe_failure`` — enforces "validate before SUBMIT" and
     "consult feeds/sitemap before choosing scrape" (the anti-under-enumeration
@@ -18,6 +19,19 @@ failed, never the predicate/threshold a candidate could target), and are run
   * Gate 3 ``stability_verdict`` — two-run Jaccard over **canonical** URLs;
     hard-reject only the near-random case, near-threshold is soft feedback. Kept
     out of the optimizer scalar so a flaky reject can't poison selection.
+
+**The boilerplate gate is INVERTED for job boards (§6).** In the news port this
+gate *rejected* any body block shared across samples — a related-links / most-read
+rail scraped as article text. That predicate is exactly backwards for a jobs
+board: every posting on one company's ATS legitimately repeats large blocks (the
+About-us blurb, the benefits list, the EEO statement), so a mechanical news→jobs
+port of this gate would reject every *correct* crawler. Instead we STRIP the
+shared blocks and judge what remains: a posting whose unique residual — after
+removing every block (≥ 80 chars) shared by ≥ 2 samples — is too thin is
+boilerplate masquerading as a description, and two byte-identical descriptions
+are a crawler grabbing one page-level blurb for every role. Shared boilerplate
+*plus* a substantial unique residual PASSES: that is the normal, healthy shape of
+a careers board, and this is exactly the spot a naive port would get wrong.
 """
 
 from __future__ import annotations
@@ -28,9 +42,9 @@ from collections.abc import Collection
 from dataclasses import dataclass
 from enum import Enum
 
-from bizup_autocrawler.generate.scoring import CandidateResult
-from bizup_autocrawler.runtime.safe_exec import BANNED_BUILTINS, module_allowed
-from bizup_autocrawler.urls import canonicalize_url, valid_on_domain_url
+from jobcrawler.generate.scoring import CandidateResult
+from jobcrawler.runtime.safe_exec import BANNED_BUILTINS, module_allowed
+from jobcrawler.urls import canonicalize_url, valid_on_domain_url
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,20 +142,30 @@ def check_completeness(
     result: CandidateResult,
     *,
     min_items: int,
-    min_body_chars: int,
+    min_description_chars: int,
     allowed_hosts: Collection[str],
     expected_items: int | None = None,
     enum_floor_ratio: float = 0.5,
-    min_body_quality: float = 0.6,
+    min_description_quality: float = 0.6,
+    min_unique_chars: int = 150,
     max_replacement_ratio: float = 0.02,
 ) -> GateResult:
-    """Gate 2: item floor + enumeration floor + per-sample validity (§6).
+    """Gate 2: position floor + enumeration floor + per-sample validity (§6).
 
-    ``expected_items`` is the host-estimated count of recent articles the site
-    actually publishes (e.g. from its news sitemap). When known, the crawler must
+    ``expected_items`` is the host-estimated count of openings the board
+    currently lists (e.g. an ATS ``meta.total`` — Greenhouse/Ashby hand back the
+    whole board in one call, so the count is exact). When known, the crawler must
     enumerate at least ``enum_floor_ratio`` of it — the anti-under-enumeration
     discipline [Sanjaya]: clearing the small absolute ``min_items`` floor is not
-    enough if the site has far more. Dormant when ``expected_items`` is None.
+    enough if the board advertises far more roles. Dormant when ``expected_items``
+    is None (a source that only shows a recent window — ``enumerates_all: false``
+    — never sets it, since a diff against a partial listing is unsound).
+
+    The boilerplate check is INVERTED from the news port (see the module
+    docstring): blocks shared across samples are STRIPPED, not rejected, and a
+    sample fails only when its unique residual falls below ``min_unique_chars`` or
+    two samples' descriptions are byte-identical — so the About-us / benefits /
+    EEO slabs a real careers board repeats never sink a correct crawler.
     """
     failures: list[str] = []
     if result.exception is not None:
@@ -154,38 +178,58 @@ def check_completeness(
         floor = math.ceil(enum_floor_ratio * expected_items)
         if result.item_count < floor:
             failures.append(
-                f"enumerated {result.item_count} of ~{expected_items} recent articles"
+                f"enumerated {result.item_count} of ~{expected_items} openings the board lists"
             )
     if result.schema_errors:
         failures.append(
             f"{len(result.schema_errors)} schema errors (e.g. {result.schema_errors[0]})"
         )
-    shared = _shared_body_block(result.samples)
-    if shared is not None:
-        failures.append(
-            f"samples share a repeated body block (boilerplate): {shared[:60]!r}"
-        )
+    failures.extend(_identical_description_failures(result.samples))
+
+    # Blocks (>= 80 chars, blank-line split) shared by >= 2 samples are the
+    # LEGITIMATE boilerplate of one company's board (About-us, benefits, EEO):
+    # strip them, then judge each posting on its unique residual — never reject a
+    # crawler merely for sharing them (the §6 inversion; see the module docstring).
+    shared = _shared_blocks(result.samples)
 
     short = 0
     for i, sample in enumerate(result.samples):
         title = str(sample.get("title") or "").strip()
-        body = str(sample.get("body") or "").strip()
+        company = str(sample.get("company") or "").strip()
+        location = str(sample.get("location") or "").strip()
+        description = str(sample.get("description") or "").strip()
         url = str(sample.get("url") or "")
         if not title:
             failures.append(f"sample {i}: empty title")
-        if len(body) < min_body_chars:
-            short += 1  # body length is graded by fraction below, not per-sample
-        elif _replacement_ratio(body) > max_replacement_ratio:
-            failures.append(f"sample {i}: high U+FFFD ratio (mojibake)")
+        if not company:
+            failures.append(f"sample {i}: empty company")
+        if not location:
+            failures.append(f"sample {i}: empty location")
+        if len(description) < min_description_chars:
+            short += 1  # description length is graded by the fraction below
+        else:
+            # Only a full-length description is checked for garble and boilerplate:
+            # a terse one is already counted toward the completeness fraction.
+            if _replacement_ratio(description) > max_replacement_ratio:
+                failures.append(f"sample {i}: high U+FFFD ratio (mojibake)")
+            residual = len(_strip_blocks(description, shared))
+            if residual < min_unique_chars:
+                failures.append(
+                    f"sample {i}: description is mostly shared boilerplate "
+                    f"(unique residual {residual} chars)"
+                )
         if not valid_on_domain_url(url, allowed_hosts):
             failures.append(f"sample {i}: invalid/off-domain url {url!r}")
 
-    # Body completeness is a fraction, not all-or-nothing: a minority of short posts
-    # (a news brief) is fine — the runtime filter drops them (§4.6), so generation
-    # isn't stricter than runtime. A mostly-summary crawler still fails.
+    # Description completeness is a fraction, not all-or-nothing: a minority of
+    # genuinely-terse postings (a one-line contract role) is fine — the runtime
+    # filter drops them (§4.6), so generation isn't stricter than runtime. A
+    # crawler that scrapes only title + teaser instead of the full posting fails.
     n = len(result.samples)
-    if n and (n - short) / n < min_body_quality:
-        failures.append(f"{short} of {n} sample bodies too short (mostly incomplete)")
+    if n and (n - short) / n < min_description_quality:
+        failures.append(
+            f"{short} of {n} sample descriptions too short (mostly incomplete)"
+        )
 
     return GateResult(not failures, tuple(failures))
 
@@ -194,28 +238,77 @@ def _replacement_ratio(text: str) -> float:
     return text.count("�") / max(len(text), 1)
 
 
-def _shared_body_block(samples: list[dict], *, min_block_chars: int = 80) -> str | None:
-    """A substantial body block shared by >= 2 samples — a related-links / most-read
-    rail scraped as article body (§6 low-boilerplate). Returns the first such block.
+def _blocks(text: str, *, min_block_chars: int = 80) -> list[str]:
+    """The *substantial* paragraphs of ``text``: blank-line split, stripped, and at
+    least ``min_block_chars`` long.
 
-    Bodies are split on blank lines; only blocks of ``min_block_chars`` or more are
-    considered, so legitimately-shared short strings (datelines, "read more") don't
-    trip it. Real article paragraphs are effectively unique across articles.
+    Short shared strings (a dateline, a lone location line, "Apply now") fall below
+    the floor so they never count as a boilerplate block — only the large repeated
+    About-us / benefits / EEO slabs a single board serves on every posting do.
+    """
+    return [
+        stripped
+        for block in text.split("\n\n")
+        if len(stripped := block.strip()) >= min_block_chars
+    ]
+
+
+def _shared_blocks(samples: list[dict]) -> frozenset[str]:
+    """The substantial blocks that appear in >= 2 samples' descriptions.
+
+    On one company's board these are the legitimately-repeated slabs (benefits,
+    EEO, About-us). We collect them so :func:`_strip_blocks` can remove them before
+    measuring each posting's unique residual — the inverted §6 boilerplate check:
+    sharing them is expected, hiding a thin description behind them is not.
     """
     counts: dict[str, int] = {}
     for sample in samples:
-        body = str(sample.get("body") or "")
-        blocks = {
-            stripped
-            for block in body.split("\n\n")
-            if len(stripped := block.strip()) >= min_block_chars
-        }
-        for block in blocks:
+        # ``set`` so a block repeated within one posting counts that posting once.
+        for block in set(_blocks(str(sample.get("description") or ""))):
             counts[block] = counts.get(block, 0) + 1
-    for block, count in counts.items():
-        if count >= 2:
-            return block
-    return None
+    return frozenset(block for block, count in counts.items() if count >= 2)
+
+
+def _strip_blocks(description: str, shared: Collection[str]) -> str:
+    """``description`` minus every shared boilerplate block — the unique residual.
+
+    Splits on the same blank-line boundary as :func:`_blocks` but keeps *every*
+    non-shared segment (including sub-80-char ones — a short but distinct role
+    summary is still unique text); only the blocks in ``shared`` are dropped. So a
+    posting that is nothing but the shared slabs residual-strips to ~nothing, while
+    one with real per-role prose keeps it.
+    """
+    if not shared:
+        return description.strip()
+    kept = [
+        stripped
+        for segment in description.split("\n\n")
+        if (stripped := segment.strip()) and stripped not in shared
+    ]
+    return " ".join(kept)
+
+
+def _identical_description_failures(samples: list[dict]) -> list[str]:
+    """Pairs of samples whose full descriptions are byte-identical (§6).
+
+    A crawler that yields the *same* description for every posting — grabbing one
+    page-level generic blurb instead of the per-role text — is broken even though
+    each row clears the length floor. Empty descriptions are ignored here (the
+    length/quality checks own that case), so this fires only on real duplication.
+    """
+    seen: dict[str, int] = {}
+    failures: list[str] = []
+    for i, sample in enumerate(samples):
+        description = str(sample.get("description") or "")
+        if not description.strip():
+            continue
+        if description in seen:
+            failures.append(
+                f"samples {seen[description]} and {i} have identical descriptions"
+            )
+        else:
+            seen[description] = i
+    return failures
 
 
 def must_observe_failure(

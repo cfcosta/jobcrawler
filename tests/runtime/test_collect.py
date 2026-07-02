@@ -3,9 +3,9 @@
 Committed crawlers run on the production schedule, so a runaway one (infinite
 loop, memory blowup) must not take down the daemon. ``collect_crawler`` runs them
 in the same isolated child as ``validate_crawler`` (AST gate → rlimits → wall-clock
-timeout) but emits **full** items — not the 5 bounded samples the scorer needs —
-so the host can dedup + ingest them. These spawn the real child process; the test
-crawlers yield static items (no network) so the subprocess boundary, full-item
+timeout) but emits **full** jobs — not the 5 bounded samples the scorer needs —
+so the host can dedup + track them. These spawn the real child process; the test
+crawlers yield static jobs (no network) so the subprocess boundary, full-job
 serialization, and the resource bounds are exercised without live traffic.
 """
 
@@ -13,56 +13,59 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from bizup_autocrawler.runtime.contract import Item
-from bizup_autocrawler.runtime.sandbox import collect_crawler
+from jobcrawler.runtime.contract import Job
+from jobcrawler.runtime.sandbox import collect_crawler
 
 UTC = timezone.utc
 
 _STATIC = """
-from bizup_autocrawler.runtime.contract import Item
+from jobcrawler.runtime.contract import Job
 SITE = "https://example.com"
 def crawl(ctx):
     for i in range(8):
-        yield Item(url=f"{SITE}/a{i}", title=f"T{i}", body="x" * 5000, source="example")
+        yield Job(url=f"{SITE}/a{i}", title=f"T{i}", company="Acme", location="Remote",
+                  description="x" * 5000, source="example")
 """
 
 
 def test_collect_returns_full_items_not_bounded_samples() -> None:
-    # The scorer caps at 5 samples / 600-char bodies; a crawl needs every item in
-    # full so the host can ingest them. 8 items come back, bodies untruncated.
+    # The scorer caps at 5 samples / 600-char descriptions; a crawl needs every job in
+    # full so the host can track them. 8 jobs come back, descriptions untruncated.
     result = collect_crawler(_STATIC, allowed_hosts={"example.com"}, timeout=20.0)
     assert result.exception is None
     assert result.errors == 0
     assert len(result.items) == 8
-    assert all(isinstance(it, Item) for it in result.items)
-    assert len(result.items[0].body) == 5000  # NOT truncated to 600
+    assert all(isinstance(it, Job) for it in result.items)
+    assert len(result.items[0].description) == 5000  # NOT truncated to 600
     assert {it.title for it in result.items} == {f"T{i}" for i in range(8)}
 
 
-def test_collect_preserves_published_at_datetime() -> None:
-    # published_at round-trips through the JSON boundary back to a tz-aware datetime
+def test_collect_preserves_posted_at_datetime() -> None:
+    # posted_at round-trips through the JSON boundary back to a tz-aware datetime
     # (the host's first-crawl freshness sort depends on it).
     src = """
 from datetime import datetime, timezone
-from bizup_autocrawler.runtime.contract import Item
+from jobcrawler.runtime.contract import Job
 SITE = "https://example.com"
 def crawl(ctx):
-    yield Item(url=SITE + "/a", title="A", body="x" * 500, source="s",
-               published_at=datetime(2026, 1, 2, tzinfo=timezone.utc))
+    yield Job(url=SITE + "/a", title="A", company="Acme", location="Remote",
+              description="x" * 500, source="s",
+              posted_at=datetime(2026, 1, 2, tzinfo=timezone.utc))
 """
     result = collect_crawler(src, allowed_hosts={"example.com"}, timeout=20.0)
     assert result.exception is None
-    assert result.items[0].published_at == datetime(2026, 1, 2, tzinfo=UTC)
+    assert result.items[0].posted_at == datetime(2026, 1, 2, tzinfo=UTC)
 
 
 def test_collect_isolates_a_crash_keeping_partial_items() -> None:
-    # A crawler that yields then raises: the items collected before the raise survive
+    # A crawler that yields then raises: the jobs collected before the raise survive
     # (mirrors the in-process _collect) and the crash is captured, never propagated.
     src = """
-from bizup_autocrawler.runtime.contract import Item
+from jobcrawler.runtime.contract import Job
 SITE = "https://example.com"
 def crawl(ctx):
-    yield Item(url=SITE + "/a", title="A", body="x" * 500, source="s")
+    yield Job(url=SITE + "/a", title="A", company="Acme", location="Remote",
+              description="x" * 500, source="s")
     raise RuntimeError("boom mid-crawl")
     yield None
 """
@@ -75,11 +78,12 @@ def crawl(ctx):
 
 def test_collect_counts_schema_invalid_yields_without_dropping_valid() -> None:
     src = """
-from bizup_autocrawler.runtime.contract import Item
+from jobcrawler.runtime.contract import Job
 SITE = "https://example.com"
 def crawl(ctx):
-    yield Item(url=SITE + "/ok", title="OK", body="x" * 500, source="s")
-    yield {"url": "", "title": "bad", "body": "no url"}  # invalid: empty url
+    yield Job(url=SITE + "/ok", title="OK", company="Acme", location="Remote",
+              description="x" * 500, source="s")
+    yield {"url": "", "title": "bad", "description": "no url"}  # invalid: empty url + missing fields
 """
     result = collect_crawler(src, allowed_hosts={"example.com"}, timeout=20.0)
     assert len(result.items) == 1

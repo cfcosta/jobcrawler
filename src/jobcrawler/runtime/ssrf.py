@@ -14,8 +14,8 @@ from __future__ import annotations
 import ipaddress
 from collections.abc import Collection
 
-from bizup_autocrawler.urls import host_on_domain as is_on_domain
-from bizup_autocrawler.urls import normalize_host
+from jobcrawler.urls import host_on_domain as is_on_domain
+from jobcrawler.urls import normalize_host
 
 __all__ = ["SsrfError", "check_url", "is_on_domain"]
 

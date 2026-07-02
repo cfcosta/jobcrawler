@@ -1,12 +1,13 @@
-"""Ingest-rate governor (§4.7) — pace ``POST /news`` to news-API LLM capacity.
+"""Ingest-rate governor (§4.7) — pace position ingest to host-side enrichment capacity.
 
-Each ``POST /news`` is **not free**: it drives 2–3 server-side LLM calls
-(summarize + classify, with one classify retry) and ``jobcrawler`` has no
-server-side idempotency. A burst of ingests — a first crawl of a large feed, or
-several sites finishing at once — would overrun the news API's enrichment
-capacity. So ingestion is paced to ``AUTOCRAWLER_INGEST_RATE`` (e.g. ``"2/s"``),
-a throughput cap **distinct** from the §4.5 per-host fetch-politeness cap (that
-one protects the *crawled* site; this one protects the *news* service).
+Admitting a scraped position into the pipeline is **not free**: each one flows through
+host-side enrichment — normalize, dedup, and (for a newly-tracked opening) LLM profile
+scoring — work ``jobcrawler`` keeps no cross-run idempotency for. A burst of ingests — a
+first crawl of a large board, or several sites finishing at once — would overrun that
+enrichment capacity (and, when it reaches the §8 matcher, spend the daily match budget in
+one spike). So ingestion is paced to ``JOBCRAWLER_INGEST_RATE`` (e.g. ``"2/s"``), a
+throughput cap **distinct** from the §4.5 per-host fetch-politeness cap: that one protects
+the *crawled* board, this one protects ``jobcrawler``'s own downstream enrichment.
 
 The governor is a minimum-interval pacer: ``wait()`` blocks until the next event
 is allowed. Clock and sleep are injected so the timing is deterministic in tests.
@@ -84,7 +85,8 @@ class RateGovernor:
         The lock is held across the sleep on purpose: the §4.9 scheduler shares one
         governor across crawls running on ``asyncio.to_thread`` workers, so the
         reservation must be atomic *and* callers must serialize — admitting two at
-        once would fire two POSTs inside one interval and overrun the news-API cap.
+        once would push two ingests through inside one interval and overrun the
+        enrichment cap.
         """
         if self._interval <= 0:
             return

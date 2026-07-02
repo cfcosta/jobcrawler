@@ -1,9 +1,10 @@
 """Tests for the ingest-rate governor (§4.7).
 
-Each ``POST /news`` drives 2–3 server-side LLM calls and ``jobcrawler`` has no
-server-side idempotency, so ingestion is paced to ``AUTOCRAWLER_INGEST_RATE``
-(distinct from the §4.5 fetch cap). The governor is a minimum-interval pacer with
-an injected clock + sleep, so the timing is asserted deterministically.
+Each ingested position drives host-side enrichment (normalize/dedup, and LLM profile
+scoring for new openings) with no cross-run idempotency, so ingestion is paced to
+``JOBCRAWLER_INGEST_RATE`` (distinct from the §4.5 fetch cap). The governor is a
+minimum-interval pacer with an injected clock + sleep, so the timing is asserted
+deterministically.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import time
 
 import pytest
 
-from bizup_autocrawler.governor import RateGovernor, interval_for
+from jobcrawler.governor import RateGovernor, interval_for
 
 
 class _Clock:
@@ -99,7 +100,7 @@ def test_wait_serializes_concurrent_callers() -> None:
     # cmd_run shares ONE governor across crawls that run on asyncio.to_thread worker
     # threads (§4.7). wait() must admit one caller at a time: an unguarded
     # read-modify-write of the next-fire time lets callers overlap and overrun the
-    # news-API cap. The clock is pinned so every call past the first takes the
+    # enrichment cap. The clock is pinned so every call past the first takes the
     # pacing branch; a small real sleep widens the window a missing lock would expose.
     active = 0
     peak = 0

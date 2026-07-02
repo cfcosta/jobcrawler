@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from bizup_autocrawler import config, optimize_job
+from jobcrawler import config, optimize_job
 
 
 def test_unheld_lock_is_not_locked(tmp_path: Path) -> None:
@@ -97,10 +97,10 @@ def test_dispatch_spawns_detached_module_invocation(
 
     assert len(_FakePopen.instances) == 1
     spawned = _FakePopen.instances[0]
-    # Invoked as `python -m bizup_autocrawler optimize` — PATH-independent. Manual
+    # Invoked as `python -m jobcrawler optimize` — PATH-independent. Manual
     # default is opt-in: no --adopt (write + deploy hint, no live pointer flip).
     assert spawned.cmd[0] == sys.executable
-    assert spawned.cmd[1:] == ["-m", "bizup_autocrawler", "optimize"]
+    assert spawned.cmd[1:] == ["-m", "jobcrawler", "optimize"]
     # Detached so it survives a daemon restart; no stdin; output captured.
     assert spawned.kwargs["start_new_session"] is True
     assert spawned.kwargs["stdin"] is subprocess.DEVNULL
@@ -126,7 +126,7 @@ def test_dispatch_adopt_appends_the_adopt_flag(
     )
 
     spawned = _FakePopen.instances[0]
-    assert spawned.cmd[1:] == ["-m", "bizup_autocrawler", "optimize", "--adopt"]
+    assert spawned.cmd[1:] == ["-m", "jobcrawler", "optimize", "--adopt"]
 
 
 def test_dispatch_skips_when_a_job_is_already_running(
@@ -160,7 +160,7 @@ def test_dispatch_uses_config_paths_by_default(
 def test_optimize_command_runs_when_lock_is_free(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from bizup_autocrawler import cli_optimize
+    from jobcrawler import cli_optimize
 
     lock = str(tmp_path / "optimize.lock")
     monkeypatch.setattr(config, "optimize_lock_path", lambda: lock)
@@ -174,7 +174,7 @@ def test_optimize_command_runs_when_lock_is_free(
 def test_optimize_command_exits_cleanly_when_already_running(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from bizup_autocrawler import cli_optimize
+    from jobcrawler import cli_optimize
 
     lock = str(tmp_path / "optimize.lock")
     monkeypatch.setattr(config, "optimize_lock_path", lambda: lock)

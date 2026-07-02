@@ -1,37 +1,95 @@
-# bizup-autocrawler site registry (§4.1) — the system's checked-in input.
-# Copy to your state dir as sites.yaml and replace with your real seed list.
+# jobcrawler site registry (§4.1) — the system's checked-in input.
+# Copy to your state dir as sites.yaml and replace with your real seed list of
+# careers pages / ATS boards. `jobcrawl generate` writes one crawler per slug; the
+# committed crawlers are plain Python (no LLM in the crawl loop). The host-side
+# §4.6 matcher then scores each new position against your PROFILE.md.
 #
 # fields:
-#   slug     stable id — names the crawler file and the `source` on ingested items.
+#   slug     stable id — names the crawler file and the `source` on each position.
+#            MUST be a valid Python identifier (underscores, never hyphens): it
+#            names crawlers/<slug>.py, which the runner loads by that name.
 #   name     human label.
-#   url      root or section page the crawler starts from.
+#   url      root or careers/board page the crawler starts from.
+#   company  OPTIONAL. For a SINGLE-COMPANY board (a Greenhouse/Lever/Ashby/Gupy
+#            board that lists only one employer's roles, and where the API carries
+#            no company field), name the employer here and the generator hard-codes
+#            it onto every Job it yields. Omit for a multi-company aggregator
+#            (RemoteOK, WeWorkRemotely) where each posting states its own company.
+#   enumerates_all  OPTIONAL, default true. true = one crawl sees the WHOLE board,
+#            so a position that vanishes between crawls can be diffed to 'closed'
+#            (§4.7 close_missing). Set FALSE for a source that only ever shows a
+#            recent window — an RSS feed, or RemoteOK's latest-~100 — where the
+#            disappear-diff is UNSOUND (an old-but-open role simply fell off the
+#            window). Closure for those comes only from the §4.9 recheck loop
+#            (JOBCRAWLER_RECHECK_INTERVAL), which re-fetches standing rows.
 #   render   max fetch tier: auto | static | browser | solver (§4.10). `auto` lets
-#            the generator pick the cheapest tier that works; `solver` needs
-#            AUTOCRAWLER_SOLVER + a backend configured.
-#   hints    free-text steer for the generator (section paths, language, layout).
-#   schedule per-site cadence — a duration (e.g. 30m | 6h | 1d), or `adaptive` to
+#            the generator pick the cheapest tier that works; a JSON ATS API is
+#            `static`; `solver` needs JOBCRAWLER_SOLVER + a backend configured.
+#   hints    free-text steer for the generator (API endpoint, section paths,
+#            language, which field holds the full description). See the ATS notes
+#            on each example below — a good hint saves generation budget.
+#   schedule per-site cadence — a duration (e.g. 4h | 12h | 1d), or `adaptive` to
 #            let the §4.9 hit-rate controller learn the cadence from how often the
-#            source actually posts (bounded by AUTOCRAWLER_MIN_SCHEDULE /
-#            AUTOCRAWLER_MAX_SCHEDULE, tuned by AUTOCRAWLER_ADAPTIVE_TARGET_N).
-#            Omit to use the fleet default, which is adaptive
-#            (AUTOCRAWLER_ADAPTIVE_DEFAULT defaults true); set it false to fall back
-#            to the fixed AUTOCRAWLER_DEFAULT_SCHEDULE (30m). (Cron expressions are
-#            not supported yet and are rejected.)
+#            source actually posts (bounded by JOBCRAWLER_MIN_SCHEDULE=1h /
+#            JOBCRAWLER_MAX_SCHEDULE=3d). Omit to use the fleet default, which is
+#            adaptive (JOBCRAWLER_ADAPTIVE_DEFAULT defaults true); set it false to
+#            fall back to the fixed JOBCRAWLER_DEFAULT_SCHEDULE (4h). Job boards move
+#            on the order of days, so these are far slower than a news cadence.
+#            (Cron expressions are not supported yet and are rejected.)
 #   adaptive equivalently, `adaptive: true` (the `schedule: adaptive` shorthand
 #            just sets this and clears the fixed cadence).
 #   enabled  crawl on/off without deleting the entry.
 
-- slug: example
-  name: Example News
-  url: https://example.com/news
+# A single-company Greenhouse board — the common ATS shape.
+# Greenhouse serves the whole board in ONE call:
+#   https://boards-api.greenhouse.io/v1/boards/<token>/jobs?content=true
+# `content` is the FULL description, but HTML-entity-escaped (html.unescape then
+# strip tags); location.name is one flattened string; no salary/employment fields.
+# One call ⇒ enumerating, so leave enumerates_all at its default (true).
+- slug: example_greenhouse
+  name: Example Inc — Careers
+  url: https://boards.greenhouse.io/example
+  company: Example Inc
   render: auto
-  schedule: 30m
+  hints: >-
+    Greenhouse board, token `example`. Enumerate the whole board in one call via
+    boards-api.greenhouse.io/v1/boards/example/jobs?content=true; `content` is the
+    full description but HTML-entity-escaped (html.unescape + strip tags);
+    location.name is a single flattened string; there are no salary fields.
+  schedule: adaptive
   enabled: true
 
-# - slug: techcrunch
-#   name: TechCrunch
-#   url: https://techcrunch.com
+# --- more examples (uncomment + adapt) --------------------------------------
+
+# A single-company Lever board. NOTE: api.lever.co/v0/postings/<token>?mode=json —
+# the `description` field is the INTRO ONLY; the full text is
+# description + lists[].content + additional. workplaceType is always present
+# (remote/hybrid/onsite); categories.{location,team,commitment}; no company field
+# (so set `company:`). Whole board in the response ⇒ enumerating (default true).
+# - slug: example_lever
+#   name: Example Co — Jobs
+#   url: https://jobs.lever.co/example
+#   company: Example Co
 #   render: auto
-#   hints: Tech/startup news; articles under dated permalink paths.
-#   schedule: adaptive   # learn the cadence from this source's posting rate
+#   hints: >-
+#     Lever board, token `example`, api.lever.co/v0/postings/example?mode=json.
+#     Full description = description + lists[].content + additional (the top-level
+#     description is just the intro). Use workplaceType for remote/hybrid/onsite.
+#   enabled: true
+
+# A multi-company aggregator that only exposes a recent window — enumerates_all
+# MUST be false so the closure diff is skipped (the recheck loop covers it). Its
+# /api returns only the latest ~100 postings, element[0] is a legal-notice object
+# to skip, it needs a browser-like UA, and its salary keys are always 0. Each
+# posting carries its own company, so DON'T set `company:` here.
+# - slug: remoteok
+#   name: RemoteOK
+#   url: https://remoteok.com/api
+#   render: browser
+#   enumerates_all: false
+#   hints: >-
+#     JSON at /api, latest ~100 only (partial — hence enumerates_all: false). Skip
+#     element[0] (a legal notice). Needs a browser-like User-Agent. Ignore the
+#     salary_min/salary_max keys (always 0). Each item states its own company.
+#   schedule: 12h
 #   enabled: true

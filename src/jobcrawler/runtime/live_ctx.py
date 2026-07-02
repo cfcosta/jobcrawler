@@ -8,10 +8,10 @@ challenge-aware ``Ctx`` the daemon's crawls run through:
   * one ``httpx`` client — carrying the configured User-Agent, per-request timeout,
     and (when set) the egress proxy — shared by both the crawl fetches and the
     robots.txt fetch, so cf_clearance's IP+UA binding holds across them;
-  * a **per-host pacer** (``AUTOCRAWLER_RATE_LIMIT``) — always on;
+  * a **per-host pacer** (``JOBCRAWLER_RATE_LIMIT``) — always on;
   * a **robots.txt policy** — always on, fetching ``/robots.txt`` through that same
     client and failing open on an unreachable file;
-  * a **challenge solver + clearance cache** — only when ``AUTOCRAWLER_SOLVER`` names
+  * a **challenge solver + clearance cache** — only when ``JOBCRAWLER_SOLVER`` names
     a backend (default ``none`` → plain httpx; the opt-in FlareSolverr backend is
     built by ``make_solver``).
 
@@ -26,15 +26,15 @@ from collections.abc import Callable, Collection
 
 import httpx
 
-from bizup_autocrawler import config
-from bizup_autocrawler.runtime.ctx import Ctx
-from bizup_autocrawler.runtime.encoding import (
+from jobcrawler import config
+from jobcrawler.runtime.ctx import Ctx
+from jobcrawler.runtime.encoding import (
     http_charset_from_content_type,
     resolve_text,
 )
-from bizup_autocrawler.runtime.politeness import PerHostPacer, RobotsPolicy
-from bizup_autocrawler.runtime.solver import make_clearance_cache, make_solver
-from bizup_autocrawler.runtime.ssrf import check_url
+from jobcrawler.runtime.politeness import PerHostPacer, RobotsPolicy
+from jobcrawler.runtime.solver import make_clearance_cache, make_solver
+from jobcrawler.runtime.ssrf import check_url
 
 
 def build_live_ctx(

@@ -4,6 +4,12 @@ Pure aggregations over the §5 run history and §4.8 health signals — the numb
 an operator (or the optional status surface) reads. ``drift_mttr`` is the §4.8
 observability metric: median time from a previously-healthy site going dark to a
 gate-passing replacement being *enabled*. It is tracked, never an exit gate.
+
+For the job board the status surface also reads the lifecycle tallies the state store
+owns directly — :meth:`StateStore.position_counts` (open/closed/matched/pending) and
+:meth:`StateStore.match_spent` (today's LLM token spend against the §8 daily cap) — and
+the recent close *rate* via :func:`closed_last_7d` here (a pure fold over run history,
+so it needs no extra store query). ``mean_body_quality`` stays the partial-drift signal.
 """
 
 from __future__ import annotations
@@ -12,8 +18,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from bizup_autocrawler.health import HealthState
-from bizup_autocrawler.state import HealthTransition, RunRecord
+from jobcrawler.health import HealthState
+from jobcrawler.state import HealthTransition, RunRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,10 +102,11 @@ def transition_events(
 def mean_body_quality(history: Sequence[RunRecord]) -> float | None:
     """Mean ``body_quality`` over finished runs that recorded it, or None (§4.8).
 
-    ``body_quality`` (fraction of fetched items whose body cleared the host-side
-    completeness bar) is the partial-drift signal: a site that starts serving teasers
-    keeps ``items_found`` healthy while this sags. None when no run carries the signal
-    (older runs, or a site whose crawls never collected items)."""
+    The ``body_quality`` signal (fraction of fetched positions whose description cleared
+    the host-side §4.6 completeness bar) is the partial-drift signal: a board that starts
+    serving boilerplate/truncated descriptions keeps ``items_found`` healthy while this
+    sags. None when no run carries the signal (older runs, or a site whose crawls never
+    collected positions). Kept named ``body_quality`` — that is the persisted signal key."""
     scores: list[float] = []
     for r in history:
         if r.signals is None:
@@ -118,14 +125,14 @@ def recovery_events(
     ``drift_mttr`` wants (dark, enabled) timestamps, but the state store keeps no
     health-transition log; the only durable signal is the §5 run history. So the
     status surface reconstructs *observed* drift recoveries from it: starting from a
-    live baseline (a finished run that found items), the first subsequent finished run
-    that finds none marks the site going dark, and the next finished run that finds
-    items again marks recovery. Each completed dark→recovered cycle yields one pair;
+    live baseline (a finished run that found positions), the first subsequent finished
+    run that finds none marks the site going dark, and the next finished run that finds
+    positions again marks recovery. Each completed dark→recovered cycle yields one pair;
     an as-yet-unrecovered drift yields nothing (MTTR is over recovered drifts only),
     and a site that has only ever returned zero never went dark *from healthy*.
 
     History need not be sorted (``runs_for`` returns newest-first); only finished runs
-    count. This measures recovery as observed at the item level — broader than §4.8's
+    count. This measures recovery as observed at the position level — broader than §4.8's
     "gate-passing replacement enabled" (it also catches a site that recovered on its
     own), so the surface labels it *observed*, never claims the precise regen metric.
     """
@@ -145,3 +152,29 @@ def recovery_events(
         elif seen_alive and dark_at is None:
             dark_at = finished
     return events
+
+
+def closed_last_7d(
+    history: Sequence[RunRecord], now: datetime, *, days: int = 7
+) -> int:
+    """Positions closed by runs that finished within the last ``days`` (default 7).
+
+    The recent close *rate* for the status surface — the churn complement of
+    :meth:`StateStore.position_counts`'s lifetime ``closed`` total. Summed from the per-run
+    ``closed`` signal each crawl records (enumerate-diff closures) alongside the §4.9
+    recheck/expiry sweep's own closures; a run that recorded none contributes 0, so this
+    degrades to 0 rather than raising when the signal is absent. A pure fold over the run
+    history the status command already loads — no extra store query. ``history`` may be in
+    any order; only finished runs inside the window count.
+    """
+    cutoff = now - timedelta(days=days)
+    total = 0
+    for run in history:
+        if run.finished is None or run.finished < cutoff:
+            continue
+        if run.signals is None:
+            continue
+        value = run.signals.get("closed")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            total += int(value)
+    return total

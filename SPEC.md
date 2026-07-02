@@ -1,0 +1,1176 @@
+# jobcrawler — SPEC
+
+| | |
+|---|---|
+| **Status** | Draft |
+| **Date** | 2026-07-02 |
+| **Depends on** | nothing external — the old `bizup-news` ingestion target is **gone** (clean break, §4.7) |
+| **Core tech** | `dspy.RLM` generation + `GEPA` self-improvement (DSPy 3.2.x) + a host-side `dspy.Predict` profile matcher |
+
+## 1. Summary
+
+`jobcrawler` turns a **list of careers pages / ATS boards** into a fleet of **per-site
+crawler scripts** that continuously **track open engineering positions** and **match them
+against the operator's `PROFILE.md`**. A `dspy.RLM` agent does the hard reasoning **once
+per site** — it explores a prefetched snapshot of the board in a sandboxed REPL (fetching
+more on demand via host tools), finds the cleanest way to enumerate postings (a public ATS
+JSON API where one exists, an HTML scrape only where none does), and **writes a standalone
+Python crawler script** for that board. Thereafter the script runs on a schedule with **no
+LLM in the loop**, yielding `Job` records that are deduplicated, **lifecycle-tracked**
+(open → changed → closed, reopened, expired), and — for new/changed postings — scored
+against the profile by a **host-side, batched, cached LLM matcher** that runs *outside* the
+crawl sandbox. Strong matches notify the operator.
+
+The load-bearing invariant is unchanged from the news era, just sharper: **the crawl loop
+never calls a model.** Committed crawlers are plain, deterministic Python; host-side
+enrichment (discipline/level/workplace/salary) is pure functions (§4.6). There are exactly
+**two out-of-loop LLM surfaces**, both bounded and off the hot path:
+
+1. **Generation (§4.2)** — the RLM writes a crawler once per site, and **improves over
+   time** through an offline optimization loop (§4.11).
+2. **Profile matching (§4.7)** — the *only new* LLM surface versus the news design. It runs
+   **host-side, batched, and cache-keyed** on `(content_hash, profile_hash, model,
+   prompt_version)`, with a hard daily token cap and a pending-backlog overflow, so scoring
+   the daily job fleet is cheap and a matcher outage degrades to "not scored yet", never a
+   crawl crash. It replaces the old `POST /news` sink.
+
+Matching *bills tokens*, so it is deliberately parsimonious: a deterministic prefilter drops
+definite mismatches for free, a content-addressed cache scores each posting **at most once
+ever**, and misses are batched into one prediction per `batch` jobs (§4.7/§8).
+
+## 2. Goals / Non-goals
+
+**Goals (v1)**
+- Given a board URL, automatically generate a committed, reviewable `crawlers/<slug>.py`.
+- **Prefer a public ATS JSON API** (Greenhouse / Lever / Ashby / Gupy — §4.2/§15) that
+  enumerates the *whole* board in a call or two; fall back to HTML scraping only where no
+  API exists.
+- Yield a rich, typed `Job` (title/company/location/description + opportunistic salary,
+  workplace, employment type, timestamps — §4.6), never inventing fields the board didn't
+  state.
+- **Own the run loop**: a built-in scheduler decides when each board is due and runs its
+  script (bounded concurrency, retry/backoff), then dedups and **tracks each position's
+  lifecycle** — first seen, content changes, closure when it disappears from a
+  fully-enumerating board, and expiry (§4.7).
+- **Match every new/changed position against `PROFILE.md`** with a host-side LLM, cache the
+  verdict, and **notify** the strong ones (§4.7).
+- Detect when a script has gone stale (board changed) and **regenerate** it (§4.8).
+
+**Non-goals (v1)**
+- **Auto-applying to jobs.** `jobcrawler` surfaces and ranks openings; a human applies. No
+  form-filling, résumé submission, or outreach automation. `apply_url` is stored for the
+  operator's convenience, never actioned.
+- **Auth-walled boards.** LinkedIn, Indeed, Glassdoor and anything behind a login/consumer
+  anti-bot wall are out of scope — we track public ATS boards and careers pages. Logins,
+  paywalls, and **interactive** CAPTCHA solving (Turnstile/hCaptcha) remain non-goals;
+  passive Cloudflare JS challenges *are* handled transparently (§4.10).
+- **Semantic cross-board dedup / repost clustering.** The same role posted to three boards
+  is three rows in v1 (§14 Q1). Content-hash dedup is *within* a `(site, url)` key only.
+- **Salary inference.** We parse a salary the board *prints* (§4.6) and never model or
+  impute one it doesn't (§14 Q3).
+- **Multi-profile / team use.** One `PROFILE.md` per deployment in v1 (§13 next).
+- A general-purpose crawler config UI. The board list is a checked-in file.
+
+## 3. Core principle: two phases, and a crawl loop with no LLM
+
+```
+            ┌─────────────────────── GENERATION (LLM, once per site) ──────────────────────┐
+ site_url ─▶│  dspy.RLM root planner                                                        │
+            │    explores via host tools: fetch() · render() · find_feeds() · get_sitemap() │
+            │    PREFERS a public ATS JSON API (Greenhouse/Lever/Ashby/Gupy); scrapes only  │
+            │    if none — drafts crawler source, validate_crawler() runs it for real &      │
+            │    reports, iterates until postings look right ─▶ SUBMIT(crawler_source)       │
+            └───────────────────────────────────┬──────────────────────────────────────────┘
+                                                 ▼
+                          crawlers/<slug>.py   (committed; reviewed or auto-promoted, §8)
+                                                 │
+   ┌──────────────────────────────── CRAWL (no LLM, scheduled) ─────────────────────────────┐
+   │  runner imports module ─▶ crawl(ctx) yields Job(s)                                      │
+   │    ctx enforces robots · rate-limit · timeouts · allowed-hosts (script can't bypass)    │
+   │    ─▶ validate Job ─▶ canonicalize url ─▶ completeness floor + expired-marker drop      │
+   │    ─▶ content_hash ─▶ upsert_position (new/changed/unchanged · REOPEN)                  │
+   │    ─▶ close_missing (only on a healthy full enumeration) ─▶ enrich ─▶ prefilter         │
+   └──────────────────────────────────────┬─────────────────────────────────────────────────┘
+                                          ▼  (new/changed, prefilter-surviving)
+   ┌───────── MATCH (host-side LLM, batched + cached + capped, OUTSIDE the sandbox) ─────────┐
+   │  cache lookup (hit = free) ─▶ daily-cap split (overflow → match_pending) ─▶             │
+   │  dspy.Predict(MatchJobs) vs PROFILE.md ─▶ MatchVerdict{score,verdict,reasons} ─▶ store  │
+   │  ─▶ notify strong matches (score ≥ match_min_score, event 'match')                      │
+   └─────────────────────────────────────────────────────────────────────────────────────────┘
+                                          │
+        health signals (positions_found, description_quality) ─▶ stale? ─▶ re-enter GENERATION
+```
+
+The **generated script declares _what_ to fetch and _how_ to extract**; the **runner owns
+_politeness, limits, lifecycle, and matching_ centrally**. A generated script therefore
+cannot hammer a board, reach the network except through the supplied `ctx`, decide a
+position is closed, or spend a match token.
+
+The crawl phase is **driven by a built-in scheduler** (§4.9), not an external cron:
+`jobcrawler` runs as a long-running service that decides when each board is due, tracks
+lifecycle, drives matching, and regenerates stale crawlers — one orchestrator over
+generation, crawling, matching, and self-healing.
+
+## 4. Components
+
+### 4.1 Site registry (input)
+A checked-in list (`sites.yaml`) is the system's input. One entry per board:
+
+| field | type | notes |
+|---|---|---|
+| `slug` | str | stable id; names `crawlers/<slug>.py` and the `source` field on jobs; must be a valid Python identifier (it names an importable module) |
+| `name` | str | human label |
+| `url` | str | board root / careers URL |
+| `render` | `auto \| static \| browser \| solver` | **max** fetch tier `ctx` may escalate to (§4.10); `auto` lets generation decide |
+| `company` | str? | **single-company boards only.** A Greenhouse/Lever/Ashby/Gupy board is one employer, and some APIs omit the company name (Lever has no company field, §15); when set, the generator hard-codes it on every `Job` so `company` (a required field, §4.6) is always populated. Omit for aggregators (RemoteOK/WWR) where each posting carries its own employer. |
+| `enumerates_all` | bool = `True` | **does one crawl see the *whole* board?** `True` for an ATS API or a complete per-category feed — closure-by-diff (§4.7) is sound. `False` for a source that only ever shows a recent window (RemoteOK's latest-~100, a combined RSS feed): a disappeared URL there means "scrolled off", **not** "closed", so the §4.7 enumerate-diff is **skipped** and the §4.9 recheck loop covers closure instead. |
+| `hints` | str? | optional free-text steer for the generator ("board is Greenhouse token `acme`") |
+| `schedule` | str? | crawl cadence — `4h`, `1d`, or `adaptive`; defaults to the fleet cadence (§4.9) |
+| `adaptive` | bool | let the §4.9 hit-rate controller learn this board's interval (`schedule: adaptive` is sugar for it) |
+| `enabled` | bool | crawl on/off without deleting |
+
+### 4.2 Generator (the RLM phase)
+
+**Module choice.** The generator writes and *runs* Python iteratively, so it needs a
+code-execution loop, not just discrete tool calls. `dspy.RLM` fits: a careers page or a
+multi-MB Ashby payload is large, semi-structured data best explored *with code + recursive
+sub-LLM calls* in a persistent REPL — RLM's core strength. The caveat to keep honest: an
+agent-driving-external-tools loop is normally `dspy.ReAct`/`dspy.CodeAct` territory, so we
+keep RLM **idiomatic** by handing it a pre-fetched board snapshot as the large input it
+reasons over in-REPL, using host tools only for *follow-up* fetches. RLM stays the
+**primary** generator; for self-improvement (§4.11) we do *not* invert to CodeAct but wrap
+the RLM in a `CrawlerGenerator(dspy.Module)` and point the optimizer at a named predictor we
+own. `dspy.CodeAct` ("writes Python that calls your tools") remains the documented fallback
+if that predictor optimizes unevenly.
+
+**RLM vs CodeAct is empirically close, not RLM-obviously-better.** The load-bearing property
+is *write → run → iterate code over an environment*, which both satisfy; head-to-head,
+coding agents match or beat RLM on single-document tasks, recursion adds only ~6 pts
+(sometimes *negative* on strong frontier models), and RLM is *worse* than a plain call below
+a ~2¹⁴-token crossover [Coding-Agents, SRLM, RLM]. So: **gate recursion on snapshot size**
+(prefer the non-recursive / CodeAct path when the snapshot fits one context — the common
+single-company-board case; reserve recursive `llm_query` for genuinely large corpora like a
+paginated Gupy board or a multi-MB Ashby dump); add a **structured-source fast-path** that
+skips DOM exploration/recursion when a public ATS JSON API is found (it still runs *one*
+`validate_crawler` pass before `SUBMIT`, satisfying gate-2 must-observe — sandbox-only, no
+LLM); keep the owned strategy predictor (§4.11) **module-agnostic** so an RLM→CodeAct swap
+doesn't invalidate it; and add a production-backbone **A/B** (RLM-recursive vs non-recursive
+CodeAct) on the held-out split in M1/M5, keeping the per-backbone winner. Define the fallback
+trigger *operationally*: the GEPA candidate fails to beat the incumbent across K budgets, or
+per-gate pass-rates regress on a subset. Keep **depth-1** recursion (sub-calls are leaf LMs;
+host tools are the follow-up channel) and async.
+
+**ATS-API-first discovery is the whole strategy, and it is empirically grounded.** A live
+probe of the major backends (2026-07-02, §15) established that the cleanest enumeration of a
+board is almost always a **public JSON API**, not the rendered HTML — so the seeded strategy
+(§4.11) probes for one *before* any DOM scraping. The generator's seed rules encode the probe
+findings and their **full-text reconstruction gotchas**, because "grab the description field"
+is wrong on two of the four backends:
+
+- **Greenhouse** — `boards-api.greenhouse.io/v1/boards/<token>/jobs?content=true` returns the
+  **whole board in one call** with a `meta.total` count (the §6 enum-floor oracle). `content`
+  is the **full** description but **HTML-entity-escaped** — the crawler must `html.unescape`
+  *then* strip tags, or every posting is mojibake. No salary/employment fields;
+  `location.name` is one flattened string; `first_published` is always present (→ `posted_at`).
+- **Lever** — `api.lever.co/v0/postings/<token>?mode=json`. The `description` field is the
+  **intro only**; the full text is `description + lists[].content + additional` concatenated
+  — a crawler that reads `description` alone yields truncated postings that fail the §6
+  completeness gate. `workplaceType` is always present (→ `workplace_type`);
+  `categories.{location,team,commitment}` map to location/department/employment_type;
+  `createdAt` is epoch-**ms**. **No company field** — set it from `sites.company` (§4.1).
+- **Ashby** — `api.ashbyhq.com/posting-api/job-board/<token>?includeCompensation=true`.
+  `descriptionPlain`/`descriptionHtml` are **full**; `employmentType` is always present;
+  structured compensation is present **~70%** of the time
+  (`compensation.summaryComponents[].{minValue,maxValue,currencyCode,interval}` →
+  `salary_min/max/currency/period`). **`isRemote` means "remote *allowed*"**, not "remote
+  only" — prefer the explicit `workplaceType`. Boards can be **multiple MB** (fold into the
+  §4.5 payload note and the recursion gate).
+- **Gupy (BR)** — a `<company>.gupy.io` board embeds **all** jobs in `__NEXT_DATA__`; the
+  cleaner path is `employability-portal.gupy.io/api/v1/jobs?companyId=..&limit=100&offset=..`,
+  which paginates (**limit max 100; do not trust `total` at limit=100 — page until a short
+  page**). The `type` enum distinguishes `vacancy_type_effective` (CLT) /
+  `vacancy_legal_entity` (PJ) / etc → `employment_type`; `publishedDate` + `expiresAt` map to
+  `posted_at`/`expires_at`; salary is absent.
+- **Aggregators** — **RemoteOK** `/api` returns **only the latest ~100** (partial → `sites`
+  must set `enumerates_all: false`), `element[0]` is a legal-notice object to **skip**, needs a
+  browser User-Agent, and its salary keys are **always 0** (drop them, don't store 0).
+  **WeWorkRemotely** exposes **complete per-category RSS feeds** (the *combined* feed is capped
+  at 10/category, so crawl per-category); `expires_at` is present; `company` is parsed from the
+  `'Company: Title'` item-title prefix.
+
+A DSPy signature whose **docstring is the task instruction** (per project convention), driven
+by `dspy.RLM`. Illustrative shape (not implementation):
+
+```python
+class GenerateCrawler(dspy.Signature):
+    """Write a standalone Python crawler for one job board.
+
+    Explore the prefetched snapshot; fetch more with the tools only if needed.
+    PREFER a public ATS JSON API (Greenhouse/Lever/Ashby/Gupy) that enumerates the
+    whole board; scrape HTML only if none exists. Reconstruct the FULL description
+    (Lever = description+lists+additional; Greenhouse = html.unescape then strip).
+    Emit a module implementing the crawler contract (§5). Validate it with
+    validate_crawler before submitting; it must yield several postings, each with a
+    non-empty title, company, location, and a sufficiently long description."""
+
+    site_url: str          = dspy.InputField(desc="board root / careers URL")
+    corpus: dict           = dspy.InputField(desc="prefetched {homepage, robots, sitemap, postings:[{url,title,text}]} — JSON-able")
+    render: str            = dspy.InputField(desc="static | browser | solver | auto")
+    company: str           = dspy.InputField(desc="single-company board employer, or '' for an aggregator")
+    hints: str             = dspy.InputField(desc="optional operator guidance")
+    discovery_method: Literal["ats_api", "feed", "sitemap", "scrape"] = dspy.OutputField(desc="how postings are discovered")
+    discovery_url: str     = dspy.OutputField(desc="the API / feed / sitemap / index URL used")
+    crawler_source: dspy.Code = dspy.OutputField(desc="Python module implementing the contract")
+
+# crawler_source is a dspy.Code (markdown fences auto-stripped); gate-1 and the write step
+# consume crawler_source.code. corpus is a plain JSON-able dict (§9): dspy injects it into the
+# REPL as a real variable (the model sees a truncated preview, reads full parts via code).
+# Keep every part JSON-primitive — no live lxml trees / httpx clients / closures.
+#
+# The signature is wrapped in CrawlerGenerator(dspy.Module) (§4.11) so its predictors are
+# visible to the optimizer and to save/load; the scheduler/CLI call it via .acall(...).
+```
+
+**Host tools passed to RLM** (`tools=[...]`, plain callables that run on the *host*, with the
+real network access the Pyodide sandbox lacks). The prefetched corpus covers the common case;
+these handle *follow-up* fetches — API pagination, a deeper posting, a discovered feed:
+
+| tool | purpose |
+|---|---|
+| `fetch(url)` | static GET → cleaned text/markdown (httpx + markitdown), rate-limited |
+| `render(url)` | headless GET → rendered HTML (Playwright) |
+| `find_feeds(url)` | discover `<link rel="alternate">` RSS/Atom/JSON feeds |
+| `get_sitemap(url)` | fetch & parse `sitemap.xml` (and robots-declared sitemaps) |
+| `validate_crawler(source)` | fence-strip, then run the candidate in the execution sandbox (§4.4) **through `ctx`** — against the live board during generation, or in the offline loop against the persisted `corpus` + recorded HTTP via a replay-backed `ctx` (§4.11), *never the network*. Returns a **size-bounded** `CandidateResult` (capped `samples`, condensed `schema_errors`, `exception` = type+message+traceback *tail*) so it survives RLM's output truncation (a **10k-char total** budget when output exceeds 10k — 5k head + 5k tail; keep load-bearing fields in the head), crossing the bridge as JSON the model parses in-REPL. |
+
+`validate_crawler` runs the candidate **on the host**, and that's mandatory, not just
+convenient: RLM's Pyodide sandbox has no network and none of the crawler's libraries
+(`httpx`/`lxml`/`selectolax`/`playwright`), so the host execution sandbox (§4.4) is the only
+place a generated crawler can actually run. The model iterates write → `validate_crawler` →
+fix before `SUBMIT`.
+
+**LMs & budgets.** A strong code-capable **root LM** plans and extracts; a cheap **`sub_lm`**
+answers in-sandbox `llm_query` calls — pass it explicitly as a concrete LM (an unset `sub_lm`
+silently falls back to the *root* LM, billing every `llm_query` at planner rates;
+`require_sub_model` errors rather than allow it, §11). Scope the LM per call with
+`with dspy.context(lm=root_lm): await gen.acall(...)`, never a process-global `dspy.configure`
+(it is thread-owned and raises from the scheduler's worker tasks — §9). Candidate
+**distinctness does not come from `cache=False`**: `BestOfN`/`Refine` run the module N times
+each with a distinct **`rollout_id` at temperature=1.0** (`lm.copy(rollout_id=…,
+temperature=1.0)`), and `rollout_id` *is* part of the cache key — so attempts re-reason and
+miss the cache even with caching **on**; GEPA instead samples by mutating the instruction via
+the reflection LM. The real lever for stochastic re-sampling is **temperature > 0** (at
+temperature 0 `rollout_id` is inert). Set both RLM caps explicitly (`JOBCRAWLER_MAX_ITERATIONS`,
+`JOBCRAWLER_MAX_LLM_CALLS`): `max_llm_calls` raises a *recoverable* in-sandbox error at its
+limit (the model can catch it and keep going), so it is a **soft** cap, not a hard
+runtime/spend bound — pair a bounded `max_iterations` with the host-side ceilings below,
+especially under `BestOfN`/`Refine`/GEPA multiplication. The default sandbox needs **Deno**
+installed.
+
+**Hard cost ceilings (host-side backstops).** The installed RLM is bounded *both* ways — the
+root loop is `for _ in range(max_iterations)` (default 20) with an extract-fallback on
+exhaustion, and `max_llm_calls` caps sub-calls — so `JOBCRAWLER_MAX_ITERATIONS`/`MAX_LLM_CALLS`
+map to `dspy.RLM(max_iterations=…, max_llm_calls=…)`, which RLM enforces **internally** as hard
+caps — not a *separate* host layer (only `MAX_SUBCALLS` is). Two real gaps remain:
+`max_llm_calls` is **soft** (a recoverable error the model can catch and loop past), and
+**fan-out** multiplies whole generations, which no single RLM cap bounds. So the host adds an
+**unconditional** sub-call kill (`JOBCRAWLER_MAX_SUBCALLS`, set ≥ `max_llm_calls`) that aborts
+the trajectory regardless — the *only* hard stop on a catch-and-continue sub-call loop — and an
+aggregate `FANOUT_SPEND_CAP` across the fan-out; plus a one-line anti-over-subcall prompt guard.
+(Size the $ cap against the **p95 tail**, not the mean.) The Pyodide/Deno sandbox adds ~2–3 s
+cold-start + per-call bridge tax per loop [Sanjaya] — confirm RLM reuses one warm sandbox per
+generation, else fold that into the cap.
+
+**Output handling:** `crawler_source` is written to `crawlers/<slug>.py` (and, depending on the
+review policy, surfaced for human review or auto-promoted — see §8) only after it passes the §6
+acceptance gates.
+
+### 4.3 Crawler script contract (the generated artifact)
+Every generated module exposes a fixed interface so one runner can execute any of them:
+
+```python
+SITE = "https://boards.greenhouse.io/acme"   # module-level constant
+
+def crawl(ctx) -> Iterable[Job]:              # yields normalized jobs; no network except via ctx
+    ...
+```
+
+- `ctx` provides `ctx.fetch(url)`, `ctx.render(url)`, `ctx.get(url, **kw)`, `ctx.log(...)`.
+  **All fetching goes through `ctx`** so limits are enforced (parsing is the module's own —
+  via the allowlist below — not a `ctx` concern). `load_crawler(module)` returns `(SITE,
+  crawl)`, validating a non-empty `SITE: str` and a callable `crawl`.
+- The module may `import` only from an allowlist (parsers like `selectolax`/`lxml`,
+  `feedparser`, stdlib `re`/`json`/`html`/`datetime`/`urllib.parse`). No `os`, `subprocess`,
+  `open`, `socket`, `eval`/`exec` (enforced by AST check, §8).
+- **Field extraction is the crawler's job**, via the allowlisted parsers with per-board
+  selectors / JSON-key reads (their brittleness is what §4.8 drift-detection + regeneration
+  handles). The crawler yields **raw** facts (title, company, location, description, and any
+  optional fields the source states) — it **never** classifies discipline/level/workplace or
+  parses salary text into numbers; that deterministic enrichment is host-side (§4.6/§8). For a
+  single-company board it hard-codes `sites.company` on every `Job`.
+
+### 4.4 Runner & execution sandbox
+- Imports `crawlers/<slug>.py`, calls `crawl(ctx)`, and consumes the yielded `Job`s.
+- Runs the module under resource limits: wall-clock timeout, max pages, memory cap, no
+  filesystem writes, network egress **only** through the `ctx` proxy. In production a committed
+  crawler runs in a **bounded subprocess** (`crawl_site_isolated`): AST gate + `RLIMIT_AS` +
+  `RLIMIT_CPU` (decoupled from wall-clock — a polite crawl is I/O-bound and sleeps between paced
+  fetches, so CPU stays tight to catch a spin while wall-clock covers the paced fetches) + hard
+  kill. A runaway crawler (infinite loop, memory blowup, hang) is bounded and reported as a
+  failed run (0 positions, ≥1 error), **never** allowed to wedge or OOM the daemon.
+- A failing script (exception, zero positions, schema violation) is isolated to its board and
+  recorded as a health signal — it never aborts the whole crawl, and a failed/empty run **never
+  advances closure** (the §4.7 mass-closure guard).
+- `validate_crawler` and committed crawlers run in a **single pinned, reused** general-purpose
+  sandbox image (Python + httpx/lxml/selectolax/feedparser/playwright), not a per-board image,
+  with a soft timeout + hard kill and **no network except the `ctx` egress-allowlist** —
+  container isolation alone is necessary-but-not-sufficient when exploring untrusted board
+  content (§8). Acceptance is LLM-bound, not sandbox-bound [LLM-in-Sandbox], so the budget knob
+  is RLM call count, not container count.
+
+### 4.5 Politeness & fetching (`ctx`, shared by all crawls)
+Centralized so generated scripts can't get it wrong: `robots.txt` compliance, per-host rate
+limiting + concurrency caps, retries with backoff (transient 429/5xx/dropped-connection only —
+a Cloudflare challenge escalates, it is never blindly retried), conditional GET (ETag /
+Last-Modified), request timeouts, and an identifying `User-Agent`. `ctx.fetch`/`render`
+restrict requests to the board's host(s) and on-domain links (SSRF guard, §8). On a detected
+Cloudflare challenge, `ctx.fetch` transparently escalates to the browser/solver tier and caches
+the clearance cookie (§4.10) — scripts stay oblivious. `ctx.fetch`/`render` also **resolve text
+encoding** (HTTP charset → meta charset/BOM → `charset-normalizer` fallback) and hand the
+crawler UTF-8 `str`, so per-board code never guesses charset.
+
+**Note — multi-MB board payloads.** Unlike a news homepage, some ATS payloads are large: an
+Ashby board can be **several MB** of JSON, and a paginated Gupy board is many 100-row pages. The
+per-crawl page/byte budget and the `max_pages` cap are sized with that in mind, and a single
+huge fetch is streamed/bounded rather than buffered unboundedly. RemoteOK requires a **browser
+User-Agent** for its `/api` — a per-board UA override rides on the fetch tier, not the crawler.
+
+### 4.6 The `Job` model & host-side enrichment
+Jobs yielded by scripts are validated against a Pydantic model (`runtime/contract.py`). The
+split is deliberate and load-bearing: a small set of **required, non-empty** identity/content
+fields, and a wide set of **optional, extract-when-present** fields — because ATS boards differ
+wildly in what they expose (Greenhouse has no salary/employment fields at all; Lever always has
+`workplaceType`; Ashby has structured compensation ~70% of the time). The optional fields are
+opportunistic enrichment, **never** a contract the generator must satisfy.
+
+| field | type | required | notes |
+|---|---|---|---|
+| `url` | str | ✓ | canonicalized; the dedup key |
+| `title` | str | ✓ | |
+| `company` | str | ✓ | single-company boards: hard-coded from `sites.company` (§4.1) |
+| `location` | str | ✓ | as stated (often one flattened string) |
+| `description` | str | ✓ | the **full** posting text (§4.2 reconstruction rules) |
+| `source` | str | ✓ | the board `slug` |
+| `salary` | str? | – | **verbatim** printed compensation text |
+| `salary_min` / `salary_max` | float? | – | set only from source-**structured** compensation |
+| `salary_currency` | str? | – | ISO-ish code as stated |
+| `salary_period` | str? | – | `year` \| `month` \| `hour`, as stated |
+| `employment_type` | str? | – | raw (CLT/PJ/full-time/contract…) |
+| `workplace_type` | str? | – | raw `remote`/`hybrid`/`onsite` as stated |
+| `department` | str? | – | team / category |
+| `posted_at` / `expires_at` | datetime? | – | drive §4.9 recheck + expiry closure |
+| `external_id` | str? | – | stable ATS id when exposed |
+| `apply_url` | str? | – | canonical apply link (stored, never actioned — §2) |
+
+**The never-invent rule (§8).** `salary` is the compensation text *as printed*; the structured
+quartet is set **only** when the source exposes it as structured data. A crawler must never
+parse, guess, or synthesize a number the page did not state — the host-side deterministic parser
+is the single place text→number extraction happens, and it too is conservative. Likewise raw
+`workplace_type`/`employment_type` are stored **as stated**; normalization into the closed
+taxonomies lives host-side, never in the untrusted crawler.
+
+**Host-side enrichment (`runtime/normalize.py`) — deterministic, LLM-free, fixable
+fleet-wide.** A crawler yields raw postings; turning those into the closed taxonomies the
+matcher and status surfaces reason over happens **here**, once, as pure functions. Three
+reasons this is a shared host module and not per-crawler logic: (1) **no LLM in the crawl loop**
+— classification must be a cheap pure function of the text, free to run on every posting every
+crawl; (2) **fix once, fixed fleet-wide** — a mis-bucketed title or a new pt-BR seniority word
+is fixed in *this* file and every board benefits immediately, no regeneration, no §4.11 run;
+(3) **determinism = testability** — pure in→out pins the whole taxonomy under EN+pt-BR unit
+tests. The enrichment (`enrich(job) -> EnrichedJob`, a frozen dataclass of `job` + `discipline`
++ `level` + `workplace` + `salary: SalaryRange|None`):
+
+- **Two-axis taxonomy.** *Discipline* (what kind of engineering) and *level* (how senior /
+  role-shape) are orthogonal, so the profile can say "senior-or-above backend/frontend" without
+  a combinatorial enum.
+  - `classify_discipline(title, description='')` → `backend | frontend | fullstack | mobile |
+    devops_sre | data | ml_ai | security | qa | embedded | eng_other | non_eng`. **Title-first**
+    (the cleanest signal); the description is consulted only when the title is fully opaque.
+    Ordered specific-first (ml_ai before data; mobile before frontend). **Recall-safe by
+    construction:** an unrecognized eng title resolves to `eng_other` (which *passes* to the
+    matcher), and `non_eng` is the *only* confident drop-signal (§4.7 prefilter).
+  - `classify_level(title, description='')` → `intern | junior | mid | senior | staff_plus |
+    tech_lead | manager | director_plus | unspecified`. **Role-shape outranks IC seniority**
+    (`Senior Engineering Manager` → `manager`; `Senior Staff Engineer` → `staff_plus`). pt-BR:
+    estágio/estagiário → intern, júnior → junior, pleno → mid, sênior → senior,
+    especialista/staff/principal → staff_plus, tech lead/líder técnico → tech_lead,
+    coordenador/gerente/engineering manager/head of engineering → manager, diretor/vp →
+    director_plus. The description fallback deliberately omits the role-shape tiers (a JD says
+    "reports to the Director" about *other* roles).
+- `classify_workplace(workplace_type, location, description)` → `remote | hybrid | onsite |
+  unspecified`. The **structured field wins outright**; only when it is empty/unrecognized do we
+  read markers (remote/remoto, hybrid/híbrido, on-site/onsite/presencial) from
+  location+description, hybrid tested before remote before onsite.
+- `parse_salary(raw, description='')` → `SalaryRange(min, max, currency, period) | None`.
+  Handles `$152,800 — $259,200 USD`, `$189K – $330K`, `R$ 8.000 - R$ 12.000`, `€60k–80k`. A
+  **currency anchor is mandatory** and numbers come **only from `raw`** (never mined from the
+  description — a JD's "$5M in funding" can't leak in). Period defaults by currency convention
+  (USD/EUR/GBP → year, BRL → month), overridden by an explicit `/hour` `/mês` `/ano` `per year`
+  marker. **Conservative:** `None` when ambiguous; never invents a figure. `enrich` prefers the
+  crawler's structured salary fields when set, else parses the verbatim `salary` text.
+
+### 4.7 Dedup, position lifecycle & the matching pipeline
+This section **replaces the old news-ingest at-most-once story and the `POST /news` sink
+entirely** (`NewsClient`/`ingest.py` are deleted). `jobcrawler` owns a small state store
+(`state.py`, SQLite for v1; Postgres is the §14 Q5 scale-up) that tracks each posting's whole
+lifecycle, and drives host-side matching off the crawl's deltas.
+
+**Content hash & the runner pipeline.** For each yielded `Job` the runner: validates it →
+canonicalizes `url` (the dedup key) → applies the **completeness floor** (description length,
+`min_unique_description_chars`, and an **`expired_markers` drop** — a description carrying "no
+longer accepting applications" / "vaga encerrada" is dropped as `expired`, catching the
+still-served-but-dead posting the enumerate-diff can't) → computes
+`content_hash = sha256` over the whitespace-normalized `(title, company, location,
+description)` → `store.upsert_position(...)`. The same hash formula is used by the matcher's
+cache key, so a posting is scored at most once across the runner and matcher.
+
+**`positions` lifecycle (per `(site, url)` primary key).** `PositionRecord` mirrors the row.
+The store owns the lifecycle columns; the crawler-supplied fields are threaded verbatim:
+
+- `upsert_position(site, url, *, fields, content_hash) -> 'new' | 'changed' | 'unchanged'`.
+  Always touches `last_seen` and resets `missing_streak`. Returns `'changed'` iff `content_hash`
+  differs from the stored one (the posting's visible content moved — new title, edited
+  requirements). A closed row that **reappears is REOPENED** (`status='open'`, `closed_at=None`)
+  and logged as `'changed'` — a role relisted after a hiring pause is the same opening resurfacing.
+- `close_missing(site, present, *, threshold) -> list[str]`. For **open** rows of the board not
+  in `present`: `missing_streak += 1`; a row reaching `>= threshold` (`close_after_misses`,
+  default 2) flips to `status='closed'`, `closed_at=now`, and is returned. Present rows were
+  already touched by the upsert. **A single miss never closes** — a paginated board briefly
+  dropping a page, or an ATS 500, is a common transient; the second confirmed absence is the
+  signal. **Mass-closure guard:** the runner calls `close_missing` **only** when the board
+  `enumerates_all` **and** the crawl raised no exception **and** yielded ≥ 1 valid position. A
+  failed or empty run, or a partial-enumeration source, **never** advances closure — otherwise a
+  transient outage would close the entire board.
+- `mark_closed(site, url, *, reason)` (explicit close) and `expire_due() -> int` (close every
+  open row whose `expires_at < now`) cover the two non-diff closure paths.
+- Reads: `open_positions(site=None, *, limit)`, `open_urls(site, *, limit)`,
+  `matches(min_score, *, limit)` (open, `match_score >= min_score`, desc), `position_counts()`
+  → `{open, closed, matched, pending}` for the status surface.
+
+For a **partial-enumeration** source (`enumerates_all: false` — RemoteOK's latest-100, a
+combined RSS feed) the disappearance diff is unsound (a URL scrolls off the window without
+closing), so closure there is driven **only** by the §4.9 recheck loop (re-fetch the standing
+open rows and confirm they still resolve / aren't expired) and by `expire_due()`.
+
+**The matching pipeline (the new LLM surface — `match.py`, `profile.py`).** After the runner
+collects the **new/changed** positions of a crawl, it `enrich`es them (§4.6), runs the
+deterministic `prefilter` (§6/§8 — drops only *definite* mismatches for free), and hands the
+survivors to `Matcher.score_new(candidates)`. The matcher is the replacement for the old
+per-item news POST, and every stage is built to spend as few tokens as possible while **never
+dropping a job**:
+
+1. **Cache lookup.** Key `(content_hash, profile_hash, model, PROMPT_VERSION)`. A hit is **free**
+   and applied immediately (`store.set_match`). A re-crawl of an unchanged posting, a daemon
+   restart, a recheck, or a pending drain all hit the cache. Editing `PROFILE.md` changes
+   `profile_hash` and **lazily invalidates** every verdict — rescoring is automatic but pays only
+   for jobs actually re-examined, never the whole backlog.
+2. **Daily cap.** `store.match_spent(today)` counts only **LLM-scored** jobs (cache hits are
+   free). Misses beyond `match_daily_cap` (default 400/UTC-day) are `set_match_pending` — **never
+   dropped** — and drained by later runs / the recheck loop.
+3. **Batched scoring.** Affordable misses are scored `match_batch` (default 10) at a time in **one
+   `dspy.Predict(MatchJobs)` call per batch**, under `dspy.context(lm=dspy.LM(model,
+   temperature=0.0))`, on a **compact digest** per job — `{title, company, location, workplace,
+   employment_type, salary-or-parsed-range, department, description[:1200]}`. The 1200-char head
+   plus structured fields is deliberate token economy (the head carries most of the fit signal).
+4. **Governor pacing.** `governor.pace()` before each batch smooths the calls so a big new-position
+   sweep can't burst the provider into rate limits (`match_rate`, default `10/m`; orthogonal to
+   the daily *volume* cap).
+5. **Fail-open.** Any LLM/parse failure, or a batch-length mismatch, parks the affected jobs
+   `pending` and logs — it **never raises into the crawl loop**. A matching outage degrades to
+   "not scored yet". Each fresh verdict is cached (`store.cache_match`) and persisted
+   (`store.set_match`, clearing the pending flag).
+
+**First-crawl cap.** On a board's first-ever position-yielding crawl only the newest
+`first_crawl_cap` (by `posted_at`, discovery order as fallback) go to the matcher now; the tail is
+`set_match_pending`. A brand-new board can list hundreds of standing roles — without this a first
+crawl would burn the whole daily budget scoring stale backlog instead of fresh postings.
+
+**Notify.** The runner filters the applied verdicts by `match_min_score` (default 70) and calls
+`notify('match', …)` for the strong ones (§4.9 notify module: an INFO log line, plus an optional
+webhook POST). The `Matcher` itself is **threshold-agnostic** — it scores everything and stores
+the verdict; the notify boundary is the runner's, keeping the decision threshold off the matcher
+surface (§8). `pending_matches(*, limit)` and `matches(...)` back the drain and the operator's
+match view.
+
+### 4.8 Health & self-healing regeneration
+Each crawl records `positions_found`, `new_positions`, `errors`, `pages_fetched`, and a
+`description_quality` signal per board. A board is flagged **stale** on a *single* zero-**`positions_found`**
+run (the **blackout** signal — **never** zero `new_positions`, since a healthy board legitimately
+adds nothing for days) against a baseline that previously yielded positions, confirmed by a short
+re-probe that **re-parses ≥ 1 complete position** (not merely network-OK). One re-probe-cleared blip
+is tolerated. A separate **partial-drift** signal fires when `description_quality` (the share of
+fetched positions whose description cleared the completeness bar, §4.6) collapses below
+`description_quality_floor` for the latest two runs while position counts stay healthy — a board that
+started serving title-only stubs or truncated postings. Both signals are host-side, never surfaced to
+the generator (§8). Stale boards are re-entered into §4.2 generation; the new script is validated and,
+per the review policy (§8), staged for approval or auto-promoted (with a versioned backup for
+rollback). This is the "regenerate when the board changes" loop made automatic.
+
+Regeneration runs the **current** generator. If generation exhausts its budget without a
+gate-passing crawler — including a forced RLM extraction (`final_reasoning == "Extract forced final
+output"`, §4.2) — the board enters a distinct **generation-failed** state (held with a geometric
+backoff, then re-tried with the — §4.11-improved — current generator), surfaced separately in
+`jobcrawl list`/`status` and *not* silently re-enqueued into the same failing generation (which
+would spin).
+
+Track **drift-MTTR** — median time from a previously-healthy board going dark to a gate-passing
+replacement being *enabled* (detection + regeneration + review gate) — as an **observability metric**
+(`jobcrawl status`), preferring the durable health-transition log and falling back to run-history
+reconstruction; the §14 Q2 review-gate tier trades directly against it (more human review lengthens
+recovery). It is *not* a milestone exit gate (gating a close on a median-over-drift-events would need
+enough organic drift events to exist first — a bootstrapping circularity).
+
+### 4.9 Scheduler / orchestrator (owns the run loop)
+`jobcrawler` runs as a **long-running service** — `jobcrawl run` starts an async scheduler that
+operates the whole loop itself rather than relying on an external cron.
+
+- **Due-selection.** Each board has a cadence (`schedule` in §4.1, else `JOBCRAWLER_DEFAULT_SCHEDULE`,
+  default **4h** — job boards move on the order of days, not minutes). The scheduler keeps `next_run`
+  per board in the store and dispatches those whose time has come.
+- **Adaptive cadence.** A board flagged `adaptive` (the fleet default via `JOBCRAWLER_ADAPTIVE_DEFAULT`)
+  learns its own interval from recent hit/miss outcomes (an AIMD hit-rate controller steering toward
+  ~`1/target_n` postings-per-check), bounded to the politeness band `[min_schedule 1h, max_schedule
+  3d]`. Adaptive cadence is **timing, not code**, and stays within the politeness band, so it is
+  **exempt from the §4.8/§4.11 autonomy brake** (which freezes only self-*modification*).
+- **NEW — recheck / expiry timer.** On `JOBCRAWLER_RECHECK_INTERVAL` (default 12h) the scheduler
+  re-fetches up to `recheck_cap` (default 150, oldest-checked first) standing **open** positions to
+  confirm they are still live. This is the **only** closure signal for `enumerates_all: false` sources
+  (where the diff is unsound), and it also re-verifies enumerating rows against `expired_markers` /
+  `expires_at` and calls `expire_due()`. Like adaptive cadence it is **observation, not
+  self-modification** — it neither rewrites a crawler nor swaps the generator — so it too is exempt
+  from the autonomy brake.
+- **Bounded concurrency.** A global cap (`JOBCRAWLER_CONCURRENCY`) limits how many boards crawl at
+  once; per-host limits come from §4.5. A board never overlaps its own prior run.
+- **Retry & backoff (one owner per failure class).** A crawl that fails *before yielding any position*
+  gets a small bounded backoff+jitter retry **here**; **transient fetch** errors belong to §4.5;
+  **matching** failures are §4.7's fail-open-to-pending and are *not* scheduler-retried. Persistent
+  failure feeds the §4.8 health signal instead of stalling the queue.
+- **Regeneration & re-optimization triggers.** A timer (`JOBCRAWLER_REGEN_CHECK`) evaluates staleness
+  and enqueues regeneration (§4.8); a slow timer (`JOBCRAWLER_REOPT_CHECK`) or a trainset-growth
+  threshold **hands off** the offline §4.11 job out-of-band (the scheduler never runs `.compile()`
+  in-band — a multi-hour GEPA run would violate the never-stall guarantee). Both self-modifying
+  triggers, plus auto-promotion and auto-adoption, are gated by the master **autonomy** brake
+  (`JOBCRAWLER_AUTONOMY`, default on): `off` freezes all self-modification while the daemon keeps
+  crawling, matching, and recording signals.
+- **Run history.** Each run records the canonical Run record (§5) for observability and the staleness
+  math. **Crash-safety:** a prior daemon killed mid-crawl leaves `finished=NULL` rows that would look
+  perpetually in-flight; the run loop reaps those orphans at boot (single-process, nothing is yet
+  in-flight).
+- **Lifecycle.** Graceful shutdown drains in-flight crawls; state lives in the store, so the loop is
+  crash-safe and restart-idempotent.
+
+v1 uses an **in-process async scheduler** (no external broker) — appropriate for a checked-in board
+list; a task queue is a later scale-up (§14). An optional thin HTTP surface (status, manual trigger)
+can be added if operators want one.
+
+### 4.10 Cloudflare / anti-bot challenge handling
+Some job boards sit behind Cloudflare, but most use it only as a CDN (plain `httpx` works), and
+**API/feed-first discovery** (§4.2) often sidesteps challenges since ATS JSON endpoints and RSS feeds
+are frequently unprotected — but *how* often is a **measured fact**, not an assumption (the M1 step-0
+tally, §13). When a real challenge appears, `ctx` handles it **transparently** — generated scripts
+never contain anti-bot logic.
+
+- **Detection.** A response is flagged on known challenge signals (`403/503` with `cf-mitigated:
+  challenge`, or `Server: cloudflare` plus interstitial/Turnstile markers).
+- **Escalation ladder.** `ctx.fetch` escalates *only on detection*: **static httpx → headless browser
+  → challenge solver**, bounded by the board's `render` ceiling (§4.1). No challenge → no escalation.
+- **Plain Playwright/Selenium is not enough.** Vanilla automation is fingerprinted and fails CF's JS
+  challenge, so the solver tier uses a **stealth** browser.
+- **`ChallengeSolver` interface (pluggable).** `solve(url) -> {cookies, user_agent}`. Backends: an
+  **in-process stealth browser** (nodriver / camoufox / patchright — *recommended primary*);
+  **FlareSolverr** (an HTTP service, least code to adopt, historically lags CF updates); a **paid
+  CAPTCHA solver** for interactive Turnstile (optional, off by default — cost + ToS; see non-goals).
+  Default backend is `none` (plain httpx) until the stealth tier is built.
+- **Clearance cache ("pay once").** A solved `cf_clearance` + its User-Agent are cached per host and
+  replayed with cheap `httpx` until expiry. **Constraint:** `cf_clearance` is bound to **IP + UA**, so
+  the solver and the subsequent cheap requests must share egress IP, User-Agent, and proxy.
+- **Budget & give-up.** The solver tier is slow and concurrency-capped; a board needing an interactive
+  CAPTCHA on every request is marked **unsupported** rather than retried forever.
+
+### 4.11 Self-improving generator (offline optimization loop)
+The generator is **not static** — it improves over time by optimizing the instruction it generates
+from. This is a **core capability**, but deliberately **offline, batched, and out-of-band**: it never
+runs on the crawl path or inside the §4.9 scheduler's in-band work. Two loops, never conflated:
+
+- **Online regeneration (§4.8)** invokes the *current, pinned* generator and stays in the scheduler.
+- **Offline self-improvement (here)** runs an optimizer over accumulated examples and produces a
+  *new, versioned* generator program for the regeneration loop to adopt.
+
+**The generator is a `dspy.Module`.** Wrap the `dspy.RLM` (and the §6 selection loop) in
+`CrawlerGenerator(dspy.Module)`; sub-modules held as attributes auto-register as parameters, making
+them visible to optimizers and to `save`/`load`. **Async caveat:** `BestOfN`/`Refine` implement only
+sync `forward`, and `Module.acall` awaits `aforward` with no sync fallback — so
+`CrawlerGenerator.aforward` must invoke the wrapper's **sync** surface offloaded via
+`asyncify`/`run_in_executor`, never delegate into a missing wrapper `aforward` (which raises
+`AttributeError` and/or blocks the single-process scheduler). RLM stays primary; we do **not** invert
+to CodeAct.
+
+**What GEPA optimizes.** RLM *does* expose optimizer-targetable predictors (`generate_action`,
+`extract`), but optimizing them mutates RLM's **generic action loop** — a broad, model-sensitive blast
+radius that collides with the §8 immutable TCB. So by **design choice** GEPA is scoped to a *narrow*
+predictor we own — an extracted `dspy.ChainOfThought` *strategy* sub-module (`site_features ->
+discovery_plan`) the RLM/CodeAct loop executes — for blast-radius control [Darwin-Gödel-Machine]. GEPA
+rewrites that predictor's docstring-instruction. `dspy.CodeAct` is the fallback if it optimizes
+unevenly.
+
+Two load-bearing requirements on this predictor. **Seed it** with a hand-authored, *ordered-rule*
+docstring enumerating the discovery decisions — now **posting-domain**: *probe for a public ATS API
+(Greenhouse/Lever/Ashby/Gupy token) before any DOM scraping; API > feed > sitemap-freshness >
+HTML-heuristic; reconstruct the full description per backend (Lever concatenation, Greenhouse
+unescape); verify ≥ N postings and a `meta.total`-consistent count before finalizing* — optimizers
+can't infer a rule set from a vacuous seed [MIPRO]. And define `site_features` (the predictor's
+**input**) to carry the per-board facts GEPA must *not* memorize (discovered API/feed URLs, board
+outline, `meta.total`), forcing it to evolve *generalizable* strategy rather than hard-coding fixture
+tokens — GEPA's meta-prompt deliberately bakes domain facts into the instruction, so without this it
+overfits the trainset's board mix and **destroys the cold-start payoff** [GEPA, gskill].
+
+**One scoring core, three adapters.** §6's **gates 1–2** are computed by a single pure scoring core:
+one `validate_crawler` run → `CandidateResult` + a graded float score + a `gate_failures` string. It
+runs the candidate through `ctx`; the **offline** metric injects a replay-backed `ctx` (persisted
+`corpus` + recorded HTTP) so it never hits the network. The **gate-3** stability verdict is computed by
+the harness comparing *two* core invocations and **appended to the GEPA feedback text**, never
+entering the scalar. Adapters sit over the core — the **GEPA 5-arg metric and the `dspy.Evaluate`
+metric are signature-compatible** (one callable serves both), so expose them as *one* example-based
+metric; only `BestOfN`'s `reward_fn(kwargs, pred) -> float` is structurally different.
+
+| consumer | signature | note |
+|---|---|---|
+| `BestOfN`/`Refine` (§6) — **the outlier** | `reward_fn(kwargs, pred) -> float` | 1st arg is the module **kwargs dict**, returns a bare float |
+| `dspy.Evaluate` | `metric(example, pred)` | Evaluate passes **no** `trace` |
+| **GEPA** (same callable) | `metric(gold, pred, trace=None, pred_name=None, pred_trace=None) -> Prediction(score, feedback)` | optimizers pass `trace` |
+
+GEPA's **per-gate textual feedback** ("AST gate: banned import `os`", "0 postings: Lever `description`
+read alone — reconstruct with `lists[].content`", "unstable across two runs") — not the scalar — is
+the whole reason it is chosen. The reward_fn also reads `pred.trajectory` / `pred.final_reasoning`,
+lowering the score on a forced RLM extraction. The noisy stability gate stays a hard accept/reject and
+is **excluded** from the scalar to keep selection low-variance.
+
+**Feedback content (the actual signal).** The GEPA/`gate_failures` text must be **un-summarized and
+concrete** — not "0 postings" but "0 postings: `discovery_url` /api returned the intro-only
+`description`; full text needs `+ lists[].content + additional` (Lever)". **Never** LLM-summarize
+`CandidateResult` before handing it to `reflection_lm` (full traces scored 50.0 vs scores-only 34.6;
+*summaries were no better than the scalar* [Meta-Harness]). Order by **severity** and **cap the
+foreground to the single most-blocking failure** (many co-equal directives degrade compliance
+[TextGrad, JudgeFlow]). Attribute by **counterfactual** — phrase the failure as the upstream
+`discovery_plan` decision that, *if changed, clears the downstream gate* — the only thing GEPA can
+change [JudgeFlow] — and include the **delta**. Mis-attributed feedback scores *below none*
+[Feedback-Descent]. Additionally feed **across-run aggregates**: condense the §4.9 run-history +
+§4.8 staleness per accepted board into per-board failure summaries and thread them in — patterns
+invisible in any single trace surface only in aggregate [HALO].
+
+**Trainset.** `list[dspy.Example]`, one per accepted generation, mirroring the `GenerateCrawler`
+inputs, `.with_inputs(...)`. It is **inputs-only / reference-free** — the metric scores by *running a
+fresh crawler*, so the recorded `discovery_*`/`crawler_source` are provenance, not labels. **Admission
+rule:** admit a `(site, corpus)` pair **iff** §6 **gates 1–3** pass, the §8 adversarial
+cross-validation passes, and the board stayed non-stale (§4.8) for `JOBCRAWLER_TRAINSET_STABLE_RUNS`
+(~3) runs. §6 **gate-4** (human approval) is **not** a precondition — it gates *enabling a script on
+the crawl path*, a separate concern; the §4.11 loop is offline and automatic. The frozen `corpus` dict
+is persisted with each example (plain JSON, JSONL trainset). A **confirmed-failed board** is also
+captured as a §4.11 *hard case* (site identity + render + hints; the corpus is re-prefetched fresh at
+optimize time so the strategy is scored against the board's *current, drifted* state) — a genuinely
+broken board feeds the optimizer's difficulty signal before self-healing tries to fix it.
+
+**Saturation is the headline failure mode.** Because admission keeps only gate-passing, non-stale
+crawlers, every example is near-success — and a near-binary reward then makes **GEPA no-op** (its
+reflection LM never fires when every sampled minibatch scores all-correct) [GEPA-+25pts]. Mitigate:
+(i) graded scalar (§6); (ii) `optimize.py` asserts a **minimum fraction of sub-maximal scores in the
+sampled minibatches** and on `baseline ≈ optimized` emits the three-way remedy (re-bias/harden the
+trainset, run on a *cheaper* optimizer executor to manufacture failure signal, or accept saturation
+and defer); (iii) **bias** GEPA's train/val toward *hard / discriminative* cases (recently-drifted,
+many-retry, barely-passing) — difficulty, not count, supplies signal [Meta-Harness, HALO]. Also assert
+**per-instance spread**: GEPA's Pareto sampling consumes per-board score *variance* [GEPA, TRIPLE].
+
+**Optimizer ladder.** Escalate by trainset size, not straight to GEPA:
+- *No trainset* → run no optimizer; keep §6's `BestOfN`/`Refine`.
+- *~5–20 pairs* → **`BootstrapFewShotWithRandomSearch`** over the owned predictor (a pair's value =
+  held-out transfer of including it as a demo), with a diversity step and the graded scalar as utility
+  [CodeAdapt, TRIPLE].
+- *feedback-rich regime* → **GEPA** (instruction evolution), justified by *feedback-richness*, not low
+  data.
+- *~200+ pairs* → **`MIPROv2` joint instruction+demo** — *documented but not built in v1* (200+
+  accepted pairs is multi-month-to-never for a near-static list).
+
+**Three disjoint pools — assert it.** GEPA takes *separate* caller-supplied `trainset` (reflective
+minibatches) and `valset` (candidate-selection / Pareto); if `valset` is omitted it **reuses
+`trainset`** (`valset = valset or trainset`) — not guaranteed disjoint, which is why we pass a distinct
+`valset`. The **promotion held-out** is a *third*, frozen pool GEPA never sees. Assert (and test) zero
+overlap across train / val / promotion.
+
+**GEPA config.** 5-arg feedback metric; `reflection_lm` = strong model
+(`JOBCRAWLER_REFLECTION_MODEL`), ideally a different family than the planner; exactly one budget
+(`auto="light"` to start); `compile(..., teacher=None)`; `track_stats=True`. **Validation dominates
+the budget**, so keep `valset` small; keep `minibatch≈3`; **retain Pareto sampling**; leave **Merge
+OFF** for v1 [GEPA, GEPA-+25pts].
+
+**Promotion gate (regression-safe).** Evaluate candidate **and incumbent** on the *same* frozen
+fixtures, offline, averaging `promotion_eval_passes` (default 3) since each gate run spins a fresh
+non-deterministic RLM sandbox. Promote only if the candidate beats the incumbent by a **margin
+exceeding eval noise**. **Co-gate on an independent true-quality signal:** the candidate must *also*
+beat the incumbent on the §8 adversarial cross-validation pass-rate — promote only if **both** improve;
+if the §6 proxy rises while adversarial quality is flat/down, **reject as over-optimization** [HALO,
+DGM, GEPA-+25pts].
+
+**Trigger & persistence.** Out-of-band — manual, a slow `JOBCRAWLER_REOPT_CHECK` cadence, and/or a
+trainset-growth threshold. The offline job runs **detached** under a single-flight lock (a reopt tick
+firing during a running compile is a no-op). The optimized program persists as **JSON state**
+(`generator.save(..., save_program=False)`) — **never** cloudpickle (`.json` suffix is what makes it
+safe; `save_program=True` would be arbitrary-code-exec on load, contrary to §8). A single config
+pointer (`JOBCRAWLER_GENERATOR_PATH`) selects the active versioned artifact; flipping it to a prior
+version is the **rollback** (`jobcrawl rollback-generator`). Under "full-auto, gated by proof"
+(`--adopt`) the daemon adopts a generator the instant it clears the frozen held-out margin, then a
+**probation watcher** (`JOBCRAWLER_ADOPT_PROBATION`, default 48h) compares post-adoption
+generation-failures against the equal window before and **auto-rolls back** on a regression of
+`adopt_regression_delta` (default 2) distinct boards — because the held-out is a proxy and a generator
+can pass it yet regress on the live fleet.
+
+**Honest payoff.** This does not make "every board better over time" — the input is a near-static
+list. It optimizes for (a) **regeneration quality under drift** (§4.8) and (b) **cold-start on
+newly-added/unseen boards**, validated on the held-out split.
+
+## 5. Data & interface contracts (summary)
+
+- **Site entry** — §4.1 (adds `company`, `enumerates_all`).
+- **Generated module** — `SITE: str`, `crawl(ctx) -> Iterable[Job]`; allowlisted imports only (§4.3).
+- **`ctx`** — `fetch`, `render`, `get`, `log`; enforces robots/rate-limit/timeouts/allowed-hosts.
+- **`Job`** — §4.6; required `url/title/company/location/description/source`, optional
+  salary/workplace/employment/timestamp/id fields; **no `Item` alias** (clean break).
+- **`EnrichedJob`** — `Job` + `discipline` + `level` + `workplace` + `salary: SalaryRange|None`
+  (host-side, §4.6).
+- **`PositionRecord`** — the `positions` row (§4.7): identity + the crawler fields + lifecycle
+  (`first_seen`/`last_seen`/`missing_streak`/`status`/`closed_at`) + match (`match_score`/
+  `match_verdict`/`match_reasons`/`matched_at`/`match_pending`).
+- **`Profile` / `ProfilePrefs`** — §5 profile (below); `profile_hash` keys the match cache.
+- **`MatchVerdict`** — `score: int` (0–100 clamped), `verdict: strong|good|weak|reject`, `reasons`,
+  `concerns` (§4.7). `PROMPT_VERSION = 'match-v1'`.
+- **Run record** (canonical) — `{site, started, finished, positions_found, new_positions, errors,
+  pages_fetched, signals}` (the `runs` table's `items_found`/`new_items` columns carry
+  positions/new-positions; the richer per-crawl deltas — changed/closed/matched/pending — plus
+  `description_quality` ride in `signals`). §4.8/§4.9 reference this.
+- **`CrawlSummary`** — the run's counters: `site, positions_found, new_positions, changed_positions,
+  closed_positions, errors, pages_fetched, incomplete, matched, match_pending`.
+- **`CandidateResult`** — frozen model (`scoring.py`): `item_count`, `samples` (capped),
+  `schema_errors`, `pages_fetched`, `exception:{type,message,traceback_tail}|None`. The §6 scoring-core
+  output; all §4.11 adapters + the feedback transform + §8 admission read these exact fields.
+- **Trainset example** — `dspy.Example(site_url, corpus, render, company, hints, discovery_*,
+  crawler_source).with_inputs(...)`; inputs-only (§4.11).
+
+### 5a. Profile (`PROFILE.md`, `profile.py`)
+`PROFILE.md` (repo root, committed; `JOBCRAWLER_PROFILE`) is the single source of *what the operator
+wants*, split into two halves so the cheap deterministic layer and the expensive LLM layer each read
+the part they need:
+
+- **YAML frontmatter** (between `---` fences) → `ProfilePrefs`, the machine-readable preferences the §6
+  prefilter reads to drop definite mismatches *before* any token is spent. Every key is **optional** —
+  an empty/omitted key means "no constraint" (recall-safe; the LLM still judges it):
+  `disciplines`/`levels`/`workplace` (frozensets **validated against the §4.6 enums** — an unknown
+  value fails loud at load, naming it), `locations`/`languages`/`exclude_keywords`/`exclude_companies`
+  (free-text tuples), and `min_salary: SalaryFloor(amount, currency, period)` (structured, so the
+  comparison against a job's parsed salary needs no NL parsing).
+- **free markdown body** → the rich narrative (skills, domains, what to reject) handed **verbatim** to
+  the matcher LM as context.
+
+`Profile(raw, body, prefs, profile_hash)` is content-addressed by `profile_hash` = sha256 of the
+*normalized raw text* (line-endings unified, trailing whitespace stripped, so cosmetic churn doesn't
+bust the cache). Because the hash is over the **raw** text — prefs *and* body — a body-only edit (new
+LLM context) also invalidates cached verdicts (§4.7). `load_profile(path)` raises
+`ProfileNotFound` (a `FileNotFoundError` subclass) with a create-`PROFILE.md` hint; YAML is parsed with
+`yaml.safe_load` (operator config, not code).
+
+## 6. Generation acceptance gates
+A generated script is accepted only if it passes, in order:
+1. **Static analysis** — AST allowlist; no banned imports/builtins; matches the §4.3 contract.
+   Consumes `crawler_source.code` (fences already stripped — §4.2).
+2. **Runtime validation & completeness** — yields ≥ `min_items`; every posting has a non-empty
+   `title`/`company`/`location`, a **sufficiently long, non-boilerplate** `description` (≥
+   `min_description_chars`, ≥ `min_unique_description_chars` distinct chars, and reject an
+   `expired_markers`/mojibake body), and a valid on-domain `url`; runs within time/page/memory budget;
+   obeys robots. Plus two anti-under-enumeration checks — enumerating a board is an
+   *exhaustive-enumeration* task and RLMs reliably under-enumerate on "find every X" [Sanjaya]: (a)
+   **must-observe** — reject/down-score a candidate that never called `validate_crawler` before
+   `SUBMIT`, or chose `discovery_method="scrape"` without first probing for an ATS API / `find_feeds` /
+   `get_sitemap` (the docstring's "API-first" is *enforced*, not merely requested); (b) **enumeration
+   floor** — compare the crawler's posting count against the host-side oracle in the corpus (a
+   Greenhouse `meta.total`, an Ashby array length, the count of `postings` entries), flagging a scraper
+   that grabbed the visible page and missed the API. **The `meta.total` gotcha:** for Gupy do **not**
+   trust `total` at `limit=100` — the oracle is "page until a short page", not the first page's `total`
+   (§4.2).
+
+   **`min_items` is 1, on purpose (the news→jobs inversion).** A small startup careers page with **one
+   or two** open roles is a *legitimate, complete* board — so an absolute floor of 1 only rejects the
+   truly empty crawl. Completeness is instead carried by the **relative enum-floor** (did we get
+   roughly as many as the board advertises?) and the stability gate — both of which a genuinely small
+   board passes and a broken selector fails. The old news `min_items=5` would wrongly reject a correct
+   two-role crawler here.
+3. **Stability** — two runs overlap by **Jaccard of canonical URLs ≥ a *low* global threshold**
+   (`stability_jaccard`, §4.6 canonicalizes `url`): a hard reject only for the **near-random** case,
+   with near-threshold overlap surfaced as *soft* feedback for the §8 review path. **Excluded from the
+   optimizer scalar** (§4.11), so a false reject can't poison selection/GEPA.
+4. **Review gate** (§8) — per `JOBCRAWLER_REVIEW_GATE` (tri-state): `auto` (default) backs up the live
+   crawler and promotes the new one unattended (safety = the gates + versioned rollback); `on` stages
+   it under `crawlers/_pending/<slug>.py` for a human `jobcrawl promote`; `off` writes live with no
+   backup.
+
+**The INVERTED boilerplate gate — the load-bearing §6 change.** The news spec rejected a body with too
+much *shared* text across items, on the theory that identical boilerplate means a broken extractor
+grabbing chrome. **That predicate rejects a *correct* job crawler.** Postings on one board legitimately
+share large blocks — the same benefits paragraph, the same equal-opportunity statement, the same
+company blurb, the same "how we work" section — and a Lever/Greenhouse board often repeats an identical
+company boilerplate on *every* posting. So the gate is inverted into three parts:
+- **Shared blocks are allowed** — cross-posting text overlap is *expected*, never penalized.
+- **Unique-residual floor** — what must clear a bar is the **per-posting *unique* residual** after the
+  board's shared blocks are subtracted: each posting must contribute enough of its *own* text (the
+  role-specific responsibilities/requirements) — this is what `min_unique_description_chars` (§11)
+  operationalizes. A crawler that yields only the shared boilerplate (title + benefits, no role body)
+  fails here even though its raw length clears `min_description_chars`.
+- **Identical-description reject** — if *every* posting's description is byte-identical (zero unique
+  residual), the crawler grabbed a board-level blob and stamped it on each row → reject.
+
+Gates 1–2 are computed by **one pure scoring core** returning a `CandidateResult`, a `gate_failures`
+reason string, and a **graded, continuous, multi-axis** score — *not* a 0/1 verdict. Compute the hard
+pass/fail gates **first**, then combine the quality axes over survivors by **shape-by-necessity** — a
+**min/AND** veto only for true veto axes (on-domain-URL validity; field-presence) and a **bounded
+weighted sum** for the graded axes (postings-yielded ratio, unique-residual description rate,
+discovery-method quality), every axis **bounded to [0,1]** (the postings axis is `min(count/N, 1)`,
+clamped). **Every working precedent that collapsed quality axes used additive/weighted-sum**
+[Netflix `#77d24b`, R1 `#494c25`, ReSeek `#fe1014`, retrieval-fusion `#dd2c1f`]; pure-multiplicative
+count is 0. **Axis weights** are seeded *non-uniformly* (heaviest on postings-yielded + unique-residual
+"real-postings" core, lightest on discovery-method — the `#e643b2` prior) with the **fewest free
+weights**, precision axes above recall [ReSeek]; run a **leave-one-axis-out** ablation before freezing
+discovery-method (a low-signal axis can hurt more than mis-weighting [Sotopia-RL]). Keep the noisy
+stability gate **out** of the scalar. The **same scoring core** feeds the §4.11 optimizer through the
+three adapters.
+
+**Candidate selection.** Generate N candidates (`fanout_n`, default 4) and take the **argmax over the
+graded scalar**. They run **sequentially** (stock `dspy.BestOfN`/`dspy.Refine` are sequential for-loops
+with an early break, verified in installed 3.2.1) — so N costs ~N× wall-clock and ~N× spend (sized
+against `FANOUT_SPEND_CAP`); the real win is the **early break**, not parallelism. For feedback-carrying
+retries use a **small custom loop**, not stock `dspy.Refine` (its hint comes from
+`inspect.getsource(reward_fn)`, never our `gate_failures`): add a `prior_feedback` `InputField` and
+re-invoke generation with the prior `CandidateResult.gate_failures` injected; cap retry depth.
+
+## 7. Project layout
+```
+jobcrawler/
+  pyproject.toml            # name="jobcrawler"; [project.scripts] jobcrawl = jobcrawler.cli:main
+  flake.nix .envrc          # nix dev shell (Deno + Playwright browsers provisioned here)
+  sites.yaml                # the input board registry (§4.1)
+  PROFILE.md                # the operator's match profile (§5a)
+  src/jobcrawler/
+    config.py               # all env knobs in one place (§11)
+    sites.py                # load/validate sites.yaml → list[Site]
+    profile.py              # PROFILE.md → Profile/ProfilePrefs; profile_hash (§5a) — NEW
+    match.py                # host-side batched/cached LLM matcher: MatchJobs, prefilter, Matcher (§4.7) — NEW
+    generate/               # generation + self-improvement
+      signatures.py         #   GenerateCrawler (+ owned strategy sub-signature, §4.11)
+      tools.py              #   fetch/render/find_feeds/get_sitemap/validate_crawler
+      snapshot.py           #   build the prefetched corpus dict: homepage/robots/sitemap/postings (§9)
+      generator.py          #   CrawlerGenerator(dspy.Module): RLM + BestOfN/Refine; save/load (§4.11)
+      scoring.py            #   one scoring core + reward_fn / Evaluate / GEPA adapters (§6, §4.11)
+      gates.py adversarial.py budget.py evaluate.py optimize.py  # §6 gates, §8 cross-val, caps, §4.11
+    runtime/                # the crawl phase (no LLM)
+      contract.py           #   Job model + crawl(ctx) protocol (§4.3/§4.6)
+      normalize.py          #   deterministic discipline/level/workplace/salary enrichment (§4.6) — NEW
+      ctx.py live_ctx.py    #   fetching + politeness + challenge escalation (§4.5)
+      solver.py ssrf.py     #   ChallengeSolver + clearance cache (§4.10); SSRF guard (§8)
+      sandbox.py hardening.py safe_exec.py  # constrained execution + XML hardening (§4.4, §8)
+      runner.py             #   import → crawl → validate → lifecycle → enrich → match (§4.7)
+    state.py                # positions/match lifecycle + run/health store (§4.7) — extended
+    schedule.py adaptive.py governor.py durations.py  # scheduler + adaptive cadence + pacing (§4.9)
+    health.py               # staleness detection → regeneration (§4.8)
+    generator_pointer.py adopt_watch.py optimize_job.py trainset.py  # §4.11 versioning/adoption/trainset
+    notify.py metrics.py    # operator notifications (§4.7/§4.8/§4.11) + observability (§4.9)
+    cli.py cli_generate.py cli_optimize.py  # operator commands (§10)
+    crawlers/               # GENERATED, committed: <slug>.py; _pending/ staging, _history/ backups
+    generators/             # GEPA-optimized generator-N.json artifacts (JSON, versioned; §4.11)
+  tests/                    # mirror src; MockInterpreter (dspy ships none), recorded HTTP + golden fixtures
+```
+`ingest.py` / `NewsClient` and every `POST /news` reference are **removed** — the matching pipeline
+(§4.7) is the replacement sink.
+
+## 8. Security model (generated code that runs on a schedule)
+The central risk is **executing model-written code against the live web**. Mitigations:
+- **AST allowlist** on every generated module (imports, builtins, no dynamic exec).
+- **Sandboxed execution** (`runtime/sandbox.py`): subprocess with CPU/memory/time limits, no filesystem
+  writes, **network egress only via the `ctx` proxy**.
+- **SSRF guard** in `ctx`: requests restricted to the board's registered host(s) and on-domain links;
+  block private/loopback/link-local ranges and cloud metadata endpoints.
+- **Review gate**: generated/regenerated scripts are gated per `JOBCRAWLER_REVIEW_GATE` before being
+  enabled (§6 gate-4) — `auto` (gated by the §6 gates + versioned rollback), `on` (human `promote`), or
+  `off`.
+- **The harness is an immutable trusted computing base.** The acceptance gates, sandbox policy, AST
+  allowlist, SSRF guard, **and every host-side threshold** (the §6 gate numbers, the §4.6 completeness
+  floors, the §4.7 closure threshold, the §4.7 match `daily_cap`/`min_score`) are *never* authored,
+  parameterized, fetched, or relaxed by model-generated code or by the GEPA-optimized predictor — only
+  by version-pinned host code/humans. GEPA may rewrite the strategy instruction but can **never** widen
+  the allowlist or weaken a gate.
+- **Hide the scorer from the optimized loop.** The scoring core's exact acceptance predicates and
+  numeric thresholds are not exposed to the generator/RLM: feedback says *what* failed semantically ("0
+  postings extracted", "descriptions truncated"), never the predicate/threshold a candidate could
+  target. Objective-hacking rose specifically when the scorer was *visible* to a self-modifying agent
+  [Darwin-Gödel-Machine]; under-specified self-evolution drove reward-hacking up to 78%
+  [Self-Evolving-survey].
+- **Adversarial admission.** The reward (posting-count + field-presence + stability) is a gameable proxy
+  — a crawler could pad/fabricate postings or scrape off-domain. Before a pair is admitted (§4.11),
+  cross-validate its postings against independent signals (URLs resolve, titles match the live page,
+  duplicate/boilerplate-body penalty via the §6 unique-residual measure, off-domain penalty).
+  Acceptance rests on the **actual** `CandidateResult`, never the model's *claimed* counts.
+- **Untrusted-XML/JSON hardening (hot path).** Feed/sitemap parsing consumes attacker-influenced XML on
+  *every committed crawl*; disable external-entity resolution and entity expansion (`defusedxml` /
+  `resolve_entities=False`) to block XXE / billion-laughs. The parser libs are part of the
+  **pinned-image TCB** — a parser CVE is fixed by re-pinning, not regenerating a crawler. (The §4.4
+  timeout + memory cap backstop regex backtracking / RAM exhaustion on a multi-MB board payload.)
+- **The matcher is host-side, spend-capped, and off the crawl surface (§4.7).** The one new LLM surface
+  runs **outside** the crawl sandbox, on the host, bounded by `match_daily_cap` (hard per-UTC-day) +
+  `match_rate` (governor) + the content/profile cache (score-at-most-once). The **profile content is
+  sent only to the configured match LM** (`require_match_model` resolves `JOBCRAWLER_MATCH_MODEL` else
+  the cheap `sub_lm`, **never** the root planner — a per-token safety *and* a privacy boundary) and is
+  never exposed to the generator/RLM or fed back into the optimizer loop. The match verdict's
+  reasons/concerns are **operator-facing only**; they are never read back by the generator (they can't
+  breach the §8 hidden-scorer invariant). No LLM scores its own output; every signal the §6 scorer
+  reads is host code the optimized loop can't touch.
+
+## 9. DSPy / runtime notes
+- `dspy.RLM` is `@experimental` — pin DSPy `3.2.x`.
+- The **default RLM sandbox requires Deno** (Pyodide/WASM); provision it in `flake.nix`.
+- RLM's Pyodide sandbox has **no network** — the model reasons over the prefetched corpus and reaches
+  the live board only through the host **tools** (§4.2), never from inside the sandbox.
+- **Two distinct sandboxes:** RLM's Pyodide REPL (where the model *reasons and drafts*) and the host
+  execution sandbox (§4.4, where crawlers actually *run*). `validate_crawler` is the bridge.
+- **The matcher does not touch either sandbox.** `dspy.Predict(MatchJobs)` is a plain host-side
+  prediction under `dspy.context(lm=dspy.LM(model, temperature=0.0))` — no Pyodide, no Deno, no crawler
+  execution. Its LM is bound per batch (never a process-global `configure`), mirroring the generator.
+- **`corpus` injection.** `corpus` is a plain **JSON-able dict** passed as an RLM input; dspy's
+  `_serialize_value` injects it as a Python literal and **raises `CodeInterpreterError` on any non-JSON
+  type**; values over 100 MB spill to `/tmp` and are `json.loads`-ed in-sandbox. So shape `corpus` as an
+  **addressable dict** (`{homepage, robots, sitemap, postings:[{url,title,text}]}`) of JSON primitives —
+  addressable parts beat one blob [Coding-Agents]. Capture `crawler_source` via the REPL **FINAL
+  channel** (bypasses the output-token limit); gate-1 treats a non-parsing `crawler_source` as truncation.
+- **Interpreter left at default Pyodide/Deno** — a host-CPython interpreter would run the model's
+  *ungated* exploratory code in a network-capable process, dissolving the no-network isolation §8 relies
+  on.
+- Obtain the LM via `dspy.context`, not the thread-owned `dspy.configure`. Candidate distinctness comes
+  from `rollout_id` + temperature, **not** `cache=False` (§4.2). Use `aforward`/async.
+- **Order gates cheapest-first**, short-circuiting on first failure: AST → single-run yield → two-run
+  Jaccard stability → (offline only) multi-pass promotion eval.
+- **Every DSPy-internal claim is source-pinned, not smoke-tested** — each load-bearing assumption is
+  recorded with the dspy version (3.2.1) and the `file:line` it holds at (`rollout_id` in the cache key;
+  `_serialize_value` type behavior; `Evaluate` metric arity; `valset = valset or trainset`; 5k+5k
+  truncation), re-audited on any dspy version bump, with **no runtime smoke test** (per project
+  preference).
+
+## 10. CLI & operations
+| command | does |
+|---|---|
+| `jobcrawl run` | **start the scheduler daemon** — crawl due boards, track lifecycle, match, retry, regenerate (§4.9) |
+| `jobcrawl generate <slug> \| --all \| --stale` | run RLM, gate (§6), write `crawlers/<slug>.py` |
+| `jobcrawl validate <slug>` | dry-run a committed script through the §4.4 sandbox, report positions/errors, **no state/match** |
+| `jobcrawl crawl <slug> \| --all` | run committed scripts, dedup, track positions, match new/changed |
+| `jobcrawl promote <slug>` | move a self-heal crawler staged under `crawlers/_pending` (§8) to live |
+| `jobcrawl rollback <slug>` | restore a board's prior crawler from `crawlers/_history` (undo an `auto` promotion) |
+| `jobcrawl list` | show boards, script presence, last position count, health/staleness, learned cadence |
+| `jobcrawl status` | per-board run aggregates, fleet health distribution, drift-recovery MTTR, active generator + held-out score + autonomy brake (§4.9/§4.11) |
+| `jobcrawl optimize [--adopt]` | the offline §4.11 job: build trainset → optimize → held-out promote (`--adopt` flips the active-generator pointer) |
+| `jobcrawl rollback-generator` | revert the active generator to the previously-adopted version (§4.11) |
+
+`jobcrawl run` is the primary deployment entrypoint (the service schedules itself); `crawl` stays for
+manual one-shot runs and CI. Startup **preflight** fails fast on a missing/malformed `sites.yaml`, an
+unwritable state path, or a missing `PROFILE.md`.
+
+## 11. Configuration (env, all in `config.py`)
+All knobs are `JOBCRAWLER_*` (the lone exception is `FLARESOLVERR_URL`) and host-side (never exposed to
+the generator — §8). Selected knobs:
+
+| var | default | meaning |
+|---|---|---|
+| `JOBCRAWLER_MODEL` | *(required)* | RLM root planner/extractor — a strong, code-capable model (`require_model` errors if unset) |
+| `JOBCRAWLER_SUB_MODEL` | *(required)* | RLM `sub_lm`; unset ⇒ every `llm_query` bills at root rates (`require_sub_model` errors) |
+| `JOBCRAWLER_REFLECTION_MODEL` | *(required for GEPA)* | GEPA `reflection_lm` (§4.11), ideally a different family |
+| `JOBCRAWLER_MATCH_MODEL` | `sub_model()` fallback | the host-side §4.7 match LM; `require_match_model` falls back to the cheap `sub_lm`, **never** the root planner |
+| `JOBCRAWLER_MATCH_BATCH` | `10` | jobs per `dspy.Predict(MatchJobs)` call (§4.7) |
+| `JOBCRAWLER_MATCH_MIN_SCORE` | `70` | 0–100 score at/above which a match notifies (surface threshold, not a drop) |
+| `JOBCRAWLER_MATCH_DAILY_CAP` | `400` | hard per-UTC-day LLM-scored jobs; cache hits free; overflow → `match_pending` |
+| `JOBCRAWLER_MATCH_RATE` | `10/m` | governor pacing for match LLM calls (≠ the daily volume cap) |
+| `JOBCRAWLER_PROFILE` | `PROFILE.md` | path to the operator's match profile (§5a) |
+| `JOBCRAWLER_FIRST_CRAWL_CAP` | `30` | newest-K new positions matched on a board's *first* crawl (§4.7) |
+| `JOBCRAWLER_CLOSE_AFTER_MISSES` | `2` | consecutive absences from an enumerating board before a position closes (§4.7) |
+| `JOBCRAWLER_RECHECK_INTERVAL` | `12h` | §4.9 recheck loop cadence (the only closure signal for `enumerates_all:false`) |
+| `JOBCRAWLER_RECHECK_CAP` | `150` | max standing open positions re-fetched per recheck pass |
+| `JOBCRAWLER_MIN_ITEMS` | `1` | §6 min positions (a 1–2 role board is legitimate; enum-floor+stability carry completeness) |
+| `JOBCRAWLER_MIN_DESCRIPTION_CHARS` | `300` | §6/§4.6 min description length |
+| `JOBCRAWLER_MIN_DESCRIPTION_QUALITY` | `0.6` | §6 fraction of sampled descriptions that must clear the length floor |
+| `JOBCRAWLER_MIN_UNIQUE_DESCRIPTION_CHARS` | `150` | §6 unique-residual floor (the inverted boilerplate gate) |
+| `JOBCRAWLER_DESCRIPTION_QUALITY_FLOOR` | `0.5` | §4.8 partial-drift floor on the per-crawl `description_quality` |
+| `JOBCRAWLER_EXPIRED_MARKERS` | 5 EN+pt-BR defaults | `\|`-separated closed-posting markers; empty disables (§4.6) |
+| `JOBCRAWLER_STABILITY_JACCARD` | `0.6` | §6 gate-3 URL-overlap threshold |
+| `JOBCRAWLER_ENUM_FLOOR_RATIO` | `0.5` | §6 enum floor vs the corpus posting-count oracle |
+| `JOBCRAWLER_STATE_URL` | `sqlite:///jobcrawler.db` | position/match/run/health store (§4.7) |
+| `JOBCRAWLER_USER_AGENT` | `jobcrawler/0.1 (+job tracker)` | sent on every request |
+| `JOBCRAWLER_RATE_LIMIT` | `1/s/host` | §4.5 politeness cap |
+| `JOBCRAWLER_MAX_PAGES` | `200` | per-crawl page budget (sized for paginated boards, §4.5) |
+| `JOBCRAWLER_DEFAULT_SCHEDULE` | `4h` | fixed cadence for a board with no `schedule` and adaptive off |
+| `JOBCRAWLER_ADAPTIVE_DEFAULT` | `on` | a board with no explicit cadence is adaptive (§4.9) |
+| `JOBCRAWLER_MIN_SCHEDULE` / `MAX_SCHEDULE` | `1h` / `3d` | adaptive-interval politeness floor / staleness ceiling |
+| `JOBCRAWLER_CONCURRENCY` | `4` | max boards crawled concurrently |
+| `JOBCRAWLER_AUTONOMY` | `on` | master brake over all self-modification (heal/regen/promote/reopt/adopt/rollback) |
+| `JOBCRAWLER_REVIEW_GATE` | `auto` | tri-state delivery: `auto` (promote+backup) / `on` (stage for `promote`) / `off` (write live) |
+| `JOBCRAWLER_REGEN_CHECK` | `24h` | staleness-evaluation cadence (§4.8) |
+| `JOBCRAWLER_HEAL_COOLDOWN` | `6h` | min spacing between event-driven self-heals of one board |
+| `JOBCRAWLER_REOPT_CHECK` | `24h` | offline §4.11 dispatch cadence (`off` disables) |
+| `JOBCRAWLER_TRAINSET_STABLE_RUNS` | `3` | sustained healthy runs before a pair enters the trainset (§4.11) |
+| `JOBCRAWLER_PROMOTION_EVAL_PASSES` | `3` | held-out eval passes averaged per promotion decision |
+| `JOBCRAWLER_ADOPT_PROBATION` | `48h` | post-adoption window the §4.11 rollback watcher judges (`off` disables) |
+| `JOBCRAWLER_ADOPT_REGRESSION_DELTA` | `2` | extra generation-failures over baseline that trip auto-rollback |
+| `JOBCRAWLER_MAX_ITERATIONS` / `MAX_LLM_CALLS` / `MAX_SUBCALLS` | `20` / `40` / `60` | RLM caps + the unconditional host sub-call kill (§4.2) |
+| `JOBCRAWLER_FANOUT_N` / `FANOUT_SPEND_CAP` | `4` / `$8/site` | §6 best-of-N width + the aggregate fan-out $ ceiling |
+| `JOBCRAWLER_SOLVER` / `FLARESOLVERR_URL` / `JOBCRAWLER_CLEARANCE_TTL` / `JOBCRAWLER_EGRESS_PROXY` | `none` / — / `30m` / — | §4.10 challenge backend + clearance + IP/UA-pinned egress |
+| `JOBCRAWLER_NOTIFY_WEBHOOK` / `NOTIFY_TIMEOUT` | — / `10s` | optional operator webhook for autonomous actions + match alerts (§4.7/§4.9) |
+
+## 12. Testing strategy
+- **Generator** — `dspy.RLM` driven by a hand-authored `MockInterpreter` (dspy ships none importable;
+  queued REPL responses) + `DummyLM`; assert tool wiring, that the scoring core + the `reward_fn`
+  adapter score correctly, that a forced extraction (`final_reasoning`) is caught, and that bad output
+  is rejected. No Deno, no live network.
+- **Normalization (§4.6)** — pure in→out unit tests over the two-axis taxonomy and salary parser, **EN +
+  pt-BR**: role-shape-outranks-IC precedence, `eng_other`/`non_eng` recall-safety, structured-workplace
+  precedence, and conservative salary (`$189K–$330K`, `R$ 8.000 - R$ 12.000`, `€60k–80k`, ambiguous →
+  `None`, BRL-defaults-monthly).
+- **Profile (§5a)** — frontmatter split, enum validation (an unknown discipline fails loud naming it),
+  `profile_hash` stability across cosmetic churn and its change on a body-only edit, `ProfileNotFound`.
+- **Matcher (§4.7)** — with a fake `dspy.Predict` and a fake governor/clock: cache hit is free and
+  applied; daily-cap overflow → `pending` (never dropped); a batch failure/length-mismatch fails open to
+  `pending`; the digest truncates description to 1200 and prefers the parsed salary range; `PROMPT_VERSION`
+  is a cache key; the prefilter drops only definite mismatches and passes `eng_other`/`unspecified`.
+- **Position lifecycle (§4.7)** — `upsert_position` new/changed/unchanged + **reopen**; `close_missing`
+  increments `missing_streak` and closes at threshold; a **failed/empty crawl never closes** (mass-closure
+  guard); `expire_due`; `enumerates_all:false` skips the diff.
+- **Self-improvement (§4.11)** — `dspy.Evaluate` over frozen corpus snapshots; the promotion gate refuses
+  a non-improving candidate and one that regresses a stratum; `save`/`load` JSON round-trip; disjoint
+  train/val/promotion pools; the **saturation** assertion fires on an all-near-maximal trainset; a tested
+  **rollback**; `CrawlerGenerator.aforward` resolves without a missing wrapper `aforward`.
+- **Runner/contract** — golden ATS-API/HTML/feed fixtures + recorded HTTP; assert normalized `Job`s,
+  the full-description reconstruction (Lever concat, Greenhouse unescape), lifecycle transitions, and
+  the enrich→prefilter→match wiring. Hand-written reference crawlers double as contract tests.
+- **Politeness/SSRF** — unit tests proving robots/rate-limit/allowed-host enforcement.
+- Mirror `tests/` to `src/`, `pytest` + `pytest-asyncio` (`asyncio_mode=auto`), `ty`, `ruff`.
+
+## 13. Milestones (the news→jobs pivot)
+- **P0 — Rename + green (DONE):** mechanical package rename `bizup_autocrawler → jobcrawler`,
+  `AUTOCRAWLER_* → JOBCRAWLER_*`, `autocrawl → jobcrawl`; suite green (815 passed). No semantics changed.
+- **P1 — Domain pivot (THIS CHANGE):** `Item → Job` with the rich optional fields (§4.6); host-side
+  `normalize.py` (two-axis taxonomy + conservative salary); the `positions` lifecycle store + runner
+  (upsert/close/reopen/expire, mass-closure guard, §4.7); `profile.py` + `PROFILE.md`; the host-side
+  batched/cached/capped `match.py` matcher and its notify sink (replacing `POST /news`); the §6 `min_items=1`
+  + inverted-boilerplate gate; the §4.1 `company`/`enumerates_all` fields; the §4.9 recheck/expiry loop;
+  ATS-API-first generator seeds (§4.2) and posting-domain GEPA feedback (§4.11). Health/self-heal and GEPA
+  mechanics **retargeted, not weakened**.
+- **P2 — Real boards:** seed `sites.yaml` with real ATS boards (Greenhouse/Lever/Ashby/Gupy tokens +
+  RemoteOK/WWR), generate over them, measure the §6 gate-1+2 pass-rate and $/board; the M1 step-0
+  feed/API/Cloudflare tally (§4.10) sizing how much rides on the solver tier.
+- **Next (post-v1):** **multi-profile** (per-persona `PROFILE.md`, per-profile caches/caps); **apply-assist**
+  (draft a tailored cover note from the match reasons — still human-sent, never auto-applied); **richer
+  salary normalization** (FX-normalized comparison, confidence bands — §14 Q3); **Postgres** state store
+  (§14 Q5); cross-board repost dedup (§14 Q1).
+
+## 14. Open questions / follow-ups
+1. **Cross-board repost dedup.** The same role on Greenhouse + WWR + RemoteOK is three `positions` rows.
+   Should a content-similarity pass collapse reposts (and how does closure interact — one board closes, the
+   others don't)? v1 keeps them separate; a fuzzy `(company, title, normalized-description)` cluster key is
+   the candidate.
+2. **Regeneration / review-gate delivery tier.** The delivery mechanism is *built* — `JOBCRAWLER_REVIEW_GATE`
+   is the tri-state (§6 gate-4, §8): `auto` backs up the live crawler and promotes the new one unattended,
+   `on` stages it under `crawlers/_pending/<slug>.py` for a human `jobcrawl promote`, `off` writes live with
+   no backup. The open question is the *policy*: how aggressively should a self-heal (§4.8) auto-promote vs.
+   stage vs. open a PR, and does that tier want to differ per-board (a flaky aggregator staged, a stable
+   single-company board auto)? The tier trades directly against **drift-MTTR** (§4.8) — more human review
+   lengthens time-to-recovery — so the "right" default is an operating-point choice, not a fixed one, and
+   auto-promotion leans on the §6 gates + versioned rollback (`jobcrawl rollback`) as its only safety net.
+3. **Salary inference confidence.** `parse_salary` is deliberately conservative (§4.6). Do we ever surface a
+   *confidence band* or an FX-normalized comparison for `min_salary` filtering across currencies/periods,
+   and how do we keep that from becoming the "invent a number" the never-invent rule forbids?
+4. **Per-source match budgets.** `match_daily_cap` is global. A noisy aggregator (RemoteOK) can crowd out a
+   high-signal single-company board within the daily budget. Do we want per-source or per-discipline
+   sub-budgets, or a priority ordering of the pending drain by prefilter-survival strength?
+5. **State store.** Postgres (matches a scaled deploy) vs. SQLite (simpler) for v1 — SQLite ships; revisit at
+   volume.
+6. **Board list ownership & `enumerates_all` correctness.** A wrong `enumerates_all: true` on a windowed
+   source would mass-close on every crawl (the §4.7 guard limits blast radius to non-empty crawls, but the
+   diff is still wrong). Should the generator *detect and set* `enumerates_all` (e.g. by comparing crawl N vs
+   N+1 coverage) rather than trusting the operator?
+7. **Challenge backend & recheck cost.** Start with FlareSolverr or an in-process stealth browser? And does
+   the §4.9 recheck loop's extra fetch budget (up to `recheck_cap`/pass) need its own politeness/solver
+   accounting distinct from the crawl cadence?
+8. **Metric calibration (a protocol, not guesses).** The §6 scalar's *combine form*, axis weights, and
+   numeric thresholds (`min_items`, description chars, unique-residual floor, Jaccard, `ENUM_FLOOR_RATIO`) are
+   *calibrated*, not asserted: A/B the combine form on the frozen held-out; sweep each threshold to maximize
+   score spread between known-good and hand-broken (boilerplate-only / off-domain) fixtures, taking the robust
+   *plateau*; seed weights from the `#e643b2` prior and regress against a downstream label (non-stale tenure).
+   All thresholds stay host-side in the immutable TCB (§8). Match-rubric calibration is its own axis: does
+   `MatchJobs`'s 4-band rubric agree with operator judgement on a labeled sample, and does a `PROMPT_VERSION`
+   bump measurably move agreement?
+9. **Typed-predictor round-trip** — *de-risked*: the optimized artifact is declarative **text** (§4.11); the
+   pre-build toy milestone settles whether a *typed* `ChainOfThought` predictor round-trips end-to-end, else
+   the instruction-string/CodeAct path is the default.
+
+## 15. Evidence base
+
+Decisions above are grounded in the local research corpus (cited inline by short tag) **plus a live ATS
+probe**. The optimizer/metric/security findings are unchanged from the news design (the mechanics are
+domain-agnostic); the posting-domain facts are new.
+
+**Live ATS field-availability probe (2026-07-02).** Direct requests to the major backends established the
+§4.2 API-first strategy and its reconstruction gotchas:
+- **Greenhouse** — `boards-api.greenhouse.io/v1/boards/<token>/jobs?content=true`: whole board in one call,
+  `meta.total` present; `content` full but **HTML-entity-escaped** (unescape then strip); no salary/employment;
+  `location.name` flattened; `first_published` always.
+- **Lever** — `api.lever.co/v0/postings/<token>?mode=json`: `description` is **intro only** (full =
+  `description + lists[].content + additional`); `workplaceType` always; `categories.{location,team,commitment}`;
+  `createdAt` epoch-ms; **no company field**.
+- **Ashby** — `api.ashbyhq.com/posting-api/job-board/<token>?includeCompensation=true`:
+  `descriptionPlain/Html` full; `employmentType` always; structured compensation ~**70%**; `isRemote` = "remote
+  *allowed*" (prefer `workplaceType`); payloads can be **MBs**.
+- **Gupy (BR)** — `<company>.gupy.io` embeds all jobs in `__NEXT_DATA__`; `employability-portal.gupy.io/api/v1/jobs?companyId=..&limit=100&offset=..`
+  paginates (limit ≤ 100; **don't trust `total` at limit=100 — page until short**); `type` enum
+  (CLT/PJ/…); `publishedDate`+`expiresAt`; salary absent.
+- **RemoteOK** — `/api` only latest ~**100** (partial → `enumerates_all:false`); `element[0]` a legal notice to
+  **skip**; needs a **browser UA**; salary keys always **0**.
+- **WeWorkRemotely** — per-**category** RSS complete (combined feed capped 10/category); `expires_at` present;
+  `company` parsed from the `'Company: Title'` prefix.
+
+**Research corpus (unchanged mechanics; full per-paper findings in the workflow notes):**
+- **GEPA** (`#50c21d`) — separate `trainset`/`valset`, Pareto sampling, validation dominates budget,
+  `minibatch≈3`, Merge model-sensitivity → §4.11.
+- **"GEPA lifted a 1.2B model 25 pts"** (`#e643b2`) — the **saturation no-op**, graded reward + hard-case bias,
+  `auto="light"`, per-example feedback, weighted-additive axis prior → §4.11, §6.
+- **RLM ♥ GEPA** (`#286485`) — GEPA evolves an external *text* skill on an RLM; optimize-cheap/deploy-strong
+  transfer; three-way held-out → §4.11.
+- **HALO** (`#472657`, `#aa636b`) — aggregate trace decomposition is the gain source; per-stratum regression +
+  noisy "peak"; capability-vs-harness triage → §4.11.
+- **Meta-Harness** (`#c78a92`) — full traces ≫ scores-only, summaries no better than the scalar;
+  small-hard-discriminative set → §4.11.
+- **Darwin Gödel Machine** (`#4008a8`) — self-modifying agents reward-hack a *visible* evaluator → immutable
+  TCB + hidden scorer + promotion margin > noise → §8, §4.11.
+- **SRLM** (`#92bd81`) & **TRIPLE** (`#d550b5`) — K-sample selection *quality* (run sequentially) beats
+  single-trajectory (+22%) → §6 selection.
+- **Coding Agents are Long-Context Processors** (`#9b7ef3`) + **RLM** (`#ea21e9`) — code+environment substrate;
+  addressable parts ≫ blob; recursion not the driver; JSON-literal injection (no pickle); FINAL channel →
+  §4.2, §9.
+- **MIPRO** (`#21498b`) + **CodeAdapt** (`#c4ad60`) — joint instruction+demo ≫ instruction-only; vacuous seeds
+  underperform; exemplar selection is the cheap early lever → §4.11 ladder + seed.
+- **Survey of Self-Evolving Agents** (`#b7bd66`) — offline/online taxonomy, tested rollback, quantified
+  reward-hacking risk → §4.11, §8.
+- **Metric design** (§6 scalar / §4.11 / §8) — additive/weighted-sum over multiplicative for collapsing
+  quality axes, bounded sub-scores, gate-then-combine, calibration, over-optimization: **Netflix** (`#77d24b`),
+  **retrieval-fusion** (`#dd2c1f`), **ReSeek** (`#fe1014`), **R1** (`#494c25`), **Sotopia-RL** (`#bdb383`),
+  **iStar/over-optimization** (`#acb2cc`), **ShinkaEvolve** (`#f3ea65`), **Self-Attribution-Bias** (`#5622de`).
+- Supporting: **LLM-in-Sandbox** (`#00c82a`), **CodeAct** (`#7a8470`), **Sanjaya** (`#745267`), **JudgeFlow**
+  (`#e3bbdd`), **Feedback Descent** (`#244e30`), **TextGrad** (`#be34e3`), **gskill** (`#39b2ab`).

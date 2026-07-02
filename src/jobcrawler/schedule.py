@@ -1,7 +1,7 @@
 """The async scheduler / orchestrator — owns the run loop (§4.9).
 
-``bizup-autocrawler`` runs as a long-running service that operates the whole
-crawl loop itself rather than relying on external cron. The scheduler:
+``jobcrawler`` runs as a long-running service that operates the whole
+job-board crawl loop itself rather than relying on external cron. The scheduler:
 
   * **due-selection** — each site has a cadence (its ``schedule`` else the global
     default); a site is due when that cadence has elapsed since its last *finished*
@@ -15,10 +15,18 @@ crawl loop itself rather than relying on external cron. The scheduler:
     health signal) rather than stalling the queue. Transient *fetch* errors belong
     to the politeness layer and *ingest* failures to §4.7's next-crawl re-attempt —
     neither is scheduler-retried.
+  * **recheck** — a §4.9 timer re-verifies the known-open positions of windowed
+    sources (``enumerates_all=False``) and closes the ones that 404/410 or show an
+    expired-posting marker, plus fleet-wide expiry-based closure. Rechecking is
+    *observation* of the board, not self-modification, so — like adaptive cadence —
+    it is exempt from the master autonomy brake.
 
 Clock, the per-site ``crawl`` coroutine, and ``sleep`` are injected for
-deterministic tests. The §4.8 regeneration and §4.11 re-optimization timers hang
-off the same loop and land with those features; ``compile()`` never runs in-band.
+deterministic tests. The §4.8 regeneration, §4.11 re-optimization, and §4.9 recheck
+timers hang off the same loop on their own cadences; ``compile()`` never runs
+in-band. The host-side profile :class:`~jobcrawler.match.Matcher` is built once at
+startup (:func:`build_matcher`) and threaded into the crawl pipeline — absent a
+``PROFILE.md`` the daemon runs matching-disabled rather than refusing to boot.
 """
 
 from __future__ import annotations
@@ -29,18 +37,22 @@ import random
 from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime, timedelta, timezone
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from pydantic import BaseModel, field_validator, model_validator
 
-from bizup_autocrawler import config
-from bizup_autocrawler.adaptive import next_interval
-from bizup_autocrawler.durations import parse_duration
-from bizup_autocrawler.health import HealthState
-from bizup_autocrawler.runtime.runner import CrawlSummary
-from bizup_autocrawler.state import StateStore
+if TYPE_CHECKING:  # deferred: importing the matcher pulls dspy, so keep it out of boot
+    from jobcrawler.match import Matcher
 
-_log = logging.getLogger("bizup_autocrawler.schedule")
+from jobcrawler import config
+from jobcrawler.adaptive import next_interval
+from jobcrawler.durations import parse_duration
+from jobcrawler.health import HealthState
+from jobcrawler.profile import ProfileNotFound, load_profile
+from jobcrawler.runtime.runner import CrawlSummary
+from jobcrawler.state import StateStore
+
+_log = logging.getLogger("jobcrawler.schedule")
 
 
 class Healer(Protocol):
@@ -49,16 +61,49 @@ class Healer(Protocol):
     async def assess(self, slug: str) -> HealthState: ...
 
 
+class _MatchPacer(Protocol):
+    """The rate-pacing seam the §8 matcher expects (structural; matches match._Governor).
+
+    :func:`build_matcher` types the injected match-rate governor by shape rather than
+    importing :mod:`jobcrawler.match`'s private protocol, keeping this module free of the
+    dspy-heavy matcher import until a profile actually exists.
+    """
+
+    def pace(self) -> None: ...
+
+
+# The §4.9 recheck fetch seam: given a known-open position URL, return
+# ``(http_status, page_text)`` from a politeness-layer GET — the SAME per-host pacer +
+# robots the crawl path uses (§4.5). Injected so the daemon wires the real host-side
+# fetch and tests inject a fake. A transient network error must RAISE (the recheck loop
+# isolates and skips it — a blip is never a closure signal); only a definitive 404/410 or
+# an expired-marker hit in the returned text closes the position.
+RecheckFetch = Callable[[str], Awaitable[tuple[int, str]]]
+
+
 class Site(BaseModel):
-    """One entry of the §4.1 site registry."""
+    """One entry of the §4.1 site registry — a job board to crawl on a cadence."""
 
     slug: str
     url: str
     name: str = ""
+    # The company (or org) the board belongs to, for operator-facing display/notify. A
+    # board is one company's careers page; the per-position ``company`` still comes from
+    # each yielded Job (an aggregator board carries many), so this is descriptive, not a
+    # crawl input — optional and defaulted so existing registries parse unchanged.
+    company: str | None = None
     render: Literal["auto", "static", "browser", "solver"] = "auto"
     hints: str = ""
     schedule: str | None = None
     adaptive: bool = False
+    # Does one crawl enumerate the board's *entire* open set? True (the default) for a
+    # full careers page/ATS listing, where the §4.7 enumerate-diff (``close_missing``)
+    # soundly closes positions absent from a healthy, error-free crawl. False for a
+    # windowed feed (RSS / latest-N APIs like RemoteOK/WWR) whose crawl only ever sees a
+    # recent slice: diffing against it would false-close everything that scrolled off, so
+    # closure for these defers entirely to the §4.9 recheck timer (per-URL 404/410/expiry
+    # re-verification) instead.
+    enumerates_all: bool = True
     enabled: bool = True
 
     @field_validator("slug")
@@ -112,7 +157,7 @@ Sleep = Callable[[float], Awaitable[None]]
 
 
 def _optional_interval(raw: str) -> timedelta | None:
-    """Parse an ``AUTOCRAWLER_*`` duration; ``off`` (or unparseable) → None (disabled)."""
+    """Parse an ``JOBCRAWLER_*`` duration; ``off`` (or unparseable) → None (disabled)."""
     if raw.strip().lower() == "off":
         return None
     try:
@@ -122,7 +167,7 @@ def _optional_interval(raw: str) -> timedelta | None:
 
 
 def _regen_interval(raw: str) -> timedelta | None:
-    """Parse ``AUTOCRAWLER_REGEN_CHECK``; ``off`` (or unparseable) disables it."""
+    """Parse ``JOBCRAWLER_REGEN_CHECK``; ``off`` (or unparseable) disables it."""
     return _optional_interval(raw)
 
 
@@ -153,8 +198,12 @@ class Scheduler:
         reopt_check: str | None = None,
         reopt_dispatch: Callable[[], bool] | None = None,
         adopt_watch: Callable[[datetime], None] | None = None,
+        recheck_check: str | None = None,
+        recheck_cap: int | None = None,
+        recheck_fetch: RecheckFetch | None = None,
+        expired_markers: tuple[str, ...] | None = None,
         heal_cooldown: str | None = None,
-        body_quality_floor: float | None = None,
+        description_quality_floor: float | None = None,
         min_schedule: float | None = None,
         max_schedule: float | None = None,
         adaptive_window: int | None = None,
@@ -203,15 +252,36 @@ class Scheduler:
         # production uses the real `adopt_watch.check_adoption`. Frozen by the autonomy
         # switch like the other self-modifying actions (an auto-rollback rewrites state).
         self._adopt_watch = adopt_watch
+        # §4.9 recheck timer: re-verify the known-open positions of windowed sources
+        # (``enumerates_all=False``) and close the gone ones, plus fleet-wide expiry
+        # closure. OBSERVATION, NOT self-modification — so, unlike regen/reopt, it is
+        # EXEMPT from the master autonomy brake (see `recheck_due`): it only records that
+        # a job the operator can no longer apply to has closed; it never rewrites a crawler
+        # or adopts a generator. Disabled unless both a cadence and a fetch seam are wired.
+        self._recheck_interval = _optional_interval(
+            config.recheck_interval() if recheck_check is None else recheck_check
+        )
+        self._recheck_cap = (
+            recheck_cap if recheck_cap is not None else config.recheck_cap()
+        )
+        self._recheck_fetch = recheck_fetch
+        self._expired_markers = (
+            expired_markers if expired_markers is not None else config.expired_markers()
+        )
+        self._next_recheck: datetime | None = None
         # §4.8 event-driven healing: a drifted crawl assesses immediately (not waiting
         # for the periodic sweep), rate-limited per-site by this cooldown (None = off).
         self._heal_cooldown = _optional_interval(
             config.heal_cooldown() if heal_cooldown is None else heal_cooldown
         )
-        self._body_quality_floor = (
-            body_quality_floor
-            if body_quality_floor is not None
-            else config.body_quality_floor()
+        # Host-side partial-drift floor: the minimum share of a crawl's fetched positions
+        # whose description cleared the §4.6 completeness bar before the crawl counts as
+        # drifted (§8: never reaches the generator/RLM). Env-configured as
+        # ``JOBCRAWLER_DESCRIPTION_QUALITY_FLOOR``.
+        self._description_quality_floor = (
+            description_quality_floor
+            if description_quality_floor is not None
+            else config.description_quality_floor()
         )
         self._last_heal: dict[str, datetime] = {}
         # §4.9 adaptive cadence bounds/tuning (host-side; never sent to the generator).
@@ -275,16 +345,17 @@ class Scheduler:
         """Recompute and persist an adaptive site's interval from recent outcomes.
 
         The §4.9 hit-rate controller reads the last ``adaptive_window`` runs (a "hit"
-        is a crawl that found ≥1 new item) and steers the interval toward checking the
-        source ``target_n`` times per post, bounded by ``[min, max]_schedule``. Called
+        is a crawl that found ≥1 new position) and steers the interval toward checking the
+        source ``target_n`` times per posting, bounded by ``[min, max]_schedule``. Called
         once per *completed* crawl in ``tick``; a no-op for fixed-cadence sites.
         """
         if not site.adaptive:
             return
         history = self._store.runs_for(site.slug, limit=self._adaptive_window)
-        hits = [
-            r.new_items > 0 for r in history
-        ]  # newest-first, matching next_interval
+        # ``new_items`` is the §5 run counter (unchanged column name); semantically it is
+        # this crawl's count of newly-seen open positions. Newest-first, matching
+        # next_interval's window convention.
+        hits = [r.new_items > 0 for r in history]
         current = self._store.get_interval(site.slug)
         if current is None:
             current = self._adaptive_seed()
@@ -315,15 +386,19 @@ class Scheduler:
     def _drift_signal(self, summary: CrawlSummary) -> bool:
         """True if this crawl's outcome looks like §4.8 drift worth assessing now.
 
-        Two host-side signals, computed straight from the run counters: a blackout
-        (zero items found) or a body-quality collapse (items came back but a large
-        share fell below the completeness bar — teasers/paywalls). ``body_quality`` is
-        ``(found - incomplete) / found``, matching the runner's persisted signal.
+        Two host-side signals, computed straight from the crawl counters: a blackout
+        (zero positions found) or a description-quality collapse (positions came back but
+        a large share of their descriptions fell below the §4.6 completeness bar —
+        truncated/boilerplate-only bodies). The completeness share is
+        ``(positions_found - incomplete) / positions_found``, mirroring the runner's
+        persisted ``body_quality`` signal.
         """
-        if summary.items_found == 0:
+        if summary.positions_found == 0:
             return True
-        body_quality = (summary.items_found - summary.incomplete) / summary.items_found
-        return body_quality < self._body_quality_floor
+        description_quality = (
+            summary.positions_found - summary.incomplete
+        ) / summary.positions_found
+        return description_quality < self._description_quality_floor
 
     def _should_event_heal(self, summary: CrawlSummary, now: datetime) -> bool:
         """True if ``summary`` warrants an immediate heal and the site is off cooldown."""
@@ -362,7 +437,7 @@ class Scheduler:
         A registry entry with no ``crawlers/<slug>.py`` can't be crawled, so the daemon
         generates one before crawling — the same generator the §4.8 healer runs, via the
         healer's ``assess`` (which treats a missing crawler as an immediately-confirmed
-        regenerate candidate). Delivery honors ``AUTOCRAWLER_REVIEW_GATE``: staged for
+        regenerate candidate). Delivery honors ``JOBCRAWLER_REVIEW_GATE``: staged for
         review by default, live under ``auto``/``off``. The health state machine
         (pending-review / generation-failed + backoff) keeps a staged or failed
         bootstrap from re-generating every tick.
@@ -391,10 +466,10 @@ class Scheduler:
         """Dispatch every currently-due site (bounded), returning the successes.
 
         Each dispatched crawl logs its outcome (the daemon's operational heartbeat,
-        §4.9): item counts at INFO on success, a WARNING when a site is dropped after
+        §4.9): position counts at INFO on success, a WARNING when a site is dropped after
         exhausting its retries so the lost work isn't invisible. A crawl that comes back
-        drifted (blackout or body-quality collapse) triggers an immediate §4.8 heal,
-        rate-limited per-site by the heal cooldown.
+        drifted (blackout or description-quality collapse) triggers an immediate §4.8
+        heal, rate-limited per-site by the heal cooldown.
 
         A due site that has no committed crawler yet is never crawled (that would only
         FileNotFoundError); it's routed to the §4.2 cold-start bootstrap after the crawl
@@ -420,8 +495,8 @@ class Scheduler:
                 _log.info(
                     "crawl ok slug=%s found=%d new=%d pages=%d errors=%d",
                     result.site,
-                    result.items_found,
-                    result.new_items,
+                    result.positions_found,
+                    result.new_positions,
                     result.pages_fetched,
                     result.errors,
                 )
@@ -445,7 +520,7 @@ class Scheduler:
         return summaries
 
     def regen_due(self, now: datetime) -> bool:
-        """True if a §4.8 staleness sweep is due (per ``AUTOCRAWLER_REGEN_CHECK``)."""
+        """True if a §4.8 staleness sweep is due (per ``JOBCRAWLER_REGEN_CHECK``)."""
         if not self._autonomy:
             return False  # master switch off: freeze all self-modification (§4.8)
         if self._healer is None or self._regen_interval is None:
@@ -481,7 +556,7 @@ class Scheduler:
         return states
 
     def reopt_due(self, now: datetime) -> bool:
-        """True if an out-of-band §4.11 re-opt is due (per ``AUTOCRAWLER_REOPT_CHECK``)."""
+        """True if an out-of-band §4.11 re-opt is due (per ``JOBCRAWLER_REOPT_CHECK``)."""
         if not self._autonomy:
             return False  # master switch off: freeze all self-modification (§4.11)
         if self._reopt_interval is None:
@@ -497,7 +572,7 @@ class Scheduler:
         """Dispatch the offline §4.11 self-improvement job out-of-band — never in-band.
 
         The GEPA compile is multi-hour, so this only *spawns* the detached, single-flight
-        ``autocrawl optimize --adopt`` job and returns at once (a dispatch while one is
+        ``jobcrawl optimize --adopt`` job and returns at once (a dispatch while one is
         already running is a no-op). ``--adopt`` is the §4.11 "full auto, gated by proof"
         path: the child still adopts the optimized generator *only* if it clears the
         frozen held-out margin — the scheduler never makes that promotion call itself,
@@ -521,9 +596,105 @@ class Scheduler:
         """Call the injected dispatch, else the real detached ``optimize --adopt``."""
         if self._reopt_dispatch is not None:
             return self._reopt_dispatch()
-        from bizup_autocrawler.optimize_job import dispatch_optimize
+        from jobcrawler.optimize_job import dispatch_optimize
 
         return dispatch_optimize(adopt=True)
+
+    def recheck_due(self, now: datetime) -> bool:
+        """True if a §4.9 recheck sweep is due (per ``JOBCRAWLER_RECHECK_INTERVAL``).
+
+        Deliberately **not** gated by the master autonomy switch. Re-fetching a known-open
+        listing to learn whether it now 404s is pure *observation* — the same category as
+        the §4.9 adaptive cadence, and unlike regen/reopt it never rewrites a crawler or
+        adopts a generator. Freezing self-modification must not blind the board to jobs
+        that have closed, so this timer keeps running with autonomy off. Requires both a
+        configured cadence and an injected fetch seam (``recheck_fetch``).
+        """
+        if self._recheck_interval is None or self._recheck_fetch is None:
+            return False
+        return self._next_recheck is None or now >= self._next_recheck
+
+    def mark_recheck(self, now: datetime) -> None:
+        """Record that a recheck sweep ran at ``now``; the next is one interval later."""
+        if self._recheck_interval is not None:
+            self._next_recheck = now + self._recheck_interval
+
+    async def recheck_tick(self) -> int:
+        """Close positions that have quietly gone away (§4.9); return how many closed.
+
+        Two host-side closure paths the enumerate-diff (``close_missing``) can't cover:
+
+          * **expiry** — every open position whose stated ``expires_at`` has passed is
+            closed fleet-wide via :meth:`StateStore.expire_due` (one indexed UPDATE across
+            all sites, regardless of ``enumerates_all``).
+          * **windowed re-verification** — for each enabled ``enumerates_all=False`` source
+            (RSS / latest-N feeds, where diffing against the recent view would false-close
+            everything that scrolled off it) re-fetch up to ``recheck_cap`` of its stalest
+            known-open URLs through the SAME politeness layer as a crawl and close the ones
+            that come back HTTP 404/410 or show an expired-posting marker. Full-enumeration
+            sources are skipped here — their closure is the runner's guarded diff.
+
+        A transient fetch error is **not** a closure signal: it is isolated and skipped
+        (a blip must never close a live posting — mirrors the §4.8 re-probe's blip
+        tolerance), so one bad fetch can't abort the sweep either. Emits structured log
+        lines in the run-loop style. Never self-modifies (autonomy-exempt).
+        """
+        fetch = self._recheck_fetch
+        if fetch is None:  # pragma: no cover - gated by recheck_due
+            return 0
+        closed = self._store.expire_due()
+        if closed:
+            _log.info("recheck expired closed=%d", closed)
+        for site in self._sites:
+            if not site.enabled or site.enumerates_all:
+                continue
+            urls = self._store.open_urls(site.slug, limit=self._recheck_cap)
+            if not urls:
+                continue
+            checked = 0
+            site_closed = 0
+            for url in urls:
+                try:
+                    status, text = await fetch(url)
+                except Exception:
+                    # A transient fetch failure is not evidence the posting closed — skip
+                    # it (closure is one-way; a blip must never end a live job). Surfaced.
+                    _log.exception(
+                        "recheck fetch failed slug=%s url=%s; skipping", site.slug, url
+                    )
+                    continue
+                checked += 1
+                reason = self._closure_reason(status, text)
+                if reason is not None:
+                    self._store.mark_closed(site.slug, url, reason=reason)
+                    site_closed += 1
+            _log.info(
+                "recheck slug=%s checked=%d closed=%d cap=%d",
+                site.slug,
+                checked,
+                site_closed,
+                self._recheck_cap,
+            )
+            closed += site_closed
+        return closed
+
+    def _closure_reason(self, status: int, text: str) -> str | None:
+        """Why a re-fetched open position should close now, or None to keep it open.
+
+        Only a *definitive* gone-signal closes a job — closure is one-way and
+        operator-visible, so an ambiguous response leaves the posting open: an HTTP
+        404/410 (the listing was removed) or an expired-posting marker in the page body
+        (some ATSes keep the URL live but swap the posting for a 'no longer accepting
+        applications' notice). Any other status — a 200 with a live posting, a 5xx, a
+        403 — is not a closure signal.
+        """
+        if status in (404, 410):
+            return f"recheck http {status}"
+        lowered = text.lower()
+        for marker in self._expired_markers:
+            if marker and marker.lower() in lowered:
+                return f"recheck expired-marker {marker!r}"
+        return None
 
     def adopt_watch_tick(self, now: datetime) -> None:
         """Run the §4.11 post-adoption regression watcher once (P4c), if autonomy is on.
@@ -546,7 +717,7 @@ class Scheduler:
         if self._adopt_watch is not None:
             self._adopt_watch(now)
             return
-        from bizup_autocrawler import adopt_watch
+        from jobcrawler import adopt_watch
 
         adopt_watch.check_adoption(self._store, now)
 
@@ -555,17 +726,21 @@ class Scheduler:
 
         The slow §4.8 regeneration sweep and the §4.11 re-optimization *dispatch* hang
         off the same loop on their own cadences — never ``.compile()`` in-band (that
-        offline GEPA work is handed off to a detached single-flight subprocess). The
-        §4.11 P4c post-adoption regression watcher rides every iteration (marker-gated,
-        so it's a cheap no-op until an adoption is under probation).
+        offline GEPA work is handed off to a detached single-flight subprocess). The §4.9
+        recheck sweep rides the loop too, closing positions that 404/expire (observation,
+        so it runs even with autonomy off). The §4.11 P4c post-adoption regression watcher
+        rides every iteration (marker-gated, so it's a cheap no-op until an adoption is
+        under probation).
         """
         _log.info(
-            "scheduler starting sites=%d interval=%ss autonomy=%s regen=%s reopt=%s",
+            "scheduler starting sites=%d interval=%ss autonomy=%s "
+            "regen=%s reopt=%s recheck=%s",
             len(self._sites),
             interval,
             "on" if self._autonomy else "OFF",
             "off" if self._regen_interval is None else self._regen_interval,
             "off" if self._reopt_interval is None else self._reopt_interval,
+            "off" if self._recheck_interval is None else self._recheck_interval,
         )
         while not stop.is_set():
             try:
@@ -577,6 +752,9 @@ class Scheduler:
                 if self.reopt_due(now):
                     self.reopt_tick()
                     self.mark_reopt(now)
+                if self.recheck_due(now):
+                    await self.recheck_tick()
+                    self.mark_recheck(now)
                 self.adopt_watch_tick(now)
             except Exception:
                 # Last-resort guard: an unexpected error in a tick or sweep must not
@@ -604,3 +782,65 @@ class Scheduler:
                     raise
                 await self._sleep(self._backoff_base * (2**attempt) + self._jitter())
         raise RuntimeError("unreachable")  # pragma: no cover
+
+
+def build_matcher(
+    store: StateStore,
+    *,
+    governor: _MatchPacer,
+    clock: Callable[[], datetime] = _utcnow,
+    profile_path: str | None = None,
+) -> Matcher | None:
+    """Build the host-side profile :class:`~jobcrawler.match.Matcher` at daemon startup.
+
+    The single place the daemon wires the §8 matcher. Returns ``None`` — matching disabled,
+    the crawl/dedup/closure loop runs completely unchanged — whenever there is nothing to
+    match against, and does so *loudly but non-fatally*:
+
+      * **no ``PROFILE.md``** — a :class:`~jobcrawler.profile.ProfileNotFound` is caught and
+        turned into a prominent operator warning (``matching disabled — create PROFILE.md``),
+        never a boot crash. Matching is opt-in: a fresh deployment crawls and tracks jobs
+        immediately, and starts scoring them against the operator the moment a profile
+        exists.
+      * **no ``JOBCRAWLER_MATCH_MODEL``** — with no LM configured there is nothing to score
+        with, so matching stays off under the same warning category.
+
+    Deliberately lives in this run-loop module rather than :mod:`jobcrawler.match` so that
+    importing the matcher's dspy-heavy module is deferred to the one moment a profile
+    actually exists — a profile-less (or match-model-less) deployment never imports dspy.
+    ``governor`` (the match-rate pacer) and ``clock`` are injected so the caller owns the
+    §8 daily budget and tests stay hermetic.
+    """
+    resolved = config.profile_path() if profile_path is None else profile_path
+    try:
+        profile = load_profile(resolved)
+    except ProfileNotFound as exc:
+        _log.warning("matching disabled — create PROFILE.md: %s", exc)
+        return None
+    model = config.match_model()
+    if model is None:
+        _log.warning(
+            "matching disabled — set JOBCRAWLER_MATCH_MODEL to score jobs against %s",
+            resolved,
+        )
+        return None
+    # Deferred import: only now, with a real profile + model, do we pull in the matcher
+    # (and its dspy dependency). Keeps `import jobcrawler.schedule` cheap for the many
+    # code paths (CLI subcommands, tests) that never build a matcher.
+    from jobcrawler.match import Matcher
+
+    _log.info(
+        "matching enabled model=%s profile=%s (%s)",
+        model,
+        resolved,
+        profile.profile_hash[:12],
+    )
+    return Matcher(
+        store,
+        profile,
+        model=model,
+        batch=config.match_batch(),
+        daily_cap=config.match_daily_cap(),
+        governor=governor,
+        clock=clock,
+    )

@@ -13,24 +13,25 @@ from types import SimpleNamespace
 
 import pytest
 
-from bizup_autocrawler import cli_generate, config
-from bizup_autocrawler.cli_generate import (
+from jobcrawler import cli_generate, config
+from jobcrawler.cli_generate import (
     _deliver,
     gate_winner,
     promote_one,
     regenerate_one,
     rollback_one,
 )
-from bizup_autocrawler.health import RegenOutcome
-from bizup_autocrawler.schedule import Site
+from jobcrawler.health import RegenOutcome
+from jobcrawler.schedule import Site
 
 _GOOD = (
-    "from bizup_autocrawler.runtime.contract import Item\n"
+    "from jobcrawler.runtime.contract import Job\n"
     'SITE = "https://example.com"\n'
     "def crawl(ctx):\n"
     "    for i in range(8):\n"
-    '        body = f"Article {i}. " + "x" * 500  # distinct per article\n'
-    '        yield Item(url=f"{SITE}/a{i}", title=f"T{i}", body=body, source="s")\n'
+    '        description = f"Role {i}. " + "x" * 500  # distinct per posting\n'
+    '        yield Job(url=f"{SITE}/a{i}", title=f"T{i}", company="Acme", '
+    'location="Remote", description=description, source="s")\n'
 )
 
 _HOSTS = {"example.com"}
@@ -76,14 +77,26 @@ def test_under_enumeration_fails_when_expected_count_known() -> None:
     assert not ok and "completeness" in reason
 
 
-def test_too_few_items_fails_completeness() -> None:
-    few = (
-        "from bizup_autocrawler.runtime.contract import Item\n"
+def test_single_posting_passes_min_items_floor() -> None:
+    # min_items defaults to 1 (§6): a small careers page with one open role is a
+    # legitimate board, so a lone valid posting must clear the completeness gate.
+    one = (
+        "from jobcrawler.runtime.contract import Job\n"
         'SITE = "https://example.com"\n'
         "def crawl(ctx):\n"
-        '    yield Item(url=f"{SITE}/a", title="T", body="x"*500, source="s")\n'
+        '    yield Job(url=f"{SITE}/a", title="T", company="Acme", '
+        'location="Remote", description="x"*500, source="s")\n'
     )
-    ok, reason = gate_winner(_pred(), few, _HOSTS)
+    ok, reason = gate_winner(_pred(), one, _HOSTS)
+    assert ok, reason
+
+
+def test_empty_crawl_fails_completeness() -> None:
+    # Zero postings never clears the floor — an empty board yield is always treated
+    # as a broken crawler, not a quiet-but-healthy one (that distinction lives in
+    # §4.8 health, not the generation gate).
+    none = 'SITE = "https://example.com"\ndef crawl(ctx):\n    return iter(())\n'
+    ok, reason = gate_winner(_pred(), none, _HOSTS)
     assert not ok and "completeness" in reason
 
 
@@ -108,7 +121,7 @@ def test_deliver_writes_live_when_gate_off(tmp_path: Path) -> None:
 
 
 def test_deliver_creates_crawlers_dir_when_missing(tmp_path: Path) -> None:
-    # A relocated AUTOCRAWLER_CRAWLERS_DIR (e.g. a fresh /data/crawlers volume) doesn't
+    # A relocated JOBCRAWLER_CRAWLERS_DIR (e.g. a fresh /data/crawlers volume) doesn't
     # exist yet on first run; live delivery must create it, not FileNotFoundError (§11).
     target = tmp_path / "crawlers"  # does not exist yet
     outcome = _deliver("acme", _SRC, mode="off", crawlers_dir=target)
@@ -222,7 +235,7 @@ def test_regenerate_one_stages_when_review_gate_on(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seen = _fake_generation(monkeypatch)
-    monkeypatch.setenv("AUTOCRAWLER_REVIEW_GATE", "on")
+    monkeypatch.setenv("JOBCRAWLER_REVIEW_GATE", "on")
     assert regenerate_one("acme") is RegenOutcome.STAGED
     assert seen["mode"] == "on"
 
@@ -231,7 +244,7 @@ def test_regenerate_one_auto_promotes_when_review_gate_auto(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seen = _fake_generation(monkeypatch)
-    monkeypatch.setenv("AUTOCRAWLER_REVIEW_GATE", "auto")
+    monkeypatch.setenv("JOBCRAWLER_REVIEW_GATE", "auto")
     assert regenerate_one("acme") is RegenOutcome.PROMOTED
     assert seen["mode"] == "auto"
 
@@ -240,12 +253,12 @@ def test_regenerate_one_goes_live_when_review_gate_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seen = _fake_generation(monkeypatch)
-    monkeypatch.setenv("AUTOCRAWLER_REVIEW_GATE", "off")
+    monkeypatch.setenv("JOBCRAWLER_REVIEW_GATE", "off")
     assert regenerate_one("acme") is RegenOutcome.PROMOTED
     assert seen["mode"] == "off"
 
 
 def test_crawlers_dir_default_is_config_driven() -> None:
     # _deliver/promote_one default to the same config-driven dir as the crawl/probe
-    # side, so a relocated AUTOCRAWLER_CRAWLERS_DIR keeps writer and reader in sync (§11).
+    # side, so a relocated JOBCRAWLER_CRAWLERS_DIR keeps writer and reader in sync (§11).
     assert cli_generate._CRAWLERS_DIR == Path(config.crawlers_dir())

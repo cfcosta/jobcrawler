@@ -9,8 +9,8 @@ import dspy
 import pytest
 from dspy.utils import DummyLM
 
-from bizup_autocrawler.generate.evaluate import evaluate_generator
-from bizup_autocrawler.generate.optimize import (
+from jobcrawler.generate.evaluate import evaluate_generator
+from jobcrawler.generate.optimize import (
     SATURATION_REMEDY,
     _budget_health_note,
     _pareto_health_note,
@@ -122,9 +122,7 @@ def test_gepa_compile_degrades_selection_for_tiny_valset(
         captured["minibatch"] = reflection_minibatch_size
         return _FakeGepa()
 
-    monkeypatch.setattr(
-        "bizup_autocrawler.generate.optimize.build_gepa", fake_build_gepa
-    )
+    monkeypatch.setattr("jobcrawler.generate.optimize.build_gepa", fake_build_gepa)
     reflection_lm = cast(dspy.LM, DummyLM([{"x": "y"}]))
     out = gepa_compile(
         cast(dspy.Module, "BASE"),
@@ -155,9 +153,7 @@ def test_gepa_compile_uses_pareto_for_adequate_pools(
         captured["minibatch"] = reflection_minibatch_size
         return _FakeGepa()
 
-    monkeypatch.setattr(
-        "bizup_autocrawler.generate.optimize.build_gepa", fake_build_gepa
-    )
+    monkeypatch.setattr("jobcrawler.generate.optimize.build_gepa", fake_build_gepa)
     reflection_lm = cast(dspy.LM, DummyLM([{"x": "y"}]))
     gepa_compile(
         cast(dspy.Module, "BASE"),

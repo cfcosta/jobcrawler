@@ -27,7 +27,10 @@ from charset_normalizer import from_bytes
 _META_CHARSET = re.compile(
     rb"<meta[^>]+?charset[\"'\s=]*([a-z0-9][a-z0-9._\-]*)", re.IGNORECASE
 )
-_PRESCAN_BYTES = 2048  # bound the meta scan; never read a whole large body
+# Bound only the <meta charset> regex search window (WHATWG-style); this is NOT a
+# body cap — ``resolve_text`` still decodes the full ``content``, so multi-MB ATS
+# JSON boards come back whole, never truncated by the charset sniff.
+_PRESCAN_BYTES = 2048
 
 _UTF32_BOMS = (codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)
 _UTF16_BOMS = (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)

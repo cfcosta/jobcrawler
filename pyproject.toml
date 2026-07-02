@@ -1,7 +1,7 @@
 [project]
-name = "bizup-autocrawler"
+name = "jobcrawler"
 version = "0.1.0"
-description = "RLM-based autocrawler that generates and runs per-site news crawlers"
+description = "RLM-based jobcrawler that generates and runs per-site news crawlers"
 requires-python = ">=3.12"
 dependencies = [
   "charset-normalizer>=3.3",
@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.scripts]
-autocrawl = "bizup_autocrawler.cli:main"
+jobcrawl = "jobcrawler.cli:main"
 
 [dependency-groups]
 dev = ["pytest>=8.0.0", "pytest-asyncio>=0.24.0", "ty>=0.0.49"]

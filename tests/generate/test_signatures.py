@@ -4,7 +4,8 @@ GenerateCrawler is the RLM task signature (docstring = instruction, per project
 convention); DiscoveryStrategy is the narrow, GEPA-owned strategy predictor whose
 seed must enumerate the ordered discovery rules (an optimizer can't infer a rule
 set from a vacuous seed). The tests pin the field contract and that the seeds
-carry the load-bearing instructions, not their exact prose.
+carry the load-bearing job-board instructions (ATS-API-first, the
+anti-under-enumeration discipline), not their exact prose.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from typing import get_args
 
 import dspy
 
-from bizup_autocrawler.generate.signatures import DiscoveryStrategy, GenerateCrawler
+from jobcrawler.generate.signatures import DiscoveryStrategy, GenerateCrawler
 
 
 def test_generate_crawler_input_fields() -> None:
@@ -39,13 +40,30 @@ def test_crawler_source_is_dspy_code() -> None:
 
 def test_discovery_method_is_constrained_literal() -> None:
     annotation = GenerateCrawler.output_fields["discovery_method"].annotation
-    assert set(get_args(annotation)) == {"feed", "sitemap", "scrape"}
+    # 'api' is added for the ATS-first ordering; feed/sitemap/scrape are kept so the
+    # scoring/must-observe gates that consume those literals still line up (§6).
+    assert set(get_args(annotation)) == {"api", "feed", "sitemap", "scrape"}
 
 
-def test_generate_crawler_instruction_demands_validate_and_feed_first() -> None:
+def test_generate_crawler_instruction_demands_validate_and_api_first() -> None:
     instr = GenerateCrawler.instructions.lower()
     assert "validate" in instr
     assert "feed" in instr
+    # retargeted to job boards: it must crawl postings and prefer a structured ATS
+    # API, naming the empirical endpoints the operator probed.
+    assert "job" in instr and "posting" in instr
+    assert "api" in instr
+    for ats in ("greenhouse", "lever", "ashby", "gupy"):
+        assert ats in instr
+
+
+def test_generate_crawler_instruction_names_structured_job_fields() -> None:
+    # The generator must extract-when-present (never fabricate) the structured Job
+    # fields, so the docstring has to name them.
+    instr = GenerateCrawler.instructions.lower()
+    for field in ("salary", "employment_type", "workplace_type", "expires_at"):
+        assert field in instr
+    assert "company" in instr  # hard-coded from the operator hint on single-co boards
 
 
 def test_strategy_predictor_fields() -> None:
@@ -55,7 +73,9 @@ def test_strategy_predictor_fields() -> None:
 
 def test_strategy_seed_enumerates_ordered_rules() -> None:
     instr = DiscoveryStrategy.instructions.lower()
-    # not vacuous: the seed enumerates the feed-first / validate-before-finalize rules.
+    # not vacuous: the seed enumerates the api-first / validate-before-finalize rules.
+    assert "api" in instr  # probe the ATS API first (whole-board enumeration)
     assert "feed" in instr and "sitemap" in instr
-    assert "scrap" in instr  # scrape only when no feed/sitemap
+    assert "scrap" in instr  # scrape only when nothing enumerates the board
     assert "verify" in instr or "validate" in instr
+    assert "board" in instr or "posting" in instr

@@ -17,25 +17,25 @@ from urllib.parse import urljoin
 
 import httpx
 
-from bizup_autocrawler import config
-from bizup_autocrawler.durations import parse_retry_after
-from bizup_autocrawler.runtime.encoding import (
+from jobcrawler import config
+from jobcrawler.durations import parse_retry_after
+from jobcrawler.runtime.encoding import (
     http_charset_from_content_type,
     resolve_text,
 )
-from bizup_autocrawler.runtime.politeness import (
+from jobcrawler.runtime.politeness import (
     Pacer,
     Robots,
     RobotsDisallowedError,
 )
-from bizup_autocrawler.runtime.solver import (
+from jobcrawler.runtime.solver import (
     ChallengeError,
     ChallengeSolver,
     ClearanceCache,
     is_challenge,
 )
-from bizup_autocrawler.runtime.ssrf import SsrfError, check_url
-from bizup_autocrawler.urls import normalize_host
+from jobcrawler.runtime.ssrf import SsrfError, check_url
+from jobcrawler.urls import normalize_host
 
 _REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
 # Transient HTTP statuses worth a backed-off retry (§4.5): rate-limit + the gateway
@@ -46,7 +46,7 @@ _RETRYABLE_CODES = frozenset({429, 502, 503, 504})
 
 
 class PageLimitError(RuntimeError):
-    """The crawl exceeded its per-run page budget (``AUTOCRAWLER_MAX_PAGES``)."""
+    """The crawl exceeded its per-run page budget (``JOBCRAWLER_MAX_PAGES``)."""
 
 
 def _is_transient(resp: httpx.Response) -> bool:
@@ -129,6 +129,16 @@ class Ctx:
         # The §4.5 ladder, not httpx's bare ``.text`` (which only honors the HTTP
         # charset and otherwise assumes UTF-8): fall through to BOM, <meta>, then
         # statistical detection so legacy pages don't come back as mojibake.
+        #
+        # ``resp.content`` materializes the WHOLE body on purpose — no byte cap here.
+        # A committed crawl's primary targets are ATS JSON boards that routinely run
+        # 0.7–3MB (Ashby/Greenhouse whole-board responses; large boards reach ~12MB),
+        # and any truncation would slice a JSON document mid-object and make it
+        # unparseable, silently starving the crawl of postings. The backstop against a
+        # decompression/response bomb is the §4.4 sandbox memory rlimit (RLIMIT_AS),
+        # which kills a runaway child cleanly — a size cap in this decode path is the
+        # wrong layer and would corrupt legitimate large boards, so we deliberately
+        # keep none.
         return resolve_text(
             resp.content,
             http_charset_from_content_type(resp.headers.get("content-type")),

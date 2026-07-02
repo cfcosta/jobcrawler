@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from bizup_autocrawler.trainset import (
+from jobcrawler.trainset import (
     INPUT_FIELDS,
     admit,
     admitted_examples,
@@ -21,7 +21,7 @@ from bizup_autocrawler.trainset import (
 def _example(site_url: str = "https://a.com"):
     return make_example(
         site_url=site_url,
-        corpus={"homepage": "h", "articles": []},
+        corpus={"homepage": "h", "postings": []},
         render="auto",
         hints="",
         discovery_method="feed",
@@ -76,18 +76,18 @@ def test_save_load_round_trip(tmp_path: object) -> None:
     loaded = load_trainset(path)
     assert [ex.site_url for ex in loaded] == ["https://a.com", "https://b.com"]
     assert set(loaded[0].inputs().keys()) == set(INPUT_FIELDS)
-    assert loaded[0].corpus == {"homepage": "h", "articles": []}
+    assert loaded[0].corpus == {"homepage": "h", "postings": []}
 
 
 def test_append_and_load_records(tmp_path: object) -> None:
     path = f"{tmp_path}/records.jsonl"  # type: ignore[str-bytes-safe]
-    append_record(path, slug="valor", example=_example("https://valor.com"))
-    append_record(path, slug="bj", example=_example("https://bj.com"))
+    append_record(path, slug="stripe", example=_example("https://stripe.com"))
+    append_record(path, slug="gitlab", example=_example("https://gitlab.com"))
 
     records = load_records(path)
 
-    assert [r["slug"] for r in records] == ["valor", "bj"]
-    assert records[0]["corpus"] == {"homepage": "h", "articles": []}
+    assert [r["slug"] for r in records] == ["stripe", "gitlab"]
+    assert records[0]["corpus"] == {"homepage": "h", "postings": []}
 
 
 def test_load_records_absent_is_empty(tmp_path: object) -> None:

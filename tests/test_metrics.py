@@ -4,16 +4,17 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from bizup_autocrawler.health import HealthState
-from bizup_autocrawler.metrics import (
+from jobcrawler.health import HealthState
+from jobcrawler.metrics import (
     aggregate_runs,
+    closed_last_7d,
     drift_mttr,
     health_distribution,
     mean_body_quality,
     recovery_events,
     transition_events,
 )
-from bizup_autocrawler.state import HealthTransition, RunRecord
+from jobcrawler.state import HealthTransition, RunRecord
 
 UTC = timezone.utc
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
@@ -241,3 +242,48 @@ def test_mean_body_quality_skips_runs_without_signal() -> None:
 def test_mean_body_quality_none_when_no_signal() -> None:
     assert mean_body_quality([_run(0, 0, 0, 1, T0)]) is None
     assert mean_body_quality([]) is None
+
+
+# -- closed_last_7d (recent close rate for the status surface) ----------------
+
+
+def test_closed_last_7d_sums_closed_signal_in_window() -> None:
+    now = T0 + timedelta(days=10)
+    history = [
+        _run(5, 2, 0, 3, now - timedelta(days=1), signals={"closed": 3}),
+        _run(4, 1, 0, 2, now - timedelta(days=6), signals={"closed": 2}),
+    ]
+    assert closed_last_7d(history, now) == 5
+
+
+def test_closed_last_7d_excludes_runs_older_than_window() -> None:
+    now = T0 + timedelta(days=10)
+    history = [
+        _run(5, 2, 0, 3, now - timedelta(days=2), signals={"closed": 4}),
+        _run(4, 1, 0, 2, now - timedelta(days=8), signals={"closed": 9}),  # too old
+    ]
+    assert closed_last_7d(history, now) == 4
+
+
+def test_closed_last_7d_ignores_runs_without_the_signal() -> None:
+    # A run that recorded no closures (or no signals at all, or is still unfinished)
+    # contributes 0 — the surface degrades gracefully rather than raising.
+    now = T0 + timedelta(days=10)
+    history = [
+        _run(5, 2, 0, 3, now - timedelta(days=1)),  # no signals
+        _run(4, 1, 0, 2, now - timedelta(days=1), signals={"incomplete": 0}),
+        _run(4, 1, 0, 2, None, signals={"closed": 99}),  # unfinished
+        _run(4, 1, 0, 2, now - timedelta(days=1), signals={"closed": 6}),
+    ]
+    assert closed_last_7d(history, now) == 6
+
+
+def test_closed_last_7d_respects_custom_window() -> None:
+    now = T0 + timedelta(days=10)
+    history = [_run(4, 1, 0, 2, now - timedelta(days=20), signals={"closed": 7})]
+    assert closed_last_7d(history, now) == 0
+    assert closed_last_7d(history, now, days=30) == 7
+
+
+def test_closed_last_7d_empty() -> None:
+    assert closed_last_7d([], T0) == 0

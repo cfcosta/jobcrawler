@@ -1,24 +1,24 @@
-"""Tests for §8 adversarial admission (cross-validate claimed items)."""
+"""Tests for §8 adversarial admission (cross-validate claimed positions)."""
 
 from __future__ import annotations
 
-from bizup_autocrawler.generate.adversarial import cross_validate
+from jobcrawler.generate.adversarial import cross_validate
 
 _HOSTS = {"example.com"}
 
 
-def _s(url: str, title: str, body: str) -> dict[str, str]:
-    return {"url": url, "title": title, "body": body}
+def _s(url: str, title: str, description: str) -> dict[str, str]:
+    return {"url": url, "title": title, "description": description}
 
 
-def test_clean_items_pass() -> None:
+def test_clean_positions_pass() -> None:
     samples = [
-        _s("https://example.com/a", "Alpha", "body a"),
-        _s("https://example.com/b", "Beta", "body b"),
+        _s("https://example.com/a", "Senior Backend Engineer", "Build our APIs..."),
+        _s("https://example.com/b", "Frontend Engineer", "Own the web app..."),
     ]
     titles = {
-        "https://example.com/a": "Alpha — Example",
-        "https://example.com/b": "Beta — Example",
+        "https://example.com/a": "Senior Backend Engineer — Example Careers",
+        "https://example.com/b": "Frontend Engineer — Example Careers",
     }
     assert cross_validate(samples, live_titles=titles, allowed_hosts=_HOSTS).passed
 
@@ -32,19 +32,37 @@ def test_off_domain_url_fails() -> None:
 
 
 def test_title_mismatch_fails() -> None:
-    samples = [_s("https://example.com/a", "Totally Wrong", "b")]
-    titles = {"https://example.com/a": "The Actual Headline"}
+    samples = [_s("https://example.com/a", "Totally Wrong Role", "b")]
+    titles = {"https://example.com/a": "Staff Data Engineer — Example Careers"}
     result = cross_validate(samples, live_titles=titles, allowed_hosts=_HOSTS)
     assert not result.passed
     assert result.title_mismatches == 1
 
 
-def test_boilerplate_duplicate_bodies_fail() -> None:
-    samples = [_s(f"https://example.com/{i}", f"T{i}", "SAME BODY") for i in range(3)]
+def test_verbatim_duplicate_descriptions_fail() -> None:
+    # The index page (or an About page) yielded as every "posting": distinct roles
+    # never share a byte-identical whole description, so this is a fabrication signal.
+    samples = [
+        _s(f"https://example.com/{i}", f"Role {i}", "SAME ABOUT PAGE") for i in range(3)
+    ]
     result = cross_validate(samples, live_titles={}, allowed_hosts=_HOSTS)
     assert not result.passed
-    assert result.duplicate_bodies == 2
+    assert result.duplicate_descriptions == 2
 
 
-def test_no_items_fails() -> None:
+def test_shared_boilerplate_but_distinct_descriptions_pass() -> None:
+    # Company boards repeat an EEO/About footer across postings; as long as the
+    # whole description differs per role, adversarial admission does not fire (the
+    # §6 gate owns shared-block stripping — this check is only for identical pages).
+    footer = "\n\nExample Inc is an equal-opportunity employer."
+    samples = [
+        _s("https://example.com/a", "Backend Engineer", "Design services." + footer),
+        _s("https://example.com/b", "Mobile Engineer", "Ship the iOS app." + footer),
+    ]
+    result = cross_validate(samples, live_titles={}, allowed_hosts=_HOSTS)
+    assert result.passed
+    assert result.duplicate_descriptions == 0
+
+
+def test_no_positions_fails() -> None:
     assert not cross_validate([], live_titles={}, allowed_hosts=_HOSTS).passed
