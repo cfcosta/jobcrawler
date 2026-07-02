@@ -1,7 +1,7 @@
 """The POST /news ingest client (§4.7).
 
 Crawlers do not write to the news store directly; each extracted item is POSTed
-to bizup-news, which owns dedup + LLM enrichment. The only judgement this client
+to jobcrawler, which owns dedup + LLM enrichment. The only judgement this client
 makes is failure classification, because it decides whether a re-POST is safe:
 
   * INGESTED  — 2xx; the item was accepted.

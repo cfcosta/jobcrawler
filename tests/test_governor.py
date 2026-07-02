@@ -1,6 +1,6 @@
 """Tests for the ingest-rate governor (§4.7).
 
-Each ``POST /news`` drives 2–3 server-side LLM calls and ``bizup-news`` has no
+Each ``POST /news`` drives 2–3 server-side LLM calls and ``jobcrawler`` has no
 server-side idempotency, so ingestion is paced to ``AUTOCRAWLER_INGEST_RATE``
 (distinct from the §4.5 fetch cap). The governor is a minimum-interval pacer with
 an injected clock + sleep, so the timing is asserted deterministically.

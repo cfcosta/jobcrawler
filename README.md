@@ -4,7 +4,7 @@ A self-maintaining news crawler fleet. For each site in a checked-in registry, a
 `dspy.RLM` agent **generates a standalone Python crawler** once (using a live LM, a
 sandboxed code interpreter, and real fetches), gates it hard, and commits it. From
 then on the committed crawler runs on a schedule with **no LLM in the loop** — it
-just fetches, extracts, and POSTs articles to the [bizup-news](../news) ingest API.
+just fetches, extracts, and POSTs articles to the [jobcrawler](../news) ingest API.
 When a site's layout drifts and its crawler goes dark, the daemon **self-heals** by
 regenerating it; an offline optimizer periodically improves the *generator* itself.
 
@@ -25,7 +25,7 @@ developer-facing summary. For running it as a service, see [`deploy/`](deploy/).
                                │              dedup · completeness filter
                        optimize (offline)              │
                        GEPA ─► generator-N.json        ▼
-                                              POST → bizup-news (§4.7)
+                                              POST → jobcrawler (§4.7)
                                                        │
                        self-heal (§4.8) ◄──── went dark? reprobe → regenerate
 ```
@@ -55,7 +55,7 @@ nix develop
 export OPENROUTER_API_KEY=sk-or-...           # read by litellm via the model slug
 export AUTOCRAWLER_MODEL=openrouter/<vendor>/<strong-code-model>
 export AUTOCRAWLER_SUB_MODEL=openrouter/<vendor>/<cheap-code-model>
-export NEWS_API_URL=http://localhost:8000     # the bizup-news ingest API
+export NEWS_API_URL=http://localhost:8000     # the jobcrawler ingest API
 
 # Generate a crawler for one site, dry-run it (no ingest), then crawl + ingest.
 autocrawl generate techcrunch
@@ -78,7 +78,7 @@ inline in [`deploy/sites.example.yaml`](deploy/sites.example.yaml).
 | `run` | Start the scheduler daemon (§4.9): paces per-site crawls, runs the self-heal and regen timers, drains gracefully on SIGINT/SIGTERM. The primary production entrypoint. |
 | `generate <slug>` / `--all` / `--stale` | Run the RLM, gate the winner, and write `crawlers/<slug>.py`. Needs a configured LM + Deno + live fetch. `--stale` is driven by the daemon's health loop, not run by hand. |
 | `validate <slug>` | Dry-run a committed crawler in the §4.4 sandbox and report item count + schema errors. **No ingest.** |
-| `crawl <slug>` / `--all` | Run committed crawlers, dedup, completeness-filter, and POST to bizup-news. |
+| `crawl <slug>` / `--all` | Run committed crawlers, dedup, completeness-filter, and POST to jobcrawler. |
 | `promote <slug>` | Promote a staged self-heal crawler (`_pending/<slug>.py`) to live (the human half of the §14.2 review gate). |
 | `list` | One line per site: enabled flag, committed-script presence, last item count, health. |
 | `status` | M4 observability: per-site run aggregates, the fleet health distribution, and observed drift-recovery MTTR. Read-only. |
@@ -110,7 +110,7 @@ starting point.
 | `OPENROUTER_API_KEY` | — | Provider key, read by litellm via the model slug's `openrouter/` prefix. Use `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` for those providers. Needed by `generate`/`optimize`, not `run`/`crawl`. |
 | `AUTOCRAWLER_MODEL` | — | RLM root planner — a strong, code-capable model. No default (errors loud rather than 404-ing deep in the provider). |
 | `AUTOCRAWLER_SUB_MODEL` | — | RLM `sub_lm` — a cheaper code model for in-sandbox `llm_query`. Required so it can't silently bill at the root rate. |
-| `NEWS_API_URL` | `http://localhost:8000` | bizup-news ingest API. (Technically defaulted, but you must point it at a real news service; in a container it must not be `localhost` — see `deploy/`.) |
+| `NEWS_API_URL` | `http://localhost:8000` | jobcrawler ingest API. (Technically defaulted, but you must point it at a real news service; in a container it must not be `localhost` — see `deploy/`.) |
 
 ### Registry, state & artifacts
 

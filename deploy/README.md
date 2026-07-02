@@ -23,7 +23,7 @@ Four values are mandatory; everything else defaults sanely (see root `README.md`
 | `OPENROUTER_API_KEY` | The LM provider key. Read by litellm via the model slug's `openrouter/` prefix — swap for `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` if you point the slugs elsewhere. Needed by `generate`/`optimize`; **not** by `run`/`crawl`. |
 | `AUTOCRAWLER_MODEL` | RLM root planner — a strong, code-capable model. No default (an unset value fails loud at generation rather than 404-ing deep in the provider). |
 | `AUTOCRAWLER_SUB_MODEL` | RLM `sub_lm` — a cheaper code model for in-sandbox `llm_query`. Required so in-sandbox calls don't silently bill at the root planner's rate. |
-| `NEWS_API_URL` | Where committed crawlers POST articles (the bizup-news ingest API). |
+| `NEWS_API_URL` | Where committed crawlers POST articles (the jobcrawler ingest API). |
 
 > **Container networking gotcha:** `NEWS_API_URL`'s default `http://localhost:8000`
 > resolves to *the container itself*. Point it at the host or the news service —

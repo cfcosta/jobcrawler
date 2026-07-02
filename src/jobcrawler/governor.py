@@ -1,7 +1,7 @@
 """Ingest-rate governor (§4.7) — pace ``POST /news`` to news-API LLM capacity.
 
 Each ``POST /news`` is **not free**: it drives 2–3 server-side LLM calls
-(summarize + classify, with one classify retry) and ``bizup-news`` has no
+(summarize + classify, with one classify retry) and ``jobcrawler`` has no
 server-side idempotency. A burst of ingests — a first crawl of a large feed, or
 several sites finishing at once — would overrun the news API's enrichment
 capacity. So ingestion is paced to ``AUTOCRAWLER_INGEST_RATE`` (e.g. ``"2/s"``),

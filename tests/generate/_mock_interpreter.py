@@ -1,7 +1,7 @@
 """A deterministic, Deno-free CodeInterpreter for RLM tests (§9).
 
 dspy 3.2.1 ships no importable MockInterpreter (its reference lives in the dspy
-repo's ``tests/``, not the wheel), so we author one — adapted from bizup-news. It
+repo's ``tests/``, not the wheel), so we author one — adapted from jobcrawler. It
 satisfies the structural :class:`dspy.primitives.CodeInterpreter` protocol that
 ``dspy.RLM`` drives: a mutable ``tools`` dict RLM updates with ``llm_query`` before
 each loop, an ``output_fields`` attribute it sets from the signature, and a
