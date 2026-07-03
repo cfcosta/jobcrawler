@@ -579,6 +579,20 @@ def adaptive_target_n() -> float:
     return max(1.0, _float("JOBCRAWLER_ADAPTIVE_TARGET_N", 2.0))
 
 
+def bootstrap_budget() -> float:
+    """Per-tick time budget (seconds) for the §4.2 cold-start bootstrap pass.
+
+    One generation blocks the single-process §4.9 loop for many minutes, and a
+    cold-start roster can queue dozens of crawler-less sites into a single tick —
+    unbudgeted, that one tick bootstraps the whole roster back-to-back while every
+    already-promoted crawler sits idle, its first crawl (and the match pipeline
+    behind it) starved until the wave ends. Cheap assesses (a site in backoff)
+    sweep through freely; once the pass exceeds this budget it defers the rest of
+    the roster to the next tick — a crawler-less site is re-detected from disk
+    every tick, so deferral loses nothing. Default: one tick interval."""
+    return _duration_secs("JOBCRAWLER_BOOTSTRAP_BUDGET", "60s")
+
+
 def adaptive_default() -> bool:
     """When true, a site with no explicit ``schedule`` is adaptive rather than using
     the fixed ``default_schedule``. Default true — the fleet self-tunes each source's

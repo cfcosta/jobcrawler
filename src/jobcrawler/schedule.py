@@ -208,6 +208,7 @@ class Scheduler:
         max_schedule: float | None = None,
         adaptive_window: int | None = None,
         adaptive_target_n: float | None = None,
+        bootstrap_budget: float | None = None,
     ) -> None:
         self._sites = list(sites)
         self._store = store
@@ -300,6 +301,14 @@ class Scheduler:
             else config.adaptive_target_n()
         )
         self._target_hit_rate = 1.0 / target_n
+        # §4.2 cold-start pacing: how long one tick's bootstrap pass may hold the
+        # single-process loop before deferring the rest of the roster (see
+        # _bootstrap_missing).
+        self._bootstrap_budget = (
+            bootstrap_budget
+            if bootstrap_budget is not None
+            else config.bootstrap_budget()
+        )
 
     def due_sites(self) -> list[Site]:
         return [
@@ -446,18 +455,40 @@ class Scheduler:
         self-modification — so with autonomy off (or no healer wired) a crawler-less site
         simply stays idle rather than being crawled into a FileNotFoundError. Each site is
         isolated like the heal path so one generation raising can't abort the tick.
+
+        The pass carries a time budget (``JOBCRAWLER_BOOTSTRAP_BUDGET``): one
+        generation blocks the single-process loop for many minutes, and a cold-start
+        roster can queue dozens of sites into one tick — unbudgeted, that tick runs
+        the whole roster back-to-back while every already-promoted crawler sits idle,
+        due but never dispatched, its first crawl starved until the wave ends. Cheap
+        assesses (a site in generation-failed backoff) sweep through freely; once the
+        pass is over budget the rest of the roster defers to the next tick, where
+        crawls — including the freshly promoted crawler's first — always run first.
+        Deferral loses nothing: a crawler-less site is re-detected from disk every
+        tick, and the health state machine still owns per-site backoff.
         """
         if not self._autonomy or self._healer is None:
             return {}
         healer = self._healer
         states: dict[str, HealthState] = {}
-        for site in sites:
+        pass_started = self._clock()
+        for done, site in enumerate(sites, start=1):
             try:
                 states[site.slug] = await healer.assess(site.slug)
             except Exception:
                 _log.exception(
                     "cold-start bootstrap failed for %s; skipping", site.slug
                 )
+            elapsed = (self._clock() - pass_started).total_seconds()
+            if elapsed > self._bootstrap_budget and done < len(sites):
+                _log.info(
+                    "bootstrap pass over budget (%.0fs > %.0fs); deferring %d site(s)"
+                    " to the next tick",
+                    elapsed,
+                    self._bootstrap_budget,
+                    len(sites) - done,
+                )
+                break
         if states:
             _log.info("bootstrap generated=%d %s", len(states), _state_summary(states))
         return states

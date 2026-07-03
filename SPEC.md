@@ -575,6 +575,16 @@ operates the whole loop itself rather than relying on an external cron.
   from the autonomy brake.
 - **Bounded concurrency.** A global cap (`JOBCRAWLER_CONCURRENCY`) limits how many boards crawl at
   once; per-host limits come from §4.5. A board never overlaps its own prior run.
+- **Cold-start bootstrap is budgeted per tick.** A due site with no committed crawler is never
+  crawled (it would only `FileNotFoundError`); the tick routes it to the §4.2 bootstrap **after** the
+  crawl wave. That pass carries a time budget (`JOBCRAWLER_BOOTSTRAP_BUDGET`, default one tick
+  interval): one generation blocks the single-process loop for many minutes, and an unbudgeted pass
+  over a cold roster runs every generation back-to-back inside a single tick — while each freshly
+  promoted crawler sits idle, due but never dispatched, until the whole wave ends. Over budget, the
+  rest of the roster defers to the next tick, where crawls (including the just-promoted crawler's
+  first) always run before more bootstrapping. Cheap assesses (a site in generation-failed backoff)
+  don't consume the budget in any meaningful way, so a no-op sweep still covers the roster in one
+  tick; deferral loses nothing because crawler-less sites are re-detected from disk every tick.
 - **Retry & backoff (one owner per failure class).** A crawl that fails *before yielding any position*
   gets a small bounded backoff+jitter retry **here**; **transient fetch** errors belong to §4.5;
   **matching** failures are §4.7's fail-open-to-pending and are *not* scheduler-retried. Persistent
@@ -1107,6 +1117,7 @@ the generator — §8). Selected knobs:
 | `JOBCRAWLER_MAX_ITERATIONS` / `MAX_LLM_CALLS` / `MAX_SUBCALLS` | `20` / `40` / `60` | RLM caps + the unconditional host sub-call kill (§4.2) |
 | `JOBCRAWLER_FANOUT_N` / `FANOUT_SPEND_CAP` | `4` / `$8/site` | §6 best-of-N width + the aggregate fan-out $ ceiling |
 | `JOBCRAWLER_FANOUT_RETRIES` | `= FANOUT_N` | §6 redraws for LM/adapter-dead attempts (a failure never eats a comparison slot; attempts ≤ 2N) |
+| `JOBCRAWLER_BOOTSTRAP_BUDGET` | `60s` | §4.9 per-tick time budget for the cold-start bootstrap pass (over budget → roster defers to next tick) |
 | `JOBCRAWLER_SOLVER` / `FLARESOLVERR_URL` / `JOBCRAWLER_CLEARANCE_TTL` / `JOBCRAWLER_EGRESS_PROXY` | `none` / — / `30m` / — | §4.10 challenge backend + clearance + IP/UA-pinned egress |
 | `JOBCRAWLER_NOTIFY_WEBHOOK` / `NOTIFY_TIMEOUT` | — / `10s` | optional operator webhook for autonomous actions + match alerts (§4.7/§4.9) |
 

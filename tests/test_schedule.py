@@ -1164,6 +1164,74 @@ async def test_a_raising_bootstrap_does_not_abort_the_tick() -> None:
     assert healer.assessed == ["new"]  # attempted, raised, tick survived
 
 
+async def test_bootstrap_over_budget_defers_and_the_next_tick_crawls_the_promoted() -> (
+    None
+):
+    # The cold-start wave pattern: a generation is many minutes of wall time — over
+    # any sane budget — so tick 1 bootstraps ONE site and defers the rest of the
+    # roster. Tick 2 then crawls the freshly promoted crawler first (due: it has no
+    # prior run) before continuing the roster. Unbudgeted, one tick held the whole
+    # roster back-to-back and every promoted crawler sat idle until the wave ended.
+    clock = _Clock(T0)
+    generated: set[str] = set()
+
+    class _PromotingHealer(_RecordingHealer):
+        async def assess(self, slug: str) -> HealthState:
+            clock.now += timedelta(minutes=20)  # generation-scale wall time
+            generated.add(slug)
+            return await super().assess(slug)
+
+    crawled: list[str] = []
+
+    async def crawl(site: Site) -> CrawlSummary:
+        crawled.append(site.slug)
+        return await _ok_crawl(site)
+
+    healer = _PromotingHealer()
+    sched = Scheduler(
+        [Site(slug="a", url="https://a.com"), Site(slug="b", url="https://b.com")],
+        store=StateStore(":memory:"),
+        crawl=crawl,
+        healer=healer,
+        has_crawler=lambda slug: slug in generated,
+        autonomy=True,
+        regen_check="off",
+        heal_cooldown="off",
+        clock=clock,
+        bootstrap_budget=60.0,
+    )
+
+    await sched.tick()
+    assert healer.assessed == ["a"]  # one generation trips the budget; b deferred
+    assert crawled == []
+
+    await sched.tick()
+    assert crawled == ["a"]  # the promoted crawler's first crawl leads the tick
+    assert healer.assessed == ["a", "b"]  # then the roster continues
+
+
+async def test_bootstrap_under_budget_sweeps_the_whole_roster() -> None:
+    # The budget only bites after real generation work: cheap assesses (a site in
+    # generation-failed backoff is a fast no-op) sweep through in a single tick.
+    clock = _Clock(T0)
+    healer = _RecordingHealer()  # never advances the clock: every assess is free
+    sched = Scheduler(
+        [Site(slug="a", url="https://a.com"), Site(slug="b", url="https://b.com")],
+        store=StateStore(":memory:"),
+        crawl=_ok_crawl,
+        healer=healer,
+        has_crawler=lambda slug: False,
+        autonomy=True,
+        regen_check="off",
+        heal_cooldown="off",
+        clock=clock,
+        bootstrap_budget=60.0,
+    )
+
+    await sched.tick()
+    assert healer.assessed == ["a", "b"]
+
+
 # -- Site model: job-domain fields (§4.6/§4.9) -------------------------------
 
 
