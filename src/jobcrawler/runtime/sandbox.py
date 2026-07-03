@@ -6,8 +6,11 @@ then exec'd in a subprocess with CPU + memory rlimits and a hard wall-clock
 timeout. Network egress can only go through the ``ctx`` the child is handed — the
 AST allowlist already bans ``socket``/``os``/``open`` *and* ``httpx``, so a
 candidate cannot open its own connection. The child returns a **size-bounded**
-``CandidateResult`` as JSON (capped samples, truncated bodies, exception =
-type + message + traceback tail) so it survives RLM's output truncation.
+``CandidateResult`` as JSON (capped sample count, pipe-bounded description text,
+exception = type + message + traceback tail) — bounded against a pathological
+candidate, but *faithful*: the §6 gate and §4.11 axes grade these exact strings.
+The RLM-facing preview clip lives in the ``validate_crawler`` tool (§4.3), which
+owns the bridge's output budget.
 
 ``replay`` serves recorded HTTP to the child for the offline metric (§4.11) so it
 never touches the network; omit it for live generation against the real site.

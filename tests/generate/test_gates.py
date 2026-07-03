@@ -607,6 +607,33 @@ def test_same_title_region_clones_pass() -> None:
     assert gate.passed, gate.reason
 
 
+def test_long_shared_intro_with_distinct_role_text_passes() -> None:
+    # The GitLab shape that motivated faithful sandbox samples: every posting opens
+    # with the SAME ~1.4k-char company intro, then carries substantial role-specific
+    # text. On full descriptions the intro is a shared boilerplate block (stripped
+    # from the residual) and no pair is byte-identical — the gate must pass. Graded
+    # on clipped heads instead, all five would collapse into "identical
+    # descriptions" and every honest crawler for the board would be rejected.
+    intro = (
+        "GitLab is an all-remote DevSecOps company where everyone can contribute. " * 19
+    )
+    samples = [
+        _job(
+            f"https://example.com/{i}",
+            intro + "\n\n" + f"Role {i}: you will own subsystem {i} end to end. " * 12,
+            title=f"Engineer {i}",
+        )
+        for i in range(5)
+    ]
+    gate = check_completeness(
+        _result(item_count=9, samples=samples),
+        min_items=5,
+        min_description_chars=400,
+        allowed_hosts=_HOSTS,
+    )
+    assert gate.passed, gate.reason
+
+
 def test_all_samples_one_posting_fails() -> None:
     # Every sample is the SAME (title, description) — one job echoed n times is a
     # broken enumeration even though the same-title clone rule tolerates each pair.

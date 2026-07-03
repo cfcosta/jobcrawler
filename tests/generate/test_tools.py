@@ -202,6 +202,43 @@ def test_host_validate_tool_surfaces_missing_job_fields_and_exception() -> None:
     assert out["exception"] == {"type": "ValueError", "message": "bad board"}
 
 
+def test_host_validate_tool_clips_description_previews_with_a_marker() -> None:
+    # The tool clips sample descriptions to previews for the RLM bridge budget
+    # (§4.3) and MARKS the cut so the model cannot mistake a preview for a short —
+    # or cross-sample identical — extraction. Presentation only: the §6 gate and
+    # §4.11 axes grade the sandbox's full text, which stays unclipped upstream.
+    def fake_validate(source: str, **_kw: object) -> CandidateResult:
+        return CandidateResult(
+            item_count=2,
+            samples=[
+                {
+                    "url": "https://example.com/a",
+                    "title": "Backend Engineer",
+                    "description": "a" * 1000,
+                },
+                {
+                    "url": "https://example.com/b",
+                    "title": "Frontend Engineer",
+                    "description": "b" * 200,
+                },
+            ],
+            schema_errors=[],
+            pages_fetched=1,
+        )
+
+    ctx = _ctx(lambda r: httpx.Response(404), host="example.com")
+    _f, _fd, _sm, validate = make_host_tools(
+        ctx, {"example.com"}, validate_fn=fake_validate
+    )
+    out = cast(dict, validate("SITE='x'\ndef crawl(ctx):\n    return []\n"))
+    long_desc, short_desc = (
+        cast(str, s["description"]) for s in cast("list[dict]", out["samples"])
+    )
+    assert long_desc.startswith("a" * 600)
+    assert "+400 extracted chars are graded in full" in long_desc
+    assert short_desc == "b" * 200  # under the preview head: untouched
+
+
 # -- §8 observed-host evidence --------------------------------------------------
 
 

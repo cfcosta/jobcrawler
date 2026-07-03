@@ -27,7 +27,15 @@ from jobcrawler.runtime.live_ctx import build_live_ctx
 from jobcrawler.runtime.safe_exec import exec_crawler
 
 _SAMPLE_CAP = 5
-_DESCRIPTION_PREVIEW = 600  # per-sample description head shown to the §6 scorer
+# Samples are §6 *evidence*: the completeness gate and the §4.11 description axis
+# grade these exact strings, so they must be faithful to what the crawler yielded.
+# The cap only bounds the child→parent JSON pipe against a pathological candidate
+# (a multi-megabyte "description") and sits far above real posting text — boards
+# that stamp a shared intro on every role (GitLab's runs ~1.4k chars) must not
+# collapse to identical samples under the clip, or the identity gate rejects
+# honest crawlers. The model-facing preview clip lives in the `validate_crawler`
+# *tool* (generate/tools.py), which owns the RLM bridge budget (§4.3).
+_DESCRIPTION_CAP = 20_000
 _ERROR_CAP = 10
 
 
@@ -100,7 +108,7 @@ def main() -> None:
                         # candidate at the gate.
                         "company": job.company,
                         "location": job.location,
-                        "description": job.description[:_DESCRIPTION_PREVIEW],
+                        "description": job.description[:_DESCRIPTION_CAP],
                     }
                 )
         result["item_count"] = count

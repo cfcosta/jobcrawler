@@ -38,18 +38,25 @@ def test_good_candidate_yields_items() -> None:
 
 
 def test_samples_and_bodies_are_size_bounded() -> None:
+    # Sample descriptions cross the child→parent pipe FAITHFULLY — they are the §6
+    # evidence the gate and description axis grade, and clipping them here once
+    # collapsed boards that stamp a long shared intro on every role into
+    # "identical descriptions" rejections of honest crawlers. Only a pathological
+    # description hits the pipe bound, and the sample *count* stays capped.
     big = """
 from jobcrawler.runtime.contract import Job
 SITE = "https://example.com"
 def crawl(ctx):
     for i in range(50):
+        desc = "y" * 5000 if i % 2 == 0 else "z" * 30000
         yield Job(url=f"{SITE}/{i}", title="T", company="Acme", location="Remote",
-                  description="y" * 5000, source="s")
+                  description=desc, source="s")
 """
     result = validate_crawler(big, allowed_hosts={"example.com"}, timeout=20.0)
     assert result.item_count == 50
     assert len(result.samples) == 5  # capped
-    assert len(result.samples[0]["description"]) == 600  # truncated
+    assert len(result.samples[0]["description"]) == 5000  # faithful, not previewed
+    assert len(result.samples[1]["description"]) == 20_000  # pipe-bounded
 
 
 def test_ast_gate_blocks_banned_code_before_running() -> None:

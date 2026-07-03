@@ -320,6 +320,27 @@ def _collect_strings(node: object, out: list[str]) -> None:
             _collect_strings(item, out)
 
 
+# Per-sample description head shown to the model. Presentation only: the §6 gate
+# and §4.11 axes grade the sandbox's full (pipe-bounded) text — this clip exists so
+# five samples fit the RLM bridge's 10k-char output budget (§4.3) instead of being
+# head+tail-spliced into unparseable JSON. The marker keeps the model from reading
+# a preview as a short (or cross-sample identical) extraction.
+_DESCRIPTION_PREVIEW = 600
+
+
+def _preview_sample(sample: dict) -> dict:
+    """Clip one sample's description for the RLM-facing ``validate_crawler`` dict."""
+    description = str(sample.get("description") or "")
+    if len(description) <= _DESCRIPTION_PREVIEW:
+        return sample
+    hidden = len(description) - _DESCRIPTION_PREVIEW
+    return {
+        **sample,
+        "description": description[:_DESCRIPTION_PREVIEW]
+        + f" …[preview clipped; +{hidden} extracted chars are graded in full]",
+    }
+
+
 def _sandbox_validate() -> Callable[..., CandidateResult]:
     """Bind the §4.4 sandbox validator lazily (keeps this module import-light).
 
@@ -375,9 +396,10 @@ def make_host_tools(
     def validate_crawler(source: str) -> dict[str, object]:
         """Run a candidate crawler in the §4.4 sandbox and report what it yielded.
 
-        Returns the positions found (``item_count`` + capped ``samples``), any
-        ``schema_errors`` naming missing or invalid Job fields (url / title /
-        company / location / description / source), and any top-level
+        Returns the positions found (``item_count`` + capped ``samples`` whose
+        descriptions are clipped previews — the scorer grades the full extracted
+        text), any ``schema_errors`` naming missing or invalid Job fields (url /
+        title / company / location / description / source), and any top-level
         ``exception`` — the write → validate → fix signal to use before SUBMIT."""
         # Bind the sandbox validator at call time (not construction) so building the
         # tools for pure discovery never imports the subprocess-sandbox machinery.
@@ -385,7 +407,7 @@ def make_host_tools(
         result = run_in_sandbox(source, allowed_hosts=hosts, timeout=validate_timeout)
         return {
             "item_count": result.item_count,
-            "samples": result.samples,
+            "samples": [_preview_sample(sample) for sample in result.samples],
             "schema_errors": result.schema_errors,
             "exception": None
             if result.exception is None
