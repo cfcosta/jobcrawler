@@ -592,7 +592,12 @@ operates the whole loop itself rather than relying on an external cron.
 - **Regeneration & re-optimization triggers.** A timer (`JOBCRAWLER_REGEN_CHECK`) evaluates staleness
   and enqueues regeneration (§4.8); a slow timer (`JOBCRAWLER_REOPT_CHECK`) or a trainset-growth
   threshold **hands off** the offline §4.11 job out-of-band (the scheduler never runs `.compile()`
-  in-band — a multi-hour GEPA run would violate the never-stall guarantee). Both self-modifying
+  in-band — a multi-hour GEPA run would violate the never-stall guarantee). The staleness sweep
+  covers only sites **with** a live crawler: a crawler-less site is the budgeted bootstrap's job
+  (above), and since the healer treats a missing crawler as an immediately-confirmed regenerate, a
+  sweep that included those sites would re-run the very generations the bootstrap budget deferred —
+  unpaced, and right at daemon boot, where the first sweep is always due. One generation owner per
+  site state: bootstrap owns cold-start, the sweep owns drift of the committed fleet. Both self-modifying
   triggers, plus auto-promotion and auto-adoption, are gated by the master **autonomy** brake
   (`JOBCRAWLER_AUTONOMY`, default on): `off` freezes all self-modification while the daemon keeps
   crawling, matching, and recording signals.

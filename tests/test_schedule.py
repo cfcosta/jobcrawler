@@ -384,6 +384,31 @@ async def test_regen_tick_skips_disabled_sites() -> None:
     assert await sched.regen_tick() == {}
 
 
+async def test_regen_tick_skips_crawlerless_sites() -> None:
+    # A §4.2 cold-start belongs to the budgeted bootstrap pass in tick(): the healer
+    # treats a missing crawler as an immediately-confirmed regenerate, so a sweep that
+    # included crawler-less sites would run the very generations the bootstrap budget
+    # just deferred — unpaced, and on daemon boot (first sweep is always due) it held
+    # the loop for a whole cold roster while promoted crawlers sat uncrawled.
+    store = _stale_store("s0")
+
+    async def regenerate(slug: str) -> RegenOutcome:
+        raise AssertionError("a crawler-less site must not be swept into regeneration")
+
+    async def reprobe(slug: str) -> int:
+        return 0
+
+    sched = Scheduler(
+        [Site(slug="s0", url="https://x.com")],
+        store=store,
+        crawl=_ok_crawl,
+        healer=SelfHealer(store, reprobe=reprobe, regenerate=regenerate),
+        clock=lambda: T0,
+        has_crawler=lambda slug: False,
+    )
+    assert await sched.regen_tick() == {}
+
+
 def test_regen_due_respects_the_cadence() -> None:
     store = _stale_store()
     sched = _sched(

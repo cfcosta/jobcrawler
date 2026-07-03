@@ -564,17 +564,25 @@ class Scheduler:
             self._next_regen = now + self._regen_interval
 
     async def regen_tick(self) -> dict[str, HealthState]:
-        """Assess every enabled site for staleness, regenerating the stale (§4.8).
+        """Assess every enabled site with a live crawler for staleness (§4.8).
 
         One orchestrator drives both crawling and regeneration; the healer persists
         each resulting state (so ``list`` can surface it and a generation-failed
         site is not re-enqueued into the same failing generation).
+
+        Crawler-less sites are skipped: a §4.2 cold-start belongs to the budgeted
+        bootstrap pass in :meth:`tick`, and the healer treats a missing crawler as
+        an immediately-confirmed regenerate — a sweep that included those sites
+        would run the very generations the bootstrap budget just deferred, unpaced.
+        The first sweep fires on daemon boot (``_next_regen`` starts unset), which
+        made this real: one restart into a cold roster held the loop for the whole
+        roster's generations while freshly promoted crawlers sat uncrawled.
         """
         if self._healer is None:
             return {}
         states: dict[str, HealthState] = {}
         for site in self._sites:
-            if not site.enabled:
+            if not site.enabled or not self._has_crawler(site.slug):
                 continue
             try:
                 states[site.slug] = await self._healer.assess(site.slug)
