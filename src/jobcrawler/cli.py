@@ -22,7 +22,6 @@ wiring is thin over already-tested backends; the live paths are correct-by-const
 from __future__ import annotations
 
 import argparse
-import ast
 import asyncio
 import json
 import logging
@@ -54,6 +53,7 @@ from jobcrawler.metrics import (
     transition_events,
 )
 from jobcrawler.profile import ProfileNotFound, load_profile
+from jobcrawler.runtime.contract import allowed_hosts_of
 from jobcrawler.runtime.runner import (
     CrawlSummary,
     crawl_site_isolated,
@@ -64,7 +64,6 @@ from jobcrawler.schedule import Scheduler, Site
 from jobcrawler.sites import find_site, load_sites
 from jobcrawler.state import PositionRecord, RunRecord, StateStore
 from jobcrawler.trainset import record_failure
-from jobcrawler.urls import normalize_host
 
 if TYPE_CHECKING:
     from jobcrawler.match import Matcher
@@ -101,18 +100,6 @@ def _has_live_crawler(slug: str, crawlers_dir: Path = _CRAWLERS_DIR) -> bool:
     count — it isn't live yet — so a site stays in the bootstrap path until promoted.
     """
     return _crawler_file(slug, crawlers_dir).exists()
-
-
-def _site_url_of(source: str) -> str:
-    """Read the module-level SITE constant from crawler source without importing."""
-    for node in ast.parse(source).body:
-        if isinstance(node, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id == "SITE" for t in node.targets
-        ):
-            value = node.value
-            if isinstance(value, ast.Constant) and isinstance(value.value, str):
-                return value.value
-    return ""
 
 
 def _db_path() -> str:
@@ -405,10 +392,8 @@ def validate_one(slug: str, *, crawlers_dir: Path = _CRAWLERS_DIR) -> CandidateR
     fetch that could over-collect paths production's robots policy would refuse.
     """
     source = _crawler_file(slug, crawlers_dir).read_text()
-    host = normalize_host(_site_url_of(source))
-    return validate_crawler(
-        source, allowed_hosts={host} if host else set(), polite=True
-    )
+    # SITE + declared EXTRA_HOSTS (§8): exactly the allowlist admission gated.
+    return validate_crawler(source, allowed_hosts=allowed_hosts_of(source), polite=True)
 
 
 # -- crawl -------------------------------------------------------------------
@@ -486,11 +471,10 @@ def crawl_one(
     ``None`` is crawl-only mode (no ``PROFILE.md``).
     """
     source = _crawler_file(site.slug, crawlers_dir).read_text()
-    host = normalize_host(_site_url_of(source))
     return crawl_site_isolated(
         site.slug,
         source,
-        {host} if host else set(),
+        allowed_hosts_of(source),  # SITE + declared EXTRA_HOSTS (§8)
         store,
         matcher=matcher,
         timeout=config.crawl_timeout(),  # wall-clock budget (§4.4)
@@ -880,10 +864,9 @@ def _probe(slug: str, *, crawlers_dir: Path = _CRAWLERS_DIR) -> int:
         source = _crawler_file(slug, crawlers_dir).read_text()
     except OSError:
         return 0  # no committed script → confirmed failure, not a transient blip
-    host = normalize_host(_site_url_of(source))
     return probe_isolated(
         source,
-        {host} if host else set(),
+        allowed_hosts_of(source),  # SITE + declared EXTRA_HOSTS (§8)
         min_description_chars=config.min_description_chars(),
         expired_markers=config.expired_markers(),  # count only live (§4.7) postings
         timeout=config.crawl_timeout(),

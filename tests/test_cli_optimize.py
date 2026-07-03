@@ -246,3 +246,41 @@ def test_no_adopt_does_not_flip_the_pointer_or_notify(
     assert events == []
     assert generator_pointer.active_generator_path() is None  # pointer untouched
     assert generator_pointer.read_adoption() is None  # no probation marker either
+
+
+# -- §8: the metric's per-candidate allowlist ----------------------------------
+
+
+def test_candidate_hosts_bound_declared_by_corpus_evidence() -> None:
+    from jobcrawler.cli_optimize import _candidate_hosts
+
+    carrier = dspy.Example(
+        site_url="https://jobs.example.com/",
+        corpus={"home": 'see <script src="https://api.partner.net/sdk.js">'},
+    ).with_inputs("site_url", "corpus")
+    src = (
+        'SITE = "https://jobs.example.com"\n'
+        'EXTRA_HOSTS = ("api.partner.net", "unvouched.net")\n'
+        "def crawl(ctx):\n    yield 1\n"
+    )
+    # The evidence-backed declaration joins; the unvouched one is dropped — an
+    # optimizer candidate can't authorize a host merely by declaring it.
+    assert _candidate_hosts(src, carrier) == {
+        "jobs.example.com",
+        "api.partner.net",
+    }
+
+
+def test_candidate_hosts_fall_back_to_registry_on_unparseable_source() -> None:
+    from jobcrawler.cli_optimize import _candidate_hosts
+
+    carrier = dspy.Example(site_url="https://jobs.example.com/", corpus={})
+    assert _candidate_hosts("def crawl(ctx:\n", carrier) == {"jobs.example.com"}
+
+
+def test_candidate_hosts_skip_evidence_walk_when_nothing_is_declared() -> None:
+    from jobcrawler.cli_optimize import _candidate_hosts
+
+    carrier = dspy.Example(site_url="https://jobs.example.com/")  # no corpus field
+    src = 'SITE = "https://jobs.example.com"\ndef crawl(ctx):\n    yield 1\n'
+    assert _candidate_hosts(src, carrier) == {"jobs.example.com"}

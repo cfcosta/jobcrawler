@@ -8,7 +8,10 @@
 #   name          human label for `jobcrawl list` / status.
 #   url           the endpoint/page the crawler starts from. It also fixes the
 #                 SSRF host allowlist (fetches must stay on this host), so it
-#                 points straight at the ATS API host where there is one.
+#                 points straight at the ATS API host where there is one. A
+#                 generated crawler may widen its own allowlist only through an
+#                 EXTRA_HOSTS declaration admitted against site-served evidence
+#                 (§6 gate-1(b) / §8) — never through this registry field.
 #   render        max fetch tier (auto|static|browser|solver, §4.10). All the
 #                 sources below are plain JSON/RSS, so `static` (no browser).
 #   hints         free-text steer for the generator — the probe-verified shape of
@@ -187,3 +190,248 @@
     <item> title is "Company: Role" (split off the company); link, full
     description, pubDate (posted_at), expiry when present. Window feed —
     enumerates_all:false.
+- slug: wwr_frontend
+  name: We Work Remotely — Front-End
+  url: https://weworkremotely.com/categories/remote-front-end-programming-jobs.rss
+  render: static
+  enumerates_all: false
+  hints: >-
+    We Work Remotely Front-End category RSS — the last uncovered programming
+    category (back-end / full-stack / devops already registered; WWR serves no
+    golang or rust category feed — those paths 301-redirect). Same shape as
+    wwr_backend: each <item> title is "Company: Role" (split the company off the
+    first ": "); <link> is the url; <description> is the full HTML body
+    (entity-escaped — html.unescape); pubDate is posted_at. Location comes from
+    the <region>/<country>/<state> elements (often partial) and <type> is
+    employment_type. The real expiry element is <expires_at> (note the _at), in
+    RFC-822 — feeds §4.9. Window feed — enumerates_all:false.
+
+# --- Multi-company aggregators, bulk API (enumerates_all: true) ---------------
+# No `company` (each posting names its own employer), but — unlike the windowed
+# feeds below — a bounded set of GET calls returns the WHOLE open board with the
+# description inline, so the §4.7 close-missing diff soundly ages out anything a
+# healthy full run no longer sees.
+- slug: myweb3jobs
+  name: MyWeb3Jobs
+  url: https://myweb3jobs.com/wp-json/wp/v2/job
+  render: static
+  hints: >-
+    WordPress REST API (public; the `job` post type has show_in_rest). Page it
+    with ?per_page=100&page=N, N=1.. until page exceeds the X-WP-TotalPages
+    response header (~37 pages / ~3600 jobs; X-WP-Total carries the count) — that
+    bounded GET walk enumerates the whole board (enumerates_all:true). Trim the
+    payload with &_fields=id,link,date_gmt,title,content,acf. Per `job`:
+    content.rendered = full description (HTML — strip tags), title.rendered
+    (HTML-entity-escaped), `link` (url), integer `id` (external_id), date_gmt
+    (posted_at, UTC). acf.* enrichment, used only when non-empty (fields are ""
+    when unset): acf.company_name (company), acf.location, acf.remote == "1" →
+    remote (workplace_type), acf.employment_type, acf.minimum_salary /
+    acf.maximum_salary (bare numbers, no currency/period), acf.apply_url_or_email
+    (apply_url only when it is a URL, not a bare email). No expiry field. Much of
+    this board mirrors web3.career.
+- slug: idealist
+  name: Idealist
+  url: https://NSV3AUESS7-dsn.algolia.net/1/indexes/idealist7-production
+  render: static
+  hints: >-
+    Nonprofit / social-impact job board, served from Algolia (the idealist.org
+    pages are a JS shell with no server-rendered jobs, so query the search index
+    directly — same host throughout). Algolia search-via-GET on the index ROOT
+    works with the public search key (the POST /query and GET /query forms do
+    NOT): GET the url with query params query=&hitsPerPage=1000&facetFilters=[[
+    "type:JOB"]] (URL-encode the bracketed facetFilters) and request headers
+    x-algolia-application-id: NSV3AUESS7 and x-algolia-api-key:
+    c2730ea10ab82787f2f3cc961e8c1e06. ~2700 JOB records; Algolia caps a result
+    set at 1000 and disables browse, so enumerate the whole board by slicing on
+    numericFilters over `published` (e.g. published<T, then published>=T …) into
+    sub-1000-hit buckets — a handful of GETs covers all of them
+    (enumerates_all:true). Each hit is the FULL posting: name (title), orgName
+    (company), description (full HTML — required), city / stateStr / country
+    (location), locationType (workplace_type), jobType[] (employment_type),
+    published (epoch → posted_at), objectID (external_id), and structured pay
+    salaryMinimum / salaryMaximum / salaryCurrency / salaryPeriod (HOUR|YEAR).
+    `url` is root-relative — prefix https://www.idealist.org. NB the api-key is a
+    public, rotatable search key hardcoded here; if it starts returning 403 it
+    must be re-probed from idealist.org (a different host, so the crawler cannot
+    self-refresh it).
+
+# --- Multi-company aggregators, windowed (enumerates_all: false) --------------
+# No `company`. One crawl sees only a recent slice (a listing/sitemap head, not
+# the whole back-catalogue), so the §4.7 diff would false-close roles that merely
+# scrolled off — closure defers to the §4.9 recheck loop (detail 404/410, passed
+# validThrough/deadline). Each posting's full description is fetched per-detail on
+# the SAME host (§8), from schema.org JobPosting ld+json unless noted.
+- slug: web3career
+  name: Web3.career
+  url: https://web3.career/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Crypto job aggregator. Windowed crawl: fetch the newest-first listing at
+    ?page=1 (and ?page=2 if needed) — do NOT walk sitemap2.xml, which lists ~26k
+    URLs including postings expired since 2022. Each listing links to detail pages
+    /<slug>/<id>; fetch each and parse the schema.org JobPosting in <script
+    type="application/ld+json"> (a page may carry several ld+json blocks, one
+    malformed — the JobPosting one parses cleanly). Fields: .title,
+    .hiringOrganization.name (company), .jobLocation.address.* (location),
+    .description (full HTML — required), .datePosted (posted_at), .validThrough
+    (expires_at, §4.9). url + external_id from the detail path (trailing integer =
+    external_id). Structured pay in .baseSalary (.currency, .value.minValue /
+    .maxValue, .value.unitText = period). employmentType is a bare string;
+    jobLocationType TELECOMMUTE = remote. No RSS exists; Cloudflare-fronted but a
+    browser User-Agent passes.
+- slug: cryptojobslist
+  name: CryptoJobsList
+  url: https://cryptojobslist.com/sitemap-jobs.xml
+  render: static
+  enumerates_all: false
+  hints: >-
+    Crypto job aggregator (Next.js). Windowed crawl: GET sitemap-jobs.xml (one
+    file, ~500 /jobs/<slug> URLs each with a <lastmod>), sort by <lastmod>
+    descending and fetch only the freshest slice of detail pages — not all of
+    them. Each detail page carries the posting in a schema.org JobPosting inside
+    the ld+json @graph array: .title, .hiringOrganization.name (company),
+    .jobLocation.address.addressLocality (location), .description (full HTML —
+    required), .url, .datePosted (posted_at), .validThrough (expires_at, §4.9).
+    external_id = the /jobs/ slug. Structured pay in .baseSalary (.currency,
+    .value.minValue/.maxValue, .value.unitText). employmentType is an array (e.g.
+    ["FULL_TIME"]); jobLocationType TELECOMMUTE = remote. Ignore the RSS: /rss
+    308-redirects to api.cryptojobslist.com (a different host) and is an empty
+    feed. Cloudflare-fronted but a browser User-Agent passes.
+- slug: sailonchain
+  name: SailOnchain
+  url: https://sailonchain.com/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Crypto job aggregator (Next.js App Router). Windowed crawl: the homepage
+    embeds a "Latest Crypto Jobs" ItemList (~20 newest) — take those /jobs/<slug>
+    links (or the freshest slice of /sitemaps/jobs.xml, which lists all ~2100) and
+    fetch each detail page — not the whole sitemap. Each detail page's schema.org
+    JobPosting sits in <script type="application/ld+json"> and is
+    HTML-ENTITY-ESCAPED — html.unescape before json.loads. Fields: .title,
+    .hiringOrganization.name (company), .jobLocation[].address.addressLocality +
+    .applicantLocationRequirements.name (location), .description (full text —
+    required), .url, .identifier.value (external_id = slug), .datePosted
+    (posted_at), .validThrough (expires_at, §4.9). Structured pay in .baseSalary
+    (.currency, .value.minValue/.maxValue, .value.unitText) when pay is stated.
+    .employmentType (e.g. FULL_TIME); .jobLocationType TELECOMMUTE=remote /
+    ON_SITE / HYBRID. Don't fetch the ?_rsc= data URLs (robots-disallowed).
+- slug: letsgetrusty
+  name: LetsGetRusty Jobs
+  url: https://jobs.letsgetrusty.com/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Rust job board (Astro SSR). Windowed crawl: fetch the newest-first listing
+    ?page=1 (10 jobs/page, ~29 pages total — take just the freshest page or two,
+    not all). The list-page JobPosting ld+json descriptions are TRUNCATED, so for
+    each job url (?job=<recID>) fetch the detail page and read its standalone
+    JobPosting ld+json: .title, .hiringOrganization.name (company),
+    .jobLocation.address.addressCountry + .applicantLocationRequirements.name
+    (location), .description (full markdown — required, detail page only),
+    .datePosted (posted_at), .validThrough (expires_at, §4.9), .employmentType,
+    .jobLocationType TELECOMMUTE=remote. external_id = the Airtable recID in the
+    url. baseSalary is present only occasionally. apply_url is NOT in the ld+json
+    — it is the URL inside the card's onclick window.open(...).
+- slug: levelsfyi
+  name: Levels.fyi Jobs
+  url: https://www.levels.fyi/jobs
+  render: static
+  enumerates_all: false
+  hints: >-
+    Levels.fyi jobs (Next.js SSR). Windowed crawl: GET /jobs and parse <script
+    id="__NEXT_DATA__"> → props.pageProps.initialJobsData.results[].jobs[].id —
+    the SSR page hardcodes a small window (~26 jobs) and IGNORES offset/limit
+    params, so this is the freshest slice, not the full board (the full pager is
+    an AES-encrypted api.levels.fyi endpoint — do not use it). For each id, GET
+    /jobs?jobId=<id> and parse __NEXT_DATA__ → props.pageProps.initialJobDetails:
+    .title, .companyInfo.name (company), .locations[] (location), .description
+    (full HTML — required, detail only), .postingDate (posted_at), .expiryDate
+    (expires_at, §4.9), .employmentTypes[], .workArrangement (remote/hybrid/
+    onsite), .applicationUrl (apply_url). Structured pay: .minBaseSalary /
+    .maxBaseSalary / .baseSalaryCurrency (annual amounts, no explicit period —
+    treat as year). external_id = .id.
+- slug: aijobs
+  name: AIJobs.net
+  url: https://aijobs.net/
+  render: static
+  enumerates_all: false
+  hints: >-
+    AI/ML job aggregator (server-rendered HTML). Windowed crawl: GET ?page=1
+    (50 jobs/page, newest-first) — take the freshest page or two, not all ~925.
+    The listing gives each job's /job/<slug>-<id>/ link plus inline company
+    (a[href^="/company/"]), salary (span.text-bg-success e.g. "USD 36K-36K", or
+    span.text-bg-secondary marked "(estimate)"), workplace (span.text-success
+    "Fully remote"/"Hybrid") and employment type — but the DESCRIPTION is only on
+    the detail page, so fetch each /job/... and extract the job-body HTML
+    (required). url = /job/<slug>-<id>/; external_id = the trailing numeric id.
+    No expiry and only relative posted dates are exposed (leave posted_at /
+    expires_at None; §4.9 recheck closes on the detail 404 when a job is pulled).
+    The JSON/CSV export is login-walled — use the pages. robots allows all but
+    /account.
+- slug: impactpool
+  name: Impactpool
+  url: https://www.impactpool.org/jobs
+  render: static
+  enumerates_all: false
+  hints: >-
+    International / NGO / UN job board (Rails, server-rendered HTML — no JSON,
+    RSS, or JSON-LD anywhere). Windowed crawl: GET the newest-first /jobs listing
+    and take the freshest /jobs/<id> links (sitemap.xml lists all ~3700 but has no
+    <lastmod>, so prefer listing order — don't walk it all). For each /jobs/<id>
+    parse the HTML: title from the <h1>; company from the <meta property=
+    "og:title"> content (the employer org, NOT the job title); description from
+    the rendered job-body text (required, usually thousands of chars); location
+    from the country / duty-station labels in the body; expires_at from the
+    "Application deadline: <date>" line; employment_type from the "Contract Type:"
+    line. Salary and posted_at are usually absent (UN-style grade postings, e.g.
+    "Grade: P-3") — leave None. external_id = the numeric path id; §4.9 recheck
+    closes on the detail 404 / passed deadline.
+
+# --- Getro-platform VC portfolio boards (windowed — enumerates_all: false) ----
+# Next.js SSR on the board host; every posting is fully server-rendered into the
+# detail page's __NEXT_DATA__. NEVER touch api.getro.com — its robots.txt is a
+# blanket `Disallow: /` for every agent, so production politeness (§4.5) refuses
+# it (and the §8 robots-at-admission probe keeps it out of EXTRA_HOSTS evidence);
+# everything needed lives on the board host itself. No JSON-LD on these pages.
+- slug: madrona
+  name: Madrona Portfolio Jobs
+  url: https://jobs.madrona.com/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Getro-platform board for Madrona's portfolio companies. Windowed crawl: GET
+    /sitemap.xml (robots-advertised; ~880 job URLs shaped
+    /companies/<org-slug>/jobs/<id>-<job-slug>, each <url> carrying a real
+    <lastmod>), sort the job <loc>s by <lastmod> descending and fetch only the
+    freshest slice — lastmods reach back to 2022, so never walk it all. Each
+    detail page embeds the posting in <script id="__NEXT_DATA__"> →
+    props.pageProps.initialState.jobs.currentJob: .title, .description (full
+    HTML, thousands of chars — strip tags), .organization.name (company),
+    .locations[].name (join into one string), .postedAt / .expiresAt ISO
+    (posted_at / expires_at, §4.9), .employmentTypes[], and structured pay in
+    .compensationAmountMinCents / MaxCents (divide by 100) +
+    .compensationCurrency + .compensationPeriod — set the salary quartet only
+    when the cents fields are non-null (period_not_defined ⇒ leave period None).
+    Job.url = the board detail URL itself; currentJob.url is the EXTERNAL
+    ATS/LinkedIn link → apply_url. external_id = the numeric id prefixing the
+    job slug. Skip a posting whose .status != "active" (filled roles linger in
+    the sitemap). NEVER fetch api.getro.com (robots-forbidden, see section note).
+
+- slug: solana
+  name: Solana Ecosystem Jobs
+  url: https://jobs.solana.com/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Getro-platform board for Solana ecosystem companies. Same shape as the
+    madrona entry: GET /sitemap.xml (~340 /companies/<org>/jobs/<id>-<slug> job
+    URLs with real <lastmod>s), sort by <lastmod> descending, fetch only the
+    freshest slice of detail pages, and read each posting from __NEXT_DATA__ →
+    props.pageProps.initialState.jobs.currentJob (.title, .description full
+    HTML, .organization.name = company, .locations[].name, .postedAt/.expiresAt,
+    .employmentTypes[], compensation*Cents ÷ 100 + currency + period when
+    non-null). Job.url = the board detail URL; currentJob.url (external ATS
+    link) → apply_url; external_id = the numeric id prefix; skip .status !=
+    "active". NEVER fetch api.getro.com (robots-forbidden, see section note).

@@ -25,12 +25,16 @@ subprocess-sandbox machinery.
 
 from __future__ import annotations
 
+import json
+import re
 from collections.abc import Callable, Collection, Iterable
 from html.parser import HTMLParser
 from typing import TYPE_CHECKING
 from urllib.parse import urljoin, urlsplit
 
 from jobcrawler.runtime.contract import Ctx
+from jobcrawler.runtime.ssrf import SsrfError, check_url
+from jobcrawler.urls import host_on_domain, normalize_host
 
 if TYPE_CHECKING:  # type-only: keeps this module import-light (no scoring at runtime)
     from jobcrawler.generate.scoring import CandidateResult
@@ -229,6 +233,93 @@ def ats_api_candidates(base_url: str) -> list[str]:
     ]
 
 
+# -- observed-host evidence (§8) ----------------------------------------------
+
+# Literal ``https://<host>`` tokens in served bytes — the direct evidence channel.
+_HOST_LITERAL_RE = re.compile(
+    r"https?://([A-Za-z0-9][A-Za-z0-9.-]{1,251}[A-Za-z0-9])", re.ASCII
+)
+
+# Board-platform host map (§8): a site built on one of these platforms loads its
+# postings from a documented API host the served HTML may never name *literally* —
+# the client constructs it in JS. Observed empirically on Getro boards
+# (jobs.madrona.com / jobs.solana.com): the HTML names cdn.getro.com assets 88×
+# while the postings ride api.getro.com, which appears 0 times. Purely mechanical,
+# TCB-owned knowledge — the cross-host sibling of ``ats_api_candidates``.
+_PLATFORM_API_HOSTS: tuple[tuple[str, str], ...] = (("getro.com", "api.getro.com"),)
+
+
+def observed_hosts(texts: Iterable[str], base_url: str) -> list[str]:
+    """Hosts the site's own served bytes vouch for — the §8 EXTRA_HOSTS evidence.
+
+    Two channels, both computed by trusted host code over the prefetched corpus,
+    never by the model: literal ``https://<host>`` tokens in ``texts``, and the
+    platform map above (plus the known-ATS API hosts of
+    :func:`ats_api_candidates`). The site's own host and its subdomains are
+    excluded — they are already the allowlist, not "extra" — and so is anything
+    the fixed SSRF kernel denies: a page that names ``metadata.google.internal``
+    never turns that into evidence. Platform-implied hosts sort first (they carry
+    the strongest signal; callers bound how many candidates they probe), then
+    literals alphabetically.
+
+    This is *evidence*, not authorization: gate-1(b) admits a declared host only
+    against this set, and the fixed runtime enforcement (SSRF kernel per hop,
+    robots, pacing, page budget) applies to every host regardless of provenance.
+    """
+    base_host = normalize_host(base_url)
+    literals: set[str] = set()
+    for text in texts:
+        literals.update(h.lower().strip(".") for h in _HOST_LITERAL_RE.findall(text))
+    platform = {
+        api
+        for suffix, api in _PLATFORM_API_HOSTS
+        if any(h == suffix or h.endswith("." + suffix) for h in literals)
+    }
+    platform.update(
+        normalize_host(candidate) for candidate in ats_api_candidates(base_url)
+    )
+
+    def eligible(host: str) -> bool:
+        if not host or "." not in host:
+            return False
+        if base_host and host_on_domain(host, (base_host,)):
+            return False  # already the allowlist; not "extra"
+        try:
+            check_url(f"https://{host}/", {host})
+        except SsrfError:
+            return False  # kernel-denied names are never evidence
+        return True
+
+    ranked = sorted(h for h in platform if eligible(h))
+    ranked += sorted(h for h in literals - platform if eligible(h))
+    return ranked
+
+
+def corpus_host_evidence(corpus: object, base_url: str) -> list[str]:
+    """The §8 EXTRA_HOSTS evidence for a site, from its prefetched corpus (§4.2).
+
+    Walks the JSON-primitive corpus collecting every string it serves (keys too —
+    the ``apis`` map is keyed by URL) and hands them to :func:`observed_hosts`.
+    The one entry point generation and optimize share, so the evidence rule can't
+    drift between them.
+    """
+    texts: list[str] = []
+    _collect_strings(corpus, texts)
+    return observed_hosts(texts, base_url)
+
+
+def _collect_strings(node: object, out: list[str]) -> None:
+    if isinstance(node, str):
+        out.append(node)
+    elif isinstance(node, dict):
+        for key, value in node.items():
+            _collect_strings(key, out)
+            _collect_strings(value, out)
+    elif isinstance(node, (list, tuple)):
+        for item in node:
+            _collect_strings(item, out)
+
+
 def _sandbox_validate() -> Callable[..., CandidateResult]:
     """Bind the §4.4 sandbox validator lazily (keeps this module import-light).
 
@@ -263,9 +354,12 @@ def make_host_tools(
     """
     hosts = set(allowed_hosts)
 
-    def fetch(url: str) -> str:
-        """Fetch an on-domain URL and return its text."""
-        return ctx.fetch(url)
+    def fetch(url: str, method: str = "GET", payload: str = "") -> str:
+        """Fetch an allowed URL and return its text. For a JSON API that only
+        answers POST (a board search endpoint), pass method="POST" and the JSON
+        body as `payload` (a JSON object string)."""
+        body = json.loads(payload) if payload.strip() else None
+        return ctx.fetch(url, method=method, json=body)
 
     def find_feeds(url: str) -> list[str]:
         """Discovery candidates for `url`: RSS/Atom/JSON feeds linked from the page,

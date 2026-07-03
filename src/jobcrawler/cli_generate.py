@@ -28,15 +28,18 @@ from __future__ import annotations
 import argparse
 import asyncio
 import re
+from collections.abc import Collection
 from pathlib import Path
 
 import dspy
+import httpx
 
 from jobcrawler import config
 from jobcrawler.generate.gates import (
     StabilityVerdict,
     check_ast,
     check_completeness,
+    check_host_admission,
     must_observe_failure,
     stability_verdict,
 )
@@ -45,10 +48,13 @@ from jobcrawler.generate.budget import CappedLM
 from jobcrawler.generate.generator import best_of_n, load_generator
 from jobcrawler.generate.scoring import CandidateResult, make_reward_fn
 from jobcrawler.generate.snapshot import prefetch_corpus
-from jobcrawler.generate.tools import make_host_tools
+from jobcrawler.generate.tools import corpus_host_evidence, make_host_tools
 from jobcrawler.health import RegenOutcome
+from jobcrawler.runtime.contract import declared_extra_hosts
 from jobcrawler.runtime.ctx import Ctx
+from jobcrawler.runtime.politeness import RobotsPolicy
 from jobcrawler.runtime.sandbox import validate_crawler
+from jobcrawler.runtime.ssrf import check_url
 from jobcrawler.schedule import Site
 from jobcrawler.sites import find_site, load_sites
 from jobcrawler.trainset import append_record, make_example
@@ -127,9 +133,19 @@ async def _run(targets: list[Site]) -> int:
 async def _generate_one(
     site: Site, root_lm: dspy.LM, sub_lm: dspy.LM, *, mode: str = "off"
 ) -> RegenOutcome:
-    hosts = {normalize_host(site.url)}
-    ctx = Ctx(hosts)
-    corpus = prefetch_corpus(site.url, ctx)
+    registry_hosts = {normalize_host(site.url)}
+    boot = Ctx(registry_hosts)
+    corpus = prefetch_corpus(site.url, boot)
+    # §8 inferred-host envelope: hosts the site's own served bytes vouch for (and
+    # production politeness could actually fetch) join the *generation* allowlist,
+    # so the RLM can explore a cross-host board API. Exploration ≠ admission: what
+    # the winner actually declares is gate-1(b)'s job, judged against this same
+    # evidence — and the committed crawl runs on registry + declared only.
+    evidence = _eligible_extra_hosts(corpus_host_evidence(corpus, site.url))
+    hosts = registry_hosts | evidence
+    # Same page budget as the old single-ctx flow: the boot ctx's corpus spend
+    # carries over rather than resetting.
+    ctx = Ctx(hosts, max_pages=max(0, config.max_pages() - boot.pages_fetched))
     # Boot-load the §4.11-optimized strategy if one is pinned, else baseline; the
     # live tools/sub_lm/caps are rebuilt fresh and only the strategy state reloads.
     generator = load_generator(
@@ -187,7 +203,7 @@ async def _generate_one(
     # instead steered toward full enumeration by site_features (it sees
     # expected_recent) and the must-observe "consult the sitemap" gate; the
     # count-based floor belongs at runtime, over a full crawl.
-    ok, reason = gate_winner(best, source, hosts)
+    ok, reason = gate_winner(best, source, registry_hosts, extra_evidence=evidence)
     if not ok:
         print(f"FAIL {site.slug}: {reason}")
         return RegenOutcome.FAILED
@@ -205,8 +221,61 @@ async def _generate_one(
         )
     else:
         print(f"OK {site.slug}: wrote crawlers/{site.slug}.py (score {score:.2f})")
-    _record_for_trainset(site, ctx, corpus, best, source, hosts)
+    _record_for_trainset(
+        site, ctx, corpus, best, source, _committed_hosts(source, registry_hosts)
+    )
     return outcome
+
+
+# Robots probes per generation. Platform-implied hosts rank first in the evidence
+# list, so the bound trims noise (social/CDN links a homepage names), never the
+# high-signal API-host candidates.
+_EVIDENCE_PROBE_BOUND = 8
+
+
+def _eligible_extra_hosts(candidates: list[str]) -> set[str]:
+    """Filter host evidence to what production politeness could actually fetch (§4.5).
+
+    The generation sandbox runs a bare ctx (no robots), but the scheduled crawl
+    runs the polite one — a host whose robots.txt blanket-refuses us
+    (api.getro.com is ``Disallow: /`` for every agent) would pass generation and
+    then die on its first production crawl, wedging the site in a heal loop. So
+    each candidate's robots.txt is probed up front and the forbidden are dropped
+    from evidence entirely: not explorable, not declarable. Unreachable robots
+    fails open, mirroring :class:`RobotsPolicy` in production.
+    """
+    policy = RobotsPolicy(_robots_fetch_text, user_agent=config.user_agent())
+    return {
+        host
+        for host in candidates[:_EVIDENCE_PROBE_BOUND]
+        if policy.allowed(f"https://{host}/")
+    }
+
+
+def _robots_fetch_text(url: str) -> str | None:
+    """SSRF-checked robots.txt fetch for the evidence probe (fail-open on non-200)."""
+    check_url(url, {normalize_host(url)})
+    resp = httpx.get(url, timeout=10.0, headers={"user-agent": config.user_agent()})
+    return resp.text if resp.status_code == 200 else None
+
+
+def _committed_hosts(source: str, registry_hosts: set[str]) -> set[str]:
+    """The allowlist the committed crawler will actually run under (§8).
+
+    Registry host + declared EXTRA_HOSTS — the same derivation the crawl-time
+    call sites make from the committed source (``contract.allowed_hosts_of``;
+    gate-1(b) has already pinned SITE to the registry host and bound every
+    declaration to evidence, so the two derivations coincide for anything that
+    got this far). Gating and trainset recording validate against *this*, never
+    the wider exploration envelope, so a fetch production would refuse fails at
+    admission, not at the first scheduled crawl.
+    """
+    declared = {
+        h
+        for h in (normalize_host(f"https://{e}") for e in declared_extra_hosts(source))
+        if h
+    }
+    return registry_hosts | declared
 
 
 def _deliver(
@@ -302,9 +371,21 @@ def rollback_one(slug: str, *, crawlers_dir: Path = _CRAWLERS_DIR) -> tuple[bool
 
 
 def gate_winner(
-    pred: object, source: str, hosts: set[str], *, expected_items: int | None = None
+    pred: object,
+    source: str,
+    hosts: set[str],
+    *,
+    extra_evidence: Collection[str] = (),
+    expected_items: int | None = None,
 ) -> tuple[bool, str]:
     """The full §6 gate set on the selected winner; returns (passed, reason).
+
+    ``hosts`` is the *registry* host set (§4.1); ``extra_evidence`` is the
+    observed-host evidence the §8 host-admission gate judges any declared
+    EXTRA_HOSTS against — empty means no extra host is admissible. The runtime
+    gates (completeness, stability) validate against exactly the allowlist the
+    committed crawler will run under (registry + admitted declarations), never a
+    wider exploration envelope, so a fetch production would refuse fails here.
 
     ``expected_items`` (the site's open-posting count, from its listing/sitemap)
     activates the enumeration floor — a feed-sized sample of a far larger board is
@@ -314,6 +395,16 @@ def gate_winner(
     if not ast_result.passed:
         return False, f"AST gate: {ast_result.reason}"
 
+    admission = check_host_admission(
+        source,
+        registry_hosts=hosts,
+        evidence_hosts=extra_evidence,
+        cap=config.extra_hosts_cap(),
+    )
+    if not admission.passed:
+        return False, f"host admission: {admission.reason}"
+    run_hosts = _committed_hosts(source, hosts)
+
     must_observe = must_observe_failure(
         validated=_called(pred, "validate_crawler"),
         discovery_method=_discovery(pred),
@@ -322,12 +413,12 @@ def gate_winner(
     if must_observe is not None:
         return False, f"must-observe: {must_observe}"
 
-    first = validate_crawler(source, allowed_hosts=hosts)
+    first = validate_crawler(source, allowed_hosts=run_hosts)
     completeness = check_completeness(
         first,
         min_items=config.min_items(),
         min_description_chars=config.min_description_chars(),
-        allowed_hosts=hosts,
+        allowed_hosts=run_hosts,
         expected_items=expected_items,
         enum_floor_ratio=config.enum_floor_ratio(),
         min_description_quality=config.min_description_quality(),
@@ -335,7 +426,7 @@ def gate_winner(
     if not completeness.passed:
         return False, f"completeness: {completeness.reason}"
 
-    second = validate_crawler(source, allowed_hosts=hosts)
+    second = validate_crawler(source, allowed_hosts=run_hosts)
     verdict, jaccard = stability_verdict(
         _sample_urls(first), _sample_urls(second), threshold=config.stability_jaccard()
     )

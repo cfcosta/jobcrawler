@@ -262,3 +262,87 @@ def test_crawlers_dir_default_is_config_driven() -> None:
     # _deliver/promote_one default to the same config-driven dir as the crawl/probe
     # side, so a relocated JOBCRAWLER_CRAWLERS_DIR keeps writer and reader in sync (§11).
     assert cli_generate._CRAWLERS_DIR == Path(config.crawlers_dir())
+
+
+# -- §8 host admission in the winner gate + evidence eligibility ----------------
+
+
+def _declaring_extra(source: str) -> str:
+    return source.replace(
+        'SITE = "https://example.com"\n',
+        'SITE = "https://example.com"\nEXTRA_HOSTS = ("api.example.net",)\n',
+    )
+
+
+def test_declared_host_without_evidence_fails_admission() -> None:
+    # gate_winner's default is no extra evidence: a winner declaring EXTRA_HOSTS
+    # can never pass on declaration alone (§8).
+    ok, reason = gate_winner(_pred(), _declaring_extra(_GOOD), _HOSTS)
+    assert not ok and "host admission" in reason
+
+
+def test_declared_evidence_backed_host_passes_the_gate() -> None:
+    ok, reason = gate_winner(
+        _pred(),
+        _declaring_extra(_GOOD),
+        _HOSTS,
+        extra_evidence=["api.example.net"],
+    )
+    assert ok, reason
+
+
+def test_site_drift_fails_admission() -> None:
+    # SITE must be the registry entry — the allowlist derives from it (§8).
+    drifted = _GOOD.replace('"https://example.com"', '"https://evil.example"')
+    ok, reason = gate_winner(_pred(), drifted, _HOSTS)
+    assert not ok and "host admission" in reason
+
+
+def test_committed_hosts_is_registry_plus_declared() -> None:
+    src = (
+        'SITE = "https://example.com"\n'
+        'EXTRA_HOSTS = ("api.example.net",)\n'
+        "def crawl(ctx):\n    yield 1\n"
+    )
+    assert cli_generate._committed_hosts(src, {"example.com"}) == {
+        "example.com",
+        "api.example.net",
+    }
+
+
+def test_eligible_extra_hosts_drop_robots_forbidden_hosts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The api.getro.com case: a host generation could fetch but production
+    # politeness would refuse must never become evidence — it would pass the
+    # gate and then die on its first scheduled crawl.
+    robots = {
+        "https://open.example.net/robots.txt": "User-agent: *\nDisallow:\n",
+        "https://closed.example.net/robots.txt": "User-agent: *\nDisallow: /\n",
+    }
+    monkeypatch.setattr(cli_generate, "_robots_fetch_text", lambda url: robots.get(url))
+    assert cli_generate._eligible_extra_hosts(
+        ["open.example.net", "closed.example.net"]
+    ) == {"open.example.net"}
+
+
+def test_eligible_extra_hosts_fail_open_on_unreachable_robots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli_generate, "_robots_fetch_text", lambda url: None)
+    assert cli_generate._eligible_extra_hosts(["a.example.net"]) == {"a.example.net"}
+
+
+def test_eligible_extra_hosts_bound_the_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probed: list[str] = []
+
+    def fetcher(url: str) -> str | None:
+        probed.append(url)
+        return None
+
+    monkeypatch.setattr(cli_generate, "_robots_fetch_text", fetcher)
+    many = [f"h{i}.example.net" for i in range(20)]
+    assert len(cli_generate._eligible_extra_hosts(many)) == 8
+    assert len(probed) == 8

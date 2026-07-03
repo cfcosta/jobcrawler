@@ -12,7 +12,12 @@ from datetime import datetime, timezone
 import pytest
 from pydantic import ValidationError
 
-from jobcrawler.runtime.contract import Job
+from jobcrawler.runtime.contract import (
+    Job,
+    allowed_hosts_of,
+    declared_extra_hosts,
+    declared_site,
+)
 
 _REQUIRED = ["url", "title", "company", "location", "description", "source"]
 
@@ -94,3 +99,49 @@ def test_job_rejects_blank_required(blank: str) -> None:
     fields[blank] = ""
     with pytest.raises(ValidationError):
         Job.model_validate(fields)
+
+
+# -- §8 declared-host derivation (SITE + EXTRA_HOSTS, AST-read) ----------------
+
+
+def test_declared_site_reads_plain_and_annotated_assignment() -> None:
+    assert declared_site('SITE = "https://a.com"\n') == "https://a.com"
+    assert declared_site('SITE: str = "https://a.com"\n') == "https://a.com"
+
+
+def test_declared_site_is_empty_when_absent_or_computed() -> None:
+    assert declared_site("def crawl(ctx): ...\n") == ""
+    assert declared_site('SITE = "https://" + "a.com"\n') == ""
+
+
+def test_declared_extra_hosts_reads_literal_tuple_and_list() -> None:
+    assert declared_extra_hosts('EXTRA_HOSTS = ("api.a.net", "b.io")\n') == (
+        "api.a.net",
+        "b.io",
+    )
+    assert declared_extra_hosts('EXTRA_HOSTS: list[str] = ["api.a.net"]\n') == (
+        "api.a.net",
+    )
+
+
+def test_declared_extra_hosts_is_constants_only() -> None:
+    # Computed shapes read as empty — this derivation must never be steerable by
+    # anything the module would evaluate at exec time (§8); the gate is where a
+    # malformed declaration is rejected loudly.
+    assert declared_extra_hosts("EXTRA_HOSTS = tuple(h for h in [])\n") == ()
+    assert declared_extra_hosts('EXTRA_HOSTS = (f"api.{x}",)\n') == ()
+    assert declared_extra_hosts('EXTRA_HOSTS = ("a.net", 3)\n') == ("a.net",)
+    assert declared_extra_hosts("def crawl(ctx): ...\n") == ()
+
+
+def test_allowed_hosts_of_is_site_plus_extras_normalized() -> None:
+    source = (
+        'SITE = "https://Jobs.Example.com/careers"\n'
+        'EXTRA_HOSTS = ("api.example.net",)\n'
+        "def crawl(ctx): ...\n"
+    )
+    assert allowed_hosts_of(source) == {"jobs.example.com", "api.example.net"}
+
+
+def test_allowed_hosts_of_drops_broken_values() -> None:
+    assert allowed_hosts_of("def crawl(ctx): ...\n") == set()

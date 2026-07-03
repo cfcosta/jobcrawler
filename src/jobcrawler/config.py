@@ -421,6 +421,16 @@ def stability_jaccard() -> float:
     return _float("JOBCRAWLER_STABILITY_JACCARD", 0.6)
 
 
+def extra_hosts_cap() -> int:
+    """Max EXTRA_HOSTS a generated crawler may declare (§8). A real cross-host board
+    needs exactly one (its platform's API host), so the default leaves headroom
+    without opening a wide envelope: the gate-1(b) evidence rule is the
+    *authorization*; this cap is the blast-radius bound on top, keeping an injected
+    "declare everything the page names" instruction from turning one crawler into a
+    broad fetcher. Host-side only, never surfaced to the generator."""
+    return _int("JOBCRAWLER_EXTRA_HOSTS_CAP", 3)
+
+
 def enum_floor_ratio() -> float:
     return _float("JOBCRAWLER_ENUM_FLOOR_RATIO", 0.5)
 

@@ -30,11 +30,14 @@ untrusted crawler.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+import ast
+from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime
 from typing import Protocol, cast, runtime_checkable
 
 from pydantic import BaseModel, Field
+
+from jobcrawler.urls import normalize_host
 
 
 class Job(BaseModel):
@@ -80,10 +83,22 @@ class Ctx(Protocol):
     All network access goes through ``ctx`` so timeouts, the SSRF guard, and
     encoding are enforced centrally now, and robots / rate-limit / Cloudflare
     join them with the M2 politeness layer — the script declares *what* to
-    fetch, not *how*.
+    fetch, not *how*. ``fetch`` is method-general (§8): a board whose
+    enumeration endpoint only answers POST (a JSON search API) passes
+    ``method="POST"`` + ``json=...``, and the request rides exactly the same
+    SSRF / politeness / budget enforcement as a GET — the crawler chooses the
+    verb, never the guard.
     """
 
-    def fetch(self, url: str) -> str: ...
+    def fetch(
+        self,
+        url: str,
+        *,
+        max_redirects: int = 5,
+        method: str = "GET",
+        json: object | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> str: ...
     def render(self, url: str) -> str: ...
     def get(self, url: str, **kwargs: object) -> object: ...
     def log(self, *args: object, **kwargs: object) -> None: ...
@@ -101,3 +116,74 @@ def load_crawler(module: object) -> tuple[str, CrawlFn]:
     if not callable(crawl):
         raise TypeError("crawler module must define crawl(ctx)")
     return site, cast(CrawlFn, crawl)
+
+
+# -- declared-host derivation (§8) -------------------------------------------
+#
+# The committed source *text* is the single place the crawl-time SSRF allowlist
+# derives from: AST-read, never executed. ``SITE`` names the board itself;
+# ``EXTRA_HOSTS`` is the optional tuple of bare hostnames a crawler additionally
+# needs (a board whose JSON API lives on a platform sibling domain). Declaration
+# is not authorization — gate-1(b) admits an EXTRA_HOSTS entry only when the
+# site's own served bytes vouch for it (see generate/gates.py) — but once a
+# crawler is committed, these helpers are how every §4.4 call site (crawl /
+# validate / probe) reconstructs exactly the allowlist that was admitted.
+
+
+def _top_level_value(tree: ast.Module, name: str) -> ast.expr | None:
+    """The value expression assigned to module-level ``name`` (Assign or AnnAssign)."""
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == name for t in node.targets
+        ):
+            return node.value
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == name
+            and node.value is not None
+        ):
+            return node.value
+    return None
+
+
+def declared_site(source: str) -> str:
+    """The module-level ``SITE`` string constant of ``source``, or ``""`` (§4.3)."""
+    value = _top_level_value(ast.parse(source), "SITE")
+    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+        return value.value
+    return ""
+
+
+def declared_extra_hosts(source: str) -> tuple[str, ...]:
+    """The module-level ``EXTRA_HOSTS`` string literals of ``source`` (§8).
+
+    Only plain string constants inside a literal tuple/list count — the same
+    constants-only discipline gate-1 enforces at admission, so this read can
+    never be steered by anything the module would *compute* at exec time.
+    Anything else (absent, non-literal, non-string entries) reads as empty here;
+    the gate is where malformed declarations are rejected loudly.
+    """
+    value = _top_level_value(ast.parse(source), "EXTRA_HOSTS")
+    if not isinstance(value, (ast.Tuple, ast.List)):
+        return ()
+    return tuple(
+        el.value
+        for el in value.elts
+        if isinstance(el, ast.Constant) and isinstance(el.value, str)
+    )
+
+
+def allowed_hosts_of(source: str) -> set[str]:
+    """The fetch allowlist a committed crawler's source declares (§8).
+
+    ``SITE``'s host plus every ``EXTRA_HOSTS`` entry, normalized; empty/broken
+    values drop out. This is *policy* — which public hosts the crawler talks
+    to; the fixed enforcement kernel (:mod:`jobcrawler.runtime.ssrf` hard
+    denials, checked per fetch and per redirect hop) applies to every member
+    regardless of how it got here.
+    """
+    hosts = {normalize_host(declared_site(source))}
+    hosts.update(normalize_host(f"https://{h}") for h in declared_extra_hosts(source))
+    hosts.discard("")
+    return hosts

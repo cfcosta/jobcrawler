@@ -7,6 +7,7 @@ no real network.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 
 import httpx
@@ -417,3 +418,108 @@ def test_fetch_enforces_the_page_budget() -> None:
     ctx.fetch("https://example.com/2")
     with pytest.raises(PageLimitError):
         ctx.fetch("https://example.com/3")
+
+
+# -- §8 method-general fetch: POST rides the same enforcement path ------------
+
+
+def _recording_ctx(
+    responder: Handler,
+) -> tuple[Ctx, list[tuple[str, bytes]]]:
+    """A ctx whose transport records (method, body) for every request."""
+    seen: list[tuple[str, bytes]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.content))
+        return responder(request)
+
+    return _ctx(handler), seen
+
+
+def test_fetch_post_sends_method_and_json_body() -> None:
+    ctx, seen = _recording_ctx(lambda r: httpx.Response(200, text="OK"))
+    out = ctx.fetch("https://example.com/api", method="post", json={"page": 1})
+    assert out == "OK"
+    method, body = seen[0]
+    assert method == "POST"  # the lowercase verb is normalized
+    assert json.loads(body) == {"page": 1}
+
+
+def test_fetch_post_303_downgrades_to_a_body_less_get() -> None:
+    # Browser convention: 301/302/303 turn the replay into GET and drop the body —
+    # replaying the POST at the redirect target would double-submit the search.
+    def responder(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/search":
+            return httpx.Response(303, headers={"location": "https://example.com/r"})
+        return httpx.Response(200, text="RESULTS")
+
+    ctx, seen = _recording_ctx(responder)
+    out = ctx.fetch("https://example.com/search", method="POST", json={"q": "x"})
+    assert out == "RESULTS"
+    assert seen[0][0] == "POST"
+    assert seen[1] == ("GET", b"")
+
+
+def test_fetch_post_307_replays_method_and_body() -> None:
+    def responder(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api":
+            return httpx.Response(
+                307, headers={"location": "https://example.com/api-v2"}
+            )
+        return httpx.Response(200, text="OK")
+
+    ctx, seen = _recording_ctx(responder)
+    assert ctx.fetch("https://example.com/api", method="POST", json={"q": 1}) == "OK"
+    assert [method for method, _ in seen] == ["POST", "POST"]
+    assert json.loads(seen[1][1]) == {"q": 1}
+
+
+def test_fetch_post_rechecks_ssrf_on_every_redirect_hop() -> None:
+    def responder(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(307, headers={"location": "https://evil.com/x"})
+
+    ctx, seen = _recording_ctx(responder)
+    with pytest.raises(SsrfError):
+        ctx.fetch("https://example.com/api", method="POST", json={})
+    assert len(seen) == 1  # the off-domain hop was never requested
+
+
+def test_fetch_post_charges_the_page_budget() -> None:
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, text="ok")),
+        follow_redirects=False,
+    )
+    ctx = Ctx({"example.com"}, client=client, max_pages=1)
+    ctx.fetch("https://example.com/api", method="POST", json={})
+    with pytest.raises(PageLimitError):
+        ctx.fetch("https://example.com/api", method="POST", json={})
+
+
+def test_fetch_post_retries_a_transient_429_with_the_body_replayed() -> None:
+    bodies: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(request.content)
+        if len(bodies) == 1:
+            return httpx.Response(429)
+        return httpx.Response(200, text="OK")
+
+    ctx, waits = _ctx_retry(handler, retries=2, backoff=0.5)
+    assert ctx.fetch("https://example.com/api", method="POST", json={"p": 2}) == "OK"
+    assert waits == [0.5]
+    assert [json.loads(b) for b in bodies] == [{"p": 2}, {"p": 2}]
+
+
+def test_fetch_caller_headers_survive_under_a_cached_clearance() -> None:
+    # An API's mandatory Accept rides alongside the solved cookie (§4.10): both
+    # must arrive — the clearance only wins an outright header collision.
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["accept"] == "application/json"
+        assert "cf_clearance" in request.headers.get("cookie", "")
+        return httpx.Response(200, text="OK")
+
+    cache = ClearanceCache(ttl=timedelta(minutes=30))
+    cache.put("example.com", Clearance(cookies={"cf_clearance": "x"}, user_agent="UA"))
+    ctx = _with_client(handler, clearance=cache)
+    out = ctx.fetch("https://example.com/a", headers={"accept": "application/json"})
+    assert out == "OK"

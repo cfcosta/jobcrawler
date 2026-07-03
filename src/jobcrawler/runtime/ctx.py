@@ -3,14 +3,16 @@
 All fetching goes through ``ctx`` so SSRF (§8), redirects, encoding, timeouts
 and (later) robots/rate-limit/Cloudflare are enforced centrally — the crawler
 declares *what* to fetch, not *how*. ``fetch`` re-checks the SSRF guard on every
-redirect hop (a redirect to an internal target would otherwise bypass it).
-``render`` (the headless Playwright tier) and the politeness layer land in M2.
+redirect hop (a redirect to an internal target would otherwise bypass it), and
+is method-general (§8): a JSON board API that only answers POST rides exactly
+the same guard/pacing/budget path as a GET — the crawler chooses the verb,
+never the enforcement. ``render`` (the headless Playwright tier) lands in M2.
 """
 
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Mapping
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urljoin
@@ -31,6 +33,7 @@ from jobcrawler.runtime.politeness import (
 from jobcrawler.runtime.solver import (
     ChallengeError,
     ChallengeSolver,
+    Clearance,
     ClearanceCache,
     is_challenge,
 )
@@ -104,21 +107,41 @@ class Ctx:
             raise PageLimitError(f"page budget exhausted ({self._max_pages} pages)")
         self._pages += 1
 
-    def fetch(self, url: str, *, max_redirects: int = 5) -> str:
-        """GET ``url`` (SSRF-checked per hop) and return decoded UTF-8 text.
+    def fetch(
+        self,
+        url: str,
+        *,
+        max_redirects: int = 5,
+        method: str = "GET",
+        json: object | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> str:
+        """Request ``url`` (SSRF-checked per hop) and return decoded UTF-8 text.
+
+        ``method``/``json``/``headers`` cover the JSON-API boards whose
+        enumeration endpoint only answers POST (a search API): the request rides
+        the same SSRF guard, politeness gate, page budget, and transient-retry
+        policy as a GET — the crawler chooses the verb, never the enforcement
+        (§8). Redirects follow browser convention: 301/302/303 downgrade a
+        non-GET to a body-less GET, 307/308 replay the method and body — and
+        every hop is re-checked either way.
 
         On a detected Cloudflare challenge ``fetch`` escalates transparently to
         the solver tier and replays the cached clearance (§4.10) — crawler code
         stays oblivious.
         """
         self._charge_page()
-        current = url
+        current, verb, body = url, method.upper(), json
         for _ in range(max_redirects + 1):
             check_url(current, self._allowed)
             self._pace(current)
-            resp = self._challenge_aware_get(current)
+            resp = self._challenge_aware_request(
+                verb, current, json=body, headers=headers
+            )
             if resp.status_code in _REDIRECT_CODES and "location" in resp.headers:
                 current = urljoin(current, resp.headers["location"])
+                if resp.status_code not in (307, 308) and verb != "GET":
+                    verb, body = "GET", None  # browser-convention method downgrade
                 continue
             resp.raise_for_status()
             return self._decode(resp)
@@ -144,34 +167,59 @@ class Ctx:
             http_charset_from_content_type(resp.headers.get("content-type")),
         )
 
-    def _challenge_aware_get(self, url: str) -> httpx.Response:
+    def _challenge_aware_request(
+        self,
+        method: str,
+        url: str,
+        *,
+        json: object | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> httpx.Response:
         host = normalize_host(url)
         cached = self._clearance.get(host) if self._clearance is not None else None
-        resp = self._get_retrying(url, headers=cached.headers() if cached else {})
+        # Caller headers survive under the clearance's (an API's mandatory Accept
+        # rides alongside the solved cookie); the clearance wins a collision —
+        # replaying it verbatim is the whole point of the cache (§4.10).
+        resp = self._request_retrying(
+            method, url, json=json, headers=self._merge(headers, cached)
+        )
         if self._solver is None or not is_challenge(resp):
             return resp
         # "Pay once": solve, cache, replay. Still challenged → give up (§4.10).
         clearance = self._solver.solve(url)
         if self._clearance is not None:
             self._clearance.put(host, clearance)
-        resp = self._get_retrying(url, headers=clearance.headers())
+        resp = self._request_retrying(
+            method, url, json=json, headers=self._merge(headers, clearance)
+        )
         if is_challenge(resp):
             raise ChallengeError(f"still challenged after solve: {url!r}")
         return resp
 
-    def _get_retrying(self, url: str, **kwargs: Any) -> httpx.Response:
-        """``client.get`` with bounded exponential backoff on transient failure (§4.5).
+    @staticmethod
+    def _merge(
+        headers: Mapping[str, str] | None, clearance: Clearance | None
+    ) -> dict[str, str]:
+        merged = dict(headers or {})
+        if clearance is not None:
+            merged.update(clearance.headers())
+        return merged
+
+    def _request_retrying(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        """``client.request`` with bounded exponential backoff on transient failure (§4.5).
 
         Retries a transient response (:data:`_RETRYABLE_CODES`, never a Cloudflare
         challenge) or a transient transport error, preferring a server ``Retry-After``
         over the computed backoff. A ``Retry-After`` longer than ``retry_cap`` is
         refused — we surface the response rather than park the crawl — and a network
         error keeps retrying until the attempt budget is spent, then re-raises.
+        Method-blind on purpose: the only POSTs on this path are board search APIs —
+        idempotent reads in POST clothing — so the GET retry policy carries over.
         """
         attempt = 0
         while True:
             try:
-                resp = self._client.get(url, **kwargs)
+                resp = self._client.request(method, url, **kwargs)
             except httpx.TransportError:
                 if attempt >= self._retries:
                     raise
@@ -210,7 +258,7 @@ class Ctx:
         # (e.g. 302 → 169.254.169.254) would bypass the SSRF guard. The caller
         # re-fetches the Location through ctx, which re-checks it.
         kwargs["follow_redirects"] = False
-        return self._get_retrying(url, **kwargs)
+        return self._request_retrying("GET", url, **kwargs)
 
     def _pace(self, url: str) -> None:
         """Politeness gate before a network fetch (§4.5).

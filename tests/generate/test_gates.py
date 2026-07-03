@@ -18,6 +18,7 @@ from jobcrawler.generate.gates import (
     StabilityVerdict,
     check_ast,
     check_completeness,
+    check_host_admission,
     jaccard_stability,
     must_observe_failure,
     stability_verdict,
@@ -145,6 +146,130 @@ def test_crawl_must_accept_ctx() -> None:
 
 def test_unparsable_source_is_truncation() -> None:
     res = check_ast('SITE = "https://x.com"\ndef crawl(ctx):\n    yield (')
+    assert not res.passed
+
+
+# -- gate 1(b): EXTRA_HOSTS shape + host admission (§8) -------------------------
+
+
+def _declaring(extra: str) -> str:
+    return (
+        'SITE = "https://example.com"\n'
+        f"EXTRA_HOSTS = {extra}\n"
+        "def crawl(ctx):\n    yield 1\n"
+    )
+
+
+def test_extra_hosts_literal_tuple_passes_ast() -> None:
+    assert check_ast(_declaring('("api.example.net",)')).passed
+
+
+def test_extra_hosts_computed_shape_fails_ast() -> None:
+    res = check_ast(_declaring("tuple(h for h in [])"))
+    assert not res.passed
+    assert any("literal tuple/list" in f for f in res.failures)
+
+
+def test_extra_hosts_non_string_entry_fails_ast() -> None:
+    res = check_ast(_declaring('("api.example.net", 3)'))
+    assert not res.passed
+    assert any("string literals" in f for f in res.failures)
+
+
+def test_extra_hosts_url_shaped_entry_fails_ast() -> None:
+    # A scheme/path/port could smuggle more than a host into the allowlist
+    # derivation — only bare hostnames are declarable.
+    res = check_ast(_declaring('("https://api.example.net/path",)'))
+    assert not res.passed
+    assert any("bare hostname" in f for f in res.failures)
+
+
+def test_admission_passes_an_evidence_backed_declaration() -> None:
+    res = check_host_admission(
+        _declaring('("api.example.net",)'),
+        registry_hosts={"example.com"},
+        evidence_hosts=["api.example.net"],
+        cap=3,
+    )
+    assert res.passed, res.reason
+
+
+def test_admission_accepts_a_subdomain_of_an_evidence_host() -> None:
+    res = check_host_admission(
+        _declaring('("eu.api.example.net",)'),
+        registry_hosts={"example.com"},
+        evidence_hosts=["api.example.net"],
+        cap=3,
+    )
+    assert res.passed, res.reason
+
+
+def test_admission_without_declarations_needs_no_evidence() -> None:
+    src = 'SITE = "https://example.com"\ndef crawl(ctx):\n    yield 1\n'
+    res = check_host_admission(
+        src, registry_hosts={"example.com"}, evidence_hosts=[], cap=3
+    )
+    assert res.passed, res.reason
+
+
+def test_admission_rejects_a_declaration_without_evidence() -> None:
+    # Declaration alone authorizes nothing (§8): the generation context is
+    # attacker-influenced (job pages carry arbitrary text), so only hosts the
+    # site's own served bytes vouch for are admissible.
+    res = check_host_admission(
+        _declaring('("api.example.net",)'),
+        registry_hosts={"example.com"},
+        evidence_hosts=[],
+        cap=3,
+    )
+    assert not res.passed
+    assert any("not observed" in f for f in res.failures)
+
+
+def test_admission_rejects_over_cap() -> None:
+    hosts = ["a.net", "b.net", "c.net", "d.net"]
+    res = check_host_admission(
+        _declaring(str(tuple(hosts))),
+        registry_hosts={"example.com"},
+        evidence_hosts=hosts,
+        cap=3,
+    )
+    assert not res.passed
+    assert any("cap" in f for f in res.failures)
+
+
+def test_admission_rejects_a_kernel_denied_host_even_with_evidence() -> None:
+    # Policy is inferred, enforcement stays fixed (§8): evidence can never
+    # launder an internal target into the allowlist.
+    res = check_host_admission(
+        _declaring('("169.254.169.254",)'),
+        registry_hosts={"example.com"},
+        evidence_hosts=["169.254.169.254"],
+        cap=3,
+    )
+    assert not res.passed
+    assert any("SSRF kernel" in f for f in res.failures)
+
+
+def test_admission_rejects_site_drift() -> None:
+    # A winner whose SITE is not the registry entry would derive its whole crawl
+    # allowlist from a base the operator never registered — rejected outright.
+    src = 'SITE = "https://evil.example"\ndef crawl(ctx):\n    yield 1\n'
+    res = check_host_admission(
+        src, registry_hosts={"example.com"}, evidence_hosts=[], cap=3
+    )
+    assert not res.passed
+    assert any("registry" in f for f in res.failures)
+
+
+def test_admission_rejects_an_unparseable_site() -> None:
+    # No SITE constant at all: nothing to pin the allowlist to.
+    res = check_host_admission(
+        "def crawl(ctx):\n    yield 1\n",
+        registry_hosts={"example.com"},
+        evidence_hosts=[],
+        cap=3,
+    )
     assert not res.passed
     assert any("parse" in f for f in res.failures)
 

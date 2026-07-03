@@ -10,8 +10,10 @@ import httpx
 from jobcrawler.generate.scoring import CandidateResult, ExceptionInfo
 from jobcrawler.generate.tools import (
     ats_api_candidates,
+    corpus_host_evidence,
     find_feeds_in,
     make_host_tools,
+    observed_hosts,
 )
 from jobcrawler.runtime.ctx import Ctx
 
@@ -198,3 +200,62 @@ def test_host_validate_tool_surfaces_missing_job_fields_and_exception() -> None:
         "location: Field required",
     ]
     assert out["exception"] == {"type": "ValueError", "message": "bad board"}
+
+
+# -- §8 observed-host evidence --------------------------------------------------
+
+
+def test_observed_hosts_extracts_literal_hosts_and_excludes_the_base() -> None:
+    texts = [
+        '<img src="https://cdn.assets.net/x.png"> https://jobs.example.com/a1',
+        "plain text naming https://Data.Example.ORG/x too",
+    ]
+    hosts = observed_hosts(texts, "https://jobs.example.com/")
+    assert "cdn.assets.net" in hosts
+    assert "data.example.org" in hosts  # lowercased
+    assert "jobs.example.com" not in hosts  # the base is already the allowlist
+
+
+def test_observed_hosts_excludes_base_subdomains() -> None:
+    hosts = observed_hosts(["https://api.example.com/x"], "https://example.com/")
+    assert "api.example.com" not in hosts
+
+
+def test_observed_hosts_never_contains_kernel_denied_names() -> None:
+    # A served page naming an internal target never turns it into evidence —
+    # the fixed SSRF kernel filters the channel itself (§8).
+    texts = [
+        "https://metadata.google.internal/computeMetadata/v1/",
+        "https://10.0.0.8/admin",
+    ]
+    hosts = observed_hosts(texts, "https://example.com/")
+    assert "metadata.google.internal" not in hosts
+    assert "10.0.0.8" not in hosts
+
+
+def test_observed_hosts_infers_the_getro_api_host_from_cdn_assets() -> None:
+    # jobs.madrona.com reality: the served HTML names cdn.getro.com dozens of
+    # times and api.getro.com never (the client builds the API URL in JS). The
+    # platform map bridges that gap, and platform-implied hosts rank first so a
+    # bounded probe never trims them.
+    texts = ['<img src="https://cdn.getro.com/logo.png">']
+    hosts = observed_hosts(texts, "https://jobs.madrona.com/")
+    assert "api.getro.com" in hosts
+    assert hosts.index("api.getro.com") < hosts.index("cdn.getro.com")
+
+
+def test_observed_hosts_includes_the_ats_api_candidates() -> None:
+    hosts = observed_hosts([], "https://x.com/")
+    assert "boards-api.greenhouse.io" in hosts
+    assert "api.lever.co" in hosts
+
+
+def test_corpus_host_evidence_walks_values_and_keys() -> None:
+    # The apis map is keyed by URL — keys are evidence too.
+    corpus = {
+        "home": '<a href="https://cdn.getro.com/x">',
+        "apis": {"https://api.other.net/v1/jobs": {"status": 200}},
+    }
+    hosts = corpus_host_evidence(corpus, "https://jobs.madrona.com/")
+    assert "api.getro.com" in hosts
+    assert "api.other.net" in hosts

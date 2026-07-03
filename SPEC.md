@@ -290,15 +290,23 @@ Every generated module exposes a fixed interface so one runner can execute any o
 
 ```python
 SITE = "https://boards.greenhouse.io/acme"   # module-level constant
+EXTRA_HOSTS = ("api.getro.com",)             # optional; evidence-gated (§6 gate-1(b), §8)
 
 def crawl(ctx) -> Iterable[Job]:              # yields normalized jobs; no network except via ctx
     ...
 ```
 
-- `ctx` provides `ctx.fetch(url)`, `ctx.render(url)`, `ctx.get(url, **kw)`, `ctx.log(...)`.
-  **All fetching goes through `ctx`** so limits are enforced (parsing is the module's own —
-  via the allowlist below — not a `ctx` concern). `load_crawler(module)` returns `(SITE,
-  crawl)`, validating a non-empty `SITE: str` and a callable `crawl`.
+- `ctx` provides `ctx.fetch(url, method=, json=, headers=)`, `ctx.render(url)`,
+  `ctx.get(url, **kw)`, `ctx.log(...)`. **All fetching goes through `ctx`** so limits are
+  enforced (parsing is the module's own — via the allowlist below — not a `ctx` concern).
+  `load_crawler(module)` returns `(SITE, crawl)`, validating a non-empty `SITE: str` and a
+  callable `crawl`.
+- **`EXTRA_HOSTS` (optional)** — a literal tuple/list of bare hostnames the crawler may fetch
+  beyond `SITE`'s host (a cross-host board API, §8). Constants-only by construction: the
+  crawl-time allowlist is **AST-read** from the committed source (`contract.allowed_hosts_of`
+  = `SITE`'s host ∪ `EXTRA_HOSTS`), never computed at exec time — so the allowlist a crawler
+  runs under is exactly the one the §6 host-admission gate judged (evidence-backed, capped,
+  SSRF-kernel-clean).
 - The module may `import` only from an allowlist (parsers like `selectolax`/`lxml`,
   `feedparser`, stdlib `re`/`json`/`html`/`datetime`/`urllib.parse`). No `os`, `subprocess`,
   `open`, `socket`, `eval`/`exec` (enforced by AST check, §8).
@@ -338,6 +346,13 @@ Cloudflare challenge, `ctx.fetch` transparently escalates to the browser/solver 
 the clearance cookie (§4.10) — scripts stay oblivious. `ctx.fetch`/`render` also **resolve text
 encoding** (HTTP charset → meta charset/BOM → `charset-normalizer` fallback) and hand the
 crawler UTF-8 `str`, so per-board code never guesses charset.
+
+`ctx.fetch` is **method-general** (§8): `method=`/`json=`/`headers=` cover the JSON board APIs
+whose enumeration endpoint only answers POST (a search API — an idempotent read in POST
+clothing), riding exactly the same SSRF-per-hop, robots, pacing, page-budget and
+transient-retry path as a GET — the crawler chooses the verb, never the enforcement. Redirects
+follow browser convention: 301/302/303 downgrade a non-GET replay to a **body-less GET**;
+307/308 replay method + body; every hop is SSRF-rechecked either way.
 
 **Note — multi-MB board payloads.** Unlike a news homepage, some ATS payloads are large: an
 Ashby board can be **several MB** of JSON, and a paginated Gupy board is many 100-row pages. The
@@ -789,7 +804,14 @@ LLM context) also invalidates cached verdicts (§4.7). `load_profile(path)` rais
 ## 6. Generation acceptance gates
 A generated script is accepted only if it passes, in order:
 1. **Static analysis** — AST allowlist; no banned imports/builtins; matches the §4.3 contract.
-   Consumes `crawler_source.code` (fences already stripped — §4.2).
+   Consumes `crawler_source.code` (fences already stripped — §4.2). **(b) Host admission (§8):**
+   `SITE`'s host must be the registry entry's (a drifted SITE would derive the whole allowlist
+   from an unregistered base), and every declared `EXTRA_HOSTS` entry must be a literal bare
+   hostname that is (i) **evidence-backed** — matched against hosts the site's own served corpus
+   vouches for, (ii) within `JOBCRAWLER_EXTRA_HOSTS_CAP`, and (iii) clean under the fixed SSRF
+   kernel. Gates 2–3 then validate against **exactly the committed allowlist** (registry ∪
+   declared), never the wider generation-time exploration envelope — a fetch production would
+   refuse fails here, not on the first scheduled crawl.
 2. **Runtime validation & completeness** — yields ≥ `min_items`; every posting has a non-empty
    `title`/`company`/`location`, a **sufficiently long, non-boilerplate** `description` (≥
    `min_description_chars`, ≥ `min_unique_description_chars` distinct chars, and reject an
@@ -904,6 +926,22 @@ The central risk is **executing model-written code against the live web**. Mitig
   writes, **network egress only via the `ctx` proxy**.
 - **SSRF guard** in `ctx`: requests restricted to the board's registered host(s) and on-domain links;
   block private/loopback/link-local ranges and cloud metadata endpoints.
+- **Inferred allowlist — policy is inferred, enforcement is fixed (§4.3/§6 gate-1(b)).** The
+  autonomous loop may *choose* which public hosts a crawler talks to (a Getro board's postings ride
+  `api.getro.com` while the served HTML only ever names `cdn.getro.com`), but only within **evidence
+  computed by trusted host code** over the site's own served bytes: literal `https://<host>` tokens ∪ a
+  TCB-owned board-platform map ∪ the known-ATS API candidates — kernel-filtered, the base host
+  excluded, and each candidate's `robots.txt` probed at admission (a blanket-`Disallow` host —
+  `api.getro.com` is `Disallow: /` for every agent — is dropped from evidence entirely: it would pass
+  bare-ctx generation and then die on its first polite production crawl, wedging the site in a heal
+  loop). Generation *explores* the envelope (registry ∪ robots-eligible evidence); the winner must
+  *declare* what it uses (`EXTRA_HOSTS`); gate-1(b) admits declarations only against that evidence and
+  a small cap; and the §6 runtime gates, trainset record, and committed crawl all run on **registry ∪
+  declared** only. Declaration alone authorizes nothing — the generation context is
+  attacker-influenced (a job page can carry injected instructions) — and the hard IP/metadata denials
+  apply to every host regardless of provenance. The offline optimizer metric (§4.11) recomputes the
+  same evidence bound from each example's frozen corpus; it skips the robots probe (a delivery-time
+  concern), a deliberate optimism bias noted in `cli_optimize`.
 - **Review gate**: generated/regenerated scripts are gated per `JOBCRAWLER_REVIEW_GATE` before being
   enabled (§6 gate-4) — `auto` (gated by the §6 gates + versioned rollback), `on` (human `promote`), or
   `off`.
@@ -1017,6 +1055,7 @@ the generator — §8). Selected knobs:
 | `JOBCRAWLER_USER_AGENT` | `jobcrawler/0.1 (+job tracker)` | sent on every request |
 | `JOBCRAWLER_RATE_LIMIT` | `1/s/host` | §4.5 politeness cap |
 | `JOBCRAWLER_MAX_PAGES` | `200` | per-crawl page budget (sized for paginated boards, §4.5) |
+| `JOBCRAWLER_EXTRA_HOSTS_CAP` | `3` | §6 gate-1(b) max declared `EXTRA_HOSTS`; the blast-radius bound atop the evidence rule (§8) |
 | `JOBCRAWLER_DEFAULT_SCHEDULE` | `4h` | fixed cadence for a board with no `schedule` and adaptive off |
 | `JOBCRAWLER_ADAPTIVE_DEFAULT` | `on` | a board with no explicit cadence is adaptive (§4.9) |
 | `JOBCRAWLER_MIN_SCHEDULE` / `MAX_SCHEDULE` | `1h` / `3d` | adaptive-interval politeness floor / staleness ceiling |

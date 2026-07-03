@@ -27,7 +27,6 @@ from jobcrawler.cli import (
     _probe,
     _record_site_failure,
     _run_rematch,
-    _site_url_of,
     build_parser,
     cmd_crawl,
     cmd_generate,
@@ -53,6 +52,7 @@ from jobcrawler.cli import (
 from jobcrawler.health import HealthState, RegenOutcome
 from jobcrawler.match import PROMPT_VERSION
 from jobcrawler.profile import load_profile
+from jobcrawler.runtime.contract import allowed_hosts_of
 from jobcrawler.runtime.runner import CrawlSummary
 from jobcrawler.schedule import Site
 from jobcrawler.state import StateStore
@@ -287,9 +287,15 @@ def test_cmd_rollback_generator_leaves_marker_when_nothing_to_roll_back(
     assert not cleared
 
 
-def test_site_url_of_reads_the_constant() -> None:
-    source = 'SITE = "https://example.com"\ndef crawl(ctx):\n    yield None\n'
-    assert _site_url_of(source) == "https://example.com"
+def test_cli_allowlist_is_derived_from_committed_source() -> None:
+    # The crawl/validate/probe surfaces all derive the allowlist from the
+    # committed source via contract.allowed_hosts_of (SITE + EXTRA_HOSTS, §8).
+    source = (
+        'SITE = "https://example.com"\n'
+        'EXTRA_HOSTS = ("api.example.net",)\n'
+        "def crawl(ctx):\n    yield None\n"
+    )
+    assert allowed_hosts_of(source) == {"example.com", "api.example.net"}
 
 
 def test_db_path_strips_sqlite_scheme(monkeypatch: MonkeyPatch) -> None:

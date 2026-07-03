@@ -38,13 +38,21 @@ from __future__ import annotations
 
 import ast
 import math
+import re
 from collections.abc import Collection
 from dataclasses import dataclass
 from enum import Enum
 
 from jobcrawler.generate.scoring import CandidateResult
+from jobcrawler.runtime.contract import declared_extra_hosts, declared_site
 from jobcrawler.runtime.safe_exec import BANNED_BUILTINS, module_allowed
-from jobcrawler.urls import canonicalize_url, valid_on_domain_url
+from jobcrawler.runtime.ssrf import SsrfError, check_url
+from jobcrawler.urls import (
+    canonicalize_url,
+    host_on_domain,
+    normalize_host,
+    valid_on_domain_url,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,15 +118,19 @@ def _check_contract(tree: ast.Module) -> list[str]:
     """The §4.3 shape: a module-level SITE and a crawl(ctx) at top level."""
     has_site = False
     crawl: ast.FunctionDef | ast.AsyncFunctionDef | None = None
+    extra_hosts: ast.expr | None = None
     for node in tree.body:
-        if isinstance(node, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id == "SITE" for t in node.targets
-        ):
-            has_site = True
-        elif isinstance(node, ast.AnnAssign) and (
-            isinstance(node.target, ast.Name) and node.target.id == "SITE"
-        ):
-            has_site = True
+        if isinstance(node, ast.Assign):
+            names = {t.id for t in node.targets if isinstance(t, ast.Name)}
+            if "SITE" in names:
+                has_site = True
+            if "EXTRA_HOSTS" in names:
+                extra_hosts = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if node.target.id == "SITE":
+                has_site = True
+            elif node.target.id == "EXTRA_HOSTS" and node.value is not None:
+                extra_hosts = node.value
         elif (
             isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
             and node.name == "crawl"
@@ -132,7 +144,101 @@ def _check_contract(tree: ast.Module) -> list[str]:
         failures.append("module must define crawl(ctx)")
     elif len(crawl.args.posonlyargs) + len(crawl.args.args) < 1:
         failures.append("crawl must accept a ctx parameter")
+    if extra_hosts is not None:
+        failures.extend(_check_extra_hosts_shape(extra_hosts))
     return failures
+
+
+# Bare hostname: dot-separated LDH labels, no scheme/path/port. The shape gate for
+# EXTRA_HOSTS entries — anything else could smuggle a path or scheme into the
+# allowlist derivation (§8).
+_HOSTNAME_RE = re.compile(
+    r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$",
+    re.IGNORECASE,
+)
+
+
+def _check_extra_hosts_shape(value: ast.expr) -> list[str]:
+    """EXTRA_HOSTS, when declared, is a literal tuple/list of bare-hostname strings.
+
+    Constants-only, statically (§8): the crawl-time allowlist derivation
+    (``contract.allowed_hosts_of``) AST-reads exactly these literals, so anything
+    computed — an f-string, a name, a call — must be rejected here or the gate
+    would admit an allowlist it cannot read.
+    """
+    if not isinstance(value, (ast.Tuple, ast.List)):
+        return ["EXTRA_HOSTS must be a literal tuple/list of hostname strings"]
+    failures: list[str] = []
+    for el in value.elts:
+        if not (isinstance(el, ast.Constant) and isinstance(el.value, str)):
+            failures.append("EXTRA_HOSTS entries must be plain string literals")
+        elif not _HOSTNAME_RE.match(el.value):
+            failures.append(
+                f"EXTRA_HOSTS entry {el.value!r} is not a bare hostname "
+                "(no scheme, path, or port)"
+            )
+    return failures
+
+
+# -- gate 1(b): host admission (§8) -------------------------------------------
+
+
+def check_host_admission(
+    source: str,
+    *,
+    registry_hosts: Collection[str],
+    evidence_hosts: Collection[str],
+    cap: int,
+) -> GateResult:
+    """Gate 1(b): the crawler's declared host envelope must be admissible (§8).
+
+    The autonomy boundary for the allowlist — *policy is inferred, enforcement is
+    fixed*. A generated crawler chooses which public hosts it talks to, but only
+    within what trusted host code has vouched for:
+
+      * ``SITE``'s host must be the registry entry's — the registry URL is what
+        fixes a site's allowlist (§4.1), so a winner that drifted to a different
+        board is rejected outright.
+      * Every ``EXTRA_HOSTS`` entry must be **evidence-backed**: a host the
+        site's own served bytes name (or its board platform documents — see
+        ``tools.observed_hosts``). The generation context is attacker-influenced
+        (a job page can carry injected instructions), so declaration alone
+        authorizes nothing.
+      * The set stays small (``cap``) and every entry must clear the fixed SSRF
+        kernel — the hard denials apply to every host regardless of provenance.
+    """
+    failures: list[str] = []
+    site_host = normalize_host(declared_site(source))
+    registry = {h for h in registry_hosts if h}
+    if not site_host or site_host not in registry:
+        failures.append(
+            f"SITE host {site_host or '(unparseable)'} is not the registry site"
+        )
+
+    declared = declared_extra_hosts(source)
+    if len(declared) > cap:
+        failures.append(f"declares {len(declared)} EXTRA_HOSTS, cap is {cap}")
+    evidence = {
+        h for h in (normalize_host(f"https://{e}") for e in evidence_hosts) if h
+    }
+    for entry in declared:
+        host = normalize_host(f"https://{entry}")
+        if not host:
+            failures.append(f"EXTRA_HOSTS entry {entry!r} is not a valid hostname")
+            continue
+        try:
+            check_url(f"https://{host}/", {host})
+        except SsrfError as exc:
+            failures.append(
+                f"EXTRA_HOSTS entry {entry!r} is denied by the SSRF kernel: {exc}"
+            )
+            continue
+        if not host_on_domain(host, evidence):
+            failures.append(
+                f"EXTRA_HOSTS entry {entry!r} is not observed in the site's "
+                "own served content"
+            )
+    return GateResult(not failures, tuple(failures))
 
 
 # -- gate 2: runtime completeness (hard half) --------------------------------

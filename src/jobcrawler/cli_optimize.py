@@ -44,6 +44,8 @@ from jobcrawler.generate.scoring import (
     make_metric,
 )
 from jobcrawler.generate.snapshot import prefetch_corpus
+from jobcrawler.generate.tools import corpus_host_evidence
+from jobcrawler.runtime.contract import declared_extra_hosts
 from jobcrawler.runtime.ctx import Ctx
 from jobcrawler.runtime.sandbox import validate_crawler
 from jobcrawler.state import StateStore
@@ -165,8 +167,7 @@ def _optimize(
     )
 
     def core(source: str, carrier: object) -> CandidateResult:
-        host = normalize_host(_carrier_site_url(carrier))
-        return validate_crawler(source, allowed_hosts={host} if host else set())
+        return validate_crawler(source, allowed_hosts=_candidate_hosts(source, carrier))
 
     bootstrap_metric = make_bootstrap_metric(
         core,
@@ -324,6 +325,41 @@ def _carrier_site_url(carrier: object) -> str:
     if isinstance(carrier, dspy.Example):
         return str(carrier.get("site_url", "") or "")
     return str(getattr(carrier, "site_url", "") or "")
+
+
+def _carrier_corpus(carrier: object) -> object:
+    if isinstance(carrier, dspy.Example):
+        return carrier.get("corpus", None)
+    return getattr(carrier, "corpus", None)
+
+
+def _candidate_hosts(source: str, carrier: object) -> set[str]:
+    """The metric's §4.4 validation allowlist for one optimizer candidate (§8).
+
+    Registry host + the candidate's declared EXTRA_HOSTS *bounded by the example's
+    corpus evidence* — the same inference live admission (gate-1(b)) applies,
+    recomputed here from the carrier's recorded corpus so an optimizer candidate
+    can't authorize an arbitrary host merely by declaring it. No robots probe in
+    this offline metric (the live gate owns that at delivery time); an unparseable
+    candidate falls back to the registry host alone and scores accordingly.
+    """
+    site_url = _carrier_site_url(carrier)
+    host = normalize_host(site_url)
+    base = {host} if host else set()
+    try:
+        declared = {
+            h
+            for h in (
+                normalize_host(f"https://{e}") for e in declared_extra_hosts(source)
+            )
+            if h
+        }
+    except SyntaxError:
+        return base
+    if not declared:
+        return base
+    evidence = set(corpus_host_evidence(_carrier_corpus(carrier), site_url))
+    return base | (declared & evidence)
 
 
 def _as_float(value: object) -> float:
