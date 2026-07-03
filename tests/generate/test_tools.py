@@ -239,6 +239,40 @@ def test_host_validate_tool_clips_description_previews_with_a_marker() -> None:
     assert short_desc == "b" * 200  # under the preview head: untouched
 
 
+def test_validate_tool_runs_under_the_admission_shaped_allowlist() -> None:
+    # With registry/evidence split out, the tool validates each candidate under
+    # the allowlist the COMMITTED crawler will get — registry + that candidate's
+    # evidence-backed EXTRA_HOSTS — not the wider exploration envelope. An
+    # undeclared cross-host fetch must fail here, in write → validate → fix,
+    # rather than first at gate 1(b) after the fan-out picked the candidate.
+    seen: dict[str, set[str]] = {}
+
+    def fake_validate(
+        source: str, *, allowed_hosts: object, **_kw: object
+    ) -> CandidateResult:
+        seen["hosts"] = set(cast("set[str]", allowed_hosts))
+        return CandidateResult(
+            item_count=0, samples=[], schema_errors=[], pages_fetched=0
+        )
+
+    ctx = _ctx(lambda r: httpx.Response(404), host="example.com")
+    exploration = {"example.com", "api.example.net", "cdn.example.net"}
+    _f, _fd, _sm, validate = make_host_tools(
+        ctx,
+        exploration,
+        registry_hosts={"example.com"},
+        evidence_hosts=["api.example.net", "cdn.example.net"],
+        validate_fn=fake_validate,
+    )
+    validate(
+        'SITE = "https://example.com"\n'
+        'EXTRA_HOSTS = ["api.example.net"]\n'
+        "def crawl(ctx):\n    yield 1\n"
+    )
+    # cdn.example.net is evidenced but undeclared: absent, exactly like admission.
+    assert seen["hosts"] == {"example.com", "api.example.net"}
+
+
 # -- §8 observed-host evidence --------------------------------------------------
 
 

@@ -249,6 +249,15 @@ convenient: RLM's Pyodide sandbox has no network and none of the crawler's libra
 place a generated crawler can actually run. The model iterates write → `validate_crawler` →
 fix before `SUBMIT`.
 
+`validate_crawler` (and the reward core) run each candidate under the **admission-shaped
+allowlist** — registry host + that candidate's *declared, evidence-backed* `EXTRA_HOSTS`
+(`gates.admissible_hosts`, the same rule as gate 1(b)) — not the wider exploration envelope
+the `fetch` tool probes with. Exploration and admission are deliberately different sets;
+validating against exploration let a candidate that fetched a cross-host board API without
+declaring it (Gupy's `employability-portal`) score full marks, win the fan-out, and only
+then die at admission. Under the committed shape the same mistake fails inside the
+write → validate → fix loop with an `SsrfError` naming the missing host.
+
 **LMs & budgets.** A strong code-capable **root LM** plans and extracts; a cheap **`sub_lm`**
 answers in-sandbox `llm_query` calls — pass it explicitly as a concrete LM (an unset `sub_lm`
 silently falls back to the *root* LM, billing every `llm_query` at planner rates;

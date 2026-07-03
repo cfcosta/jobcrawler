@@ -66,6 +66,16 @@ def test_generate_crawler_instruction_states_the_site_admission_rule() -> None:
     assert "site must be exactly the given site_url" in instr
 
 
+def test_generate_crawler_instruction_states_the_extra_hosts_rule() -> None:
+    # Gate 1(b) admits only evidence-backed EXTRA_HOSTS declarations, and the
+    # validate tool runs candidates under that same allowlist; the instruction
+    # must name the declaration mechanism or a cross-host board API (Gupy's
+    # employability-portal rode this) is fetched undeclared and every honest
+    # candidate dies at validation without knowing why.
+    instr = GenerateCrawler.instructions.lower()
+    assert "extra_hosts" in instr
+
+
 def test_generate_crawler_instruction_names_structured_job_fields() -> None:
     # The generator must extract-when-present (never fabricate) the structured Job
     # fields, so the docstring has to name them.

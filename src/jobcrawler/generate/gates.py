@@ -241,6 +241,46 @@ def check_host_admission(
     return GateResult(not failures, tuple(failures))
 
 
+def admissible_hosts(
+    source: str,
+    *,
+    registry_hosts: Collection[str],
+    evidence_hosts: Collection[str],
+) -> set[str]:
+    """The allowlist admission will grant ``source`` — registry + evidence-backed
+    declarations (§8).
+
+    Registry host(s) plus every declared ``EXTRA_HOSTS`` entry that clears the
+    same evidence rule :func:`check_host_admission` applies (SSRF kernel + the
+    ``host_on_domain`` evidence match). Generation-time validation and the reward
+    grade a candidate under *this* set — the allowlist the committed crawler will
+    actually run with — so an undeclared cross-host fetch fails inside the
+    write → validate → fix loop with an ``SsrfError`` naming the host, not first
+    at admission after the fan-out already picked a winner. A source whose
+    declarations don't parse keeps the registry hosts alone (it will lose at
+    gate 1 anyway; validation just runs narrower).
+    """
+    base = {h for h in registry_hosts if h}
+    try:
+        declared = declared_extra_hosts(source)
+    except SyntaxError:
+        return base
+    evidence = {
+        h for h in (normalize_host(f"https://{e}") for e in evidence_hosts) if h
+    }
+    admitted: set[str] = set()
+    for entry in declared:
+        host = normalize_host(f"https://{entry}")
+        if not host or not host_on_domain(host, evidence):
+            continue
+        try:
+            check_url(f"https://{host}/", {host})
+        except SsrfError:
+            continue
+        admitted.add(host)
+    return base | admitted
+
+
 # -- gate 2: runtime completeness (hard half) --------------------------------
 
 

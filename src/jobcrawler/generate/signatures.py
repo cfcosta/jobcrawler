@@ -59,7 +59,12 @@ class GenerateCrawler(dspy.Signature):
     and crawl(ctx) yielding Jobs). SITE must be exactly the given site_url — the
     acceptance gate rejects a SITE on any other host, even the board's own
     careers domain; job *urls*, by contrast, keep the source's canonical posting
-    links wherever they live. Yield one Job per open role with url, title,
+    links wherever they live. ctx.fetch reaches only SITE's host plus hosts you
+    declare in a module-level EXTRA_HOSTS list of bare hostnames (e.g.
+    EXTRA_HOSTS = ["employability-portal.gupy.io"]) — declare every cross-host
+    API you fetch; only hosts the site's own served bytes name are admitted, and
+    an undeclared host fails validation with an SsrfError naming it. Yield one
+    Job per open role with url, title,
     company, location, and the FULL description text, plus every structured field
     the source actually states — salary, employment_type, workplace_type,
     department, posted_at, expires_at, external_id, apply_url. NEVER fabricate a

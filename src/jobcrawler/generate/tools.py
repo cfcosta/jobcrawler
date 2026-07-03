@@ -359,6 +359,8 @@ def make_host_tools(
     ctx: Ctx,
     allowed_hosts: Collection[str],
     *,
+    registry_hosts: Collection[str] | None = None,
+    evidence_hosts: Collection[str] = (),
     validate_timeout: float = 10.0,
     validate_fn: Callable[..., CandidateResult] | None = None,
 ) -> list[Callable[..., object]]:
@@ -369,6 +371,16 @@ def make_host_tools(
     corpus missed, and ``validate_crawler`` is the bridge to the §4.4 execution
     sandbox so the model can write → validate → fix before SUBMIT. Each is a plain
     named callable with a docstring (RLM uses these as the tool descriptions).
+
+    ``allowed_hosts`` is the *exploration* envelope (registry + corpus-evidenced
+    hosts): what ``fetch``/``find_feeds``/``get_sitemap`` may probe while the model
+    decides what to build. When ``registry_hosts`` is given, ``validate_crawler``
+    instead runs each candidate under the *admission-shaped* allowlist —
+    ``gates.admissible_hosts`` over the candidate's own EXTRA_HOSTS declarations,
+    bounded by ``evidence_hosts`` — the same set the committed crawler runs with,
+    so an undeclared cross-host fetch fails during write → validate → fix rather
+    than first at gate time (without it, exploration-wide validation lets a
+    non-declaring candidate score and win while being un-admittable).
 
     ``validate_fn`` overrides the §4.4 sandbox validator (default: bound lazily) so
     the reshaping is testable without spawning the subprocess.
@@ -396,6 +408,9 @@ def make_host_tools(
     def validate_crawler(source: str) -> dict[str, object]:
         """Run a candidate crawler in the §4.4 sandbox and report what it yielded.
 
+        The crawler runs under the allowlist the committed crawler will get: SITE's
+        host plus your evidence-backed EXTRA_HOSTS declarations — a fetch of any
+        other host raises SsrfError naming it (declare the host and revalidate).
         Returns the positions found (``item_count`` + capped ``samples`` whose
         descriptions are clipped previews — the scorer grades the full extracted
         text), any ``schema_errors`` naming missing or invalid Job fields (url /
@@ -404,7 +419,20 @@ def make_host_tools(
         # Bind the sandbox validator at call time (not construction) so building the
         # tools for pure discovery never imports the subprocess-sandbox machinery.
         run_in_sandbox = validate_fn or _sandbox_validate()
-        result = run_in_sandbox(source, allowed_hosts=hosts, timeout=validate_timeout)
+        run_hosts = hosts
+        if registry_hosts is not None:
+            # Lazy like _sandbox_validate: gates pulls scoring/pydantic, which the
+            # pure discovery helpers must not pay for.
+            from jobcrawler.generate.gates import admissible_hosts
+
+            run_hosts = admissible_hosts(
+                source,
+                registry_hosts=registry_hosts,
+                evidence_hosts=evidence_hosts,
+            )
+        result = run_in_sandbox(
+            source, allowed_hosts=run_hosts, timeout=validate_timeout
+        )
         return {
             "item_count": result.item_count,
             "samples": [_preview_sample(sample) for sample in result.samples],

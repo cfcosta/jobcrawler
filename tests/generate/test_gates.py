@@ -16,6 +16,7 @@ import pytest
 
 from jobcrawler.generate.gates import (
     StabilityVerdict,
+    admissible_hosts,
     check_ast,
     check_completeness,
     check_host_admission,
@@ -225,6 +226,40 @@ def test_admission_rejects_a_declaration_without_evidence() -> None:
     )
     assert not res.passed
     assert any("not observed" in f for f in res.failures)
+
+
+def test_admissible_hosts_admits_only_evidence_backed_declarations() -> None:
+    # The allowlist generation-time validation and the reward run under: the
+    # registry plus declared ∩ evidence. An unevidenced declaration stays out
+    # (declaration alone authorizes nothing), and so does undeclared evidence —
+    # the committed crawler won't have it either.
+    hosts = admissible_hosts(
+        _declaring('("api.example.net", "evil.attacker.io")'),
+        registry_hosts={"example.com"},
+        evidence_hosts=["api.example.net", "cdn.example.net"],
+    )
+    assert hosts == {"example.com", "api.example.net"}
+
+
+def test_admissible_hosts_uses_the_gate_domain_rule() -> None:
+    # Same host_on_domain evidence match as check_host_admission: a declared
+    # subdomain of an evidence host is admitted, keeping the two derivations
+    # aligned so validation can't reject what admission would grant.
+    hosts = admissible_hosts(
+        _declaring('("eu.api.example.net",)'),
+        registry_hosts={"example.com"},
+        evidence_hosts=["api.example.net"],
+    )
+    assert "eu.api.example.net" in hosts
+
+
+def test_admissible_hosts_on_unparseable_source_keeps_registry() -> None:
+    hosts = admissible_hosts(
+        "def broken(:",
+        registry_hosts={"example.com"},
+        evidence_hosts=["api.example.net"],
+    )
+    assert hosts == {"example.com"}
 
 
 def test_admission_rejects_over_cap() -> None:

@@ -37,6 +37,7 @@ import httpx
 from jobcrawler import config
 from jobcrawler.generate.gates import (
     StabilityVerdict,
+    admissible_hosts,
     check_ast,
     check_completeness,
     check_host_admission,
@@ -150,7 +151,9 @@ async def _generate_one(
     # Boot-load the §4.11-optimized strategy if one is pinned, else baseline; the
     # live tools/sub_lm/caps are rebuilt fresh and only the strategy state reloads.
     generator = load_generator(
-        tools=make_host_tools(ctx, hosts),
+        tools=make_host_tools(
+            ctx, hosts, registry_hosts=registry_hosts, evidence_hosts=evidence
+        ),
         sub_lm=sub_lm,
         max_iterations=config.max_iterations(),
         max_llm_calls=config.max_llm_calls(),
@@ -164,7 +167,17 @@ async def _generate_one(
     }
 
     def core(source: str, carrier: object) -> CandidateResult:
-        return validate_crawler(source, allowed_hosts=hosts)
+        # Admission-shaped (§8): grade under the allowlist the committed crawler
+        # will run with (registry + this candidate's evidence-backed EXTRA_HOSTS),
+        # not the exploration envelope — otherwise a cross-host candidate that
+        # never declares its API host scores full marks and wins the fan-out,
+        # only to die at gate 1(b). Mirrors cli_optimize._candidate_hosts.
+        return validate_crawler(
+            source,
+            allowed_hosts=admissible_hosts(
+                source, registry_hosts=registry_hosts, evidence_hosts=evidence
+            ),
+        )
 
     reward_fn = make_reward_fn(
         core,

@@ -28,6 +28,11 @@ python-version = "3.13"
 
 [tool.ty.src]
 include = ["src", "tests"]
+# crawlers/ is the machine-owned artifact space: generated modules admitted by
+# the §6 gates and executed in the §4.4 sandbox, not dev-typed code. A model
+# writing e.g. `def crawl(ctx=None)` is runtime-fine (the daemon always passes
+# ctx) but would churn `ty check` with every self-heal.
+exclude = ["src/jobcrawler/crawlers/"]
 
 [build-system]
 requires = ["uv_build>=0.11.0,<0.12.0"]
