@@ -204,6 +204,54 @@ async def test_best_of_n_skips_a_failing_attempt() -> None:
     assert best == 2 and value == 2.0  # the failed attempt is skipped, not fatal
 
 
+async def test_best_of_n_retries_replace_failed_draws() -> None:
+    # A parse-dead attempt must not consume a comparison slot: with retries, the
+    # fan-out keeps drawing fresh rollout_ids until n candidates actually score.
+    seen: list[int] = []
+
+    async def make_attempt(i: int) -> object:
+        seen.append(i)
+        if i < 3:
+            raise RuntimeError(f"rollout {i} unparseable")
+        return i
+
+    best, value = await best_of_n(
+        make_attempt, reward=_reward_int, n=3, threshold=99.0, retries=3
+    )
+    assert seen == [0, 1, 2, 3, 4, 5]  # three failures redrawn, three scored
+    assert best == 5 and value == 5.0
+
+
+async def test_best_of_n_retries_are_bounded() -> None:
+    # A model that never parses stops at n + retries attempts, not forever.
+    seen: list[int] = []
+
+    async def make_attempt(i: int) -> object:
+        seen.append(i)
+        raise RuntimeError("never parses")
+
+    best, _ = await best_of_n(
+        make_attempt, reward=_reward_int, n=2, threshold=99.0, retries=2
+    )
+    assert seen == [0, 1, 2, 3]
+    assert best is None
+
+
+async def test_best_of_n_retry_budget_is_for_failures_only() -> None:
+    # Retries backfill failed draws; once n candidates score, the budget is moot.
+    seen: list[int] = []
+
+    async def make_attempt(i: int) -> object:
+        seen.append(i)
+        return i
+
+    best, _ = await best_of_n(
+        make_attempt, reward=_reward_int, n=2, threshold=99.0, retries=5
+    )
+    assert seen == [0, 1]
+    assert best == 1
+
+
 async def test_best_of_n_stops_at_the_fanout_spend_cap() -> None:
     # The §4.2 aggregate spend cap bounds the fan-out: at $3/candidate with a $5 cap,
     # the loop stops after the candidate that crosses it — never launching the rest.

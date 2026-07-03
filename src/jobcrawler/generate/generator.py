@@ -134,6 +134,7 @@ async def best_of_n(
     threshold: float = 1.0,
     cost: Callable[[object], float] | None = None,
     spend_cap: float | None = None,
+    retries: int = 0,
 ) -> tuple[object, float]:
     """§6 sequential best-of-N for the async generator: argmax over the scalar.
 
@@ -149,11 +150,22 @@ async def best_of_n(
     can't run away. With no cap (or a cost that reports 0 — no usage signal), the
     fan-out is still bounded structurally by ``n`` and each candidate by the
     per-trajectory ``MAX_SUBCALLS`` kill.
+
+    ``retries`` grants extra draws for attempts that die before producing a
+    prediction (an LM/adapter failure — unparseable model output, a dropped
+    connection — as opposed to a graded-zero candidate): a failure does not
+    consume one of the ``n`` comparison slots, and each redraw advances the
+    attempt index so the caller's rollout_id moves to a fresh sample instead of
+    replaying the failed one. At most ``n + retries`` attempts are made, so the
+    fan-out stays structurally bounded even against a model that rarely parses.
     """
     best: object = None
     best_reward = float("-inf")
     spent = 0.0
-    for i in range(n):
+    scored = 0
+    for i in range(n + max(0, retries)):
+        if scored >= n:
+            break
         try:
             pred = await make_attempt(i)
             value = reward(pred)
@@ -162,6 +174,7 @@ async def best_of_n(
                 f"[best_of_n] candidate {i} failed: {type(exc).__name__}: {str(exc)[:140]}"
             )
             continue
+        scored += 1
         if value > best_reward:
             best, best_reward = pred, value
         if value >= threshold:

@@ -205,6 +205,7 @@ async def _generate_one(
         threshold=1.0,
         cost=_pred_cost,  # aggregate FANOUT_SPEND_CAP across the fan-out (§4.2)
         spend_cap=config.fanout_spend_cap_usd(),
+        retries=config.fanout_retries(),
     )
     if best is None:
         print(f"FAIL {site.slug}: no candidate produced")

@@ -246,6 +246,16 @@ def fanout_n() -> int:
     return _int("JOBCRAWLER_FANOUT_N", 4)
 
 
+def fanout_retries() -> int:
+    """Extra draws for fan-out attempts that die before producing a prediction
+    (an LM/adapter failure such as unparseable output — not a graded-zero
+    candidate). Defaults to ``fanout_n()``: one full replacement round, so a
+    model whose responses sometimes fail to parse still fills its comparison
+    slots, while total attempts stay bounded at ``2 * n``.
+    """
+    return _int("JOBCRAWLER_FANOUT_RETRIES", fanout_n())
+
+
 def max_tokens() -> int:
     """LM output-token cap. Generous by default so a reasoning model has room for
     both its thinking and the answer on the long RLM action prompt — too low and
