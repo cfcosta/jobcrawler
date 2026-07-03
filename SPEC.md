@@ -848,6 +848,14 @@ A generated script is accepted only if it passes, in order:
    roughly as many as the board advertises?) and the stability gate — both of which a genuinely small
    board passes and a broken selector fails. The old news `min_items=5` would wrongly reject a correct
    two-role crawler here.
+
+   **Schema errors tolerate a production-mirroring ratio.** The production runner (`runner._collect`)
+   drops an invalid yield, counts it (`errors=N`), and the crawl proceeds — so gate 2 fails a candidate
+   only when schema errors exceed `max_schema_error_ratio` (default 2%) of total yields. One remote
+   posting with an empty `location` on a hundred-role Gupy board is a wart production would quietly
+   skip, not a broken extractor; a systematic mapping bug still fails, and mass breakage also collapses
+   `item_count` into the floors above. Tolerated errors stay visible in `validate_crawler` output, so
+   the write → validate → fix loop still steers toward zero.
 3. **Stability** — two runs overlap by **Jaccard of canonical URLs ≥ a *low* global threshold**
    (`stability_jaccard`, §4.6 canonicalizes `url`): a hard reject only for the **near-random** case,
    with near-threshold overlap surfaced as *soft* feedback for the §8 review path. **Excluded from the
@@ -899,6 +907,13 @@ against `FANOUT_SPEND_CAP`); the real win is the **early break**, not parallelis
 retries use a **small custom loop**, not stock `dspy.Refine` (its hint comes from
 `inspect.getsource(reward_fn)`, never our `gate_failures`): add a `prior_feedback` `InputField` and
 re-invoke generation with the prior `CandidateResult.gate_failures` injected; cap retry depth.
+
+An attempt that dies **before producing a prediction** (an LM/adapter failure — unparseable model
+output, a dropped stream — as opposed to a graded-zero candidate) does not consume a comparison slot:
+the fan-out redraws with a fresh `rollout_id`, up to `fanout_retries` extra draws
+(`JOBCRAWLER_FANOUT_RETRIES`, default = `fanout_n`, so total attempts stay ≤ 2N and the spend cap
+still applies). Without this, a reasoning model that intermittently emits unparseable JSON zeroes out
+a site's entire fan-out by pure rollout roulette and burns a 6h-backoff slot on it.
 
 ## 7. Project layout
 ```
@@ -1091,6 +1106,7 @@ the generator — §8). Selected knobs:
 | `JOBCRAWLER_ADOPT_REGRESSION_DELTA` | `2` | extra generation-failures over baseline that trip auto-rollback |
 | `JOBCRAWLER_MAX_ITERATIONS` / `MAX_LLM_CALLS` / `MAX_SUBCALLS` | `20` / `40` / `60` | RLM caps + the unconditional host sub-call kill (§4.2) |
 | `JOBCRAWLER_FANOUT_N` / `FANOUT_SPEND_CAP` | `4` / `$8/site` | §6 best-of-N width + the aggregate fan-out $ ceiling |
+| `JOBCRAWLER_FANOUT_RETRIES` | `= FANOUT_N` | §6 redraws for LM/adapter-dead attempts (a failure never eats a comparison slot; attempts ≤ 2N) |
 | `JOBCRAWLER_SOLVER` / `FLARESOLVERR_URL` / `JOBCRAWLER_CLEARANCE_TTL` / `JOBCRAWLER_EGRESS_PROXY` | `none` / — / `30m` / — | §4.10 challenge backend + clearance + IP/UA-pinned egress |
 | `JOBCRAWLER_NOTIFY_WEBHOOK` / `NOTIFY_TIMEOUT` | — / `10s` | optional operator webhook for autonomous actions + match alerts (§4.7/§4.9) |
 

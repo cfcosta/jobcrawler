@@ -361,9 +361,22 @@ def test_exception_fails() -> None:
     assert not _complete(_result(item_count=9, samples=[_good_sample()], exception=exc))
 
 
-def test_schema_errors_fail() -> None:
+def test_schema_errors_beyond_tolerance_fail() -> None:
+    # 1 error across 10 yields = 10%: a systematic extraction bug, not a wart.
     assert not _complete(
         _result(item_count=9, samples=[_good_sample()], schema_errors=["bad url"])
+    )
+
+
+def test_schema_errors_within_tolerance_pass() -> None:
+    # 1 invalid item on a 100-role board: production _collect drops it and the
+    # crawl proceeds (errors=1), so admission must not sink the candidate either.
+    assert _complete(
+        _result(
+            item_count=99,
+            samples=[_good_sample()],
+            schema_errors=["location: String should have at least 1 character"],
+        )
     )
 
 

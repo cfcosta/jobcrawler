@@ -68,7 +68,8 @@ class GenerateCrawler(dspy.Signature):
     company, location, and the FULL description text, plus every structured field
     the source actually states — salary, employment_type, workplace_type,
     department, posted_at, expires_at, external_id, apply_url. NEVER fabricate a
-    salary or a date: leave a field unset when the source is silent. On a
+    salary or a date: leave a field unset when the source is silent — unset means
+    omitted or None, never an empty string (a "" fails schema validation). On a
     single-company board hard-code ``company`` from the operator hint.
 
     Validate with validate_crawler before SUBMIT: it must yield several postings,

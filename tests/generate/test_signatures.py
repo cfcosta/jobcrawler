@@ -76,6 +76,15 @@ def test_generate_crawler_instruction_states_the_extra_hosts_rule() -> None:
     assert "extra_hosts" in instr
 
 
+def test_generate_crawler_instruction_says_unset_is_never_an_empty_string() -> None:
+    # "Leave a field unset when the source is silent" alone reads as ``""`` to a
+    # model mapping ATS JSON (grupoboticario yielded location="" for a remote
+    # posting and failed Job's min_length=1); the instruction must say what
+    # unset means mechanically.
+    instr = GenerateCrawler.instructions.lower()
+    assert "never an empty string" in instr
+
+
 def test_generate_crawler_instruction_names_structured_job_fields() -> None:
     # The generator must extract-when-present (never fabricate) the structured Job
     # fields, so the docstring has to name them.

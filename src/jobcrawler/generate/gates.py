@@ -295,6 +295,7 @@ def check_completeness(
     min_description_quality: float = 0.6,
     min_unique_chars: int = 150,
     max_replacement_ratio: float = 0.02,
+    max_schema_error_ratio: float = 0.02,
 ) -> GateResult:
     """Gate 2: position floor + enumeration floor + per-sample validity (§6).
 
@@ -312,6 +313,14 @@ def check_completeness(
     sample fails only when its unique residual falls below ``min_unique_chars`` or
     two samples' descriptions are byte-identical — so the About-us / benefits /
     EEO slabs a real careers board repeats never sink a correct crawler.
+
+    Schema errors are tolerated up to ``max_schema_error_ratio`` of the total
+    yield, mirroring the production runner: ``runner._collect`` drops an invalid
+    item, counts it in ``errors=N``, and the crawl proceeds — so a candidate the
+    runtime would run fine (say one remote posting with an empty location on a
+    hundred-role board) must not die at admission for a sub-ratio wart. The
+    errors stay in the ``validate_crawler`` output either way, so the
+    write → validate → fix loop still steers toward zero.
     """
     failures: list[str] = []
     if result.exception is not None:
@@ -327,9 +336,12 @@ def check_completeness(
                 f"enumerated {result.item_count} of ~{expected_items} openings the board lists"
             )
     if result.schema_errors:
-        failures.append(
-            f"{len(result.schema_errors)} schema errors (e.g. {result.schema_errors[0]})"
-        )
+        total = result.item_count + len(result.schema_errors)
+        if len(result.schema_errors) > max_schema_error_ratio * total:
+            failures.append(
+                f"{len(result.schema_errors)} schema errors across {total} yields "
+                f"(e.g. {result.schema_errors[0]})"
+            )
     failures.extend(_identical_description_failures(result.samples))
 
     # Blocks (>= 80 chars, blank-line split) shared by >= 2 samples are the
