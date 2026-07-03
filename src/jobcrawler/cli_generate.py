@@ -226,7 +226,13 @@ async def _generate_one(
     else:
         print(f"OK {site.slug}: wrote crawlers/{site.slug}.py (score {score:.2f})")
     _record_for_trainset(
-        site, ctx, corpus, best, source, _committed_hosts(source, registry_hosts)
+        site,
+        ctx,
+        corpus,
+        best,
+        source,
+        _committed_hosts(source, registry_hosts),
+        url_evidence=observed,
     )
     return outcome
 
@@ -498,16 +504,22 @@ def _record_for_trainset(
     pred: object,
     source: str,
     hosts: set[str],
+    url_evidence: Collection[str] = (),
 ) -> None:
     """Append an admitted example to the §4.11 trainset — only if the §8 adversarial
     cross-validation over the *actual* items also passes (the §6 gates already did).
     The per-site stability admission is applied later, at optimize time.
+
+    ``url_evidence`` widens only the cross-validation's *sample-url* domain check,
+    the same evidence rule as gate 2 — Greenhouse's ``absolute_url`` lives on a
+    corpus-evidenced sibling host, not the crawl host. Sandbox *execution* keeps
+    exactly the committed allowlist.
     """
     result = validate_crawler(source, allowed_hosts=hosts)
     verdict = cross_validate(
         result.samples,
         live_titles=_live_titles(ctx, result.samples),
-        allowed_hosts=hosts,
+        allowed_hosts=hosts | set(url_evidence),
     )
     if not verdict.passed:
         print(f"  not recorded for trainset: adversarial failed ({verdict.reason})")

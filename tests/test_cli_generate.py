@@ -131,6 +131,58 @@ def test_sibling_host_urls_pass_with_url_evidence() -> None:
     assert ok, reason
 
 
+def test_trainset_recorder_widens_url_judgment_not_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The §8 adversarial recorder follows gate 2's evidence rule: its sample-url
+    # domain check accepts corpus-evidenced link hosts (a gate-passing Greenhouse
+    # winner links job-boards.greenhouse.io while crawling boards-api...), or every
+    # delivered ATS-API crawler would be "off-domain" and never enter the trainset.
+    # Sandbox *execution* keeps exactly the committed allowlist.
+    from collections.abc import Collection, Mapping, Sequence
+
+    from jobcrawler.generate.adversarial import AdversarialResult
+    from jobcrawler.generate.scoring import CandidateResult
+    from jobcrawler.runtime.ctx import Ctx
+
+    seen: dict[str, set[str]] = {}
+
+    def fake_validate(
+        source: str, *, allowed_hosts: Collection[str]
+    ) -> CandidateResult:
+        seen["execution"] = set(allowed_hosts)
+        return CandidateResult(
+            item_count=1,
+            samples=[{"url": "https://boards.example.org/jobs/1", "title": "T"}],
+            schema_errors=[],
+            pages_fetched=1,
+        )
+
+    def fake_cross_validate(
+        samples: Sequence[Mapping[str, object]],
+        *,
+        live_titles: Mapping[str, str],
+        allowed_hosts: Collection[str],
+    ) -> AdversarialResult:
+        seen["judgment"] = set(allowed_hosts)
+        return AdversarialResult(False, 0, 0, 0, "stop before append_record")
+
+    monkeypatch.setattr(cli_generate, "validate_crawler", fake_validate)
+    monkeypatch.setattr(cli_generate, "cross_validate", fake_cross_validate)
+    monkeypatch.setattr(cli_generate, "_live_titles", lambda ctx, samples: {})
+    cli_generate._record_for_trainset(
+        Site(slug="acme", url="https://example.com"),
+        ctx=Ctx({"example.com"}),  # unused: _live_titles, the only ctx user, is stubbed
+        corpus={},
+        pred=_pred(),
+        source=_SIBLING_URLS,
+        hosts={"example.com"},
+        url_evidence={"boards.example.org"},
+    )
+    assert seen["execution"] == {"example.com"}
+    assert seen["judgment"] == {"example.com", "boards.example.org"}
+
+
 # -- §4.8 / §14.2 delivery: stage for review vs write live, and promote ---------
 
 _SRC = "SITE='x'\ndef crawl(ctx):\n    yield None\n"
