@@ -56,7 +56,10 @@ class GenerateCrawler(dspy.Signature):
       4. Scrape the HTML only when nothing above enumerates the board.
 
     Emit a module implementing the crawler contract (a module-level SITE constant
-    and crawl(ctx) yielding Jobs). Yield one Job per open role with url, title,
+    and crawl(ctx) yielding Jobs). SITE must be exactly the given site_url — the
+    acceptance gate rejects a SITE on any other host, even the board's own
+    careers domain; job *urls*, by contrast, keep the source's canonical posting
+    links wherever they live. Yield one Job per open role with url, title,
     company, location, and the FULL description text, plus every structured field
     the source actually states — salary, employment_type, workplace_type,
     department, posted_at, expires_at, external_id, apply_url. NEVER fabricate a

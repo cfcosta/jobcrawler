@@ -57,6 +57,15 @@ def test_generate_crawler_instruction_demands_validate_and_api_first() -> None:
         assert ats in instr
 
 
+def test_generate_crawler_instruction_states_the_site_admission_rule() -> None:
+    # Gate 1(b) rejects a SITE off the registry host; the instruction must state
+    # that fixed contract or a model anchors SITE on a board's vanity careers
+    # domain (duolingo's Greenhouse board links careers.duolingo.com) and every
+    # candidate loses at the gate without ever being told the rule.
+    instr = GenerateCrawler.instructions.lower()
+    assert "site must be exactly the given site_url" in instr
+
+
 def test_generate_crawler_instruction_names_structured_job_fields() -> None:
     # The generator must extract-when-present (never fabricate) the structured Job
     # fields, so the docstring has to name them.
