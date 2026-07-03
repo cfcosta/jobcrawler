@@ -130,24 +130,37 @@ def compute_axes(
     min_description_chars: int,
     discovery_method: str,
     max_replacement_ratio: float = 0.02,
+    min_unique_chars: int = 150,
 ) -> QualityAxes:
     """Measure the five bounded [0,1] axes from a ``CandidateResult`` (§6).
 
     The veto axes (field presence, url validity) and the description axis are
     sampled rates over ``result.samples``; no samples means they are 0 (the veto
-    fires).
+    fires). The description axis is the §6 *unique-residual* measure, not raw
+    length: a sample counts only when it is long enough, clean of mojibake, AND
+    outside the gate's uniqueness defects (cross-title identical bodies, one
+    posting echoed n times, residual below the floor after shared-block strip) —
+    so a candidate that stamps one page-level blurb on every posting scores low
+    here instead of sailing to the completeness gate on length alone (§8
+    adversarial admission).
     """
+    from jobcrawler.generate import gates  # lazy: break the import cycle
+
     samples = result.samples
     n = len(samples)
     if n == 0:
         field_presence = description_quality = url_validity = 0.0
     else:
+        defective = gates.defective_description_indices(
+            samples, min_unique_chars=min_unique_chars
+        )
         field_presence = sum(1 for s in samples if _has_fields(s)) / n
         description_quality = (
             sum(
                 1
-                for s in samples
-                if _good_description(s, min_description_chars, max_replacement_ratio)
+                for i, s in enumerate(samples)
+                if i not in defective
+                and _good_description(s, min_description_chars, max_replacement_ratio)
             )
             / n
         )
@@ -170,6 +183,7 @@ def score_candidate(
     discovery_method: str,
     forced: bool = False,
     weights: GradedWeights = DEFAULT_WEIGHTS,
+    min_unique_chars: int = 150,
 ) -> float:
     """The graded scalar for one candidate, minus the forced-extraction tie-breaker."""
     axes = compute_axes(
@@ -178,6 +192,7 @@ def score_candidate(
         allowed_hosts=allowed_hosts,
         min_description_chars=min_description_chars,
         discovery_method=discovery_method,
+        min_unique_chars=min_unique_chars,
     )
     return score_from_axes(axes, forced=forced, weights=weights)
 
@@ -232,8 +247,9 @@ _AXIS_GUIDANCE: dict[str, str] = {
         "— yield every posting with all of them"
     ),
     "description_quality": (
-        "job descriptions are short or garbled — extract the FULL posting text and "
-        "drop nav/boilerplate and encoding artefacts"
+        "job descriptions are short, garbled, or not per-role — extract each "
+        "posting's FULL, role-specific text (not one page-level blurb repeated "
+        "across postings), dropping nav/boilerplate and encoding artefacts"
     ),
     "url_validity": (
         "some posting urls are off-domain or malformed — yield only absolute, "
@@ -350,6 +366,7 @@ def make_reward_fn(
     target_n: int,
     min_description_chars: int,
     weights: GradedWeights = DEFAULT_WEIGHTS,
+    min_unique_chars: int = 150,
 ) -> Callable[[Mapping[str, object], object], float]:
     """The BestOfN/Refine adapter (the outlier): ``reward_fn(kwargs, pred) -> float``."""
 
@@ -363,6 +380,7 @@ def make_reward_fn(
             discovery_method=_discovery(pred),
             forced=_forced(pred),
             weights=weights,
+            min_unique_chars=min_unique_chars,
         )
 
     return reward_fn
@@ -375,6 +393,7 @@ def make_metric(
     min_items: int,
     min_description_chars: int,
     weights: GradedWeights = DEFAULT_WEIGHTS,
+    min_unique_chars: int = 150,
 ) -> Callable[..., dspy.Prediction]:
     """The unified Evaluate/GEPA metric (signature-compatible — verified in 3.2.1).
 
@@ -408,6 +427,7 @@ def make_metric(
             min_items=min_items,
             min_description_chars=min_description_chars,
             allowed_hosts=hosts,
+            min_unique_chars=min_unique_chars,
         )
         # One axis pass feeds both the scalar and the per-axis remediation, so a
         # gate-passing-but-mediocre candidate still hands GEPA actionable feedback
@@ -419,6 +439,7 @@ def make_metric(
             allowed_hosts=hosts,
             min_description_chars=min_description_chars,
             discovery_method=_discovery(pred),
+            min_unique_chars=min_unique_chars,
         )
         score = score_from_axes(axes, forced=forced, weights=weights)
         return dspy.Prediction(
@@ -437,6 +458,7 @@ def make_bootstrap_metric(
     target_n: int,
     min_description_chars: int,
     weights: GradedWeights = DEFAULT_WEIGHTS,
+    min_unique_chars: int = 150,
 ) -> Callable[..., float]:
     """The BootstrapFewShot adapter (§4.11 / M5a): a bare **float** score.
 
@@ -464,6 +486,7 @@ def make_bootstrap_metric(
             discovery_method=_discovery(pred),
             forced=_forced(pred),
             weights=weights,
+            min_unique_chars=min_unique_chars,
         )
 
     return metric
@@ -490,4 +513,18 @@ def _forced(pred: object) -> bool:
 
 
 def _hosts(carrier: object) -> set[str]:
-    return {normalize_host(str(_field(carrier, "site_url", "")))}
+    """Hosts a sample's ``url`` may live on: the site plus its served evidence (§6/§8).
+
+    The url-validity axis judges the *canonical posting link*, and an ATS API
+    legitimately points that at a sibling human-facing host the crawler never
+    fetches (Greenhouse's ``absolute_url`` lives on job-boards.greenhouse.io while
+    the crawl host is boards-api.greenhouse.io). The same §8 evidence rule as host
+    admission applies: a host the site's own served bytes name is a valid link
+    target; one the crawler invented is not. Fetching is governed elsewhere — the
+    sandbox/crawl allowlist stays SITE + declared EXTRA_HOSTS.
+    """
+    from jobcrawler.generate.tools import corpus_host_evidence  # lazy: import cycle
+
+    site_url = str(_field(carrier, "site_url", ""))
+    base = {h for h in (normalize_host(site_url),) if h}
+    return base | set(corpus_host_evidence(_field(carrier, "corpus", None), site_url))

@@ -173,12 +173,14 @@ def _optimize(
         core,
         target_n=_TARGET_ITEMS,
         min_description_chars=config.min_description_chars(),
+        min_unique_chars=config.min_unique_description_chars(),
     )
     eval_metric = make_metric(
         core,
         target_n=_TARGET_ITEMS,
         min_items=config.min_items(),
         min_description_chars=config.min_description_chars(),
+        min_unique_chars=config.min_unique_description_chars(),
     )
     # The incumbent: the pinned generator.json if any, else baseline (§4.11 boot-load).
     baseline = load_generator(

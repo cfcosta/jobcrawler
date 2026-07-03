@@ -100,6 +100,37 @@ def test_empty_crawl_fails_completeness() -> None:
     assert not ok and "completeness" in reason
 
 
+# The Greenhouse shape: the crawl host serves an API whose canonical posting links
+# live on a sibling human-facing host the crawler never fetches (absolute_url on
+# job-boards.greenhouse.io vs the boards-api crawl host).
+_SIBLING_URLS = (
+    "from jobcrawler.runtime.contract import Job\n"
+    'SITE = "https://example.com"\n'
+    "def crawl(ctx):\n"
+    "    for i in range(8):\n"
+    '        description = f"Role {i}. " + "x" * 500  # distinct per posting\n'
+    '        yield Job(url=f"https://boards.example.org/jobs/{i}", title=f"T{i}", '
+    'company="Acme", location="Remote", description=description, source="s")\n'
+)
+
+
+def test_sibling_host_urls_fail_without_evidence() -> None:
+    # No corpus evidence names the sibling host → the completeness gate rejects the
+    # off-allowlist link target (a crawler cannot invent hosts, §8).
+    ok, reason = gate_winner(_pred(), _SIBLING_URLS, _HOSTS)
+    assert not ok and "completeness" in reason
+
+
+def test_sibling_host_urls_pass_with_url_evidence() -> None:
+    # The same winner once the site's own served corpus names the sibling host
+    # (§6 gate 2): the canonical posting link may live there even though the
+    # crawler never fetches it — the crawl allowlist itself stays unchanged.
+    ok, reason = gate_winner(
+        _pred(), _SIBLING_URLS, _HOSTS, url_evidence={"boards.example.org"}
+    )
+    assert ok, reason
+
+
 # -- §4.8 / §14.2 delivery: stage for review vs write live, and promote ---------
 
 _SRC = "SITE='x'\ndef crawl(ctx):\n    yield None\n"

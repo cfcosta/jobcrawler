@@ -19,6 +19,7 @@ from jobcrawler.generate.gates import (
     check_ast,
     check_completeness,
     check_host_admission,
+    defective_description_indices,
     jaccard_stability,
     must_observe_failure,
     stability_verdict,
@@ -557,15 +558,15 @@ def test_all_boilerplate_fails() -> None:
     assert any("boilerplate" in f for f in gate.failures)
 
 
-def test_identical_descriptions_fail() -> None:
-    # A crawler yielding the SAME description for every posting (a page-level generic
-    # blurb, not the per-role text) — byte-identical descriptions REJECT. Built from
+def test_identical_descriptions_under_different_titles_fail() -> None:
+    # A crawler yielding the SAME description for postings with DIFFERENT titles (a
+    # page-level generic blurb, not the per-role text) — REJECT. Built from
     # sub-80-char lines so no block registers as shared boilerplate; this isolates
     # the identical-descriptions rule from the residual check.
     line = "We build reliable backend services in Python and Go."
     desc = "\n\n".join(f"{line} Detail {j}." for j in range(6))
-    a = _job("https://example.com/a", desc)
-    b = _job("https://example.com/b", desc)
+    a = _job("https://example.com/a", desc, title="Backend Engineer")
+    b = _job("https://example.com/b", desc, title="Frontend Engineer")
     gate = check_completeness(
         _result(item_count=9, samples=[a, b]),
         min_items=5,
@@ -574,6 +575,87 @@ def test_identical_descriptions_fail() -> None:
     )
     assert not gate.passed
     assert any("identical descriptions" in f for f in gate.failures)
+
+
+def test_same_title_region_clones_pass() -> None:
+    # One req posted per region as separate postings with byte-identical bodies —
+    # the GitLab/Greenhouse shape. The clone pair shares title AND description, so
+    # it is tolerated; and the clone's own body (an ≥80-char block appearing in two
+    # samples) must NOT count as a shared boilerplate block, or the clones would
+    # residual-strip themselves to zero. The third, distinct posting keeps the set
+    # from collapsing to a single job.
+    clone_desc = (
+        "We are hiring a backend engineer to design, build, and operate our payments "
+        "and billing APIs in Python and Go, owning reliability and on-call from the "
+        "first commit through the production rollout across the region."
+    )
+    emea = _job("https://example.com/be-emea", clone_desc, title="Backend Engineer")
+    amer = _job("https://example.com/be-amer", clone_desc, title="Backend Engineer")
+    other = _job(
+        "https://example.com/fe",
+        "We are hiring a frontend engineer to build our customer-facing dashboard in "
+        "TypeScript and React, partnering closely with design and product on the "
+        "end-to-end user experience and accessibility for every customer.",
+        title="Frontend Engineer",
+    )
+    gate = check_completeness(
+        _result(item_count=9, samples=[emea, amer, other]),
+        min_items=5,
+        min_description_chars=100,
+        allowed_hosts=_HOSTS,
+    )
+    assert gate.passed, gate.reason
+
+
+def test_all_samples_one_posting_fails() -> None:
+    # Every sample is the SAME (title, description) — one job echoed n times is a
+    # broken enumeration even though the same-title clone rule tolerates each pair.
+    line = "We build reliable backend services in Python and Go."
+    desc = "\n\n".join(f"{line} Detail {j}." for j in range(6))
+    samples = [
+        _job(f"https://example.com/{i}", desc, title="Backend Engineer")
+        for i in range(3)
+    ]
+    gate = check_completeness(
+        _result(item_count=9, samples=samples),
+        min_items=5,
+        min_description_chars=100,
+        allowed_hosts=_HOSTS,
+    )
+    assert not gate.passed
+    assert any("same posting" in f for f in gate.failures)
+
+
+def test_defective_indices_track_the_gate_rules() -> None:
+    # The §4.11 description axis grades by the same defect set the gate enforces
+    # (one _identity_scan feeds both): cross-title identical pairs, the collapsed
+    # set, and thin residual are defective; a same-title clone pair is not.
+    blurb = "One page-level blurb the crawler stamped on every posting. " * 4
+    cross = [
+        _job("https://example.com/a", blurb, title="Backend Engineer"),
+        _job("https://example.com/b", blurb, title="Frontend Engineer"),
+        _job("https://example.com/c", "A genuinely distinct role text. " * 8),
+    ]
+    assert defective_description_indices(cross, min_unique_chars=150) == {0, 1}
+
+    collapsed = [
+        _job(f"https://example.com/{i}", blurb, title="Backend Engineer")
+        for i in range(3)
+    ]
+    assert defective_description_indices(collapsed, min_unique_chars=150) == {0, 1, 2}
+
+    clones = [
+        _job("https://example.com/be-1", blurb, title="Backend Engineer"),
+        _job("https://example.com/be-2", blurb, title="Backend Engineer"),
+        _job("https://example.com/fe", "A genuinely distinct role text. " * 8),
+    ]
+    assert defective_description_indices(clones, min_unique_chars=150) == set()
+
+    thin = [
+        _job("https://example.com/a", _EEO + "\n\nRole A"),
+        _job("https://example.com/b", _EEO + "\n\nRole B", title="Data Engineer"),
+    ]
+    assert defective_description_indices(thin, min_unique_chars=150) == {0, 1}
 
 
 def test_distinct_descriptions_pass_the_boilerplate_check() -> None:

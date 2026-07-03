@@ -809,13 +809,19 @@ A generated script is accepted only if it passes, in order:
    from an unregistered base), and every declared `EXTRA_HOSTS` entry must be a literal bare
    hostname that is (i) **evidence-backed** — matched against hosts the site's own served corpus
    vouches for, (ii) within `JOBCRAWLER_EXTRA_HOSTS_CAP`, and (iii) clean under the fixed SSRF
-   kernel. Gates 2–3 then validate against **exactly the committed allowlist** (registry ∪
+   kernel. Gates 2–3 then *execute* against **exactly the committed allowlist** (registry ∪
    declared), never the wider generation-time exploration envelope — a fetch production would
    refuse fails here, not on the first scheduled crawl.
 2. **Runtime validation & completeness** — yields ≥ `min_items`; every posting has a non-empty
    `title`/`company`/`location`, a **sufficiently long, non-boilerplate** `description` (≥
    `min_description_chars`, ≥ `min_unique_description_chars` distinct chars, and reject an
-   `expired_markers`/mojibake body), and a valid on-domain `url`; runs within time/page/memory budget;
+   `expired_markers`/mojibake body), and a valid `url` on an **evidence-backed host** — the committed
+   allowlist *or* a host the site's own served corpus names (the same §8 evidence rule as gate 1(b),
+   but robots-**unfiltered**: robots governs what may be *fetched*, not what a posting may *link* to).
+   An ATS API's canonical posting link legitimately lives on a sibling human-facing host the crawler
+   never fetches — Greenhouse's `absolute_url` sits on `job-boards.greenhouse.io` while the crawl host
+   is `boards-api.greenhouse.io`; judging sample urls against the crawl allowlist alone makes every
+   API-first board ungeneratable. Runs within time/page/memory budget;
    obeys robots. Plus two anti-under-enumeration checks — enumerating a board is an
    *exhaustive-enumeration* task and RLMs reliably under-enumerate on "find every X" [Sanjaya]: (a)
    **must-observe** — reject/down-score a candidate that never called `validate_crawler` before
@@ -854,8 +860,13 @@ company boilerplate on *every* posting. So the gate is inverted into three parts
   role-specific responsibilities/requirements) — this is what `min_unique_description_chars` (§11)
   operationalizes. A crawler that yields only the shared boilerplate (title + benefits, no role body)
   fails here even though its raw length clears `min_description_chars`.
-- **Identical-description reject** — if *every* posting's description is byte-identical (zero unique
-  residual), the crawler grabbed a board-level blob and stamped it on each row → reject.
+- **Identical-description reject, title-aware** — byte-identical descriptions under **different**
+  titles mean the crawler grabbed a board-level blob and stamped it on each row → reject. An identical
+  body under the **same** title is a legitimate per-region clone (one req posted per location, the
+  GitLab/Greenhouse shape) → tolerated; the shared-block set is accordingly computed over **distinct
+  description strings**, so a clone can't promote its own body to "boilerplate" and residual-strip
+  itself to zero. A sample set that collapses to a *single* (title, description) posting still
+  rejects — that is one job echoed n times, not a crawl.
 
 Gates 1–2 are computed by **one pure scoring core** returning a `CandidateResult`, a `gate_failures`
 reason string, and a **graded, continuous, multi-axis** score — *not* a 0/1 verdict. Compute the hard

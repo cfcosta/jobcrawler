@@ -360,17 +360,22 @@ def _blocks(text: str, *, min_block_chars: int = 80) -> list[str]:
 
 
 def _shared_blocks(samples: list[dict]) -> frozenset[str]:
-    """The substantial blocks that appear in >= 2 samples' descriptions.
+    """The substantial blocks that appear in >= 2 *distinct* descriptions.
 
     On one company's board these are the legitimately-repeated slabs (benefits,
     EEO, About-us). We collect them so :func:`_strip_blocks` can remove them before
     measuring each posting's unique residual — the inverted §6 boilerplate check:
     sharing them is expected, hiding a thin description behind them is not.
+    Counted over distinct description strings, not raw samples, so a same-req
+    region clone (the same posting sampled twice) never promotes its own body to
+    "boilerplate" and residual-strips itself to nothing — shared means "appears
+    across different postings".
     """
     counts: dict[str, int] = {}
-    for sample in samples:
+    descriptions = {str(sample.get("description") or "") for sample in samples}
+    for description in descriptions:
         # ``set`` so a block repeated within one posting counts that posting once.
-        for block in set(_blocks(str(sample.get("description") or ""))):
+        for block in set(_blocks(description)):
             counts[block] = counts.get(block, 0) + 1
     return frozenset(block for block, count in counts.items() if count >= 2)
 
@@ -394,27 +399,84 @@ def _strip_blocks(description: str, shared: Collection[str]) -> str:
     return " ".join(kept)
 
 
-def _identical_description_failures(samples: list[dict]) -> list[str]:
-    """Pairs of samples whose full descriptions are byte-identical (§6).
+def _identity_scan(samples: list[dict]) -> tuple[list[tuple[int, int]], list[int]]:
+    """The §6 identity facts: cross-title identical pairs + the collapsed set.
 
-    A crawler that yields the *same* description for every posting — grabbing one
-    page-level generic blurb instead of the per-role text — is broken even though
-    each row clears the length floor. Empty descriptions are ignored here (the
-    length/quality checks own that case), so this fires only on real duplication.
+    Returns ``(pairs, collapsed)``: each pair is two sample indices whose
+    descriptions are byte-identical under *different* titles, and ``collapsed``
+    is every counted index when the whole set reduces to a single
+    (title, description) posting — else empty. Samples with empty descriptions
+    are ignored (the length/quality checks own that case). One scan feeds both
+    the gate's failure messages and the description axis's defect set, so the
+    identity rules cannot drift between enforcement and reward.
     """
-    seen: dict[str, int] = {}
-    failures: list[str] = []
+    seen: dict[str, tuple[int, str]] = {}
+    pairs: list[tuple[int, int]] = []
+    postings: set[tuple[str, str]] = set()
+    counted: list[int] = []
     for i, sample in enumerate(samples):
         description = str(sample.get("description") or "")
         if not description.strip():
             continue
+        title = str(sample.get("title") or "").strip()
+        counted.append(i)
+        postings.add((title, description))
         if description in seen:
-            failures.append(
-                f"samples {seen[description]} and {i} have identical descriptions"
-            )
+            first, first_title = seen[description]
+            if title != first_title:
+                pairs.append((first, i))
         else:
-            seen[description] = i
+            seen[description] = (i, title)
+    collapsed = counted if len(counted) >= 2 and len(postings) == 1 else []
+    return pairs, collapsed
+
+
+def _identical_description_failures(samples: list[dict]) -> list[str]:
+    """Cross-title pairs of samples whose descriptions are byte-identical (§6).
+
+    A crawler that yields the *same* description for postings with *different*
+    titles grabbed one page-level generic blurb instead of the per-role text —
+    broken even though each row clears the length floor. Same-title duplicates
+    are tolerated: a real ATS board posts one req per region as separate
+    postings with identical bodies (GitLab's per-region clones), and rejecting
+    those makes the board ungeneratable. A sample set that collapses to a
+    single (title, description) posting still fails as a whole: that is one job
+    echoed n times, not a crawl.
+    """
+    pairs, collapsed = _identity_scan(samples)
+    failures = [
+        f"samples {a} and {b} have identical descriptions under different titles"
+        for a, b in pairs
+    ]
+    if collapsed:
+        failures.append(f"all {len(collapsed)} samples are the same posting")
     return failures
+
+
+def defective_description_indices(
+    samples: list[dict], *, min_unique_chars: int
+) -> set[int]:
+    """Sample indices whose descriptions flunk the §6 uniqueness rules.
+
+    The union of: members of a cross-title identical-description pair, every
+    sample when the set collapses to a single (title, description) posting, and
+    samples whose unique residual after stripping the board's shared blocks
+    falls below ``min_unique_chars``. This is the "§6 unique-residual measure"
+    the §4.11 description axis grades by (§8 adversarial admission): the reward
+    steers by exactly the defects this gate enforces — a candidate that stamps
+    one page-level blurb on every posting scores low *before* it ever reaches
+    the gate, instead of sailing to the gate on length alone. Thresholds stay
+    hidden from the generator either way (§8).
+    """
+    pairs, collapsed = _identity_scan(samples)
+    defective = {i for pair in pairs for i in pair}
+    defective.update(collapsed)
+    shared = _shared_blocks(samples)
+    for i, sample in enumerate(samples):
+        description = str(sample.get("description") or "").strip()
+        if description and len(_strip_blocks(description, shared)) < min_unique_chars:
+            defective.add(i)
+    return defective
 
 
 def must_observe_failure(

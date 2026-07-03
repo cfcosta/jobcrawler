@@ -141,7 +141,8 @@ async def _generate_one(
     # so the RLM can explore a cross-host board API. Exploration ≠ admission: what
     # the winner actually declares is gate-1(b)'s job, judged against this same
     # evidence — and the committed crawl runs on registry + declared only.
-    evidence = _eligible_extra_hosts(corpus_host_evidence(corpus, site.url))
+    observed = corpus_host_evidence(corpus, site.url)
+    evidence = _eligible_extra_hosts(observed)
     hosts = registry_hosts | evidence
     # Same page budget as the old single-ctx flow: the boot ctx's corpus spend
     # carries over rather than resetting.
@@ -169,6 +170,7 @@ async def _generate_one(
         core,
         target_n=_TARGET_ITEMS,
         min_description_chars=config.min_description_chars(),
+        min_unique_chars=config.min_unique_description_chars(),
     )
 
     async def make_attempt(i: int) -> object:
@@ -203,7 +205,9 @@ async def _generate_one(
     # instead steered toward full enumeration by site_features (it sees
     # expected_recent) and the must-observe "consult the sitemap" gate; the
     # count-based floor belongs at runtime, over a full crawl.
-    ok, reason = gate_winner(best, source, registry_hosts, extra_evidence=evidence)
+    ok, reason = gate_winner(
+        best, source, registry_hosts, extra_evidence=evidence, url_evidence=observed
+    )
     if not ok:
         print(f"FAIL {site.slug}: {reason}")
         return RegenOutcome.FAILED
@@ -376,6 +380,7 @@ def gate_winner(
     hosts: set[str],
     *,
     extra_evidence: Collection[str] = (),
+    url_evidence: Collection[str] = (),
     expected_items: int | None = None,
 ) -> tuple[bool, str]:
     """The full §6 gate set on the selected winner; returns (passed, reason).
@@ -386,6 +391,13 @@ def gate_winner(
     gates (completeness, stability) validate against exactly the allowlist the
     committed crawler will run under (registry + admitted declarations), never a
     wider exploration envelope, so a fetch production would refuse fails here.
+
+    ``url_evidence`` widens only the completeness gate's *sample-url* domain
+    check: a Job's canonical link may live on any host the site's own served
+    bytes name (§8 evidence rule — Greenhouse's ``absolute_url`` points at the
+    human-facing job-boards host, which the crawler never fetches). Unlike
+    ``extra_evidence`` it is not robots-filtered — robots governs fetching, not
+    linking.
 
     ``expected_items`` (the site's open-posting count, from its listing/sitemap)
     activates the enumeration floor — a feed-sized sample of a far larger board is
@@ -418,10 +430,11 @@ def gate_winner(
         first,
         min_items=config.min_items(),
         min_description_chars=config.min_description_chars(),
-        allowed_hosts=run_hosts,
+        allowed_hosts=run_hosts | set(url_evidence),
         expected_items=expected_items,
         enum_floor_ratio=config.enum_floor_ratio(),
         min_description_quality=config.min_description_quality(),
+        min_unique_chars=config.min_unique_description_chars(),
     )
     if not completeness.passed:
         return False, f"completeness: {completeness.reason}"

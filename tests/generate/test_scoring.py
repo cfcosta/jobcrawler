@@ -23,6 +23,7 @@ from jobcrawler.generate.scoring import (
     compute_axes,
     graded_score,
     items_axis,
+    make_reward_fn,
     score_candidate,
     score_from_axes,
 )
@@ -165,6 +166,31 @@ def test_axes_short_description_zeros_description_quality() -> None:
     assert _axes(_result(30, [s])).description_quality == 0.0
 
 
+def test_axes_cross_title_identical_descriptions_zero_the_axis() -> None:
+    # The description axis is the §6 unique-residual measure, not raw length: one
+    # page-level blurb stamped on two different roles is long enough but defective,
+    # so the reward steers away from it before the completeness gate ever fires.
+    a, b = _sample("https://example.com/a"), _sample("https://example.com/b")
+    a["title"], b["title"] = "Backend Engineer", "Frontend Engineer"
+    axes = _axes(_result(30, [a, b]))
+    assert axes.description_quality == 0.0
+
+
+def test_axes_same_title_region_clones_keep_the_axis() -> None:
+    # One req posted per region (identical title AND body) is a legitimate board
+    # shape — the clone pair must not sink the axis, and a distinct third posting
+    # keeps the set from collapsing to a single job.
+    emea, amer = (
+        _sample("https://example.com/be-1"),
+        _sample("https://example.com/be-2"),
+    )
+    other = _sample("https://example.com/fe")
+    other["title"] = "Frontend Engineer"
+    other["description"] = "Frontend role. " + "y" * 500
+    axes = _axes(_result(30, [emea, amer, other]))
+    assert axes.description_quality == 1.0
+
+
 def test_axes_discovery_quality_tracks_method() -> None:
     assert (
         _axes(_result(30, [_sample()]), "scrape").discovery_quality
@@ -231,6 +257,38 @@ def test_forced_penalty_never_goes_below_zero() -> None:
         forced=True,
     )
     assert score == 0.0
+
+
+# -- make_reward_fn: the §8 evidence rule reaches the url axis ----------------
+
+
+def test_reward_accepts_corpus_evidenced_link_hosts() -> None:
+    # The Greenhouse shape: the API's canonical posting links live on a sibling
+    # human-facing host the crawler never fetches. The reward judges sample urls
+    # against the site's served evidence (§6 gate 2 / §8) — without this the url
+    # veto steers every candidate away from the only correct url the API offers.
+    # A host the corpus never named stays vetoed: a crawler cannot invent hosts.
+    samples = []
+    for i in range(3):
+        s = _sample(f"https://boards.example.org/jobs/{i}")
+        s["title"] = f"Engineer {i}"
+        s["description"] = f"Role {i}. " + "x" * 500  # distinct per posting
+        samples.append(s)
+    result = _result(30, samples)
+    reward = make_reward_fn(
+        lambda source, carrier: result, target_n=30, min_description_chars=400
+    )
+    pred = {"crawler_source": "src", "discovery_method": "feed"}
+    evidenced = reward(
+        {
+            "site_url": "https://example.com/",
+            "corpus": {"apis": {"seen": "links at https://boards.example.org/jobs"}},
+        },
+        pred,
+    )
+    bare = reward({"site_url": "https://example.com/"}, pred)
+    assert evidenced == pytest.approx(1.0)
+    assert bare == 0.0
 
 
 # -- build_feedback: concrete, severity-capped, across-run-aware --------------
