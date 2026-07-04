@@ -45,12 +45,15 @@ the injected ``regenerate`` reports which delivery happened.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 
 from jobcrawler.notify import notify
 from jobcrawler.state import HealthRecord, RunRecord, StateStore
+
+_log = logging.getLogger(__name__)
 
 
 def _utcnow() -> datetime:
@@ -244,7 +247,18 @@ class SelfHealer:
         # is a new site, not a failure to learn from, so it is not captured.
         if not missing and self._on_confirmed_failure is not None:
             self._on_confirmed_failure(slug)
-        outcome = await self._regenerate(slug)
+        try:
+            outcome = await self._regenerate(slug)
+        except Exception:
+            # A regeneration that *crashes* (entrypoint refusing the corpus prefetch,
+            # LM transport, sandbox runtime) must land in the same held state as one
+            # that produced nothing: an escaping exception writes no health record,
+            # so no geometric backoff engages and the site re-enters the same crash
+            # every tick — a hot loop the generation-failed hold exists to prevent.
+            _log.exception(
+                "regeneration crashed for %s; held as generation-failed", slug
+            )
+            outcome = RegenOutcome.FAILED
         _notify_regen(slug, outcome)
         return self._record(slug, regeneration_state(outcome))
 

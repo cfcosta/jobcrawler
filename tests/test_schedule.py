@@ -544,7 +544,9 @@ def _two_site_stale_store() -> StateStore:
 
 async def test_regen_tick_isolates_a_single_sites_failure() -> None:
     # One site's regenerate (LM/Deno/network) raising must not abort the sweep or the
-    # daemon — the other sites are still assessed (§4.8 failure isolation).
+    # daemon — the other sites are still assessed (§4.8 failure isolation). The healer
+    # holds the crash as generation-failed (recorded, backoff engaged) rather than
+    # letting it escape, so the sweep sees a state, not an exception.
     store = _two_site_stale_store()
 
     async def reprobe(slug: str) -> int:
@@ -565,7 +567,8 @@ async def test_regen_tick_isolates_a_single_sites_failure() -> None:
     )
     states = await sched.regen_tick()  # must not raise
     assert states["s1"] is HealthState.HEALTHY  # the healthy site was still assessed
-    assert "s0" not in states  # the failing site is isolated, not fleet-fatal
+    assert states["s0"] is HealthState.GENERATION_FAILED  # held, not fleet-fatal
+    assert store.get_health("s0") == "generation_failed"  # backoff record persisted
 
 
 async def test_run_loop_survives_a_tick_error(monkeypatch: pytest.MonkeyPatch) -> None:

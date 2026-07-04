@@ -545,7 +545,13 @@ gate-passing crawler — including a forced RLM extraction (`final_reasoning == 
 output"`, §4.2) — the board enters a distinct **generation-failed** state (held with a geometric
 backoff, then re-tried with the — §4.11-improved — current generator), surfaced separately in
 `jobcrawl list`/`status` and *not* silently re-enqueued into the same failing generation (which
-would spin).
+would spin). A regeneration that **crashes** (the entrypoint refusing the corpus prefetch, LM
+transport, sandbox runtime) lands in the same held state: an escaping exception writes no health
+record, so no backoff would engage and the site would re-enter the identical crash every tick —
+the hot loop this hold exists to prevent. Relatedly, the corpus prefetch itself must **degrade,
+not die**, when the registry URL refuses a bare GET (an API index wanting auth headers, a bot
+wall): the refusal is recorded in-band in the corpus as a fact for the generator — the operator
+hints carry the recipe for exactly such boards, and the §6 gate still proves the result live.
 
 Track **drift-MTTR** — median time from a previously-healthy board going dark to a gate-passing
 replacement being *enabled* (detection + regeneration + review gate) — as an **observability metric**

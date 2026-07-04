@@ -239,6 +239,28 @@ def test_prefetch_corpus_assembles_from_ctx() -> None:
     assert corpus["feeds"] == ["https://x.com/feed.xml"]  # feed discovery
 
 
+def test_prefetch_survives_an_entrypoint_that_refuses_the_bare_get() -> None:
+    # A registry URL can be an API index that 403s a naked GET (idealist's Algolia
+    # root wants its search-key headers — only the generated crawler sends them, per
+    # the operator hints). The refusal must land IN the corpus as a fact the model
+    # reads, not crash the bootstrap before generation ever starts.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, text="Forbidden")
+
+    ctx = Ctx(
+        {"x.com"},
+        client=httpx.Client(
+            transport=httpx.MockTransport(handler), follow_redirects=False
+        ),
+    )
+    corpus = prefetch_corpus("https://x.com/", ctx)
+
+    homepage = cast("str", corpus["homepage"])
+    assert homepage.startswith("[unfetchable: GET https://x.com/")
+    assert "403" in homepage
+    assert corpus["postings"] == []  # nothing sampled — and nothing raised
+
+
 def test_prefetch_clips_oversized_content_but_discovers_from_the_full_page() -> None:
     # Raw pages run to 100s of KB; the snapshot must bound them (§9) or a reasoning
     # LM burns its whole token budget. Link discovery still uses the full homepage,

@@ -220,6 +220,28 @@ async def test_a_blip_does_not_invoke_the_capture_hook() -> None:
     assert captured == []
 
 
+async def test_a_crashing_regeneration_is_held_as_generation_failed() -> None:
+    # A regeneration that raises (entrypoint refusing the corpus prefetch, LM
+    # transport, sandbox runtime) must land in the same held state as one that
+    # produced nothing: an escaping exception writes no health record, so no
+    # geometric backoff engages and the site re-enters the identical crash every
+    # tick (idealist's Algolia entrypoint 403-ing the bare corpus GET found this).
+    store = _stale_store()
+
+    async def reprobe(slug: str) -> int:
+        return 0  # confirms the blackout: regeneration proceeds
+
+    async def regenerate(slug: str) -> RegenOutcome:
+        raise RuntimeError("corpus prefetch: 403 Forbidden")
+
+    healer = SelfHealer(store, reprobe=reprobe, regenerate=regenerate)
+    assert await healer.assess("s") is HealthState.GENERATION_FAILED
+    assert store.get_health("s") == HealthState.GENERATION_FAILED.value
+    record = store.get_health_record("s")
+    assert record is not None
+    assert record.attempts == 1  # the retry backoff counter engaged
+
+
 async def test_reprobe_clears_a_blip() -> None:
     healer = await _healer(
         _stale_store(), reprobe_items=3, regen_outcome=RegenOutcome.FAILED

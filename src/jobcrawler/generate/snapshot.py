@@ -365,7 +365,17 @@ def prefetch_corpus(
     )
     post_cap = config.corpus_article_chars() if posting_chars is None else posting_chars
 
-    homepage = ctx.fetch(site_url)
+    try:
+        homepage = ctx.fetch(site_url)
+    except Exception as exc:
+        # An entrypoint that refuses a bare GET — an API index wanting auth headers
+        # (idealist's Algolia root 403s without its search key), a bot wall, a JS
+        # shell behind a challenge — is a *fact about the site*, not a reason to
+        # abort generation: the operator hints carry the recipe for exactly these
+        # boards, and the §6 gate still proves whatever the model writes against the
+        # live site. Surface the refusal in-band where the model reads first, so it
+        # knows the naked fetch is off the table and leans on hints/probes instead.
+        homepage = f"[unfetchable: GET {site_url} failed: {type(exc).__name__}: {exc}]"
     robots = _try_fetch(ctx, urljoin(site_url, "/robots.txt"))
     # Discover a jobs sitemap from robots (it enumerates the open roles); fall back
     # to /sitemap.xml when robots advertises none, so the count is best-effort.
