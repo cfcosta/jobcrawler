@@ -50,7 +50,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Callable, Iterable, Protocol, Sequence
+from typing import TYPE_CHECKING, Callable, Iterable, Protocol, Sequence, cast
 
 import dspy
 
@@ -272,6 +272,7 @@ class Matcher:
         daily_cap: int,
         governor: _Governor,
         clock: Callable[[], datetime],
+        max_tokens: int = 4000,
     ) -> None:
         self._store = store
         self._profile = profile
@@ -280,6 +281,11 @@ class Matcher:
         self._daily_cap = max(0, daily_cap)
         self._governor = governor
         self._clock = clock
+        # A verdict is ~200 tokens; even a full batch fits comfortably in 4k. Bounding
+        # the request matters beyond cost: providers reject a call whose max_tokens
+        # exceeds the remaining credit balance, so an unbounded (provider-default)
+        # ceiling turns a low-credit account into a hard outage for matching.
+        self._max_tokens = max(256, max_tokens)
         # Constructed offline (no LM bound yet); the LM is set per batch under
         # dspy.context. Tests overwrite this attribute with a fake predictor.
         self._predict = dspy.Predict(MatchJobs)
@@ -373,21 +379,24 @@ class Matcher:
     ) -> list[tuple[str, str, MatchVerdict]]:
         """LLM-score one batch; persist + cache each verdict; return applied results.
 
-        Raises on an LLM/parse failure or a job-count mismatch so the caller parks the
-        whole batch pending (fail-open). A well-formed response with an individual job
-        missing/garbled parks just that job and applies the rest — one bad row must not
-        waste the tokens already spent on its batch-mates.
+        Raises on an LLM/parse failure so the caller parks the whole batch pending
+        (fail-open). Anything short of that degrades PER JOB: a verdict-count mismatch,
+        an extra/unknown index, or an individual garbled entry parks just the affected
+        jobs and applies the rest by ``index`` — one bad row (or one chatty model
+        padding the array) must not waste the tokens already spent on its batch-mates.
         """
         payload = [_digest(index, e) for index, (_s, _u, e, _h) in enumerate(batch)]
         jobs_json = json.dumps(payload, ensure_ascii=False)
-        lm = dspy.LM(self._model, temperature=0.0)
+        lm = dspy.LM(self._model, temperature=0.0, max_tokens=self._max_tokens)
         with dspy.context(lm=lm):
             prediction = self._predict(profile=self._profile.body, jobs=jobs_json)
 
         items = _parse_verdict_list(getattr(prediction, "verdicts", None))
         if len(items) != len(batch):
-            raise ValueError(
-                f"LLM returned {len(items)} verdict(s) for {len(batch)} job(s)"
+            _log.warning(
+                "verdict count mismatch (%d for %d job(s)); applying by index",
+                len(items),
+                len(batch),
             )
         by_index: dict[object, object] = {}
         for item in items:
@@ -674,25 +683,53 @@ def _as_str_tuple(value: object) -> tuple[str, ...]:
 
 
 def _parse_verdict_list(raw: object) -> list[object]:
-    """Parse the LLM ``verdicts`` output into a list, tolerating code fences.
+    """Parse the LLM ``verdicts`` output into a list, tolerating model chatter.
 
-    Raises ``ValueError`` on empty output or non-JSON so the batch fails open. A bare
-    object, or a ``{"verdicts": [...]}`` wrapper, is tolerated and unwrapped to a list.
+    Raises ``ValueError`` on empty output or output with no JSON value in it, so the
+    batch fails open. Code fences, prose before/after the JSON (the most common
+    malformation — and one that gets CACHED, replaying forever if treated as fatal),
+    a bare object, and a ``{"verdicts": [...]}`` wrapper are all tolerated: the first
+    complete JSON value found is used and the chatter ignored. The per-``index``
+    mapping upstream keeps salvage safe — a verdict either names a job in the batch
+    or is dropped.
     """
     if raw is None:
         raise ValueError("empty verdicts output")
     text = _strip_fences(str(raw).strip())
     if not text:
         raise ValueError("empty verdicts output")
-    data = json.loads(text)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        data = _first_json_value(text)
+        if data is None:
+            raise ValueError(f"verdicts output is not JSON: {exc}") from exc
     if isinstance(data, dict):
         inner = data.get("verdicts")
         if isinstance(inner, list):
-            return inner
+            return cast("list[object]", inner)
         return [data]
     if not isinstance(data, list):
         raise ValueError("verdicts output is not a JSON array")
-    return data
+    return cast("list[object]", data)
+
+
+def _first_json_value(text: str) -> object | None:
+    """The first complete JSON value embedded in ``text``, or None if there is none.
+
+    Chatty models lead or trail the requested JSON with prose; the value itself is
+    usually intact. Try a ``raw_decode`` from each ``[``/``{`` until one parses —
+    responses are a few KB, so the scan is cheap.
+    """
+    decoder = json.JSONDecoder()
+    for i, ch in enumerate(text):
+        if ch in "[{":
+            try:
+                value, _end = decoder.raw_decode(text, i)
+            except json.JSONDecodeError:
+                continue
+            return value
+    return None
 
 
 def _strip_fences(text: str) -> str:

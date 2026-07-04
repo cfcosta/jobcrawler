@@ -211,6 +211,16 @@ def match_rate() -> str:
     return _str("JOBCRAWLER_MATCH_RATE", "10/m")
 
 
+def match_max_tokens() -> int:
+    """Per-request completion ceiling for the match LM, distinct from the generation
+    LM's ``JOBCRAWLER_MAX_TOKENS`` (crawler code needs tens of KB; a verdict batch is
+    ~200 tokens per job). Bounding it matters beyond cost: providers reject any call
+    whose ``max_tokens`` exceeds the remaining credit balance, so an unbounded ceiling
+    turns a low-credit account into a total matching outage. Default 4000 fits a full
+    default batch with headroom."""
+    return _int("JOBCRAWLER_MATCH_MAX_TOKENS", 4000)
+
+
 # --- generation caps (§4.2) ------------------------------------------------
 
 

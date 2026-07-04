@@ -726,3 +726,13 @@ def test_match_rate_defaults_to_10_per_minute(monkeypatch: pytest.MonkeyPatch) -
 def test_match_rate_honors_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("JOBCRAWLER_MATCH_RATE", "30/m")
     assert config.match_rate() == "30/m"
+
+
+def test_match_max_tokens_default_and_override(monkeypatch) -> None:
+    # Distinct from the generation LM's JOBCRAWLER_MAX_TOKENS: a verdict batch needs
+    # ~4k, and the ceiling must stay below a low credit balance or providers reject
+    # every match call outright.
+    monkeypatch.delenv("JOBCRAWLER_MATCH_MAX_TOKENS", raising=False)
+    assert config.match_max_tokens() == 4000
+    monkeypatch.setenv("JOBCRAWLER_MATCH_MAX_TOKENS", "2500")
+    assert config.match_max_tokens() == 2500

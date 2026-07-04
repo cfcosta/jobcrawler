@@ -1180,8 +1180,13 @@ the generator — §8). Selected knobs:
 - **Profile (§5a)** — frontmatter split, enum validation (an unknown discipline fails loud naming it),
   `profile_hash` stability across cosmetic churn and its change on a body-only edit, `ProfileNotFound`.
 - **Matcher (§4.7)** — with a fake `dspy.Predict` and a fake governor/clock: cache hit is free and
-  applied; daily-cap overflow → `pending` (never dropped); a batch failure/length-mismatch fails open to
-  `pending`; the digest truncates description to 1200 and prefers the parsed salary range; `PROMPT_VERSION`
+  applied; daily-cap overflow → `pending` (never dropped); an LLM/parse failure fails open to `pending`,
+  but anything short of that degrades **per index**: prose around the JSON is salvaged (the first
+  complete JSON value wins — a "fatal" chatty response would be cached and replay the failure forever),
+  a padded array's stray verdict is dropped, a short array parks only the skipped job; the match LM call
+  is token-bounded (`JOBCRAWLER_MATCH_MAX_TOKENS`, default 4000 — providers reject a call whose ceiling
+  exceeds the remaining credit balance, so an unbounded request turns low credits into a matching
+  outage); the digest truncates description to 1200 and prefers the parsed salary range; `PROMPT_VERSION`
   is a cache key; the prefilter drops only definite mismatches and passes `eng_other`/`unspecified`.
 - **Position lifecycle (§4.7)** — `upsert_position` new/changed/unchanged + **reopen**; `close_missing`
   increments `missing_streak` and closes at threshold; a **failed/empty crawl never closes** (mass-closure

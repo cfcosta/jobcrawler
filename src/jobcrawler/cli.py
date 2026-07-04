@@ -446,6 +446,7 @@ def build_matcher(store: StateStore) -> Matcher | None:
         daily_cap=config.match_daily_cap(),
         governor=_MatchPacer(RateGovernor(config.match_rate())),
         clock=lambda: datetime.now(timezone.utc),
+        max_tokens=config.match_max_tokens(),
     )
 
 
@@ -459,8 +460,8 @@ def _notify_strong_matches(
 
     Mirrors the runner's §4.7 pipeline sink for store-side scoring paths (the daemon's
     match drain and ``rematch``): the fields come off the rebuilt row candidates rather
-    than a live crawl. Best-effort by construction — ``notify.notify`` is silent without
-    a webhook and never raises into the caller.
+    than a live crawl. Best-effort by construction — ``notify.notify`` always logs, only
+    POSTs when a webhook is configured, and never raises into the caller.
     """
     sent = {(site, url): enriched for site, url, enriched in candidates}
     for site, url, verdict in results:

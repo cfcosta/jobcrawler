@@ -444,7 +444,10 @@ def test_malformed_llm_output_parks_pending_and_does_not_crash() -> None:
     assert store.cache_match_calls == []  # nothing cached from a failed batch
 
 
-def test_length_mismatch_parks_the_whole_batch() -> None:
+def test_length_mismatch_degrades_per_index_not_per_batch() -> None:
+    # 2 jobs, 1 verdict: the verdict we DID pay for is applied; only the job the model
+    # skipped parks pending. (Failing the whole batch would also cache-replay chatty
+    # responses as permanent failures — see the salvage tests below.)
     store = FakeStore()
     matcher = _matcher(store, batch=10)
     predictor = FakePredictor(lambda jobs: json.dumps([{"index": 0, "score": 90}]))
@@ -452,7 +455,7 @@ def test_length_mismatch_parks_the_whole_batch() -> None:
 
     summary = matcher.score_new(_candidates(2))  # 2 jobs, 1 verdict → mismatch
 
-    assert summary["scored"] == 0 and summary["pending"] == 2
+    assert summary["scored"] == 1 and summary["pending"] == 1
 
 
 def test_missing_index_parks_only_that_job() -> None:
@@ -758,3 +761,102 @@ def test_drained_candidates_score_end_to_end_through_score_new() -> None:
         _content_hash(job), "profhash", "openrouter/test/model", PROMPT_VERSION
     )
     store.close()
+
+
+# --- chatty-model tolerance: salvage parsing + per-index degradation ---------
+#
+# GLM-class models lead/trail the requested JSON with prose or pad the array. Treating
+# that as fatal is worse than it looks: the malformed response is CACHED, so the same
+# batch replays the same failure forever, free but making zero progress. Salvage the
+# JSON value, apply verdicts by index, park only what's genuinely missing.
+
+
+def _verdict_items(jobs, *, score=80):
+    return [
+        {
+            "index": j["index"],
+            "score": score,
+            "verdict": "strong",
+            "reasons": ["fit"],
+            "concerns": [],
+        }
+        for j in jobs
+    ]
+
+
+def test_parse_salvages_json_wrapped_in_model_chatter() -> None:
+    store = FakeStore()
+    matcher = _matcher(store)
+
+    def respond(jobs):
+        body = json.dumps(_verdict_items(jobs))
+        return f"Here are the verdicts you asked for:\n{body}\nHope this helps!"
+
+    matcher._predict = FakePredictor(respond)
+    result = matcher.score_new(_candidates(3))
+    assert result["scored"] == 3 and result["pending"] == 0
+    assert len(store.set_match_calls) == 3
+
+
+def test_parse_still_fails_open_when_no_json_value_exists() -> None:
+    # Pure prose (or a truncated, never-closing array) has nothing to salvage: the
+    # whole batch parks pending, exactly as before.
+    store = FakeStore()
+    matcher = _matcher(store)
+    matcher._predict = FakePredictor(lambda jobs: "I cannot score these [sorry")
+    result = matcher.score_new(_candidates(2))
+    assert result["scored"] == 0 and result["pending"] == 2
+    assert len(store.pending_calls) == 2
+
+
+def test_an_extra_verdict_is_dropped_by_index_not_fatal() -> None:
+    # 11 verdicts for 10 jobs used to fail the whole batch; the stray entry names no
+    # job in the batch, so it is simply ignored.
+    store = FakeStore()
+    matcher = _matcher(store)
+
+    def respond(jobs):
+        items = _verdict_items(jobs)
+        items.append({"index": 99, "score": 5, "verdict": "reject", "reasons": []})
+        return json.dumps(items)
+
+    matcher._predict = FakePredictor(respond)
+    result = matcher.score_new(_candidates(3))
+    assert result["scored"] == 3 and result["pending"] == 0
+
+
+def test_a_missing_verdict_parks_only_that_job() -> None:
+    # A short array degrades per job: batch-mates keep their (already paid-for)
+    # verdicts; only the dropped index parks pending.
+    store = FakeStore()
+    matcher = _matcher(store)
+
+    def respond(jobs):
+        return json.dumps([i for i in _verdict_items(jobs) if i["index"] != 1])
+
+    matcher._predict = FakePredictor(respond)
+    result = matcher.score_new(_candidates(3))
+    assert result["scored"] == 2 and result["pending"] == 1
+    assert ("acme", "https://acme.example/job/1") in store.pending_calls
+
+
+def test_match_lm_request_is_token_bounded(monkeypatch) -> None:
+    # The batch LM call must carry the injected max_tokens ceiling: providers reject
+    # any request whose max_tokens exceeds the remaining credit balance, so an
+    # unbounded ceiling turns low credits into a total matching outage.
+    from jobcrawler import match as match_mod
+
+    captured: dict = {}
+    orig_lm = match_mod.dspy.LM
+
+    def spy(model, **kwargs):
+        captured.update(kwargs)
+        return orig_lm(model, **kwargs)
+
+    monkeypatch.setattr(match_mod.dspy, "LM", spy)
+    store = FakeStore()
+    matcher = _matcher(store)
+    matcher._predict = FakePredictor(_all_score())
+    matcher.score_new(_candidates(1))
+    assert captured["max_tokens"] == 4000  # the Matcher default
+    assert captured["temperature"] == 0.0
