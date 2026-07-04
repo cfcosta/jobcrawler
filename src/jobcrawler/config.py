@@ -523,6 +523,24 @@ def recheck_cap() -> int:
     return _int("JOBCRAWLER_RECHECK_CAP", 150)
 
 
+def match_drain_interval() -> str:
+    """How often the daemon's §4.7 match-drain tick runs: reload ``PROFILE.md`` (a hash
+    change requeues the open backlog for rescoring) and re-present parked pending rows
+    to the matcher straight from the store (their descriptions are persisted, so no
+    crawl round-trip). Default 10m — fast enough that a profile edit feels live, cheap
+    because an empty backlog is a no-op and every LLM call stays under the daily cap.
+    ``off`` disables the tick (pending then drains only via re-crawls, the old way)."""
+    return _str("JOBCRAWLER_MATCH_DRAIN_INTERVAL", "10m")
+
+
+def match_drain_cap() -> int:
+    """Max parked rows one match-drain tick re-presents to the matcher. Bounds a single
+    tick's LLM exposure after a profile edit requeues thousands of rows; successive
+    ticks (FIFO) work through the rest, and the §8 daily cap still bounds total spend.
+    Default 200."""
+    return _int("JOBCRAWLER_MATCH_DRAIN_CAP", 200)
+
+
 # --- scheduler (§4.9) ------------------------------------------------------
 
 

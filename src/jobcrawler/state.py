@@ -155,6 +155,7 @@ class PositionRecord:
     title: str
     company: str
     location: str
+    description: str | None
     discipline: str | None
     level: str | None
     workplace: str | None
@@ -226,6 +227,7 @@ CREATE TABLE IF NOT EXISTS positions (
     title           TEXT NOT NULL,
     company         TEXT NOT NULL,
     location        TEXT NOT NULL,
+    description     TEXT,
     discipline      TEXT,
     level           TEXT,
     workplace       TEXT,
@@ -262,20 +264,27 @@ CREATE TABLE IF NOT EXISTS match_spend (
     day    TEXT PRIMARY KEY,
     scored INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 # Columns of ``positions`` the runner supplies per crawl via ``upsert_position(fields=)``.
 # Everything else — the lifecycle (first_seen/last_seen/missing_streak/status/closed_at)
 # and the ``match_*`` verdict — is owned by the store's own methods and is never taken
 # from the caller's dict. Unknown keys are ignored, so a crawler that yields a field the
-# schema does not track (e.g. the raw ``description``, which only feeds ``content_hash``)
-# never breaks the upsert.
+# schema does not track never breaks the upsert. ``description`` is stored verbatim: the
+# row must be a *complete* record of the posting so the §4.7 matcher can rebuild its LLM
+# digest from the store alone (a profile edit re-scores the whole backlog without waiting
+# for each board's next crawl to re-serve the text).
 _POSITION_FIELDS: frozenset[str] = frozenset(
     {
         "external_id",
         "title",
         "company",
         "location",
+        "description",
         "discipline",
         "level",
         "workplace",
@@ -298,6 +307,7 @@ _POSITION_FIELDS: frozenset[str] = frozenset(
 # runs.signals / site_health.attempts retrofits.
 _POSITION_ADD_COLUMNS: tuple[tuple[str, str], ...] = (
     ("external_id", "TEXT"),
+    ("description", "TEXT"),
     ("discipline", "TEXT"),
     ("level", "TEXT"),
     ("workplace", "TEXT"),
@@ -865,6 +875,38 @@ class StateStore:
             )
             self._conn.commit()
 
+    def clear_match_pending(self, site: str, url: str) -> None:
+        """Unpark a position without recording a verdict (deterministic prefilter miss).
+
+        The store-side drain rebuilds candidates from parked rows; one the prefilter now
+        definitely rejects must leave the FIFO (or it would clog every future drain
+        window) but has earned no LLM verdict — it returns to plain "tracked, unscored",
+        the same state the runner gives a fresh prefilter miss. A later profile widening
+        re-presents it via :meth:`requeue_open_matches`.
+        """
+        with self._lock:
+            self._conn.execute(
+                "UPDATE positions SET match_pending = 0 WHERE site = ? AND url = ?",
+                (site, url),
+            )
+            self._conn.commit()
+
+    def requeue_open_matches(self) -> int:
+        """Park every open position for (re)scoring; return how many rows changed.
+
+        The §4.7 profile-edit path: a new ``profile_hash`` invalidates every cached
+        verdict, so ALL open rows — scored under the old profile, prefilter-skipped, or
+        never presented — go back through the matcher. Unchanged (job, profile) pairs
+        re-apply from cache for free; only genuinely new pairs reach the LLM, still under
+        the daily cap. Closed rows stay untouched (history keeps its old verdicts).
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE positions SET match_pending = 1 WHERE status = 'open'"
+            )
+            self._conn.commit()
+            return cur.rowcount
+
     def pending_matches(self, *, limit: int) -> list[PositionRecord]:
         """Open positions awaiting scoring, oldest-discovered first (FIFO backlog drain)."""
         rows = self._conn.execute(
@@ -873,6 +915,30 @@ class StateStore:
             (limit,),
         ).fetchall()
         return [_to_position(r) for r in rows]
+
+    # -- meta (small persisted key/value scalars) ------------------------------
+
+    def get_meta(self, key: str) -> str | None:
+        """The persisted scalar for ``key``, or None if never set."""
+        row = self._conn.execute(
+            "SELECT value FROM meta WHERE key = ?", (key,)
+        ).fetchone()
+        return None if row is None else str(row["value"])
+
+    def set_meta(self, key: str, value: str) -> None:
+        """Persist a small scalar the daemon must remember across restarts.
+
+        First use: ``profile_hash`` — the hash verdicts were last applied under, so a
+        ``PROFILE.md`` edited while the daemon is DOWN is still detected on the next
+        boot's drain tick and the backlog is requeued (§4.7).
+        """
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+            self._conn.commit()
 
     def position_counts(self) -> dict[str, int]:
         """Coarse lifecycle tallies for status surfaces.
@@ -1038,6 +1104,7 @@ def _to_position(row: sqlite3.Row) -> PositionRecord:
         title=row["title"],
         company=row["company"],
         location=row["location"],
+        description=row["description"],
         discipline=row["discipline"],
         level=row["level"],
         workplace=row["workplace"],

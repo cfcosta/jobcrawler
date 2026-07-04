@@ -80,6 +80,14 @@ class _MatchPacer(Protocol):
 # an expired-marker hit in the returned text closes the position.
 RecheckFetch = Callable[[str], Awaitable[tuple[int, str]]]
 
+# The §4.7 match-drain seam: one drain pass — reload PROFILE.md (a hash change requeues
+# the open backlog), then re-present parked pending rows to the matcher straight from
+# the store (descriptions are persisted, so no crawl round-trip). Returns the pass's
+# summary counters for the tick log. Injected as a whole because the matcher lives in
+# the daemon wiring (cli), not in the scheduler: the closure owns the matcher cell and
+# the profile reload; the scheduler owns only the cadence.
+MatchDrain = Callable[[], Awaitable[dict[str, int]]]
+
 
 class Site(BaseModel):
     """One entry of the §4.1 site registry — a job board to crawl on a cadence."""
@@ -201,6 +209,8 @@ class Scheduler:
         recheck_check: str | None = None,
         recheck_cap: int | None = None,
         recheck_fetch: RecheckFetch | None = None,
+        match_drain: MatchDrain | None = None,
+        match_drain_check: str | None = None,
         expired_markers: tuple[str, ...] | None = None,
         heal_cooldown: str | None = None,
         description_quality_floor: float | None = None,
@@ -270,6 +280,18 @@ class Scheduler:
             expired_markers if expired_markers is not None else config.expired_markers()
         )
         self._next_recheck: datetime | None = None
+        # §4.7 match-drain timer: profile watch + store-side pending drain. Like the
+        # recheck, this is judgement over already-gathered data, never self-modification,
+        # so it is EXEMPT from the master autonomy brake (matching already runs with
+        # autonomy off — it rides every crawl). Disabled unless both a cadence and the
+        # injected drain seam are wired (a crawl-only deployment has no matcher).
+        self._match_drain_interval = _optional_interval(
+            config.match_drain_interval()
+            if match_drain_check is None
+            else match_drain_check
+        )
+        self._match_drain = match_drain
+        self._next_match_drain: datetime | None = None
         # §4.8 event-driven healing: a drifted crawl assesses immediately (not waiting
         # for the periodic sweep), rate-limited per-site by this cooldown (None = off).
         self._heal_cooldown = _optional_interval(
@@ -717,6 +739,44 @@ class Scheduler:
             closed += site_closed
         return closed
 
+    def match_drain_due(self, now: datetime) -> bool:
+        """True if a §4.7 match-drain pass is due (``JOBCRAWLER_MATCH_DRAIN_INTERVAL``).
+
+        Like the recheck, deliberately NOT gated by the master autonomy switch: scoring
+        already-tracked rows against the operator's profile is judgement over gathered
+        data, not self-modification — matching already runs with autonomy off (it rides
+        every crawl). Requires both a cadence and the injected drain seam. The first
+        pass fires on boot, which is what catches a ``PROFILE.md`` edited while the
+        daemon was down (the persisted ``profile_hash`` meta no longer matches).
+        """
+        if self._match_drain_interval is None or self._match_drain is None:
+            return False
+        return self._next_match_drain is None or now >= self._next_match_drain
+
+    def mark_match_drain(self, now: datetime) -> None:
+        """Record that a match-drain pass ran at ``now``; the next is one interval later."""
+        if self._match_drain_interval is not None:
+            self._next_match_drain = now + self._match_drain_interval
+
+    async def match_drain_tick(self) -> dict[str, int]:
+        """Run one injected §4.7 match-drain pass and log its counters.
+
+        The seam does the whole job (profile reload → requeue on hash change → rebuild
+        parked rows → score under cache/cap); the scheduler contributes only cadence and
+        the run-loop log line. An empty backlog with an unchanged profile is a cheap
+        no-op, so the pass is quiet unless it actually did something.
+        """
+        drain = self._match_drain
+        if drain is None:  # pragma: no cover - gated by match_drain_due
+            return {}
+        summary = await drain()
+        if any(summary.values()):
+            _log.info(
+                "match drain %s",
+                " ".join(f"{k}={v}" for k, v in sorted(summary.items())),
+            )
+        return summary
+
     def _closure_reason(self, status: int, text: str) -> str | None:
         """Why a re-fetched open position should close now, or None to keep it open.
 
@@ -767,19 +827,21 @@ class Scheduler:
         off the same loop on their own cadences — never ``.compile()`` in-band (that
         offline GEPA work is handed off to a detached single-flight subprocess). The §4.9
         recheck sweep rides the loop too, closing positions that 404/expire (observation,
-        so it runs even with autonomy off). The §4.11 P4c post-adoption regression watcher
-        rides every iteration (marker-gated, so it's a cheap no-op until an adoption is
-        under probation).
+        so it runs even with autonomy off), as does the §4.7 match drain (profile watch +
+        store-side pending rescoring — judgement, so likewise autonomy-exempt). The §4.11
+        P4c post-adoption regression watcher rides every iteration (marker-gated, so it's
+        a cheap no-op until an adoption is under probation).
         """
         _log.info(
             "scheduler starting sites=%d interval=%ss autonomy=%s "
-            "regen=%s reopt=%s recheck=%s",
+            "regen=%s reopt=%s recheck=%s match_drain=%s",
             len(self._sites),
             interval,
             "on" if self._autonomy else "OFF",
             "off" if self._regen_interval is None else self._regen_interval,
             "off" if self._reopt_interval is None else self._reopt_interval,
             "off" if self._recheck_interval is None else self._recheck_interval,
+            "off" if self._match_drain_interval is None else self._match_drain_interval,
         )
         while not stop.is_set():
             try:
@@ -794,6 +856,9 @@ class Scheduler:
                 if self.recheck_due(now):
                     await self.recheck_tick()
                     self.mark_recheck(now)
+                if self.match_drain_due(now):
+                    await self.match_drain_tick()
+                    self.mark_match_drain(now)
                 self.adopt_watch_tick(now)
             except Exception:
                 # Last-resort guard: an unexpected error in a tick or sweep must not

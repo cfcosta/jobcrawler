@@ -543,6 +543,11 @@ def _position_fields(job: Job, enriched: EnrichedJob) -> dict[str, object]:
     structured fields over parsed text), so the row carries the single best salary the
     host derived. ``upsert_position`` filters to ``_POSITION_FIELDS`` and coerces the
     ``datetime`` timestamps to ISO text, so passing the raw values here is safe.
+
+    ``description`` is persisted verbatim so the row is a complete record of the
+    posting: the §4.7 matcher can rebuild its LLM digest (and verify ``content_hash``)
+    from the store alone, which is what lets a profile edit re-score the entire backlog
+    without waiting for every board's next crawl to re-serve the text.
     """
     salary = enriched.salary
     return {
@@ -550,6 +555,7 @@ def _position_fields(job: Job, enriched: EnrichedJob) -> dict[str, object]:
         "title": job.title,
         "company": job.company,
         "location": job.location,
+        "description": job.description,
         "discipline": enriched.discipline,
         "level": enriched.level,
         "workplace": enriched.workplace,

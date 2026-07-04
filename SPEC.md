@@ -456,7 +456,12 @@ longer accepting applications" / "vaga encerrada" is dropped as `expired`, catch
 still-served-but-dead posting the enumerate-diff can't) → computes
 `content_hash = sha256` over the whitespace-normalized `(title, company, location,
 description)` → `store.upsert_position(...)`. The same hash formula is used by the matcher's
-cache key, so a posting is scored at most once across the runner and matcher.
+cache key, so a posting is scored at most once across the runner and matcher. The row persists
+the **full `description` verbatim** alongside the structured fields: a position row is a
+*complete* record of the posting, so the matcher can rebuild its LLM digest (and verify
+`content_hash`) **from the store alone** — the save-everything property that makes profile
+edits re-scorable without re-crawling (see the store-side drain below). Rows written before
+this column existed backfill naturally: every re-seen position refreshes its fields on upsert.
 
 **`positions` lifecycle (per `(site, url)` primary key).** `PositionRecord` mirrors the row.
 The store owns the lifecycle columns; the crawler-supplied fields are threaded verbatim:
@@ -525,6 +530,37 @@ webhook POST). The `Matcher` itself is **threshold-agnostic** — it scores ever
 the verdict; the notify boundary is the runner's, keeping the decision threshold off the matcher
 surface (§8). `pending_matches(*, limit)` and `matches(...)` back the drain and the operator's
 match view.
+
+**Profile edits & the store-side drain.** Crawling and matching are fully decoupled: every
+position is persisted at crawl time regardless of any verdict, and rescoring works from the
+store. The persisted `meta.profile_hash` records the hash verdicts were last applied under.
+The daemon's **match-drain tick** (`JOBCRAWLER_MATCH_DRAIN_INTERVAL`, default 10m, `off` to
+disable; autonomy-EXEMPT like the recheck — judgement over gathered data, not
+self-modification) runs a three-step pass, first firing **on boot** so an edit made while the
+daemon was down is caught immediately:
+
+1. **Profile watch.** Reload `PROFILE.md` from disk; a hash change (or a profile/model that
+   arrived after boot) rebuilds the shared matcher in place, so subsequent crawls score under
+   the new profile without a restart. A *deleted* profile disables matching; a momentarily
+   *malformed* one (mid-edit save) keeps the old matcher and retries next pass.
+2. **Requeue on edit.** When the disk hash differs from `meta.profile_hash`,
+   `requeue_open_matches()` parks **every open row** (scored, prefilter-skipped, or never
+   presented) and the meta is updated. Old-profile verdicts on *closed* rows are history and
+   stay untouched. First-ever adoption of the meta key records the hash without a requeue.
+3. **Drain.** Up to `JOBCRAWLER_MATCH_DRAIN_CAP` (default 200) parked rows per pass are rebuilt
+   from their stored fields (`drain_candidates`): a row **without** a stored description (or
+   whose rebuilt job doesn't hash back to its own `content_hash`) is *unscorable host-side* and
+   stays parked for its next crawl to backfill; a row the deterministic prefilter now
+   definitely rejects is **unparked verdict-less** (`clear_match_pending` — back to "tracked,
+   unscored", so permanent mismatches can't clog the FIFO); survivors go through the ordinary
+   `score_new` path — cache hits free, fresh scoring under the daily cap, fail-open parking,
+   strong verdicts notified exactly like the runner's sink. Unchanged `(job, profile)` pairs
+   re-apply from cache for **zero tokens**, so a requeue of thousands of rows only pays for
+   verdicts the edit actually changed.
+
+`jobcrawl rematch` runs the same logic on demand (free cache passes over parked + open scored
+rows, then one capped LLM drain from the store) and refreshes `meta.profile_hash`, so the
+daemon doesn't requeue a second time for an edit the operator already rematched by hand.
 
 ### 4.8 Health & self-healing regeneration
 Each crawl records `positions_found`, `new_positions`, `errors`, `pages_fetched`, and a

@@ -1579,3 +1579,67 @@ def test_build_matcher_wires_the_matcher_when_configured(
         "daily_cap": 500,
         "governor": gov,
     }
+
+
+# -- §4.7 match-drain timer: profile watch + store-side rescoring -------------
+#
+# The drain is autonomy-EXEMPT (like the recheck): it exercises judgement over data
+# already gathered, not self-modification, so it keeps running with autonomy off.
+
+
+def test_match_drain_due_requires_both_a_cadence_and_a_seam() -> None:
+    store = StateStore(":memory:")
+    sites = [Site(slug="s0", url="https://x.com")]
+
+    async def drain() -> dict[str, int]:
+        return {}
+
+    # A cadence but no seam → disabled.
+    no_seam = Scheduler(
+        sites, store=store, crawl=_ok_crawl, clock=lambda: T0, match_drain_check="10m"
+    )
+    assert no_seam.match_drain_due(T0) is False
+    # A seam but the cadence turned off → disabled.
+    no_cadence = Scheduler(
+        sites,
+        store=store,
+        crawl=_ok_crawl,
+        clock=lambda: T0,
+        match_drain_check="off",
+        match_drain=drain,
+    )
+    assert no_cadence.match_drain_due(T0) is False
+    # Both wired → due on the FIRST pass (catches a PROFILE.md edited while the
+    # daemon was down).
+    both = Scheduler(
+        sites,
+        store=store,
+        crawl=_ok_crawl,
+        clock=lambda: T0,
+        match_drain_check="10m",
+        match_drain=drain,
+    )
+    assert both.match_drain_due(T0) is True
+
+
+async def test_match_drain_tick_invokes_the_seam_and_marks_the_timer() -> None:
+    calls: list[str] = []
+
+    async def drain() -> dict[str, int]:
+        calls.append("drain")
+        return {"requeued": 0, "rows": 0, "unscorable": 0, "prefiltered": 0}
+
+    sched = Scheduler(
+        [Site(slug="s0", url="https://x.com")],
+        store=StateStore(":memory:"),
+        crawl=_ok_crawl,
+        clock=lambda: T0,
+        match_drain_check="10m",
+        match_drain=drain,
+    )
+    await sched.match_drain_tick()
+    assert calls == ["drain"]
+    sched.mark_match_drain(T0)
+    assert sched.match_drain_due(T0) is False
+    assert sched.match_drain_due(T0 + timedelta(minutes=9)) is False
+    assert sched.match_drain_due(T0 + timedelta(minutes=10)) is True

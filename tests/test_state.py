@@ -1234,3 +1234,102 @@ def test_reopening_an_old_schema_db_twice_is_stable(tmp_path: object) -> None:
     assert cols.count("match_pending") == 1
     assert [r.url for r in s.open_positions("acme")] == ["u"]  # legacy row intact
     s.close()
+
+
+# --- description persistence + meta + requeue (§4.7 store-side rematch) ------
+
+
+def test_positions_persist_the_description_verbatim() -> None:
+    # The row is a COMPLETE record of the posting: the §4.7 matcher rebuilds its LLM
+    # digest from the store alone, so the description must round-trip untouched.
+    s = StateStore(":memory:")
+    text = "We build distributed payment systems in Rust.\n\n  Benefits: remote."
+    s.upsert_position(
+        "acme",
+        "https://acme.example/jobs/1",
+        fields={"title": "T", "company": "C", "location": "L", "description": text},
+        content_hash="h1",
+    )
+    (rec,) = s.open_positions("acme")
+    assert rec.description == text
+    s.close()
+
+
+def test_a_reseen_row_backfills_its_description() -> None:
+    # Rows written before the description column existed heal on the next crawl: the
+    # upsert refreshes crawler-supplied fields even when the content hash is unchanged.
+    s = StateStore(":memory:")
+    s.upsert_position(
+        "acme",
+        "u",
+        fields={"title": "T", "company": "C", "location": "L"},
+        content_hash="h",
+    )
+    assert s.open_positions("acme")[0].description is None
+    outcome = s.upsert_position(
+        "acme",
+        "u",
+        fields={"title": "T", "company": "C", "location": "L", "description": "Full."},
+        content_hash="h",
+    )
+    assert outcome == "unchanged"  # same hash — yet the field refreshed
+    assert s.open_positions("acme")[0].description == "Full."
+    s.close()
+
+
+def test_meta_roundtrip_and_overwrite() -> None:
+    s = StateStore(":memory:")
+    assert s.get_meta("profile_hash") is None
+    s.set_meta("profile_hash", "aaa")
+    assert s.get_meta("profile_hash") == "aaa"
+    s.set_meta("profile_hash", "bbb")  # upsert, not insert-or-fail
+    assert s.get_meta("profile_hash") == "bbb"
+    s.close()
+
+
+def test_requeue_open_matches_parks_all_open_rows_and_keeps_verdicts() -> None:
+    # A profile edit invalidates every verdict lazily; the requeue parks the whole OPEN
+    # backlog for rescoring (scored rows keep their old verdict until re-applied) while
+    # closed history stays untouched.
+    s = StateStore(":memory:")
+    for url, score in (("u1", 85), ("u2", None)):
+        s.upsert_position(
+            "acme",
+            url,
+            fields={"title": "T", "company": "C", "location": "L"},
+            content_hash=f"h-{url}",
+        )
+        if score is not None:
+            s.set_match("acme", url, score=score, verdict="strong", reasons="[]")
+    s.upsert_position(
+        "acme",
+        "u3",
+        fields={"title": "T", "company": "C", "location": "L"},
+        content_hash="h-u3",
+    )
+    s.mark_closed("acme", "u3", reason="test")
+
+    assert s.requeue_open_matches() == 2
+    pending = {r.url for r in s.pending_matches(limit=10)}
+    assert pending == {"u1", "u2"}
+    by_url = {r.url: r for r in s.open_positions("acme")}
+    assert by_url["u1"].match_score == 85  # verdict survives the requeue
+    s.close()
+
+
+def test_clear_match_pending_unparks_without_a_verdict() -> None:
+    # A drain-time definite prefilter miss leaves the FIFO but earns no verdict — the
+    # row returns to plain "tracked, unscored" (the same state a fresh prefilter miss
+    # gets from the runner).
+    s = StateStore(":memory:")
+    s.upsert_position(
+        "acme",
+        "u",
+        fields={"title": "T", "company": "C", "location": "L"},
+        content_hash="h",
+    )
+    s.set_match_pending("acme", "u")
+    s.clear_match_pending("acme", "u")
+    assert s.pending_matches(limit=10) == []
+    assert s.open_positions("acme")[0].match_score is None
+    s.close()

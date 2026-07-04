@@ -24,6 +24,7 @@ from jobcrawler.cli import (
     _configure_logging,
     _db_path,
     _humanize_secs,
+    _match_drain_pass,
     _probe,
     _record_site_failure,
     _run_rematch,
@@ -50,7 +51,7 @@ from jobcrawler.cli import (
     validate_one,
 )
 from jobcrawler.health import HealthState, RegenOutcome
-from jobcrawler.match import PROMPT_VERSION
+from jobcrawler.match import PROMPT_VERSION, Matcher
 from jobcrawler.profile import load_profile
 from jobcrawler.runtime.contract import allowed_hosts_of
 from jobcrawler.runtime.runner import CrawlSummary
@@ -1417,3 +1418,87 @@ def test_crawlers_dir_default_is_config_driven() -> None:
     from jobcrawler import cli
 
     assert cli._CRAWLERS_DIR == Path(config.crawlers_dir())
+
+
+# -- daemon match-drain pass (§4.7): profile watch + requeue on edit ----------
+#
+# The seeded rows are DESCRIPTIONLESS on purpose: drain_candidates classifies them
+# unscorable (parked for the next crawl to backfill), so the pass exercises the whole
+# profile-watch/requeue/drain plumbing without ever reaching the LM boundary.
+
+
+def test_match_drain_pass_adopts_the_hash_then_requeues_on_profile_edit(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    profile = tmp_path / "PROFILE.md"
+    profile.write_text(_VALID_PROFILE)
+    monkeypatch.setenv("JOBCRAWLER_PROFILE", str(profile))
+    monkeypatch.setenv("JOBCRAWLER_MATCH_MODEL", "test/match-model")
+
+    store = StateStore(":memory:")
+    _seed_position(
+        store, url="https://acme.com/a", title="A", content_hash="hA", score=80
+    )
+    _seed_position(store, url="https://acme.com/b", title="B", content_hash="hB")
+
+    cell: dict[str, Matcher | None] = {"m": None}
+    first = _match_drain_pass(store, cell)
+    assert cell["m"] is not None  # matcher built now that profile+model exist
+    # First adoption of the meta key records the hash WITHOUT a mass requeue.
+    assert first["requeued"] == 0
+    assert store.get_meta("profile_hash") == load_profile(str(profile)).profile_hash
+
+    old_matcher = cell["m"]
+    profile.write_text(_VALID_PROFILE + "\nAlso: distributed systems, compilers.\n")
+    second = _match_drain_pass(store, cell)
+    assert second["requeued"] == 2  # every OPEN row re-parked for rescoring
+    assert cell["m"] is not old_matcher  # shared matcher rebuilt under the new hash
+    assert store.get_meta("profile_hash") == load_profile(str(profile)).profile_hash
+    # Descriptionless rows stay parked (unscorable host-side) awaiting crawl backfill.
+    assert {r.url for r in store.pending_matches(limit=10)} == {
+        "https://acme.com/a",
+        "https://acme.com/b",
+    }
+    assert second["unscorable"] == 2
+    store.close()
+
+
+def test_match_drain_pass_disables_matching_when_the_profile_is_deleted(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    profile = tmp_path / "PROFILE.md"
+    profile.write_text(_VALID_PROFILE)
+    monkeypatch.setenv("JOBCRAWLER_PROFILE", str(profile))
+    monkeypatch.setenv("JOBCRAWLER_MATCH_MODEL", "test/match-model")
+
+    store = StateStore(":memory:")
+    cell: dict[str, Matcher | None] = {"m": None}
+    _match_drain_pass(store, cell)
+    assert cell["m"] is not None
+
+    profile.unlink()
+    assert _match_drain_pass(store, cell) == {}  # type: ignore[arg-type]
+    assert cell["m"] is None  # crawl-only mode until a profile returns
+    store.close()
+
+
+def test_match_drain_pass_keeps_the_old_matcher_through_a_malformed_save(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    # A mid-edit save (broken YAML front-matter) must not thrash the pipeline: the
+    # pass warns, keeps the current matcher, and retries on the next tick.
+    profile = tmp_path / "PROFILE.md"
+    profile.write_text(_VALID_PROFILE)
+    monkeypatch.setenv("JOBCRAWLER_PROFILE", str(profile))
+    monkeypatch.setenv("JOBCRAWLER_MATCH_MODEL", "test/match-model")
+
+    store = StateStore(":memory:")
+    cell: dict[str, Matcher | None] = {"m": None}
+    _match_drain_pass(store, cell)
+    old_matcher = cell["m"]
+    assert old_matcher is not None
+
+    profile.write_text("---\ndisciplines: [unclosed\n---\nbody\n")
+    assert _match_drain_pass(store, cell) == {}  # type: ignore[arg-type]
+    assert cell["m"] is old_matcher
+    store.close()

@@ -30,12 +30,12 @@ import signal
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import yaml
 from pydantic import ValidationError
 
-from jobcrawler import config, generator_pointer
+from jobcrawler import config, generator_pointer, notify
 from jobcrawler.generate.scoring import CandidateResult
 from jobcrawler.governor import RateGovernor
 from jobcrawler.health import (
@@ -449,6 +449,115 @@ def build_matcher(store: StateStore) -> Matcher | None:
     )
 
 
+def _notify_strong_matches(
+    candidates: Sequence[tuple[str, str, object]],
+    results: Sequence[tuple[str, str, object]],
+    *,
+    min_score: int,
+) -> None:
+    """Emit a ``match`` notify for every applied verdict at/over ``min_score``.
+
+    Mirrors the runner's §4.7 pipeline sink for store-side scoring paths (the daemon's
+    match drain and ``rematch``): the fields come off the rebuilt row candidates rather
+    than a live crawl. Best-effort by construction — ``notify.notify`` is silent without
+    a webhook and never raises into the caller.
+    """
+    sent = {(site, url): enriched for site, url, enriched in candidates}
+    for site, url, verdict in results:
+        score = getattr(verdict, "score", 0)
+        if score < min_score:
+            continue
+        enriched = sent.get((site, url))
+        if enriched is None:  # defensive: every result came from candidates
+            continue
+        job = getattr(enriched, "job", None)
+        if job is None:
+            continue
+        notify.notify(
+            "match",
+            f"{job.title} at {job.company} — "
+            f"{getattr(verdict, 'verdict', '?')} ({score})",
+            site=site,
+            url=url,
+            title=job.title,
+            company=job.company,
+            score=score,
+            reasons="; ".join(getattr(verdict, "reasons", ())),
+        )
+
+
+def _match_drain_pass(
+    store: StateStore, matcher_cell: dict[str, "Matcher | None"]
+) -> dict[str, int]:
+    """One §4.7 match-drain pass: profile watch, requeue on edit, store-side rescoring.
+
+    Runs on a worker thread off the scheduler's drain timer. Three steps:
+
+      1. **Profile watch.** Reload ``PROFILE.md`` from disk. A hash change against the
+         matcher (or a matcher that never got built — profile/model arrived after boot)
+         rebuilds the matcher in ``matcher_cell`` so crawls score under the new profile
+         from this moment. A profile DELETED mid-run disables matching (cell → None); a
+         momentarily malformed one (mid-edit save) keeps the old matcher and retries
+         next pass — an edit in progress must not thrash the pipeline.
+      2. **Requeue on edit.** When the persisted ``profile_hash`` meta differs from the
+         disk profile, every open position is parked for rescoring. The meta survives
+         restarts, so an edit made while the daemon was down is caught on the boot
+         pass. First adoption of the meta key records the hash without a requeue.
+      3. **Drain.** Parked rows are rebuilt from their stored descriptions
+         (:func:`jobcrawler.match.drain_candidates`) and re-presented to the matcher —
+         cache hits are free, the §8 daily cap bounds fresh scoring, strong verdicts
+         notify exactly like the runner's sink.
+    """
+    from jobcrawler.match import drain_candidates  # lazy: pulls dspy
+
+    try:
+        profile = load_profile(config.profile_path())
+    except ProfileNotFound as exc:
+        if matcher_cell["m"] is not None:
+            _log.warning("PROFILE.md gone — match scoring disabled: %s", exc)
+            matcher_cell["m"] = None
+        return {}
+    except (ValueError, yaml.YAMLError) as exc:
+        _log.warning("PROFILE.md malformed — keeping current profile: %s", exc)
+        return {}
+
+    matcher = matcher_cell["m"]
+    if matcher is None or matcher._profile.profile_hash != profile.profile_hash:
+        rebuilt = build_matcher(store)
+        if rebuilt is None:
+            return {}  # no model (or profile vanished between reads); warned inside
+        matcher_cell["m"] = matcher = rebuilt
+
+    requeued = 0
+    last_hash = store.get_meta("profile_hash")
+    if last_hash != profile.profile_hash:
+        if last_hash is not None:
+            requeued = store.requeue_open_matches()
+            _log.info(
+                "profile changed (%s -> %s): requeued %d open position(s)",
+                last_hash[:12],
+                profile.profile_hash[:12],
+                requeued,
+            )
+        store.set_meta("profile_hash", profile.profile_hash)
+
+    candidates, stats = drain_candidates(
+        store, matcher._profile.prefs, limit=config.match_drain_cap()
+    )
+    summary: dict[str, int] = {"requeued": requeued, **stats}
+    if candidates:
+        result = matcher.score_new(candidates)
+        summary["cached"] = cast(int, result["cached"])
+        summary["scored"] = cast(int, result["scored"])
+        summary["pending"] = cast(int, result["pending"])
+        _notify_strong_matches(
+            candidates,
+            cast("Sequence[tuple[str, str, object]]", result["results"]),
+            min_score=config.match_min_score(),
+        )
+    return summary
+
+
 def crawl_one(
     site: Site,
     *,
@@ -694,17 +803,19 @@ def cmd_rematch(args: argparse.Namespace) -> int:
 
 
 def _run_rematch(store: StateStore) -> int:
-    """Drain the pending-match backlog and re-evaluate verdicts after a profile edit (§4.7).
+    """Re-score the tracked backlog against the CURRENT profile, from the store (§4.7).
 
-    Both passes are content-addressed cache lookups keyed by the *current*
-    ``profile_hash`` — free (no tokens), and the only rescoring possible host-side
-    (the store keeps a position's ``content_hash`` but not its description, so it can't
-    re-digest for the LLM here). Editing ``PROFILE.md`` changes ``profile_hash``, so a
-    verdict cached under the old profile misses and the position is parked pending for
-    the next crawl (which re-yields a full ``Job`` to re-score). Reports scored (freshly
-    applied from cache), rescored (updated open verdicts), pending (parked), cache-hits.
+    Three passes. (1) and (2) are content-addressed cache lookups keyed by the current
+    ``profile_hash`` — free: drain parked rows whose verdict is already cached, and
+    re-apply / invalidate the open scored rows (a verdict cached under an old profile
+    misses and parks the row). (3) then LLM-scores what remains parked, rebuilt straight
+    from the rows' stored descriptions — a profile edit re-scores NOW instead of waiting
+    for every board's next crawl; the §8 daily cap and drain cap still bound one
+    invocation's spend, and the daemon's drain timer works through any remainder.
+    Reports scored (from cache), rescored (updated verdicts), llm_scored (fresh),
+    pending (still parked), cache_hits.
     """
-    from jobcrawler.match import PROMPT_VERSION  # lazy: pulls dspy
+    from jobcrawler.match import PROMPT_VERSION, drain_candidates  # lazy: pulls dspy
 
     path = config.profile_path()
     try:
@@ -760,9 +871,31 @@ def _run_rematch(store: StateStore) -> int:
             rescored += 1
             cache_hits += 1
 
+    # 3. LLM-score what stayed parked, rebuilt from the stored rows. Prefilter misses
+    #    are unparked verdict-less inside drain_candidates; rows without a stored
+    #    description (pre-persistence writes) stay parked for their next crawl to
+    #    backfill. The persisted profile_hash meta is refreshed so the daemon's drain
+    #    tick doesn't requeue the backlog a second time for the same edit.
+    llm_scored = 0
+    matcher = build_matcher(store)
+    if matcher is not None:
+        candidates, _stats = drain_candidates(
+            store, profile.prefs, limit=config.match_drain_cap()
+        )
+        if candidates:
+            result = matcher.score_new(candidates)
+            llm_scored = cast(int, result["cached"]) + cast(int, result["scored"])
+            _notify_strong_matches(
+                candidates,
+                cast("Sequence[tuple[str, str, object]]", result["results"]),
+                min_score=config.match_min_score(),
+            )
+    store.set_meta("profile_hash", profile_hash)
+
+    pending_now = store.position_counts()["pending"]
     print(
-        f"rematch: scored={scored} rescored={rescored} "
-        f"pending={still_pending + invalidated} cache_hits={cache_hits}"
+        f"rematch: scored={scored} rescored={rescored} llm_scored={llm_scored} "
+        f"pending={pending_now} cache_hits={cache_hits}"
     )
     return 0
 
@@ -953,11 +1086,19 @@ def cmd_run(args: argparse.Namespace) -> int:
     # One shared matcher across all concurrent crawls so the §8 daily match cap and the
     # match rate-limit hold globally: the scheduler runs up to `concurrency` crawls at
     # once on to_thread workers, and a per-crawl matcher would let the token budget be
-    # exceeded by the fan-out factor. None → crawl-only mode (no PROFILE.md).
-    matcher = build_matcher(store)
+    # exceeded by the fan-out factor. None → crawl-only mode (no PROFILE.md). Held in a
+    # one-slot cell (not a plain local) so the §4.7 match-drain pass can swap in a
+    # rebuilt matcher when PROFILE.md changes — crawls read the cell at dispatch time
+    # and score under the new profile without a daemon restart.
+    matcher_cell: dict[str, Matcher | None] = {"m": build_matcher(store)}
 
     async def crawl(site: Site) -> CrawlSummary:
-        return await asyncio.to_thread(crawl_one, site, store=store, matcher=matcher)
+        return await asyncio.to_thread(
+            crawl_one, site, store=store, matcher=matcher_cell["m"]
+        )
+
+    async def match_drain() -> dict[str, int]:
+        return await asyncio.to_thread(_match_drain_pass, store, matcher_cell)
 
     scheduler = Scheduler(
         sites,
@@ -965,6 +1106,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         crawl=crawl,
         healer=_build_healer(store, sites),
         has_crawler=_has_live_crawler,  # route crawler-less sites to §4.2 bootstrap
+        match_drain=match_drain,  # §4.7 profile watch + store-side pending drain
     )
 
     async def serve() -> None:

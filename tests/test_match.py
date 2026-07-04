@@ -629,3 +629,132 @@ def test_salary_floor_is_usable_in_prefs() -> None:
     prefs = _prefs(min_salary=SalaryFloor(amount=120000, currency="USD", period="year"))
     assert prefs.min_salary is not None
     assert prefs.min_salary.amount == 120000
+
+
+# --- store-side drain: rebuild parked rows into candidates (§4.7) ------------
+
+
+def _seed_row(
+    store,
+    *,
+    url,
+    description="We build distributed payment systems in Rust.",
+    title="Senior Backend Engineer",
+    discipline="backend",
+    level="senior",
+    workplace="remote",
+    content_hash=None,
+    pending=True,
+):
+    """Upsert one open row the way the runner does (hash + fields from ONE job)."""
+    from jobcrawler.state import StateStore  # noqa: F401  (documents the real surface)
+
+    job = FakeJob(title=title, description=description, url=url)
+    fields: dict[str, object] = {
+        "title": job.title,
+        "company": job.company,
+        "location": job.location,
+        "discipline": discipline,
+        "level": level,
+        "workplace": workplace,
+        "employment_type": job.employment_type,
+        "department": job.department,
+    }
+    if description:
+        fields["description"] = description
+    store.upsert_position(
+        "acme", url, fields=fields, content_hash=content_hash or _content_hash(job)
+    )
+    if pending:
+        store.set_match_pending("acme", url)
+    return job
+
+
+def test_drain_rebuilds_a_hash_faithful_candidate_from_the_row() -> None:
+    from jobcrawler.match import drain_candidates
+    from jobcrawler.state import StateStore
+
+    store = StateStore(":memory:")
+    job = _seed_row(store, url="https://acme.example/jobs/1")
+    candidates, stats = drain_candidates(store, _prefs(), limit=10)
+
+    assert stats == {"rows": 1, "unscorable": 0, "prefiltered": 0}
+    ((site, url, enriched),) = candidates
+    assert (site, url) == ("acme", "https://acme.example/jobs/1")
+    # The rebuilt job hashes to the ORIGINAL job's content hash — the property that
+    # makes drain-time verdicts land under the same cache key the runner would use.
+    assert _content_hash(enriched.job) == _content_hash(job)
+    assert enriched.job.description == job.description
+    store.close()
+
+
+def test_drain_leaves_descriptionless_rows_parked() -> None:
+    # A pre-description-column row can't re-present the posting; it must WAIT for the
+    # next crawl to backfill, not be silently dropped from the queue.
+    from jobcrawler.match import drain_candidates
+    from jobcrawler.state import StateStore
+
+    store = StateStore(":memory:")
+    _seed_row(store, url="https://acme.example/jobs/1", description="")
+    candidates, stats = drain_candidates(store, _prefs(), limit=10)
+
+    assert candidates == [] and stats["unscorable"] == 1
+    assert len(store.pending_matches(limit=10)) == 1  # still parked
+    store.close()
+
+
+def test_drain_rejects_a_row_whose_hash_does_not_match_its_fields() -> None:
+    # Belt-and-braces: a tampered/partial row must not be scored, or the verdict would
+    # be cached under a key no future lookup computes.
+    from jobcrawler.match import drain_candidates
+    from jobcrawler.state import StateStore
+
+    store = StateStore(":memory:")
+    _seed_row(store, url="https://acme.example/jobs/1", content_hash="stale-hash")
+    candidates, stats = drain_candidates(store, _prefs(), limit=10)
+
+    assert candidates == [] and stats["unscorable"] == 1
+    assert len(store.pending_matches(limit=10)) == 1
+    store.close()
+
+
+def test_drain_unparks_a_definite_prefilter_miss_without_a_verdict() -> None:
+    # A profile that now definitely rejects the row must not leave it clogging the
+    # FIFO forever — it leaves verdict-less, same as a fresh crawl-time prefilter miss.
+    from jobcrawler.match import drain_candidates
+    from jobcrawler.state import StateStore
+
+    store = StateStore(":memory:")
+    _seed_row(store, url="https://acme.example/jobs/1", discipline="backend")
+    candidates, stats = drain_candidates(
+        store, _prefs(disciplines=("frontend",)), limit=10
+    )
+
+    assert candidates == [] and stats["prefiltered"] == 1
+    assert store.pending_matches(limit=10) == []  # unparked...
+    assert store.open_positions("acme")[0].match_score is None  # ...verdict-less
+    store.close()
+
+
+def test_drained_candidates_score_end_to_end_through_score_new() -> None:
+    # The whole §4.7 loop against a REAL store: park → drain → score → verdict applied
+    # to the row AND cached under (stored content_hash, profile, model, version).
+    from jobcrawler.match import drain_candidates
+    from jobcrawler.state import StateStore
+
+    store = StateStore(":memory:")
+    job = _seed_row(store, url="https://acme.example/jobs/1")
+    candidates, _stats = drain_candidates(store, _prefs(), limit=10)
+
+    matcher = _matcher(store)
+    predictor = FakePredictor(_all_score(88, verdict="strong"))
+    matcher._predict = predictor
+    result = matcher.score_new(candidates)
+
+    assert result["scored"] == 1 and predictor.calls == 1
+    rec = store.open_positions("acme")[0]
+    assert rec.match_score == 88 and rec.match_pending is False
+    assert store.cached_match(
+        _content_hash(job), "profhash", "openrouter/test/model", PROMPT_VERSION
+    )
+    store.close()

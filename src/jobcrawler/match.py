@@ -447,6 +447,141 @@ def _norm_ws(value: object) -> str:
     return " ".join(str(value or "").split())
 
 
+# --- store-side drain: rebuild candidates from parked rows (§4.7) ----------
+#
+# The positions row persists the description, so a parked job can be re-presented to
+# the LLM straight from the store — no crawl round-trip. This is what makes a profile
+# edit actionable NOW: requeue the open backlog, rebuild each row into the same
+# (site, url, enriched) triple the runner sends, and let the ordinary score_new path
+# (cache → cap → batch → fail-open) do the rest.
+
+
+@dataclass(frozen=True, slots=True)
+class _RowSalary:
+    """The stored salary columns, shaped like the §4.6 parsed range for the digest."""
+
+    min: float | None
+    max: float | None
+    currency: str
+    period: str
+
+
+@dataclass(frozen=True, slots=True)
+class _RowJob:
+    """A job rebuilt from its positions row — the ``_JobLike`` fields, verbatim.
+
+    ``salary`` is always None: the parsed range (kept in its own columns) is carried by
+    ``_RowSalary`` on the enriched wrapper, and the raw salary *text* was never stored.
+    The digest prefers the parsed range anyway, so nothing is lost.
+    """
+
+    title: str
+    company: str
+    location: str
+    description: str
+    employment_type: str | None
+    department: str | None
+    salary: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _RowEnriched:
+    """A stored row wearing the ``_Enriched`` shape the digest/prefilter expect."""
+
+    job: _RowJob
+    discipline: str
+    level: str
+    workplace: str
+    salary: _RowSalary | None
+
+
+def candidate_from_row(rec: object) -> _RowEnriched | None:
+    """Rebuild one parked row into an ``_Enriched`` candidate, or None if unscorable.
+
+    None means the row cannot faithfully re-present the posting host-side and must wait
+    for the next crawl to re-serve it (the pre-existing drain path):
+
+      * **no stored description** — a row written before descriptions were persisted;
+        the next crawl's upsert backfills it (every re-seen row refreshes its fields).
+      * **content-hash mismatch** — the rebuilt job must hash to the row's own
+        ``content_hash``, or a fresh verdict would be cached under a key no future
+        lookup computes. This cannot happen for rows the current upsert wrote (hash and
+        fields are written together from one Job); the guard is belt-and-braces against
+        partially-migrated rows.
+
+    Missing enrichment buckets degrade to ``"unspecified"`` — recall-safe: the
+    prefilter passes them through to the LLM rather than inventing a rejection.
+    """
+    description = getattr(rec, "description", None)
+    if not description:
+        return None
+    job = _RowJob(
+        title=getattr(rec, "title", "") or "",
+        company=getattr(rec, "company", "") or "",
+        location=getattr(rec, "location", "") or "",
+        description=description,
+        employment_type=getattr(rec, "employment_type", None),
+        department=getattr(rec, "department", None),
+    )
+    if _content_hash(job) != getattr(rec, "content_hash", None):
+        return None
+    salary_min = getattr(rec, "salary_min", None)
+    salary_max = getattr(rec, "salary_max", None)
+    salary = (
+        _RowSalary(
+            min=salary_min,
+            max=salary_max,
+            currency=getattr(rec, "salary_currency", None) or "",
+            period=getattr(rec, "salary_period", None) or "",
+        )
+        if salary_min is not None or salary_max is not None
+        else None
+    )
+    return _RowEnriched(
+        job=job,
+        discipline=getattr(rec, "discipline", None) or "unspecified",
+        level=getattr(rec, "level", None) or "unspecified",
+        workplace=getattr(rec, "workplace", None) or "unspecified",
+        salary=salary,
+    )
+
+
+def drain_candidates(
+    store: "StateStore", prefs: ProfilePrefs, *, limit: int
+) -> tuple[list[tuple[str, str, _RowEnriched]], dict[str, int]]:
+    """The parked backlog rebuilt into scoreable candidates, plus drain stats.
+
+    Pulls up to ``limit`` pending rows (FIFO), rebuilds each via
+    :func:`candidate_from_row`, and applies the free deterministic :func:`prefilter`.
+    A row the prefilter now definitely rejects is UNPARKED without a verdict
+    (``clear_match_pending``) so permanent mismatches can't clog every future drain
+    window; an unscorable row (no stored description yet) is left parked for the next
+    crawl to backfill. The caller feeds the candidates to :meth:`Matcher.score_new`,
+    which applies the cache, the daily cap, and fail-open parking as usual.
+    """
+    candidates: list[tuple[str, str, _RowEnriched]] = []
+    unscorable = 0
+    prefiltered = 0
+    rows = store.pending_matches(limit=limit)
+    for rec in rows:
+        enriched = candidate_from_row(rec)
+        if enriched is None:
+            unscorable += 1
+            continue
+        keep, _why = prefilter(enriched, prefs)
+        if not keep:
+            store.clear_match_pending(rec.site, rec.url)
+            prefiltered += 1
+            continue
+        candidates.append((rec.site, rec.url, enriched))
+    stats = {
+        "rows": len(rows),
+        "unscorable": unscorable,
+        "prefiltered": prefiltered,
+    }
+    return candidates, stats
+
+
 # --- digest + verdict (de)serialization ------------------------------------
 
 
