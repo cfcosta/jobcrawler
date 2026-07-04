@@ -1,0 +1,72 @@
+import json
+from datetime import datetime
+
+SITE = "https://api.ashbyhq.com/posting-api/job-board/linear?includeCompensation=true"
+
+
+def crawl(ctx):
+    resp = ctx.fetch(SITE)
+    data = json.loads(resp)
+    jobs = data.get("jobs", [])
+    for job in jobs:
+        if not job.get("isListed", True):
+            continue
+
+        title = job.get("title", "")
+        if not title:
+            continue
+
+        job_url = job.get("jobUrl", "")
+        if not job_url:
+            continue
+
+        description = job.get("descriptionPlain", "")
+        if not description:
+            description = job.get("descriptionHtml", "")
+
+        company = "Linear"
+
+        location = job.get("location", "")
+
+        employment_type = job.get("employmentType")
+        workplace_type = job.get("workplaceType")
+
+        department = job.get("department")
+        if job.get("team") and department:
+            department = department + " - " + job.get("team")
+        elif job.get("team"):
+            department = job.get("team")
+
+        posted_at = job.get("publishedAt")
+
+        external_id = job.get("id")
+        apply_url = job.get("applyUrl")
+
+        salary = None
+        comp = job.get("compensation", {})
+        sc = comp.get("summaryComponents", [])
+        if sc:
+            for component in sc:
+                min_val = component.get("minValue")
+                max_val = component.get("maxValue")
+                currency = component.get("currencyCode", "USD")
+                interval = component.get("interval", "year")
+                if min_val is not None and max_val is not None:
+                    salary = f"{currency} {min_val}-{max_val}/{interval}"
+                    break
+
+        yield {
+            "url": job_url,
+            "title": title,
+            "company": company,
+            "location": location,
+            "description": description,
+            "source": SITE,
+            "employment_type": employment_type,
+            "workplace_type": workplace_type,
+            "department": department,
+            "posted_at": posted_at,
+            "salary": salary,
+            "external_id": external_id,
+            "apply_url": apply_url,
+        }
