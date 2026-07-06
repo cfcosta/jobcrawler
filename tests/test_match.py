@@ -16,11 +16,15 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from jobcrawler.match import (
+    EXTRACT_VERSION,
     PROMPT_VERSION,
     MatchJobs,
     MatchVerdict,
     Matcher,
     _content_hash,
+    _num_or_none,
+    _parse_extraction_list,
+    _to_extraction,
     _verdict_to_json,
     prefilter,
 )
@@ -100,6 +104,32 @@ class FakeStore:
     cache_match_calls: list = field(default_factory=list)
     bump_calls: list = field(default_factory=list)
     reserve_calls: list = field(default_factory=list)
+    # §4.7 extraction surface
+    extract_cache: dict = field(default_factory=dict)
+    salary_set: list = field(default_factory=list)
+    salary_rows: set = field(default_factory=set)
+    hiring_set: list = field(default_factory=list)
+
+    def cached_extract(self, content_hash, model, prompt_version):
+        return self.extract_cache.get((content_hash, model, prompt_version))
+
+    def cache_extract(self, content_hash, model, prompt_version, extraction_json):
+        self.extract_cache[(content_hash, model, prompt_version)] = extraction_json
+
+    def set_salary(
+        self, site, url, *, salary_min, salary_max, salary_currency, salary_period
+    ):
+        # Mirror StateStore.set_salary's guard: only fills a row that has no salary yet.
+        if (site, url) in self.salary_rows:
+            return False
+        self.salary_rows.add((site, url))
+        self.salary_set.append(
+            (site, url, salary_min, salary_max, salary_currency, salary_period)
+        )
+        return True
+
+    def set_hiring_company(self, site, url, *, name, canonical):
+        self.hiring_set.append((site, url, name, canonical))
 
     def cached_match(self, content_hash, profile_hash, model, prompt_version):
         return self.cache.get((content_hash, profile_hash, model, prompt_version))
@@ -178,6 +208,9 @@ def _matcher(
     daily_cap=1000,
     profile=None,
     governor=None,
+    extract_model=None,
+    extract_min_score=60,
+    extract_cap=50,
 ):
     return Matcher(
         store,
@@ -187,7 +220,43 @@ def _matcher(
         daily_cap=daily_cap,
         governor=governor or FakeGovernor(),
         clock=_clock,
+        extract_model=extract_model,
+        extract_min_score=extract_min_score,
+        extract_cap=extract_cap,
     )
+
+
+class FakeExtractPredictor:
+    """Stands in for ``dspy.Predict(ExtractFromDescription)``: records calls, returns JSON."""
+
+    def __init__(self, respond) -> None:
+        self.calls = 0
+        self.batches: list[list[dict]] = []
+        self._respond = respond
+
+    def __call__(self, *, jobs: str) -> SimpleNamespace:
+        self.calls += 1
+        parsed = json.loads(jobs)
+        self.batches.append(parsed)
+        return SimpleNamespace(extractions=self._respond(parsed))
+
+
+def _extract_all(*, salary=None, hiring=""):
+    """A responder that returns the same salary/employer for every job, echoing its index."""
+
+    def respond(jobs):
+        return json.dumps(
+            [
+                {"index": job["index"], "salary": salary, "hiring_company": hiring}
+                for job in jobs
+            ]
+        )
+
+    return respond
+
+
+def _raise_predictor(*, jobs=None):
+    raise RuntimeError("extract LM exploded")
 
 
 def _candidates(n, *, prefix="job"):
@@ -596,6 +665,7 @@ def test_empty_candidates_is_a_noop() -> None:
         "cached": 0,
         "scored": 0,
         "pending": 0,
+        "extracted": 0,
         "results": [],
     }
 
@@ -899,3 +969,228 @@ def test_match_lm_request_is_token_bounded(monkeypatch) -> None:
     matcher.score_new(_candidates(1))
     assert captured["max_tokens"] == 4000  # the Matcher default
     assert captured["temperature"] == 0.0
+
+
+# --- §4.7 match-time salary/employer extraction -----------------------------
+
+
+def test_extraction_fills_salary_and_employer_for_matched_salaryless_jobs() -> None:
+    store = FakeStore()
+    matcher = _matcher(store, extract_model="openrouter/test/model")
+    matcher._predict = FakePredictor(_all_score(90))
+    matcher._extract_predict = FakeExtractPredictor(
+        _extract_all(
+            salary={"min": 100000, "max": 150000, "currency": "usd", "period": "year"},
+            hiring="Acme Payments Inc",
+        )
+    )
+    summary = matcher.score_new(_candidates(2))
+
+    assert summary["extracted"] == 2
+    assert len(store.salary_set) == 2
+    # currency upcased, floats coerced, period preserved.
+    assert store.salary_set[0][2:] == (100000.0, 150000.0, "USD", "year")
+    # employer recorded with its canonicalised (suffix-stripped) dedup key.
+    assert len(store.hiring_set) == 2
+    assert store.hiring_set[0][2:] == ("Acme Payments Inc", "acmepayments")
+    # every extraction is cached (even a non-empty one) so a re-run doesn't re-bill.
+    assert len(store.extract_cache) == 2
+
+
+def test_extraction_skips_jobs_that_already_have_structured_salary() -> None:
+    store = FakeStore()
+    matcher = _matcher(store, extract_model="openrouter/test/model")
+    matcher._predict = FakePredictor(_all_score(90))
+    ep = FakeExtractPredictor(_extract_all(salary={"min": 1, "max": 2, "currency": "USD"}))
+    matcher._extract_predict = ep
+    # candidates arrive already carrying a §4.6 structured salary.
+    cands = [
+        (
+            "acme",
+            f"https://acme.example/job/{i}",
+            FakeEnriched(
+                job=FakeJob(title=f"Senior Backend Engineer {i}"),
+                salary=FakeSalaryRange(min=90000, max=90000, currency="USD", period="year"),
+            ),
+        )
+        for i in range(2)
+    ]
+    summary = matcher.score_new(cands)
+
+    assert summary["extracted"] == 0
+    assert ep.calls == 0
+    assert store.salary_set == []
+
+
+def test_extraction_skips_matches_below_min_score() -> None:
+    store = FakeStore()
+    matcher = _matcher(store, extract_model="openrouter/test/model", extract_min_score=60)
+    matcher._predict = FakePredictor(_all_score(50))  # below the 60 gate
+    ep = FakeExtractPredictor(_extract_all(salary={"min": 1, "max": 2, "currency": "USD"}))
+    matcher._extract_predict = ep
+    summary = matcher.score_new(_candidates(3))
+
+    assert summary["extracted"] == 0
+    assert ep.calls == 0
+
+
+def test_extraction_is_off_without_an_extract_model() -> None:
+    store = FakeStore()
+    matcher = _matcher(store)  # extract_model=None (default)
+    matcher._predict = FakePredictor(_all_score(95))
+    ep = FakeExtractPredictor(_extract_all(salary={"min": 1, "max": 2, "currency": "USD"}))
+    matcher._extract_predict = ep
+    summary = matcher.score_new(_candidates(2))
+
+    assert summary["extracted"] == 0
+    assert ep.calls == 0
+    assert store.salary_set == []
+
+
+def test_extraction_cache_hit_reapplies_without_calling_the_lm() -> None:
+    store = FakeStore()
+    matcher = _matcher(store, extract_model="openrouter/test/model")
+    matcher._predict = FakePredictor(_all_score(90))
+    # A predictor that would explode if the extractor ever reached the LM.
+    matcher._extract_predict = _raise_predictor
+
+    cands = _candidates(1)
+    content_hash = _content_hash(cands[0][2].job)
+    store.extract_cache[(content_hash, "openrouter/test/model", EXTRACT_VERSION)] = (
+        json.dumps(
+            {
+                "salary_min": 120000.0,
+                "salary_max": 120000.0,
+                "salary_currency": "EUR",
+                "salary_period": "year",
+                "hiring_company": "Globex",
+            }
+        )
+    )
+    summary = matcher.score_new(cands)
+
+    assert summary["extracted"] == 1  # re-applied from cache, LM untouched
+    assert store.salary_set[0][2:] == (120000.0, 120000.0, "EUR", "year")
+    assert store.hiring_set[0][2:] == ("Globex", "globex")
+
+
+def test_extraction_respects_the_per_run_cap() -> None:
+    store = FakeStore()
+    matcher = _matcher(store, extract_model="openrouter/test/model", extract_cap=1)
+    matcher._predict = FakePredictor(_all_score(90))
+    ep = FakeExtractPredictor(
+        _extract_all(salary={"min": 80000, "max": 80000, "currency": "USD"})
+    )
+    matcher._extract_predict = ep
+    summary = matcher.score_new(_candidates(3))
+
+    # Only one fresh (cache-miss) extraction runs this pass; the rest wait for next run.
+    assert summary["extracted"] == 1
+    assert len(store.salary_set) == 1
+    assert ep.calls == 1
+    assert len(ep.batches[0]) == 1
+
+
+def test_extraction_fails_open_when_the_lm_raises() -> None:
+    store = FakeStore()
+    matcher = _matcher(store, extract_model="openrouter/test/model")
+    matcher._predict = FakePredictor(_all_score(90))
+    matcher._extract_predict = _raise_predictor  # blows up on the extract call
+    summary = matcher.score_new(_candidates(2))
+
+    # Scoring is unaffected; extraction quietly backs off (no crash, nothing written).
+    assert summary["scored"] == 2
+    assert summary["extracted"] == 0
+    assert store.salary_set == []
+
+
+def test_extraction_set_salary_guard_blocks_a_second_fill() -> None:
+    # A source salary already on the row wins: set_salary refuses to overwrite it.
+    store = FakeStore()
+    store.salary_rows.add(("acme", "https://acme.example/job/0"))
+    matcher = _matcher(store, extract_model="openrouter/test/model")
+    matcher._predict = FakePredictor(_all_score(90))
+    matcher._extract_predict = FakeExtractPredictor(
+        _extract_all(salary={"min": 5, "max": 6, "currency": "USD"}, hiring="Umbrella")
+    )
+    summary = matcher.score_new(_candidates(1))
+
+    # The employer still records, but the guarded salary write is a no-op.
+    assert store.salary_set == []
+    assert store.hiring_set[0][2:] == ("Umbrella", "umbrella")
+    # employer write still counts as an applied change.
+    assert summary["extracted"] == 1
+
+
+# --- extraction parse/normalise units ---------------------------------------
+
+
+def test_to_extraction_keeps_amount_with_currency_and_mirrors_single_figure() -> None:
+    full = _to_extraction(
+        {
+            "salary": {"min": 100000, "max": 120000, "currency": "usd", "period": "year"},
+            "hiring_company": "Foo",
+        }
+    )
+    assert full is not None
+    assert (full.salary_min, full.salary_max, full.salary_currency, full.salary_period) == (
+        100000.0,
+        120000.0,
+        "USD",
+        "year",
+    )
+    assert full.hiring_company == "Foo"
+
+    single = _to_extraction({"salary": {"min": 90000, "currency": "EUR", "period": "month"}})
+    assert single is not None
+    assert single.salary_min == single.salary_max == 90000.0
+
+
+def test_to_extraction_drops_ambiguous_or_missing_salary() -> None:
+    # amount with no currency is ambiguous → no salary at all.
+    no_cur = _to_extraction({"salary": {"min": 90000, "max": 100000, "currency": None}})
+    assert no_cur is not None
+    assert no_cur.salary_min is None and no_cur.salary_currency is None
+
+    # unrecognised period is dropped, but a well-formed salary is still kept.
+    odd_period = _to_extraction(
+        {"salary": {"min": 90000, "max": 90000, "currency": "USD", "period": "fortnight"}}
+    )
+    assert odd_period is not None
+    assert odd_period.salary_min == 90000.0 and odd_period.salary_period is None
+
+    # a vague/equity posting returns salary: null but may still name an employer.
+    vague = _to_extraction({"salary": None, "hiring_company": "Bar"})
+    assert vague is not None
+    assert vague.salary_min is None and vague.hiring_company == "Bar"
+
+    # a non-mapping is unusable; an empty mapping is a valid "nothing found".
+    assert _to_extraction("nope") is None
+    empty = _to_extraction({})
+    assert empty is not None
+    assert empty.salary_min is None and empty.hiring_company == ""
+
+
+def test_num_or_none_never_invents_a_number() -> None:
+    assert _num_or_none(True) is None  # bool is not a salary
+    assert _num_or_none(-5) is None
+    assert _num_or_none(0) is None
+    assert _num_or_none(100000) == 100000.0
+    assert _num_or_none("120,000") == 120000.0
+    assert _num_or_none("$90000") == 90000.0
+    assert _num_or_none("competitive") is None
+    assert _num_or_none(None) is None
+
+
+def test_parse_extraction_list_tolerates_model_chatter() -> None:
+    assert _parse_extraction_list('```json\n[{"index": 0}]\n```') == [{"index": 0}]
+    assert _parse_extraction_list('here: [{"index": 1}] done') == [{"index": 1}]
+    assert _parse_extraction_list('{"extractions": [{"index": 2}]}') == [{"index": 2}]
+    assert _parse_extraction_list('{"index": 3}') == [{"index": 3}]
+
+    import pytest
+
+    with pytest.raises(ValueError):
+        _parse_extraction_list(None)
+    with pytest.raises(ValueError):
+        _parse_extraction_list("   ")

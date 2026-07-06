@@ -47,7 +47,7 @@
     <td class="score">{{ p.match_score if p.match_score is not none else '—' }}</td>
     <td class="title"><a href="/positions/{{ encode_pid(p.site, p.url) }}">{{ p.title }}</a>
         {% if p.dismissed %}<span class="tag">dismissed</span>{% endif %}</td>
-    <td>{{ p.company }}</td>
+    <td>{{ p.hiring_company or p.company }}</td>
     <td>{{ p.location }}{% if p.workplace %} · {{ p.workplace }}{% endif %}</td>
     <td class="nowrap">{{ p | salary }}</td>
     <td><span class="lifecycle lc-{{ p.status }}">{{ p.status }}</span></td>

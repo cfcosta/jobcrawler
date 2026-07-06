@@ -158,6 +158,7 @@ class PositionRecord:
     title: str
     company: str
     company_canonical: str | None
+    hiring_company: str | None
     location: str
     description: str | None
     discipline: str | None
@@ -237,6 +238,7 @@ CREATE TABLE IF NOT EXISTS positions (
     title           TEXT NOT NULL,
     company         TEXT NOT NULL,
     company_canonical TEXT,
+    hiring_company  TEXT,
     location        TEXT NOT NULL,
     description     TEXT,
     discipline      TEXT,
@@ -280,6 +282,14 @@ CREATE TABLE IF NOT EXISTS match_cache (
 CREATE TABLE IF NOT EXISTS match_spend (
     day    TEXT PRIMARY KEY,
     scored INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS extract_cache (
+    content_hash    TEXT,
+    model           TEXT,
+    prompt_version  TEXT,
+    extraction_json TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    PRIMARY KEY (content_hash, model, prompt_version)
 );
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -343,6 +353,9 @@ _POSITION_ADD_COLUMNS: tuple[tuple[str, str], ...] = (
     # it backfills cleanly; rows written before it existed read NULL until their next crawl,
     # and the ``matches`` grouping COALESCEs to ``lower(company)`` so dedup still holds.
     ("company_canonical", "TEXT"),
+    # §4.7 match-time LLM-extracted employer name (set only when a description names one and
+    # the board didn't); written by ``set_hiring_company``, never by a crawl upsert.
+    ("hiring_company", "TEXT"),
     ("posted_at", "TEXT"),
     ("expires_at", "TEXT"),
     ("missing_streak", "INTEGER NOT NULL DEFAULT 0"),
@@ -941,6 +954,63 @@ class StateStore:
             )
             self._conn.commit()
 
+    def set_salary(
+        self,
+        site: str,
+        url: str,
+        *,
+        salary_min: float | None,
+        salary_max: float | None,
+        salary_currency: str | None,
+        salary_period: str | None,
+    ) -> bool:
+        """Backfill LLM-extracted compensation, but only onto a row that has NONE (§4.7).
+
+        Guarded to ``salary_min IS NULL AND salary_max IS NULL`` so a source-structured
+        salary — a crawler field or the §4.6 host parse — always wins and is never
+        clobbered by an LLM guess. Salary is not part of ``content_hash``, so writing it
+        never re-dedups a posting or invalidates its match verdict. Returns whether a row
+        was actually filled (False = it already had a salary, or no such row).
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE positions SET salary_min = ?, salary_max = ?, "
+                "salary_currency = ?, salary_period = ? "
+                "WHERE site = ? AND url = ? "
+                "AND salary_min IS NULL AND salary_max IS NULL",
+                (salary_min, salary_max, salary_currency, salary_period, site, url),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def set_hiring_company(
+        self, site: str, url: str, *, name: str, canonical: str
+    ) -> None:
+        """Record the §4.7 LLM-extracted employer, and point the §16 dedup key at it.
+
+        The board's own ``company``/``company_canonical`` stay as crawled; this adds the
+        cleaner employer a description named — a Lever board with no company field, or a
+        "Confidential" listing whose text says the real name — and, when that yields a
+        non-empty canonical, repoints ``company_canonical`` at it so company dedup groups on
+        the actual employer. An empty canonical never clobbers the crawl-derived key.
+        Idempotent: re-applying the cached extraction each match run restores the key after a
+        crawl upsert reverts it to ``canonical_company(company)``. Neither is in
+        ``content_hash``.
+        """
+        with self._lock:
+            if canonical:
+                self._conn.execute(
+                    "UPDATE positions SET hiring_company = ?, company_canonical = ? "
+                    "WHERE site = ? AND url = ?",
+                    (name, canonical, site, url),
+                )
+            else:
+                self._conn.execute(
+                    "UPDATE positions SET hiring_company = ? WHERE site = ? AND url = ?",
+                    (name, site, url),
+                )
+            self._conn.commit()
+
     def set_match_pending(self, site: str, url: str) -> None:
         """Flag a position as awaiting scoring — over the daily cap, or a match failure.
 
@@ -1317,6 +1387,45 @@ class StateStore:
             )
             self._conn.commit()
 
+    def cached_extract(
+        self, content_hash: str, model: str, prompt_version: str
+    ) -> str | None:
+        """The cached description-extraction JSON for a job's content, or None (§4.7).
+
+        Unlike :meth:`cached_match` this key omits ``profile_hash``: salary and employer are
+        properties of the *posting*, not of whose profile is matching, so one extraction
+        serves every profile and every re-score for free.
+        """
+        row = self._conn.execute(
+            "SELECT extraction_json FROM extract_cache WHERE content_hash = ? "
+            "AND model = ? AND prompt_version = ?",
+            (content_hash, model, prompt_version),
+        ).fetchone()
+        return row["extraction_json"] if row is not None else None
+
+    def cache_extract(
+        self, content_hash: str, model: str, prompt_version: str, extraction_json: str
+    ) -> None:
+        """Memoize a fresh description extraction under its (content, model, version) key."""
+        now = self._clock().isoformat()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO extract_cache (content_hash, model, prompt_version, "
+                "extraction_json, created_at) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT (content_hash, model, prompt_version) "
+                "DO UPDATE SET extraction_json = ?, created_at = ?",
+                (
+                    content_hash,
+                    model,
+                    prompt_version,
+                    extraction_json,
+                    now,
+                    extraction_json,
+                    now,
+                ),
+            )
+            self._conn.commit()
+
     def match_spent(self, day: str) -> int:
         """How many jobs have been LLM-scored on ``day`` (UTC ``YYYY-MM-DD``); 0 if none.
 
@@ -1410,6 +1519,7 @@ def _to_position(row: sqlite3.Row) -> PositionRecord:
         title=row["title"],
         company=row["company"],
         company_canonical=row["company_canonical"],
+        hiring_company=row["hiring_company"],
         location=row["location"],
         description=row["description"],
         discipline=row["discipline"],

@@ -877,3 +877,67 @@ def test_probe_isolated_is_zero_on_a_hang_never_raising() -> None:
         probe_isolated(hang, {"example.com"}, min_description_chars=300, timeout=1.0)
         == 0
     )
+
+
+# --- §4.7 position fields: salary-omission clobber fix + §16 dedup key -------
+
+
+def test_position_fields_omits_salary_columns_when_unstated() -> None:
+    # A salary-less crawl must OMIT the salary columns (not send NULLs), so a re-crawl can't
+    # null out a salary the §4.7 extractor backfilled. The §16 canonical key is always sent.
+    from jobcrawler.runtime.normalize import enrich
+    from jobcrawler.runtime.runner import _position_fields
+
+    job = _job(company="Acme, Inc.")  # default description states no pay
+    enriched = enrich(job)
+    assert enriched.salary is None
+    fields = _position_fields(job, enriched)
+    for key in ("salary_min", "salary_max", "salary_currency", "salary_period"):
+        assert key not in fields
+    assert fields["company_canonical"] == "acme"  # suffix-stripped dedup key
+
+
+def test_position_fields_includes_a_source_salary() -> None:
+    # When the source DOES state pay (§4.6 enrichment carries it), the columns are present
+    # and carry the parsed figures — a source salary always wins over a later LLM guess.
+    from dataclasses import replace
+
+    from jobcrawler.runtime.normalize import SalaryRange, enrich
+    from jobcrawler.runtime.runner import _position_fields
+
+    job = _job()
+    enriched = replace(
+        enrich(job), salary=SalaryRange(min=150000.0, max=200000.0, currency="USD", period="year")
+    )
+    fields = _position_fields(job, enriched)
+    assert fields["salary_min"] == 150000.0 and fields["salary_max"] == 200000.0
+    assert fields["salary_currency"] == "USD" and fields["salary_period"] == "year"
+
+
+def test_recrawl_without_salary_keys_preserves_a_backfilled_salary() -> None:
+    # End-to-end clobber guard: a salary-less upsert, then a §4.7 backfill, then an UNCHANGED
+    # re-crawl (same content_hash, salary keys omitted) must leave the backfilled salary intact.
+    from jobcrawler.runtime.normalize import enrich
+    from jobcrawler.runtime.runner import _content_hash, _position_fields
+
+    store = StateStore(":memory:")
+    try:
+        job = _job()
+        enriched = enrich(job)
+        chash = _content_hash(job)
+        store.upsert_position(
+            "example", job.url, fields=_position_fields(job, enriched), content_hash=chash
+        )
+        assert store.set_salary(
+            "example", job.url, salary_min=120000.0, salary_max=120000.0,
+            salary_currency="EUR", salary_period="year",
+        )
+        # a later unchanged crawl re-upserts the same salary-less fields
+        store.upsert_position(
+            "example", job.url, fields=_position_fields(job, enriched), content_hash=chash
+        )
+        rec = store.open_positions("example")[0]
+        assert (rec.salary_min, rec.salary_max) == (120000.0, 120000.0)
+        assert (rec.salary_currency, rec.salary_period) == ("EUR", "year")
+    finally:
+        store.close()

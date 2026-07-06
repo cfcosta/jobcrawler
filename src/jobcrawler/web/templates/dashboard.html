@@ -52,8 +52,9 @@
       <li>
         <a href="/positions/{{ encode_pid(p.site, p.url) }}">
           <span class="score">{{ p.match_score }}</span>
-          <span class="mt">{{ p.title }} · {{ p.company }}</span>
+          <span class="mt">{{ p.title }} · {{ p.hiring_company or p.company }}</span>
         </a>
+        {% if p | salary %}<span class="tag">{{ p | salary }}</span>{% endif %}
         {% if p.match_verdict %}<span class="verdict">{{ p.match_verdict }}</span>{% endif %}
       </li>
       {% endfor %}

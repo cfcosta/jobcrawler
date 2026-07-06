@@ -438,6 +438,13 @@ def build_matcher(store: StateStore) -> Matcher | None:
     except RuntimeError as exc:
         _log.warning("no match model — crawling without match scoring: %s", exc)
         return None
+    # Match-time salary/employer extraction (§4.7) rides the cheap tier and is OFF when no
+    # such tier exists (require_extract_model raises) — extraction is a best-effort add-on,
+    # never a reason to break or block scoring.
+    try:
+        extract_model: str | None = config.require_extract_model()
+    except RuntimeError:
+        extract_model = None
     return Matcher(
         store,
         profile,
@@ -447,6 +454,9 @@ def build_matcher(store: StateStore) -> Matcher | None:
         governor=_MatchPacer(RateGovernor(config.match_rate())),
         clock=lambda: datetime.now(timezone.utc),
         max_tokens=config.match_max_tokens(),
+        extract_model=extract_model,
+        extract_min_score=config.extract_min_score(),
+        extract_cap=config.extract_cap(),
     )
 
 

@@ -518,6 +518,26 @@ dropping a job**:
    `pending` and logs — it **never raises into the crawl loop**. A matching outage degrades to
    "not scored yet". Each fresh verdict is cached (`store.cache_match`) and persisted
    (`store.set_match`, clearing the pending flag).
+6. **Match-time extraction (salary + employer, best-effort).** After scoring, when an extract
+   model is configured (`JOBCRAWLER_EXTRACT_MODEL`, else the cheap `JOBCRAWLER_SUB_MODEL` —
+   **never** the root planner), jobs that matched at/above `extract_min_score` (default 60) but
+   carry **no structured salary** have their description mined on the cheap tier via a separate
+   `dspy.Predict(ExtractFromDescription)` for a salary and, when the board's `company` was blank
+   or a placeholder, the real **hiring company**. It is separately cached on `(content_hash,
+   model, EXTRACT_VERSION)` — **no `profile_hash`**, because salary and employer are properties
+   of the posting, not the profile, so one extraction serves every profile — and a cache hit
+   re-applies for free on every run (which also re-heals the §16 dedup key a crawl upsert
+   reverted). Fresh (cache-miss) extractions are bounded to `extract_cap` (default 50) per run so
+   a first pass over a big salary-less backlog can't spike spend; the overflow simply waits for
+   the next run (nothing is parked). It is strictly additive and conservative: `set_salary` only
+   fills a row that has **none** (a source salary always wins and is never clobbered — this is
+   why `_position_fields` **omits** the salary columns on a salary-less crawl rather than sending
+   NULLs), the extractor returns `null` unless the description *literally* states pay **with a
+   currency** (never inferring from seniority/market/location), and `set_hiring_company` records
+   the cleaner name and repoints the §16 `company_canonical` dedup key at the real employer.
+   Neither salary nor employer is in `content_hash`, so backfilling them never re-dedups a
+   posting or invalidates its verdict. Like scoring, it is **fail-open** — a bad extract batch is
+   skipped, never raised into the crawl loop, and never affects the verdict the runner notifies on.
 
 **First-crawl cap.** On a board's first-ever position-yielding crawl only the newest
 `first_crawl_cap` (by `posted_at`, discovery order as fallback) go to the matcher now; the tail is
@@ -854,10 +874,13 @@ newly-added/unseen boards**, validated on the held-out split.
   (host-side, §4.6).
 - **`PositionRecord`** — the `positions` row (§4.7): identity + the crawler fields + lifecycle
   (`first_seen`/`last_seen`/`missing_streak`/`status`/`closed_at`) + match (`match_score`/
-  `match_verdict`/`match_reasons`/`matched_at`/`match_pending`).
+  `match_verdict`/`match_reasons`/`matched_at`/`match_pending`) + the §4.7-mined
+  `hiring_company` and the §16 `company_canonical` dedup key (both **out** of `content_hash`).
 - **`Profile` / `ProfilePrefs`** — §5 profile (below); `profile_hash` keys the match cache.
 - **`MatchVerdict`** — `score: int` (0–100 clamped), `verdict: strong|good|weak|reject`, `reasons`,
-  `concerns` (§4.7). `PROMPT_VERSION = 'match-v1'`.
+  `concerns` (§4.7). `PROMPT_VERSION = 'match-v1'`. The match-time extractor (§4.7) is a separate
+  signature cached under `EXTRACT_VERSION = 'extract-v1'` — keyed on `(content_hash, model)` with
+  **no** `profile_hash`, since salary/employer are properties of the posting, not the profile.
 - **Run record** (canonical) — `{site, started, finished, positions_found, new_positions, errors,
   pages_fetched, signals}` (the `runs` table's `items_found`/`new_items` columns carry
   positions/new-positions; the richer per-crawl deltas — changed/closed/matched/pending — plus
@@ -1200,6 +1223,9 @@ an `openrouter/…` slug billed per token. Selected knobs:
 | `JOBCRAWLER_MATCH_MIN_SCORE` | `70` | 0–100 score at/above which a match notifies (surface threshold, not a drop) |
 | `JOBCRAWLER_MATCH_DAILY_CAP` | `400` | hard per-UTC-day LLM-scored jobs; cache hits free; overflow → `match_pending` |
 | `JOBCRAWLER_MATCH_RATE` | `10/m` | governor pacing for match LLM calls (≠ the daily volume cap) |
+| `JOBCRAWLER_EXTRACT_MODEL` | `sub_model()` fallback | the §4.7 match-time salary/employer extract LM; `require_extract_model` falls back to the cheap `sub_lm`, **never** the root planner; unset with no `sub_lm` ⇒ extraction is simply **off** |
+| `JOBCRAWLER_EXTRACT_MIN_SCORE` | `60` | 0–100 match score at/above which a salary-less posting is mined (below the notify threshold, above the noise floor) |
+| `JOBCRAWLER_EXTRACT_CAP` | `50` | hard per-run ceiling on *fresh* (cache-miss) description extractions; cache hits free; overflow retried next run |
 | `JOBCRAWLER_PROFILE` | `PROFILE.md` | path to the operator's match profile (§5a) |
 | `JOBCRAWLER_FIRST_CRAWL_CAP` | `30` | newest-K new positions matched on a board's *first* crawl (§4.7) |
 | `JOBCRAWLER_CLOSE_AFTER_MISSES` | `2` | consecutive absences from an enumerating board before a position closes (§4.7) |

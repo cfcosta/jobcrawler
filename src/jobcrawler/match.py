@@ -70,6 +70,12 @@ _log = logging.getLogger("jobcrawler.match")
 # version string for a different prompt.
 PROMPT_VERSION = "match-v1"
 
+# The extraction cache version (§4.7 match-time salary/employer mining). Keyed WITHOUT a
+# profile hash — salary and employer are properties of the posting, not of the profile — so
+# one extraction serves every profile. Bump on ANY change to the ExtractFromDescription
+# prompt or the persisted extraction shape: it invalidates every prior extraction.
+EXTRACT_VERSION = "extract-v1"
+
 # The verdict bands. Numeric score is the source of truth; the label is derived from
 # it when the LLM omits or garbles it (see _verdict_label). match_min_score (the
 # notify threshold, host-side in config) is applied by the RUNNER, not here — the
@@ -192,6 +198,38 @@ class MatchJobs(dspy.Signature):
     )
 
 
+class ExtractFromDescription(dspy.Signature):
+    """Extract compensation and the hiring company from job postings. COPY, do not guess.
+
+    You get each job's integer ``index`` plus its title, the board-supplied ``company`` (may
+    be blank or a placeholder like "Confidential"), and the description text. Return exactly
+    one object per input job:
+
+      * ``salary`` — ONLY if the description literally states the pay for THIS role. Copy the
+        figures as written into ``{min, max, currency, period}``: ``currency`` an ISO-ish code
+        ("USD", "EUR", "BRL"), ``period`` one of "year" | "month" | "hour". A single figure
+        sets ``min`` == ``max``. Return ``salary: null`` when pay is absent, vague
+        ("competitive", "DOE"), equity-only, or when NO currency is stated (an amount with no
+        currency is ambiguous — do not assume one). NEVER infer a range from seniority,
+        location, or market rates: no explicitly stated number means ``null``.
+      * ``hiring_company`` — the real employer the description names, but ONLY when the board
+        ``company`` is blank or a placeholder AND the text clearly identifies it. Otherwise
+        return "". Never guess from the domain, the title, or invent a name.
+
+    Output ``extractions`` as a JSON array, one object per input job, echoing its integer
+    ``index``: {"index": int, "salary": {"min": num|null, "max": num|null,
+    "currency": str|null, "period": str|null} | null, "hiring_company": str}. Return exactly
+    one object per input job, in any order; add no commentary outside the JSON.
+    """
+
+    jobs: str = dspy.InputField(
+        desc="JSON array of jobs, each with an integer 'index', title, company, description"
+    )
+    extractions: str = dspy.OutputField(
+        desc="JSON array of {index, salary|null, hiring_company}, one per input job"
+    )
+
+
 def prefilter(enriched: _Enriched, prefs: ProfilePrefs) -> tuple[bool, str]:
     """Deterministically drop a job iff it is a DEFINITE mismatch (recall over precision).
 
@@ -288,6 +326,9 @@ class Matcher:
         governor: _Governor,
         clock: Callable[[], datetime],
         max_tokens: int = 4000,
+        extract_model: str | None = None,
+        extract_min_score: int = 60,
+        extract_cap: int = 50,
     ) -> None:
         self._store = store
         self._profile = profile
@@ -296,6 +337,13 @@ class Matcher:
         self._daily_cap = max(0, daily_cap)
         self._governor = governor
         self._clock = clock
+        # §4.7 match-time salary/employer extraction. OFF unless a (cheap) extract model is
+        # given; then, after scoring, jobs that matched at/above ``extract_min_score`` but
+        # carry no structured salary have their description mined — bounded to ``extract_cap``
+        # fresh (cache-miss) extractions per run so a first pass can't spike token spend.
+        self._extract_model = extract_model
+        self._extract_min_score = extract_min_score
+        self._extract_cap = max(0, extract_cap)
         # A verdict is ~200 tokens; even a full batch fits comfortably in 4k. Bounding
         # the request matters beyond cost: providers reject a call whose max_tokens
         # exceeds the remaining credit balance, so an unbounded (provider-default)
@@ -304,6 +352,9 @@ class Matcher:
         # Constructed offline (no LM bound yet); the LM is set per batch under
         # dspy.context. Tests overwrite this attribute with a fake predictor.
         self._predict = dspy.Predict(MatchJobs)
+        # The separate cheap extractor predictor (§4.7). Also LM-less until per-batch context;
+        # a test injecting extraction overwrites it with a fake, like ``_predict``.
+        self._extract_predict = dspy.Predict(ExtractFromDescription)
 
     def score_new(
         self, candidates: Sequence[tuple[str, str, _Enriched]]
@@ -326,7 +377,9 @@ class Matcher:
 
         # (a) cache lookup — a hit is free and applied at once; a miss queues for LLM.
         misses: list[tuple[str, str, _Enriched, str]] = []
+        enriched_by_key: dict[tuple[str, str], _Enriched] = {}
         for site, url, enriched in candidates:
+            enriched_by_key[(site, url)] = enriched
             content_hash = _content_hash(enriched.job)
             cached = self._store.cached_match(
                 content_hash, self._profile.profile_hash, self._model, PROMPT_VERSION
@@ -379,11 +432,28 @@ class Matcher:
 
         # No late bump: reserve_match_spend already charged the grant (== len(to_score))
         # atomically up front, so concurrent crawls sharing this matcher can't race the cap.
+
+        # (f) match-time salary/employer backfill (§4.7). For jobs that matched well but carry
+        # no structured salary, mine the description on the cheap extract LM. Runs over cache
+        # hits AND fresh scores (a cached extraction re-applies for free), is bounded per run,
+        # and is a no-op unless an extract model is configured. Best-effort: never affects the
+        # scoring result the runner notifies on.
+        extracted_n = 0
+        if self._extract_model is not None:
+            to_extract = [
+                (site, url, enriched_by_key[(site, url)])
+                for site, url, verdict in results
+                if verdict.score >= self._extract_min_score
+                and enriched_by_key[(site, url)].salary is None
+            ]
+            extracted_n = self._extract_missing(to_extract)
+
         return {
             "candidates": len(candidates),
             "cached": cached_n,
             "scored": scored_n,
             "pending": pending_n,
+            "extracted": extracted_n,
             "results": results,
         }
 
@@ -453,6 +523,103 @@ class Matcher:
             reasons=json.dumps(list(verdict.reasons)),
             concerns=json.dumps(list(verdict.concerns)),
         )
+
+    # -- match-time extraction (§4.7) ---------------------------------------
+
+    def _extract_missing(
+        self, candidates: Sequence[tuple[str, str, _Enriched]]
+    ) -> int:
+        """Backfill salary/employer for salary-less matched jobs; return rows updated.
+
+        Cache lookup first — a hit re-applies for free (keeping salary and the §16 employer
+        key populated on every run, even after a crawl upsert reverts the key). Cache misses
+        are extracted on the cheap LM in batches, bounded to ``extract_cap`` per run so a
+        first pass over a big backlog can't spike spend (the overflow is simply retried next
+        run — extraction is best-effort, nothing is parked). Never raises: a failed extract
+        batch leaves those rows untouched (fail-open, like scoring)."""
+        applied = 0
+        misses: list[tuple[str, str, _Enriched, str]] = []
+        model = cast(str, self._extract_model)
+        for site, url, enriched in candidates:
+            content_hash = _content_hash(enriched.job)
+            cached = self._store.cached_extract(content_hash, model, EXTRACT_VERSION)
+            ext = _extraction_from_json(cached) if cached is not None else None
+            if ext is not None:
+                applied += int(self._apply_extraction(site, url, ext))
+            else:
+                misses.append((site, url, enriched, content_hash))
+        for batch in _chunks(misses[: self._extract_cap], self._batch):
+            self._governor.pace()
+            try:
+                applied += self._extract_batch(batch)
+            except Exception as exc:  # fail-open — a bad extract batch is skipped, not fatal
+                _log.warning(
+                    "extract batch of %d job(s) failed, skipping: %s: %s",
+                    len(batch),
+                    type(exc).__name__,
+                    str(exc)[:200],
+                )
+        return applied
+
+    def _extract_batch(
+        self, batch: Sequence[tuple[str, str, _Enriched, str]]
+    ) -> int:
+        """LLM-extract one batch; cache + apply each entry; return rows updated.
+
+        Raises on an LLM/parse failure so the caller skips the batch (fail-open). Every
+        parsed entry is cached — including an empty "nothing found" one, so a genuinely
+        salary-less posting is never re-billed."""
+        payload = [_extract_digest(i, e) for i, (_s, _u, e, _h) in enumerate(batch)]
+        jobs_json = json.dumps(payload, ensure_ascii=False)
+        model = cast(str, self._extract_model)
+        lm = build_lm(model, temperature=0.0, max_tokens=self._max_tokens)
+        with dspy.context(lm=lm):
+            prediction = self._extract_predict(jobs=jobs_json)
+
+        items = _parse_extraction_list(getattr(prediction, "extractions", None))
+        by_index: dict[object, object] = {}
+        for item in items:
+            if isinstance(item, dict):
+                by_index[item.get("index")] = item
+
+        applied = 0
+        for index, (site, url, _enriched, content_hash) in enumerate(batch):
+            ext = _to_extraction(by_index.get(index))
+            if ext is None:
+                continue
+            self._store.cache_extract(
+                content_hash, model, EXTRACT_VERSION, _extraction_to_json(ext)
+            )
+            applied += int(self._apply_extraction(site, url, ext))
+        return applied
+
+    def _apply_extraction(self, site: str, url: str, ext: "_Extraction") -> bool:
+        """Persist a mined salary and/or employer onto the row; return whether anything wrote.
+
+        Salary only fills a row that has none (``set_salary`` guards it, so a source figure
+        always wins); a non-empty employer records the cleaner name and repoints the §16
+        dedup key at its canonical form. An all-empty extraction writes nothing."""
+        from jobcrawler.runtime.normalize import canonical_company
+
+        wrote = False
+        if ext.salary_min is not None:
+            wrote |= self._store.set_salary(
+                site,
+                url,
+                salary_min=ext.salary_min,
+                salary_max=ext.salary_max,
+                salary_currency=ext.salary_currency,
+                salary_period=ext.salary_period,
+            )
+        if ext.hiring_company:
+            self._store.set_hiring_company(
+                site,
+                url,
+                name=ext.hiring_company,
+                canonical=canonical_company(ext.hiring_company),
+            )
+            wrote = True
+        return wrote
 
 
 # --- content hashing (mirror the §4.7 runner) ------------------------------
@@ -650,6 +817,165 @@ def _digest(index: int, enriched: _Enriched) -> dict[str, object]:
         "department": getattr(job, "department", None),
         "description": (getattr(job, "description", "") or "")[:1200],
     }
+
+
+# --- match-time extraction (§4.7) ------------------------------------------
+
+# The salary periods the extractor is allowed to emit. An out-of-set period is dropped
+# rather than guessed (never invent a unit) — matching the §4.6 host parse's conservatism.
+_SALARY_PERIODS: frozenset[str] = frozenset({"year", "month", "hour"})
+
+
+@dataclass(frozen=True, slots=True)
+class _Extraction:
+    """One posting's LLM-mined salary + employer (§4.7).
+
+    A salary is present only as a whole: ``salary_min`` is None whenever the description
+    stated no usable figure OR no currency (an amount with no currency is ambiguous), and in
+    that case every salary field is None. ``hiring_company`` is "" when the text named no
+    clearer employer than the board already did.
+    """
+
+    salary_min: float | None
+    salary_max: float | None
+    salary_currency: str | None
+    salary_period: str | None
+    hiring_company: str
+
+
+def _extract_digest(index: int, enriched: _Enriched) -> dict[str, object]:
+    """The compact per-job payload sent to the extractor (title/company/description).
+
+    A wider description window than the matcher's (2000 vs 1200 chars): salary and the
+    real employer often sit deep in a posting (benefits block, "About <Company>" footer),
+    past where the fit signal is decided.
+    """
+    job = enriched.job
+    return {
+        "index": index,
+        "title": getattr(job, "title", None),
+        "company": getattr(job, "company", None),
+        "description": (getattr(job, "description", "") or "")[:2000],
+    }
+
+
+def _num_or_none(value: object) -> float | None:
+    """Coerce an LLM salary bound to a positive float, else None (never invent a number)."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) if value > 0 else None
+    if isinstance(value, str):
+        cleaned = value.replace(",", "").replace("$", "").strip()
+        try:
+            num = float(cleaned)
+        except ValueError:
+            return None
+        return num if num > 0 else None
+    return None
+
+
+def _to_extraction(item: object) -> _Extraction | None:
+    """Build an ``_Extraction`` from one parsed LLM object, defensively.
+
+    Returns None only when ``item`` is not a mapping (unusable). A mapping with neither a
+    salary nor a company is a valid "nothing found" and yields an empty ``_Extraction`` —
+    the caller caches that (so the posting isn't re-billed) and persists nothing. Salary is
+    kept ONLY with a usable amount AND a currency; an unrecognized period is dropped.
+    """
+    if not isinstance(item, dict):
+        return None
+    smin = smax = None
+    currency = period = None
+    salary = item.get("salary")
+    if isinstance(salary, dict):
+        lo = _num_or_none(salary.get("min"))
+        hi = _num_or_none(salary.get("max"))
+        lo, hi = (lo if lo is not None else hi), (hi if hi is not None else lo)
+        cur = salary.get("currency")
+        cur_norm = cur.strip().upper() if isinstance(cur, str) and cur.strip() else None
+        if lo is not None and cur_norm is not None:
+            smin, smax, currency = lo, hi, cur_norm
+            per = salary.get("period")
+            per_norm = per.strip().lower() if isinstance(per, str) else None
+            period = per_norm if per_norm in _SALARY_PERIODS else None
+    company = item.get("hiring_company")
+    hiring = company.strip() if isinstance(company, str) else ""
+    return _Extraction(
+        salary_min=smin,
+        salary_max=smax,
+        salary_currency=currency,
+        salary_period=period,
+        hiring_company=hiring,
+    )
+
+
+def _parse_extraction_list(raw: object) -> list[object]:
+    """Parse the LLM ``extractions`` output into a list, tolerating model chatter.
+
+    Mirrors ``_parse_verdict_list``: raises ``ValueError`` on empty/non-JSON output so the
+    batch fails open, tolerates code fences and surrounding prose (the first complete JSON
+    value wins), and unwraps a ``{"extractions": [...]}`` object. Per-``index`` mapping
+    upstream keeps salvage safe — an entry either names a job in the batch or is dropped.
+    """
+    if raw is None:
+        raise ValueError("empty extractions output")
+    text = _strip_fences(str(raw).strip())
+    if not text:
+        raise ValueError("empty extractions output")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        data = _first_json_value(text)
+        if data is None:
+            raise ValueError(f"extractions output is not JSON: {exc}") from exc
+    if isinstance(data, dict):
+        inner = data.get("extractions")
+        if isinstance(inner, list):
+            return cast("list[object]", inner)
+        return [data]
+    if not isinstance(data, list):
+        raise ValueError("extractions output is not a JSON array")
+    return cast("list[object]", data)
+
+
+def _extraction_to_json(ext: _Extraction) -> str:
+    """Serialize an ``_Extraction`` for the extract cache (flat, one JSON object)."""
+    return json.dumps(
+        {
+            "salary_min": ext.salary_min,
+            "salary_max": ext.salary_max,
+            "salary_currency": ext.salary_currency,
+            "salary_period": ext.salary_period,
+            "hiring_company": ext.hiring_company,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _extraction_from_json(cached: object) -> _Extraction | None:
+    """Rebuild an ``_Extraction`` from a cached JSON string; None if unusable."""
+    if not isinstance(cached, str):
+        return None
+    try:
+        data = json.loads(cached)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    smin = data.get("salary_min")
+    smax = data.get("salary_max")
+    return _Extraction(
+        salary_min=float(smin) if isinstance(smin, (int, float)) else None,
+        salary_max=float(smax) if isinstance(smax, (int, float)) else None,
+        salary_currency=data.get("salary_currency")
+        if isinstance(data.get("salary_currency"), str)
+        else None,
+        salary_period=data.get("salary_period")
+        if isinstance(data.get("salary_period"), str)
+        else None,
+        hiring_company=str(data.get("hiring_company") or ""),
+    )
 
 
 def _verdict_label(score: int) -> str:

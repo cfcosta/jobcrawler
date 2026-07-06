@@ -1035,6 +1035,81 @@ def test_upsert_persists_company_canonical(store: StateStore) -> None:
     assert rec.company_canonical == "acme"
 
 
+# -- §4.7 LLM extraction setters + cache -------------------------------------
+
+
+def test_set_salary_fills_an_empty_row_and_reports_it(store: StateStore) -> None:
+    store.upsert_position("acme", "u", fields=FIELDS, content_hash="h")  # no salary
+    filled = store.set_salary(
+        "acme", "u", salary_min=120000.0, salary_max=160000.0,
+        salary_currency="USD", salary_period="year",
+    )
+    assert filled is True
+    rec = store.open_positions("acme")[0]
+    assert (rec.salary_min, rec.salary_max) == (120000.0, 160000.0)
+    assert (rec.salary_currency, rec.salary_period) == ("USD", "year")
+
+
+def test_set_salary_never_clobbers_a_source_salary(store: StateStore) -> None:
+    # A crawler/§4.6 salary on the row wins: the guard refuses the LLM backfill and the
+    # existing figures survive untouched.
+    store.upsert_position(
+        "acme", "u", fields={**FIELDS, "salary_min": 90000.0, "salary_max": 90000.0},
+        content_hash="h",
+    )
+    filled = store.set_salary(
+        "acme", "u", salary_min=200000.0, salary_max=200000.0,
+        salary_currency="USD", salary_period="year",
+    )
+    assert filled is False
+    rec = store.open_positions("acme")[0]
+    assert (rec.salary_min, rec.salary_max) == (90000.0, 90000.0)
+
+
+def test_set_salary_missing_row_is_a_noop(store: StateStore) -> None:
+    assert (
+        store.set_salary(
+            "acme", "nope", salary_min=1.0, salary_max=2.0,
+            salary_currency="USD", salary_period="year",
+        )
+        is False
+    )
+
+
+def test_set_hiring_company_repoints_the_canonical_dedup_key(store: StateStore) -> None:
+    # A "Confidential" listing whose text names the real employer: the cleaner name is
+    # recorded and the §16 dedup key is repointed at its canonical form.
+    _upsert_scored(store, "u", company="Confidential", canonical="confidential")
+    store.set_hiring_company("acme", "u", name="Globex Corp", canonical="globex")
+    rec = store.open_positions("acme")[0]
+    assert rec.hiring_company == "Globex Corp"
+    assert rec.company_canonical == "globex"  # dedup now groups on the real employer
+    assert rec.company == "Confidential"  # the board field is left as crawled
+
+
+def test_set_hiring_company_empty_canonical_keeps_the_crawl_key(store: StateStore) -> None:
+    # An employer name that canonicalises to nothing must not wipe the crawl-derived key.
+    _upsert_scored(store, "u", company="Acme", canonical="acme")
+    store.set_hiring_company("acme", "u", name="The Group", canonical="")
+    rec = store.open_positions("acme")[0]
+    assert rec.hiring_company == "The Group"
+    assert rec.company_canonical == "acme"  # unchanged
+
+
+def test_extract_cache_roundtrips_and_is_keyed_by_model_and_version(
+    store: StateStore,
+) -> None:
+    assert store.cached_extract("h", "m", "extract-v1") is None
+    store.cache_extract("h", "m", "extract-v1", '{"salary_min": 1}')
+    assert store.cached_extract("h", "m", "extract-v1") == '{"salary_min": 1}'
+    # a different model or version is a distinct entry (a miss), never a stale hit
+    assert store.cached_extract("h", "other", "extract-v1") is None
+    assert store.cached_extract("h", "m", "extract-v2") is None
+    # re-caching the same key overwrites (ON CONFLICT DO UPDATE)
+    store.cache_extract("h", "m", "extract-v1", '{"salary_min": 2}')
+    assert store.cached_extract("h", "m", "extract-v1") == '{"salary_min": 2}'
+
+
 def test_set_match_records_verdict_and_clears_pending() -> None:
     at = datetime(2026, 7, 2, 9, 30, tzinfo=timezone.utc)
     s = StateStore(":memory:", clock=lambda: at)

@@ -199,6 +199,33 @@ def require_match_model() -> str:
     return value
 
 
+def extract_model() -> str | None:
+    """The §4.7 match-time description-extraction LM slug (``JOBCRAWLER_EXTRACT_MODEL``).
+
+    Optional: unset, the salary/employer extractor borrows the cheap ``sub_lm`` via
+    :func:`require_extract_model`, exactly as the matcher borrows it for scoring. Name a
+    dedicated slug only to split extraction off from ``sub_lm``."""
+    return _opt("JOBCRAWLER_EXTRACT_MODEL")
+
+
+def require_extract_model() -> str:
+    """The §4.7 description extractor LM, erroring only if *no* usable model is set at all.
+
+    Extraction bills real tokens per salary-less job, so like the matcher it must run on a
+    *cheap* model: resolves ``JOBCRAWLER_EXTRACT_MODEL`` first, then the ``sub_lm``
+    (:func:`sub_model`) — deliberately **never** the root planner (:func:`model`). Errors
+    loud (naming both env vars) only when neither is set.
+    """
+    value = extract_model() or sub_model()
+    if value is None:
+        raise RuntimeError(
+            "no extract model configured (§4.7): set JOBCRAWLER_EXTRACT_MODEL for the "
+            "host-side description extractor, or JOBCRAWLER_SUB_MODEL (the cheap fallback "
+            "it borrows). Like the matcher it never falls back to the root JOBCRAWLER_MODEL."
+        )
+    return value
+
+
 def match_batch() -> int:
     """How many jobs ride in ONE ``dspy.Predict(MatchJobs)`` call (§4.7). Batching
     amortizes the profile+rubric prompt prefix across many jobs (each job is a compact
@@ -244,6 +271,25 @@ def match_max_tokens() -> int:
     turns a low-credit account into a total matching outage. Default 4000 fits a full
     default batch with headroom."""
     return _int("JOBCRAWLER_MATCH_MAX_TOKENS", 4000)
+
+
+def extract_min_score() -> int:
+    """The 0-100 match score at or above which a salary-less posting is worth mining on the
+    extract LM (§4.7 match-time extraction). Extraction is a *convenience* enrichment, not a
+    fit signal — spending tokens to recover the salary of a job the profile already rejected
+    is waste, so this gates the pass below the notify threshold (``match_min_score``, 70) but
+    above the noise floor. Default 60 (a 'good' fit): raise it to mine only strong matches,
+    lower it to fill more rows at more token cost."""
+    return _int("JOBCRAWLER_EXTRACT_MIN_SCORE", 60)
+
+
+def extract_cap() -> int:
+    """Hard per-run ceiling on *fresh* (cache-miss) description extractions (§4.7). A cache
+    hit re-applies for free and is never charged; only postings mined anew this run count.
+    Bounds the token spike when a first pass meets a large salary-less backlog — the overflow
+    is simply retried next run, nothing is parked. Distinct from ``match_daily_cap``: that
+    bounds scoring volume per UTC day, this bounds extraction volume per run. Default 50."""
+    return _int("JOBCRAWLER_EXTRACT_CAP", 50)
 
 
 # --- generation caps (§4.2) ------------------------------------------------

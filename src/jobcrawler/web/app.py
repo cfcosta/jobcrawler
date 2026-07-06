@@ -138,6 +138,7 @@ def _position_dict(p: PositionRecord) -> dict[str, Any]:
         "url": p.url,
         "title": p.title,
         "company": p.company,
+        "hiring_company": p.hiring_company,
         "location": p.location,
         "workplace": p.workplace,
         "level": p.level,

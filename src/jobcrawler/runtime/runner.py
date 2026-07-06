@@ -539,18 +539,18 @@ def _has_marker(description: str, markers: tuple[str, ...]) -> bool:
 def _position_fields(job: Job, enriched: EnrichedJob) -> dict[str, object]:
     """The ``positions`` columns for one job: raw identity + the §4.6 enrichment.
 
-    Salary columns are taken from the enrichment (which already prefers the crawler's
-    structured fields over parsed text), so the row carries the single best salary the
-    host derived. ``upsert_position`` filters to ``_POSITION_FIELDS`` and coerces the
-    ``datetime`` timestamps to ISO text, so passing the raw values here is safe.
+    Salary columns are written ONLY when the enrichment carries structured compensation
+    (the crawler's own fields, or the §4.6 host parse). A salary-less crawl OMITS them
+    rather than sending NULLs, so an upsert never nulls out a salary the §4.7 match-time
+    extractor backfilled onto the row (``set_salary``); when the source does state a
+    salary it is included and wins on upsert — a source figure always beats an LLM guess.
 
     ``description`` is persisted verbatim so the row is a complete record of the
     posting: the §4.7 matcher can rebuild its LLM digest (and verify ``content_hash``)
     from the store alone, which is what lets a profile edit re-score the entire backlog
     without waiting for every board's next crawl to re-serve the text.
     """
-    salary = enriched.salary
-    return {
+    fields: dict[str, object] = {
         "external_id": job.external_id,
         "title": job.title,
         "company": job.company,
@@ -562,15 +562,18 @@ def _position_fields(job: Job, enriched: EnrichedJob) -> dict[str, object]:
         "discipline": enriched.discipline,
         "level": enriched.level,
         "workplace": enriched.workplace,
-        "salary_min": salary.min if salary is not None else None,
-        "salary_max": salary.max if salary is not None else None,
-        "salary_currency": salary.currency if salary is not None else None,
-        "salary_period": salary.period if salary is not None else None,
         "employment_type": job.employment_type,
         "department": job.department,
         "posted_at": job.posted_at,
         "expires_at": job.expires_at,
     }
+    salary = enriched.salary
+    if salary is not None:
+        fields["salary_min"] = salary.min
+        fields["salary_max"] = salary.max
+        fields["salary_currency"] = salary.currency
+        fields["salary_period"] = salary.period
+    return fields
 
 
 def _content_hash(job: Job) -> str:

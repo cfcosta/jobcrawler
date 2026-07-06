@@ -988,6 +988,12 @@ def build_matcher(
         resolved,
         profile.profile_hash[:12],
     )
+    # Match-time salary/employer extraction (§4.7) rides the cheap tier; OFF when none exists
+    # (require_extract_model raises). Best-effort — its absence never disables scoring.
+    try:
+        extract_model: str | None = config.require_extract_model()
+    except RuntimeError:
+        extract_model = None
     return Matcher(
         store,
         profile,
@@ -996,4 +1002,7 @@ def build_matcher(
         daily_cap=config.match_daily_cap(),
         governor=governor,
         clock=clock,
+        extract_model=extract_model,
+        extract_min_score=config.extract_min_score(),
+        extract_cap=config.extract_cap(),
     )
