@@ -331,6 +331,9 @@ class Scheduler:
             if bootstrap_budget is not None
             else config.bootstrap_budget()
         )
+        # Slugs a §16 "crawl now" button forced this tick (set by due_sites, read by
+        # tick to jump a crawler-less forced site to the front of the bootstrap pass).
+        self._forced_this_tick: frozenset[str] = frozenset()
 
     def due_sites(self) -> list[Site]:
         """Sites to crawl this tick: those past their cadence, plus any a §16 web-UI
@@ -344,8 +347,13 @@ class Scheduler:
         registry is logged and dropped, since the daemon can only crawl boards it knows.
         """
         forced = set(self._store.take_crawl_requests())
+        known = {s.slug for s in self._sites}
+        # Remember this tick's manual requests so tick() can bootstrap a forced but
+        # crawler-less site *ahead* of the cold-start backlog (§4.2) rather than behind
+        # it — a button press is an explicit, high-intent signal, not just another due
+        # site. Reset every tick (this is the queue's sole drain).
+        self._forced_this_tick = frozenset(forced & known)
         if forced:
-            known = {s.slug for s in self._sites}
             if forced & known:
                 _log.info(
                     "manual crawl requested slugs=%s", ",".join(sorted(forced & known))
@@ -487,7 +495,9 @@ class Scheduler:
             _log.info("event heal assessed=%d %s", len(states), _state_summary(states))
         return states
 
-    async def _bootstrap_missing(self, sites: list[Site]) -> dict[str, HealthState]:
+    async def _bootstrap_missing(
+        self, sites: list[Site], forced: frozenset[str] = frozenset()
+    ) -> dict[str, HealthState]:
         """Write a first crawler for each due site that has none yet (§4.2 cold-start).
 
         A registry entry with no ``crawlers/<slug>.py`` can't be crawled, so the daemon
@@ -513,6 +523,12 @@ class Scheduler:
         crawls — including the freshly promoted crawler's first — always run first.
         Deferral loses nothing: a crawler-less site is re-detected from disk every
         tick, and the health state machine still owns per-site backoff.
+
+        Slugs in ``forced`` (this tick's manual "crawl now" requests, sorted to the
+        front by the caller) are exempt from the budget cutoff: an operator who pressed
+        the button asked for that crawler explicitly, so it is always attempted even if
+        an earlier generation already blew the budget. Only the cadence-driven backlog
+        yields.
         """
         if not self._autonomy or self._healer is None:
             return {}
@@ -526,6 +542,8 @@ class Scheduler:
                 _log.exception(
                     "cold-start bootstrap failed for %s; skipping", site.slug
                 )
+            if site.slug in forced:
+                continue  # explicit request — never deferred by the budget
             elapsed = (self._clock() - pass_started).total_seconds()
             if elapsed > self._bootstrap_budget and done < len(sites):
                 _log.info(
@@ -594,7 +612,13 @@ class Scheduler:
         if to_heal:
             await self._event_heal(to_heal)
         if missing:
-            await self._bootstrap_missing(missing)
+            # A manual "crawl now" on a crawler-less site is an explicit request: write
+            # its crawler first (and don't let the time budget defer it behind the whole
+            # cold-start backlog). Forced slugs sort ahead; the cadence-due remainder
+            # follows under the budget exactly as before.
+            forced = self._forced_this_tick
+            missing.sort(key=lambda s: s.slug not in forced)
+            await self._bootstrap_missing(missing, forced=forced)
         return summaries
 
     def regen_due(self, now: datetime) -> bool:

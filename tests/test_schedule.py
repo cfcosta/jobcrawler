@@ -1238,6 +1238,52 @@ async def test_bootstrap_over_budget_defers_and_the_next_tick_crawls_the_promote
     assert healer.assessed == ["a", "b"]  # then the roster continues
 
 
+async def test_manual_crawl_now_on_a_crawlerless_site_jumps_the_bootstrap_queue() -> (
+    None
+):
+    # §13: a "crawl now" press on a site with no crawler is an explicit request — it must
+    # be generated ahead of the cold-start backlog and NOT deferred by the tick's budget.
+    # Every generation here is over budget (20min > 60s) and the forced site 'c' sits LAST
+    # in registry order, so without prioritization it would be starved behind 'a' (cf.
+    # test_bootstrap_over_budget_defers, where the tail is deferred). Forcing it moves it
+    # to the front and exempts it from the cutoff.
+    clock = _Clock(T0)
+    generated: set[str] = set()
+
+    class _PromotingHealer(_RecordingHealer):
+        async def assess(self, slug: str) -> HealthState:
+            clock.now += timedelta(minutes=20)  # generation-scale wall time
+            generated.add(slug)
+            return await super().assess(slug)
+
+    store = StateStore(":memory:")
+    store.request_crawl("c")  # the web-UI button enqueues a manual request
+    healer = _PromotingHealer()
+    sched = Scheduler(
+        [
+            Site(slug="a", url="https://a.com"),
+            Site(slug="b", url="https://b.com"),
+            Site(slug="c", url="https://c.com"),
+        ],
+        store=store,
+        crawl=_ok_crawl,
+        healer=healer,
+        has_crawler=lambda slug: slug in generated,
+        autonomy=True,
+        regen_check="off",
+        heal_cooldown="off",
+        clock=clock,
+        bootstrap_budget=60.0,
+    )
+
+    await sched.tick()
+
+    # 'c' (forced) generates first and survives the budget; 'a' then runs and trips the
+    # cutoff, deferring 'b'. Without the §13 fix this tick would be just ['a'].
+    assert healer.assessed == ["c", "a"]
+    assert "c" in generated
+
+
 async def test_bootstrap_under_budget_sweeps_the_whole_roster() -> None:
     # The budget only bites after real generation work: cheap assesses (a site in
     # generation-failed backoff is a fast no-op) sweep through in a single tick.
