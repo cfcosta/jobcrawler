@@ -56,6 +56,7 @@ Python, and matching is host-side, outside the sandbox.
 from __future__ import annotations
 
 import hashlib
+import math
 from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import timezone
@@ -107,6 +108,7 @@ def crawl_site(
     *,
     matcher: Matcher | None = None,
     enumerates_all: bool = True,
+    expected_positions: int = 0,
     first_crawl_cap: int | None = None,
     min_description_chars: int = 0,
     expired_markers: tuple[str, ...] = (),
@@ -135,6 +137,7 @@ def crawl_site(
         store,
         matcher=matcher,
         enumerates_all=enumerates_all,
+        expected_positions=expected_positions,
         first_crawl_cap=first_crawl_cap,
         min_description_chars=min_description_chars,
         expired_markers=expired_markers,
@@ -154,6 +157,7 @@ def crawl_site_isolated(
     cpu_seconds: float = 120.0,
     matcher: Matcher | None = None,
     enumerates_all: bool = True,
+    expected_positions: int = 0,
     first_crawl_cap: int | None = None,
     min_description_chars: int = 0,
     expired_markers: tuple[str, ...] = (),
@@ -196,6 +200,7 @@ def crawl_site_isolated(
         store,
         matcher=matcher,
         enumerates_all=enumerates_all,
+        expected_positions=expected_positions,
         first_crawl_cap=first_crawl_cap,
         min_description_chars=min_description_chars,
         expired_markers=expired_markers,
@@ -216,6 +221,7 @@ def _process(
     *,
     matcher: Matcher | None,
     enumerates_all: bool,
+    expected_positions: int,
     first_crawl_cap: int | None,
     min_description_chars: int,
     expired_markers: tuple[str, ...],
@@ -303,14 +309,29 @@ def _process(
         match_min_score,
     )
 
+    # Enumeration floor (§6 discipline, runtime half). When the board's open-role total
+    # is known (``expected_positions`` > 0, pinned per-site in the registry), a crawl that
+    # surfaced far fewer alive than that — below ``enum_floor_ratio`` of it — enumerated
+    # only a *slice*: pagination broke, a selector drifted, an ATS shifted its response
+    # shape. Such a crawl need not raise, so ``crawl_raised`` alone can't catch it, yet
+    # closing the board's tail against that slice would mass-false-close live roles. Treat
+    # it as a partial run and skip the diff, exactly as a raised crawl does. Dormant at
+    # ``expected_positions == 0`` (the default: no estimate, e.g. a windowed source), so
+    # existing registries keep prior behaviour. Keyed on ``len(seen)`` (distinct alive
+    # URLs, the closure diff's own alive set), not the raw yield, so duplicate yields
+    # can't inflate a slice past the floor.
+    floor = math.ceil(config.enum_floor_ratio() * expected_positions)
+    under_enumerated = expected_positions > 0 and len(seen) < floor
+
     # Closure diff (§4.7) — the mass-closure guard, a correctness invariant. Only a
     # healthy full-enumeration run may age out unseen positions: the source enumerates
     # its whole board, the crawl did not raise (a partial/aborted enumeration must not
-    # close the tail), and >= 1 COMPLETE position was tracked (an empty/all-incomplete
-    # run leaves ``present`` empty and must never close the whole board). The diff itself
-    # runs against ``seen`` (complete + truncated) so a truncated re-serve stays alive.
+    # close the tail), it cleared the enumeration floor above, and >= 1 COMPLETE position
+    # was tracked (an empty/all-incomplete run leaves ``present`` empty and must never
+    # close the whole board). The diff itself runs against ``seen`` (complete + truncated)
+    # so a truncated re-serve stays alive.
     closed_positions = 0
-    if enumerates_all and not crawl_raised and present:
+    if enumerates_all and not crawl_raised and present and not under_enumerated:
         closed_positions = len(
             store.close_missing(slug, seen, threshold=close_after_misses)
         )
@@ -326,6 +347,15 @@ def _process(
     signals: dict[str, object] = {"incomplete": incomplete}
     if positions_found:
         signals["body_quality"] = (positions_found - incomplete) / positions_found
+    # §4.8 under-enumeration signal: a known board that came back a slice. Recorded even
+    # though closure was skipped above, so the operator sees *why* the tail stopped aging
+    # (a silently-broken crawler that never raised) instead of a mystery frozen board.
+    if under_enumerated:
+        signals["under_enumerated"] = {
+            "seen": len(seen),
+            "floor": floor,
+            "expected": expected_positions,
+        }
 
     store.finish_run(
         run_id,

@@ -23,6 +23,12 @@ generator, and runner consume. ``jobcrawl generate`` writes a crawler per slug;
     any URL absent from a healthy crawl) or only a recent *window* (``False`` for
     an RSS feed or RemoteOK's latest-~100, where the diff would false-close roles
     that merely scrolled off — closure there defers to the §4.9 recheck loop).
+  * ``expected_positions`` (job-domain, §4.7) — the host's estimate of how many open
+    roles the board lists (an ATS ``meta.total``, a sitemap count). Arms the runtime
+    enumeration floor: a full-enumeration crawl that comes back below
+    ``enum_floor_ratio`` of it enumerated only a slice (broken pagination / drifted
+    selector) even without raising, so mass-closure is skipped rather than
+    false-closing the roles it missed. Optional, ``0`` (dormant) by default.
   * ``render`` / ``hints`` / ``schedule`` / ``adaptive`` / ``enabled`` — fetch
     tier, generator steer, cadence, and on-off (see :class:`Site`).
 

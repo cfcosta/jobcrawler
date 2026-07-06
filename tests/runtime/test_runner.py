@@ -485,6 +485,64 @@ def test_closure_skipped_when_not_enumerating() -> None:
     store.close()
 
 
+def test_closure_skipped_under_the_enumeration_floor() -> None:
+    # A board whose known total is 10 comes back with just 1 alive — a slice, not the
+    # board (broken pagination / drifted selector), though the crawl never raised. Closing
+    # the tail against that slice would false-close the 9 it missed, so the floor (§4.7)
+    # skips the diff exactly as a raised crawl does.
+    store = StateStore(":memory:")
+    a, b = _job("https://example.com/a"), _job("https://example.com/b")
+    crawl_site("s", _crawl(a, b), _ctx(), store)  # A, B open
+    summary = crawl_site(
+        "s", _crawl(a), _ctx(), store, expected_positions=10, close_after_misses=1
+    )
+    assert summary.closed_positions == 0  # 1 of 10 alive is under the 0.5 floor → skip
+    assert _open_urls(store, "s") == {
+        canonicalize_url("https://example.com/a"),
+        canonicalize_url("https://example.com/b"),
+    }  # B survives despite being absent
+    rec = store.last_run("s")
+    assert rec is not None and rec.signals is not None
+    assert rec.signals["under_enumerated"] == {"seen": 1, "floor": 5, "expected": 10}
+    store.close()
+
+
+def test_closure_runs_when_the_enumeration_floor_is_met() -> None:
+    # The same board comes back with 5 of its ~10 alive — clears the 0.5 floor, so the run
+    # counts as a healthy enumeration and the one absent role IS aged out. The floor gates
+    # only slices, never a board that legitimately shrank within tolerance.
+    store = StateStore(":memory:")
+    urls = [f"https://example.com/{n}" for n in range(6)]
+    jobs = [_job(u) for u in urls]
+    crawl_site("s", _crawl(*jobs), _ctx(), store, expected_positions=10)  # 6 open
+    summary = crawl_site(
+        "s",
+        _crawl(*jobs[:5]),  # drop the 6th → 5 alive, clears floor(5)
+        _ctx(),
+        store,
+        expected_positions=10,
+        close_after_misses=1,
+    )
+    assert summary.closed_positions == 1  # the dropped role ages out normally
+    assert canonicalize_url(urls[5]) not in _open_urls(store, "s")
+    store.close()
+
+
+def test_enumeration_floor_dormant_without_an_estimate() -> None:
+    # expected_positions defaults to 0 (no estimate) — the floor never fires, so a board
+    # that legitimately shrank to 1 of 2 still closes the absent role. Guards the 216
+    # existing registry entries against a behaviour change.
+    store = StateStore(":memory:")
+    a, b = _job("https://example.com/a"), _job("https://example.com/b")
+    crawl_site("s", _crawl(a, b), _ctx(), store)  # A, B open, no estimate
+    summary = crawl_site("s", _crawl(a), _ctx(), store, close_after_misses=1)  # B gone
+    assert summary.closed_positions == 1  # floor dormant → normal closure
+    rec = store.last_run("s")
+    assert rec is not None and rec.signals is not None
+    assert "under_enumerated" not in rec.signals
+    store.close()
+
+
 def test_reopen_flow_resurfaces_a_closed_position() -> None:
     # A closed posting that reappears REOPENS as 'changed' (verdict intact — the store's
     # job), so a churned-then-returned role is re-surfaced without re-billing matching.

@@ -607,6 +607,9 @@ def crawl_one(
         enumerates_all=getattr(
             site, "enumerates_all", True
         ),  # mass-closure guard (§4.7)
+        expected_positions=getattr(
+            site, "expected_positions", 0
+        ),  # enumeration floor (§4.7)
         match_min_score=config.match_min_score(),  # notify threshold (§4.7)
     )
 

@@ -112,6 +112,15 @@ class Site(BaseModel):
     # closure for these defers entirely to the §4.9 recheck timer (per-URL 404/410/expiry
     # re-verification) instead.
     enumerates_all: bool = True
+    # Host estimate of how many open roles the board currently lists (an ATS
+    # ``meta.total``, a careers-page counter, a sitemap URL count). Arms the §4.7 runtime
+    # enumeration floor: a full-enumeration crawl that comes back below
+    # ``enum_floor_ratio`` of this surfaced only a slice (broken pagination / drifted
+    # selector) even without raising, so mass-closure is skipped rather than false-closing
+    # the roles it missed. 0 (the default) leaves the floor dormant — a windowed source
+    # (``enumerates_all: false``) or any board whose total isn't known keeps prior
+    # behaviour, and existing registries parse unchanged.
+    expected_positions: int = 0
     enabled: bool = True
 
     @field_validator("slug")
