@@ -21,7 +21,7 @@ from typing import cast
 import httpx
 
 from jobcrawler.runtime.contract import Job
-from jobcrawler.runtime.ctx import Ctx
+from jobcrawler.runtime.ctx import Ctx, crawler_facade
 from jobcrawler.runtime.hardening import harden_xml
 from jobcrawler.runtime.live_ctx import build_live_ctx
 from jobcrawler.runtime.safe_exec import exec_crawler
@@ -84,11 +84,13 @@ def main() -> None:
         # __import__ absent; imports allowlisted) — the runtime half of the sandbox,
         # not trusting the AST gate alone.
         namespace = exec_crawler(data["source"], filename="<candidate>")
-        crawl = cast("Callable[[Ctx], Iterable[object]]", namespace["crawl"])
+        crawl = cast("Callable[[object], Iterable[object]]", namespace["crawl"])
         count = 0
         samples: list[dict[str, str]] = []
         errors: list[str] = []
-        for obj in crawl(ctx):
+        # Hand the crawler the capability facade, never the enforcing ctx (§8):
+        # the real ctx stays here so pages_fetched below reads the true budget.
+        for obj in crawl(crawler_facade(ctx)):
             job = obj if isinstance(obj, Job) else None
             if job is None:
                 try:

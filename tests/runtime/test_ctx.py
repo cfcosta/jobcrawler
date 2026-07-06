@@ -16,7 +16,7 @@ import pytest
 from datetime import timedelta
 
 from jobcrawler.runtime.contract import Ctx as CtxProtocol
-from jobcrawler.runtime.ctx import Ctx, PageLimitError
+from jobcrawler.runtime.ctx import Ctx, PageLimitError, crawler_facade
 from jobcrawler.runtime.politeness import RobotsDisallowedError
 from jobcrawler.runtime.solver import (
     ChallengeError,
@@ -523,3 +523,62 @@ def test_fetch_caller_headers_survive_under_a_cached_clearance() -> None:
     ctx = _with_client(handler, clearance=cache)
     out = ctx.fetch("https://example.com/a", headers={"accept": "application/json"})
     assert out == "OK"
+
+
+# -- capability facade (§8, #20) ---------------------------------------------
+
+
+def test_facade_forwards_fetch_and_charges_the_real_budget() -> None:
+    # A crawler calling facade.fetch rides the real ctx's guard and budget: the
+    # body comes back and pages_fetched ticks on the ENFORCING ctx the host holds.
+    ctx = _ctx(lambda req: httpx.Response(200, text="<ok/>"))
+    facade = crawler_facade(ctx)
+
+    body = facade.fetch("https://example.com/jobs")
+
+    assert body == "<ok/>"
+    assert ctx.pages_fetched == 1
+
+
+def test_facade_forwards_ssrf_and_budget_enforcement() -> None:
+    # Enforcement is not bypassed by the wrapper: an off-allowlist host still
+    # raises through the facade exactly as it would on the bare ctx.
+    facade = crawler_facade(_ctx(lambda req: httpx.Response(200), allowed={"example.com"}))
+    with pytest.raises(SsrfError):
+        facade.fetch("https://evil.test/x")
+
+
+def test_facade_is_a_valid_ctx_but_hides_enforcement_state() -> None:
+    ctx = _ctx(lambda req: httpx.Response(200, text=""))
+    facade = crawler_facade(ctx)
+
+    # It structurally satisfies the crawler contract...
+    assert isinstance(facade, CtxProtocol)
+    # ...yet exposes none of the single-underscore guard state a hostile crawler
+    # would pivot through (the gate permits single-underscore access), nor a
+    # raw-Response `get`, nor any `_ctx` handle back to the enforcing object.
+    for attr in (
+        "_client",
+        "_allowed",
+        "_max_pages",
+        "_pacer",
+        "_robots",
+        "_ctx",
+        "get",
+    ):
+        assert not hasattr(facade, attr)
+    # __slots__ = () → no instance __dict__ to smuggle a reference through.
+    with pytest.raises(TypeError):
+        vars(facade)
+
+
+def test_facade_only_reaches_ctx_through_a_gate_banned_dunder() -> None:
+    # The lone handle to the enforcing ctx lives in the method closure — reachable
+    # only via __closure__ (a dunder the AST gate rejects) and getattr (banned).
+    # This pins WHY single-underscore access finds nothing to pivot through.
+    ctx = _ctx(lambda req: httpx.Response(200, text=""))
+    facade = crawler_facade(ctx)
+
+    cells = facade.fetch.__func__.__closure__
+    assert cells is not None
+    assert any(cell.cell_contents is ctx for cell in cells)

@@ -14,7 +14,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Collection, Mapping
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin
 
 import httpx
@@ -283,3 +283,58 @@ class Ctx:
 
     def log(self, *args: object, **kwargs: object) -> None:
         print("[crawl]", *args)
+
+
+if TYPE_CHECKING:
+    from jobcrawler.runtime.contract import Ctx as _CtxProtocol
+
+
+def crawler_facade(ctx: Ctx) -> _CtxProtocol:
+    """Wrap the enforcing :class:`Ctx` in the capability object a crawler receives (§8).
+
+    :class:`Ctx` keeps its enforcement state — the SSRF allowlist (``_allowed``),
+    the page budget (``_max_pages``), the pacer, the live ``httpx`` client — in
+    *single-underscore* attributes, and the AST gate deliberately permits
+    single-underscore attribute access. That combination let hostile crawler code
+    reach ``ctx._client`` (a raw client → requests straight past the SSRF guard),
+    null ``ctx._max_pages`` / ``ctx._pacer`` (kill the budget and politeness), or
+    call ``ctx._allowed.add(...)`` (widen the allowlist) — the enforcing object was
+    handed to the very code it constrains.
+
+    So the crawler never touches the real ctx. It gets this facade: a
+    ``__slots__ = ()`` object whose only members are the three capability methods,
+    each *closing over* the real ctx as a free variable. The ctx lives in the
+    methods' ``__closure__`` — a dunder the gate rejects — and prising it out would
+    also need ``getattr``, which is banned. There is no instance attribute (single
+    underscore or otherwise) to pivot through: enforcement is unreachable from
+    crawler code, not merely awkward to reach. ``get`` (a raw ``httpx.Response``
+    leak) is intentionally absent — it is off the crawler contract entirely.
+    """
+
+    class _Facade:
+        __slots__ = ()
+
+        def fetch(
+            self,
+            url: str,
+            *,
+            max_redirects: int = 5,
+            method: str = "GET",
+            json: object | None = None,
+            headers: Mapping[str, str] | None = None,
+        ) -> str:
+            return ctx.fetch(
+                url,
+                max_redirects=max_redirects,
+                method=method,
+                json=json,
+                headers=headers,
+            )
+
+        def render(self, url: str) -> str:
+            return ctx.render(url)
+
+        def log(self, *args: object, **kwargs: object) -> None:
+            ctx.log(*args, **kwargs)
+
+    return _Facade()
