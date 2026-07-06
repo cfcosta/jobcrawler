@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fcntl
 import json
 import logging
 import os
@@ -105,6 +106,26 @@ def _has_live_crawler(slug: str, crawlers_dir: Path = _CRAWLERS_DIR) -> bool:
 def _db_path() -> str:
     url = config.state_url()
     return url.removeprefix("sqlite:///") if url.startswith("sqlite:") else url
+
+
+def _acquire_run_lock(path: str | None = None) -> int | None:
+    """Take the exclusive single-instance daemon lock (``flock``); ``None`` if held.
+
+    Only one ``jobcrawl run`` may drive a store at a time: :func:`cmd_run` reaps every
+    unfinished run row as a crash orphan on that single-process assumption (§4.9), so a
+    second concurrent daemon would reap the first's in-flight runs and double-dispatch
+    every site. The lock rides on the open fd (kept for the process lifetime), so a
+    crash releases it — no stale lock to reap. Mirrors ``optimize_job.optimize_lock``;
+    see that module's docstring on why ``flock`` (not an ``fcntl`` record lock that
+    drops on any ``close``) and not a PID file."""
+    lock_path = path or config.run_lock_path()
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
 
 
 def _humanize_secs(secs: float) -> str:
@@ -1135,6 +1156,19 @@ def cmd_run(args: argparse.Namespace) -> int:
     sites, code = _preflight_or_exit()  # fail fast on bad config, never mid-loop
     if sites is None:
         return code
+
+    # Single-instance guard (before reap_orphans, which assumes it is the only
+    # process): a second concurrent daemon on the same store would reap this one's
+    # in-flight runs and double-dispatch every site. Refuse rather than race.
+    lock_fd = _acquire_run_lock()
+    if lock_fd is None:
+        _log.error(
+            "another `jobcrawl run` daemon already holds %s — refusing to start a "
+            "second scheduler on the same store",
+            config.run_lock_path(),
+        )
+        return 1
+
     store = StateStore(_db_path())
 
     # A prior daemon killed mid-crawl leaves finished=NULL run rows; the scheduler
@@ -1184,6 +1218,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         asyncio.run(serve())
     finally:
         store.close()
+        os.close(lock_fd)  # release the single-instance lock (also freed on crash)
     return 0
 
 

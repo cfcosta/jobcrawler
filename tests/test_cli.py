@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from pytest import MonkeyPatch
 from jobcrawler import config, generator_pointer
 from jobcrawler.cli import (
     PreflightError,
+    _acquire_run_lock,
     _build_healer,
     _configure_logging,
     _db_path,
@@ -345,6 +347,22 @@ def test_cli_allowlist_is_derived_from_committed_source() -> None:
 def test_db_path_strips_sqlite_scheme(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setenv("JOBCRAWLER_STATE_URL", "sqlite:///data/x.db")
     assert _db_path() == "data/x.db"
+
+
+def test_run_lock_is_single_instance(tmp_path: Path) -> None:
+    # The daemon's single-instance guard: the first `jobcrawl run` takes the flock and
+    # a concurrent second one is refused (returns None) so it can't reap the first's
+    # in-flight runs. Releasing the fd (crash or clean exit) frees it for a restart.
+    lock = str(tmp_path / "run.lock")
+
+    first = _acquire_run_lock(lock)
+    assert first is not None
+    assert _acquire_run_lock(lock) is None  # contended while the first is held
+
+    os.close(first)  # simulate the holder exiting
+    second = _acquire_run_lock(lock)
+    assert second is not None  # freed lock is re-acquirable
+    os.close(second)
 
 
 def test_configure_logging_honors_the_level_env(monkeypatch: MonkeyPatch) -> None:

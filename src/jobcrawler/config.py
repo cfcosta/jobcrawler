@@ -398,6 +398,17 @@ def state_url() -> str:
     return _str("JOBCRAWLER_STATE_URL", "sqlite:///jobcrawler.db")
 
 
+def run_lock_path() -> str:
+    """Single-instance lockfile for the §4.9 scheduler daemon (held for its lifetime).
+
+    ``jobcrawl run`` takes an advisory lock on this file so only one scheduler runs
+    against a store at a time. ``cmd_run`` reaps every unfinished run row as a crash
+    orphan on that single-process assumption; a second concurrent daemon would reap
+    the first's in-flight runs and double-dispatch every site, so the guard is
+    load-bearing. CWD-relative by default, like the optimize lock."""
+    return _str("JOBCRAWLER_RUN_LOCK", "run.lock")
+
+
 def user_agent() -> str:
     return _str("JOBCRAWLER_USER_AGENT", "jobcrawler/0.1 (+job tracker)")
 
