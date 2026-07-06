@@ -219,13 +219,20 @@ def check_host_admission(
       * ``SITE``'s host must be the registry entry's — the registry URL is what
         fixes a site's allowlist (§4.1), so a winner that drifted to a different
         board is rejected outright.
-      * Every ``EXTRA_HOSTS`` entry must be **evidence-backed**: a host the
-        site's own served bytes name (or its board platform documents — see
-        ``tools.observed_hosts``). The generation context is attacker-influenced
-        (a job page can carry injected instructions), so declaration alone
-        authorizes nothing.
+      * Every ``EXTRA_HOSTS`` entry must be **operator-authorized**: on-domain of
+        a host in ``evidence_hosts``. The generation context is attacker-influenced
+        (a job page can carry injected instructions and name any host it likes), so
+        neither the crawler declaring a host nor that host merely appearing in the
+        fetched page content authorizes egress — only the operator's out-of-band
+        registry declaration does.
       * The set stays small (``cap``) and every entry must clear the fixed SSRF
         kernel — the hard denials apply to every host regardless of provenance.
+
+    ``evidence_hosts`` is the authorization source, and the *caller's* contract is
+    to supply the operator-declared registry ``Site.extra_hosts`` for the site —
+    NEVER hosts scraped from the fetched corpus. That distinction is the whole §8
+    fix: page content is untrusted input, so it can name hosts but can never
+    authorize the crawler to fetch them.
     """
     failures: list[str] = []
     site_host = normalize_host(declared_site(source))
@@ -255,8 +262,8 @@ def check_host_admission(
             continue
         if not host_on_domain(host, evidence):
             failures.append(
-                f"EXTRA_HOSTS entry {entry!r} is not observed in the site's "
-                "own served content"
+                f"EXTRA_HOSTS entry {entry!r} is not operator-authorized — add it "
+                "to the registry entry's extra_hosts if it is a legitimate backend"
             )
     return GateResult(not failures, tuple(failures))
 
@@ -267,18 +274,20 @@ def admissible_hosts(
     registry_hosts: Collection[str],
     evidence_hosts: Collection[str],
 ) -> set[str]:
-    """The allowlist admission will grant ``source`` — registry + evidence-backed
-    declarations (§8).
+    """The allowlist admission will grant ``source`` — registry hosts + the declared
+    ``EXTRA_HOSTS`` entries the operator authorized (§8).
 
-    Registry host(s) plus every declared ``EXTRA_HOSTS`` entry that clears the
-    same evidence rule :func:`check_host_admission` applies (SSRF kernel + the
-    ``host_on_domain`` evidence match). Generation-time validation and the reward
-    grade a candidate under *this* set — the allowlist the committed crawler will
-    actually run with — so an undeclared cross-host fetch fails inside the
-    write → validate → fix loop with an ``SsrfError`` naming the host, not first
-    at admission after the fan-out already picked a winner. A source whose
-    declarations don't parse keeps the registry hosts alone (it will lose at
-    gate 1 anyway; validation just runs narrower).
+    Registry host(s) plus every declared ``EXTRA_HOSTS`` entry that clears the same
+    rule :func:`check_host_admission` applies (SSRF kernel + a ``host_on_domain``
+    match against ``evidence_hosts``). Like that gate, the caller must source
+    ``evidence_hosts`` from the operator's registry ``extra_hosts`` — never the
+    fetched page content. Generation-time validation and the reward grade a
+    candidate under *this* set — the allowlist the committed crawler will actually
+    run with — so an undeclared cross-host fetch fails inside the write → validate →
+    fix loop with an ``SsrfError`` naming the host, not first at admission after the
+    fan-out already picked a winner. A source whose declarations don't parse keeps
+    the registry hosts alone (it will lose at gate 1 anyway; validation just runs
+    narrower).
     """
     base = {h for h in registry_hosts if h}
     try:

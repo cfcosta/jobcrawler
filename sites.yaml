@@ -254,6 +254,12 @@
   url: https://api.ashbyhq.com/posting-api/job-board/kraken.com?includeCompensation=true
   render: static
   company: "Kraken"
+  # Ashby serves the machine-readable feed from api.ashbyhq.com (the registry host)
+  # but the human-facing board — the canonical job URL each posting links to — lives
+  # on the sibling host jobs.ashbyhq.com. Authorize it explicitly so a regenerated
+  # crawler may reference/fetch it (§8); a sibling host is not on-domain of api.*.
+  extra_hosts:
+    - jobs.ashbyhq.com
   hints: >-
     Ashby job board API, token `kraken.com`. Parse the standard Ashby fields. Strong match
     for crypto exchange infrastructure, custody, payments, on-chain integrations,

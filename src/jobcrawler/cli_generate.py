@@ -60,7 +60,7 @@ from jobcrawler.runtime.ssrf import check_url
 from jobcrawler.schedule import Site
 from jobcrawler.sites import find_site, load_sites
 from jobcrawler.trainset import append_record, make_example
-from jobcrawler.urls import normalize_host
+from jobcrawler.urls import host_on_domain, normalize_host
 
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 
@@ -162,14 +162,19 @@ async def _generate_one(
     registry_hosts = {normalize_host(site.url)}
     boot = Ctx(registry_hosts)
     corpus = prefetch_corpus(site.url, boot)
-    # §8 inferred-host envelope: hosts the site's own served bytes vouch for (and
-    # production politeness could actually fetch) join the *generation* allowlist,
-    # so the RLM can explore a cross-host board API. Exploration ≠ admission: what
-    # the winner actually declares is gate-1(b)'s job, judged against this same
-    # evidence — and the committed crawl runs on registry + declared only.
+    # §8 authorization envelope: beyond the registry host, a generated crawler may
+    # fetch only the operator-declared ``Site.extra_hosts`` (the ATS/API host a
+    # careers page is backed by), robots-permitting. These — never hosts merely
+    # *named* in the fetched, attacker-influenceable page content — form the
+    # *generation* allowlist the RLM explores AND the evidence gate-1(b) judges the
+    # winner's declared EXTRA_HOSTS against, so a compromised/hostile page cannot
+    # authorize the crawler to egress to a host it names. The committed crawl runs
+    # on registry + declared only. Page-named-but-unauthorized hosts are surfaced as
+    # an operator hint (add them to the registry entry if legitimate), not admitted.
+    authorized = _authorized_extra_hosts(site)
     observed = corpus_host_evidence(corpus, site.url)
-    evidence = _eligible_extra_hosts(observed)
-    hosts = registry_hosts | evidence
+    _report_unauthorized_named_hosts(site.slug, observed, authorized, registry_hosts)
+    hosts = registry_hosts | authorized
     # Same page budget as the old single-ctx flow: the boot ctx's corpus spend
     # carries over rather than resetting.
     ctx = Ctx(hosts, max_pages=max(0, config.max_pages() - boot.pages_fetched))
@@ -177,7 +182,7 @@ async def _generate_one(
     # live tools/sub_lm/caps are rebuilt fresh and only the strategy state reloads.
     generator = load_generator(
         tools=make_host_tools(
-            ctx, hosts, registry_hosts=registry_hosts, evidence_hosts=evidence
+            ctx, hosts, registry_hosts=registry_hosts, evidence_hosts=authorized
         ),
         sub_lm=sub_lm,
         max_iterations=config.max_iterations(),
@@ -193,14 +198,14 @@ async def _generate_one(
 
     def core(source: str, carrier: object) -> CandidateResult:
         # Admission-shaped (§8): grade under the allowlist the committed crawler
-        # will run with (registry + this candidate's evidence-backed EXTRA_HOSTS),
+        # will run with (registry + this candidate's operator-authorized EXTRA_HOSTS),
         # not the exploration envelope — otherwise a cross-host candidate that
         # never declares its API host scores full marks and wins the fan-out,
         # only to die at gate 1(b). Mirrors cli_optimize._candidate_hosts.
         return validate_crawler(
             source,
             allowed_hosts=admissible_hosts(
-                source, registry_hosts=registry_hosts, evidence_hosts=evidence
+                source, registry_hosts=registry_hosts, evidence_hosts=authorized
             ),
         )
 
@@ -245,7 +250,7 @@ async def _generate_one(
     # expected_recent) and the must-observe "consult the sitemap" gate; the
     # count-based floor belongs at runtime, over a full crawl.
     ok, reason = gate_winner(
-        best, source, registry_hosts, extra_evidence=evidence, url_evidence=observed
+        best, source, registry_hosts, extra_evidence=authorized, url_evidence=observed
     )
     if not ok:
         print(f"FAIL {site.slug}: {reason}")
@@ -276,22 +281,66 @@ async def _generate_one(
     return outcome
 
 
-# Robots probes per generation. Platform-implied hosts rank first in the evidence
-# list, so the bound trims noise (social/CDN links a homepage names), never the
-# high-signal API-host candidates.
+# Robots probes per generation — an upper bound on how many declared extra hosts an
+# operator can authorize for one site, so a fat-fingered registry entry can't fan out
+# into an unbounded robots-probe storm.
 _EVIDENCE_PROBE_BOUND = 8
 
 
+def _authorized_extra_hosts(site: Site) -> set[str]:
+    """The operator-authorized extra fetch hosts for ``site`` (§8), robots-filtered.
+
+    ``Site.extra_hosts`` normalized to bare hosts and passed through the same robots
+    gate as any candidate host. This is the SOLE authorization source for a generated
+    crawler's ``EXTRA_HOSTS``: a host present only in the fetched page content is never
+    admitted here, so a hostile or compromised page cannot steer the crawler into
+    fetching a host it merely names. An empty declaration (the default) keeps the
+    crawler on its registry host alone.
+    """
+    declared = [
+        h for h in (normalize_host(f"https://{e}") for e in site.extra_hosts) if h
+    ]
+    return _eligible_extra_hosts(declared)
+
+
+def _report_unauthorized_named_hosts(
+    slug: str,
+    named: Collection[str],
+    authorized: set[str],
+    registry_hosts: set[str],
+) -> None:
+    """Print a §8 operator hint for hosts the page names but nothing authorizes.
+
+    The generator no longer treats page-named hosts as fetch evidence, so a
+    legitimate cross-host board (careers page served off a distinct ATS/API host)
+    now needs an explicit ``extra_hosts`` entry. Surfacing the un-covered named
+    hosts turns that from a silent gate-1(b) rejection into an actionable nudge —
+    without ever admitting them.
+    """
+    candidates = {h for h in (normalize_host(f"https://{n}") for n in named) if h}
+    unauthorized = sorted(
+        h
+        for h in candidates
+        if not host_on_domain(h, registry_hosts) and not host_on_domain(h, authorized)
+    )
+    if unauthorized:
+        print(
+            f"  {slug}: page names host(s) not authorized to fetch: "
+            f"{', '.join(unauthorized)} — add to the registry entry's extra_hosts "
+            f"if a legitimate ATS/API backend (§8)"
+        )
+
+
 def _eligible_extra_hosts(candidates: list[str]) -> set[str]:
-    """Filter host evidence to what production politeness could actually fetch (§4.5).
+    """Filter candidate extra hosts to what production politeness could fetch (§4.5).
 
     The generation sandbox runs a bare ctx (no robots), but the scheduled crawl
     runs the polite one — a host whose robots.txt blanket-refuses us
     (api.getro.com is ``Disallow: /`` for every agent) would pass generation and
     then die on its first production crawl, wedging the site in a heal loop. So
     each candidate's robots.txt is probed up front and the forbidden are dropped
-    from evidence entirely: not explorable, not declarable. Unreachable robots
-    fails open, mirroring :class:`RobotsPolicy` in production.
+    entirely: not explorable, not declarable. Unreachable robots fails open,
+    mirroring :class:`RobotsPolicy` in production.
     """
     policy = RobotsPolicy(_robots_fetch_text, user_agent=config.user_agent())
     return {

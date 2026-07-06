@@ -251,23 +251,57 @@ def test_no_adopt_does_not_flip_the_pointer_or_notify(
 # -- §8: the metric's per-candidate allowlist ----------------------------------
 
 
-def test_candidate_hosts_bound_declared_by_corpus_evidence() -> None:
+def test_candidate_hosts_bound_declared_by_gold_source_not_corpus() -> None:
     from jobcrawler.cli_optimize import _candidate_hosts
 
+    # §8: the corpus (untrusted page content) names unvouched.net — under the old
+    # rule that alone would authorize a candidate to declare it. It must not now:
+    # only the recorded gold crawler's own EXTRA_HOSTS (operator-vetted at commit
+    # time, gate-1(b)) bound the candidate, never the scraped bytes.
     carrier = dspy.Example(
         site_url="https://jobs.example.com/",
-        corpus={"home": 'see <script src="https://api.partner.net/sdk.js">'},
+        corpus={"home": 'fetch("https://unvouched.net/api"); "api.partner.net"'},
+        crawler_source=(
+            'SITE = "https://jobs.example.com"\n'
+            'EXTRA_HOSTS = ("api.partner.net",)\n'
+            "def crawl(ctx):\n    yield 1\n"
+        ),
     ).with_inputs("site_url", "corpus")
     src = (
         'SITE = "https://jobs.example.com"\n'
         'EXTRA_HOSTS = ("api.partner.net", "unvouched.net")\n'
         "def crawl(ctx):\n    yield 1\n"
     )
-    # The evidence-backed declaration joins; the unvouched one is dropped — an
-    # optimizer candidate can't authorize a host merely by declaring it.
+    # api.partner.net is authorized by the gold crawler → joins; unvouched.net is
+    # only named by the corpus, never declared by the gold → dropped.
     assert _candidate_hosts(src, carrier) == {
         "jobs.example.com",
         "api.partner.net",
+    }
+
+
+def test_candidate_hosts_admit_a_subdomain_of_a_gold_host() -> None:
+    from jobcrawler.cli_optimize import _candidate_hosts
+
+    # Same host_on_domain rule as the live gate: a candidate declaring a subdomain
+    # of a gold-authorized host is admitted, keeping the offline metric aligned
+    # with what live admission (gate-1(b)) would grant.
+    carrier = dspy.Example(
+        site_url="https://jobs.example.com/",
+        crawler_source=(
+            'SITE = "https://jobs.example.com"\n'
+            'EXTRA_HOSTS = ("api.partner.net",)\n'
+            "def crawl(ctx):\n    yield 1\n"
+        ),
+    ).with_inputs("site_url")
+    src = (
+        'SITE = "https://jobs.example.com"\n'
+        'EXTRA_HOSTS = ("eu.api.partner.net",)\n'
+        "def crawl(ctx):\n    yield 1\n"
+    )
+    assert _candidate_hosts(src, carrier) == {
+        "jobs.example.com",
+        "eu.api.partner.net",
     }
 
 

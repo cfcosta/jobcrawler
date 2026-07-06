@@ -29,6 +29,13 @@ generator, and runner consume. ``jobcrawl generate`` writes a crawler per slug;
     ``enum_floor_ratio`` of it enumerated only a slice (broken pagination / drifted
     selector) even without raising, so mass-closure is skipped rather than
     false-closing the roles it missed. Optional, ``0`` (dormant) by default.
+  * ``extra_hosts`` (§8) — hosts beyond the ``url`` host a generated crawler for
+    this site is authorized to fetch, e.g. the sibling ATS host a careers page is
+    backed by. This is the *sole* authorization source for a crawler's
+    ``EXTRA_HOSTS``: generation admits a declared extra host only if it is on-domain
+    of one of these, so a host merely named in the (untrusted) fetched page content
+    authorizes nothing. Optional, empty by default — most single-host boards need
+    none; the operator adds one deliberately for a genuine cross-host backend.
   * ``render`` / ``hints`` / ``schedule`` / ``adaptive`` / ``enabled`` — fetch
     tier, generator steer, cadence, and on-off (see :class:`Site`).
 

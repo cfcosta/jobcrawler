@@ -39,7 +39,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Literal, Protocol
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 if TYPE_CHECKING:  # deferred: importing the matcher pulls dspy, so keep it out of boot
     from jobcrawler.match import Matcher
@@ -121,6 +121,15 @@ class Site(BaseModel):
     # (``enumerates_all: false``) or any board whose total isn't known keeps prior
     # behaviour, and existing registries parse unchanged.
     expected_positions: int = 0
+    # Extra hosts (beyond the registry ``url`` host) a generated crawler for this site is
+    # authorized to fetch (§8) — the ATS/API host a careers page is backed by, e.g.
+    # ``jobs.ashbyhq.com`` for a board that renders its listings off Ashby. This is the
+    # SOLE authorization source for a crawler's ``EXTRA_HOSTS``: generation admits a
+    # declared extra host only if it is on-domain of one of these, so a host merely named
+    # in the (attacker-influenceable) page content authorizes nothing. Empty by default —
+    # a same-host board needs none, and the operator adds one deliberately. Subdomains are
+    # covered (``ashbyhq.com`` admits ``jobs.ashbyhq.com``).
+    extra_hosts: list[str] = Field(default_factory=list)
     enabled: bool = True
 
     @field_validator("slug")

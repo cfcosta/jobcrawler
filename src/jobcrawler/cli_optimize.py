@@ -45,13 +45,12 @@ from jobcrawler.generate.scoring import (
     make_metric,
 )
 from jobcrawler.generate.snapshot import prefetch_corpus
-from jobcrawler.generate.tools import corpus_host_evidence
 from jobcrawler.runtime.contract import declared_extra_hosts
 from jobcrawler.runtime.ctx import Ctx
 from jobcrawler.runtime.sandbox import validate_crawler
 from jobcrawler.state import StateStore
 from jobcrawler.trainset import load_records, optimization_pool, split_by_site
-from jobcrawler.urls import normalize_host
+from jobcrawler.urls import host_on_domain, normalize_host
 
 _TARGET_ITEMS = 30  # the positions-axis saturation target (mirrors cli_generate)
 _MIN_SITES = 3  # need at least one site each for train / val / held-out
@@ -333,19 +332,40 @@ def _carrier_site_url(carrier: object) -> str:
     return str(getattr(carrier, "site_url", "") or "")
 
 
-def _carrier_corpus(carrier: object) -> object:
+def _carrier_source(carrier: object) -> str:
+    """The recorded gold crawler's source from the trainset example (§4.11)."""
     if isinstance(carrier, dspy.Example):
-        return carrier.get("corpus", None)
-    return getattr(carrier, "corpus", None)
+        raw = carrier.get("crawler_source", "")
+    else:
+        raw = getattr(carrier, "crawler_source", "")
+    code = getattr(raw, "code", None)
+    return code if isinstance(code, str) else str(raw or "")
+
+
+def _gold_extra_hosts(carrier: object) -> set[str]:
+    """The recorded gold crawler's own declared EXTRA_HOSTS (§8).
+
+    These already cleared live admission (gate-1(b)) against the operator's registry
+    ``extra_hosts`` when the example was committed, so they are an operator-rooted
+    authorization — unlike the example's scraped corpus, which is untrusted.
+    """
+    try:
+        gold = declared_extra_hosts(_carrier_source(carrier))
+    except SyntaxError:
+        return set()
+    return {h for h in (normalize_host(f"https://{e}") for e in gold) if h}
 
 
 def _candidate_hosts(source: str, carrier: object) -> set[str]:
     """The metric's §4.4 validation allowlist for one optimizer candidate (§8).
 
-    Registry host + the candidate's declared EXTRA_HOSTS *bounded by the example's
-    corpus evidence* — the same inference live admission (gate-1(b)) applies,
-    recomputed here from the carrier's recorded corpus so an optimizer candidate
-    can't authorize an arbitrary host merely by declaring it. No robots probe in
+    Registry host + the candidate's declared EXTRA_HOSTS *bounded by the recorded
+    gold crawler's own declared hosts* — an operator-rooted authorization (those
+    hosts passed live gate-1(b) against the registry ``extra_hosts`` at commit
+    time), applied with the same ``host_on_domain`` rule the live gate uses. It is
+    deliberately NOT the example's scraped corpus: page content is
+    attacker-influenceable, so a candidate must never be able to authorize a host
+    merely because some fetched byte-stream happened to name it. No robots probe in
     this offline metric (the live gate owns that at delivery time); an unparseable
     candidate falls back to the registry host alone and scores accordingly.
     """
@@ -364,8 +384,8 @@ def _candidate_hosts(source: str, carrier: object) -> set[str]:
         return base
     if not declared:
         return base
-    evidence = set(corpus_host_evidence(_carrier_corpus(carrier), site_url))
-    return base | (declared & evidence)
+    authorized = _gold_extra_hosts(carrier)
+    return base | {h for h in declared if host_on_domain(h, authorized)}
 
 
 def _as_float(value: object) -> float:

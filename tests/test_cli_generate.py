@@ -431,6 +431,45 @@ def test_eligible_extra_hosts_bound_the_probe(
     assert len(probed) == 8
 
 
+def test_authorized_extra_hosts_reads_the_operator_declaration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # §8: a crawler's extra fetch hosts come from the registry entry the operator
+    # controls (Site.extra_hosts), robots-permitting — never from page content.
+    monkeypatch.setattr(cli_generate, "_robots_fetch_text", lambda url: None)
+    site = Site(
+        slug="kraken",
+        url="https://api.ashbyhq.com/x",
+        extra_hosts=["jobs.ashbyhq.com"],
+    )
+    assert cli_generate._authorized_extra_hosts(site) == {"jobs.ashbyhq.com"}
+
+
+def test_authorized_extra_hosts_empty_without_a_declaration() -> None:
+    # The default: no operator declaration → no extra fetch host. The function takes
+    # only the Site, so there is structurally no path for page content to authorize
+    # a host — the whole point of the §8 fix.
+    site = Site(slug="acme", url="https://acme.com")
+    assert cli_generate._authorized_extra_hosts(site) == set()
+
+
+def test_report_unauthorized_named_hosts_hints_only_uncovered(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A host the page names but neither the registry nor the operator authorized is
+    # surfaced as an actionable hint; one already covered stays silent.
+    cli_generate._report_unauthorized_named_hosts(
+        "acme",
+        named=["evil.attacker.io", "api.ashbyhq.com", "acme.com"],
+        authorized={"api.ashbyhq.com"},
+        registry_hosts={"acme.com"},
+    )
+    out = capsys.readouterr().out
+    assert "evil.attacker.io" in out
+    assert "api.ashbyhq.com" not in out  # operator-authorized → not flagged
+    assert "acme.com" not in out  # the registry host itself → not flagged
+
+
 def test_committed_slugs_ignores_staging_and_helpers(tmp_path: Path) -> None:
     # Only top-level crawlers/<slug>.py count — _pending/_history staging and any
     # _-prefixed helper are not crawlers, so a staged-only site still reads as missing.

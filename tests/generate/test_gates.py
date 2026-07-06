@@ -256,8 +256,9 @@ def test_admission_without_declarations_needs_no_evidence() -> None:
 
 def test_admission_rejects_a_declaration_without_evidence() -> None:
     # Declaration alone authorizes nothing (§8): the generation context is
-    # attacker-influenced (job pages carry arbitrary text), so only hosts the
-    # site's own served bytes vouch for are admissible.
+    # attacker-influenced (job pages carry arbitrary text and can name any host),
+    # so only hosts the operator declared out-of-band (registry extra_hosts, passed
+    # as evidence_hosts) are admissible — an empty authorization admits none.
     res = check_host_admission(
         _declaring('("api.example.net",)'),
         registry_hosts={"example.com"},
@@ -265,7 +266,7 @@ def test_admission_rejects_a_declaration_without_evidence() -> None:
         cap=3,
     )
     assert not res.passed
-    assert any("not observed" in f for f in res.failures)
+    assert any("not operator-authorized" in f for f in res.failures)
 
 
 def test_admissible_hosts_admits_only_evidence_backed_declarations() -> None:
