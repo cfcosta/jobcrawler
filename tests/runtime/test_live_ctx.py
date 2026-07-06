@@ -17,9 +17,10 @@ import httpx
 import pytest
 from pytest import MonkeyPatch
 
-from jobcrawler.runtime.live_ctx import build_live_ctx
+from jobcrawler.runtime.live_ctx import build_live_ctx, build_recheck_fetch
 from jobcrawler.runtime.politeness import RobotsDisallowedError
 from jobcrawler.runtime.solver import Clearance
+from jobcrawler.runtime.ssrf import SsrfError
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
@@ -123,3 +124,59 @@ def test_build_live_ctx_routes_through_the_egress_proxy(
     build_live_ctx({"jobs.example"})  # builds its own (proxied) client
 
     assert seen.get("proxy") == "http://egress.local:8080"
+
+
+# -- recheck fetch (§4.9) ----------------------------------------------------
+
+
+async def test_build_recheck_fetch_surfaces_status_and_body(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    # The §4.9 recheck seam returns (status, text) for a known job URL — and unlike a
+    # crawl fetch it must SURFACE a 404 (the closure signal) rather than raise on it, so
+    # recheck_tick can read the status and close the row.
+    monkeypatch.setenv("JOBCRAWLER_RATE_LIMIT", "1000/s/host")  # keep the test fast
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(404)  # no robots → fail open (allow)
+        if request.url.path == "/gone":
+            return httpx.Response(404, text="not found")
+        return httpx.Response(200, text="still open")
+
+    fetch = build_recheck_fetch(client=_client(handler))
+
+    assert await fetch("https://jobs.example/open") == (200, "still open")
+    assert await fetch("https://jobs.example/gone") == (404, "not found")
+
+
+async def test_build_recheck_fetch_is_robots_gated(monkeypatch: MonkeyPatch) -> None:
+    # Mirrors the crawl fetch path: a robots Disallow refuses the recheck before any
+    # request (the scheduler isolates the raise as "not a closure" and keeps the row).
+    monkeypatch.setenv("JOBCRAWLER_RATE_LIMIT", "1000/s/host")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nDisallow: /private\n")
+        return httpx.Response(200, text="body")
+
+    fetch = build_recheck_fetch(client=_client(handler))
+
+    assert await fetch("https://jobs.example/ok") == (200, "body")
+    with pytest.raises(RobotsDisallowedError):
+        await fetch("https://jobs.example/private")
+
+
+async def test_build_recheck_fetch_refuses_internal_targets() -> None:
+    # A drifted or hostile stored URL must not turn the recheck into an SSRF probe: the
+    # own-host floor still blocks cloud-metadata / loopback / private / link-local, even
+    # though the URL's own host is (trivially) allowed.
+    fetch = build_recheck_fetch(client=_client(lambda _r: httpx.Response(200)))
+
+    for url in (
+        "http://169.254.169.254/latest/meta-data/",
+        "http://127.0.0.1/admin",
+        "http://metadata.google.internal/",
+    ):
+        with pytest.raises(SsrfError):
+            await fetch(url)

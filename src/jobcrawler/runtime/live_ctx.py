@@ -22,7 +22,8 @@ crawler containing any of that logic.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection
+import asyncio
+from collections.abc import Awaitable, Callable, Collection
 
 import httpx
 
@@ -32,9 +33,14 @@ from jobcrawler.runtime.encoding import (
     http_charset_from_content_type,
     resolve_text,
 )
-from jobcrawler.runtime.politeness import PerHostPacer, RobotsPolicy
+from jobcrawler.runtime.politeness import (
+    PerHostPacer,
+    RobotsDisallowedError,
+    RobotsPolicy,
+)
 from jobcrawler.runtime.solver import make_clearance_cache, make_solver
 from jobcrawler.runtime.ssrf import check_url
+from jobcrawler.urls import normalize_host
 
 
 def build_live_ctx(
@@ -86,6 +92,85 @@ def _robots_fetcher(
         check_url(
             url, allowed
         )  # SSRF guard; RobotsPolicy._load folds a raise → fail-open
+        resp = client.get(url)
+        if resp.status_code != 200:
+            return None
+        return resolve_text(
+            resp.content,
+            http_charset_from_content_type(resp.headers.get("content-type")),
+        )
+
+    return fetch_text
+
+
+def build_recheck_fetch(
+    *, client: httpx.Client | None = None
+) -> Callable[[str], Awaitable[tuple[int, str]]]:
+    """A host-side polite GET for the §4.9 recheck sweep: ``(status, decoded text)``.
+
+    The scheduler re-fetches an already-known job URL to learn whether it has quietly
+    404/410'd or now shows an expired-posting marker (the caller reads status + body for
+    the one-way closure decision). This shares the crawl's §4.5 politeness — the per-host
+    pacer, the robots gate, the configured UA / timeout / egress proxy, and the SSRF
+    guard — but deliberately drops the ``Ctx`` *page budget*: that cap is a per-crawl
+    runaway bound, and a daemon-lifetime recheck fetch under a fixed page cap would
+    exhaust it after a few sweeps and then refuse every later recheck. The pacer and
+    robots caches are per-host and lifetime-safe (unlike the page counter), so a sweep of
+    many URLs on one host costs a single robots fetch and paces exactly like a crawl.
+
+    The SSRF floor is per-URL *own-host*, not a fixed fleet allowlist — matching the
+    store's §4.9 ``_url_is_safe_to_store`` admission: a public job URL on a ``url_evidence``
+    sibling host the crawler itself never fetched is still re-checkable, while any internal
+    target (cloud-metadata / loopback / private / link-local) is refused. A robots-disallowed
+    path likewise raises; the scheduler isolates every raise as "not a closure signal" and
+    keeps the row open, so a blip or a refusal never ends a live posting.
+
+    Redirects are not followed: a moved posting (301/302) is not a closure signal, and an
+    unchecked redirect target would slip the SSRF guard. ``client`` is injectable for tests
+    (a MockTransport); production passes ``None`` and the factory builds the proxied,
+    UA-stamped client, reused for the daemon's life (closed at process exit).
+    """
+    ua = config.user_agent()
+    http = client or httpx.Client(
+        headers={"user-agent": ua},
+        follow_redirects=False,
+        timeout=config.fetch_timeout(),
+        proxy=config.egress_proxy(),  # None → direct
+    )
+    pacer = PerHostPacer(config.rate_limit())
+    robots = RobotsPolicy(_own_host_robots_fetcher(http), user_agent=ua)
+
+    async def fetch(url: str) -> tuple[int, str]:
+        def _get() -> tuple[int, str]:
+            check_url(url, {normalize_host(url)})  # own host ok; internal target refused
+            if not robots.allowed(url):
+                raise RobotsDisallowedError(url)
+            # robots' Crawl-delay raises the floor; the pacer never speeds past our rate.
+            pacer.wait(normalize_host(url), min_interval=robots.crawl_delay(url))
+            resp = http.get(url)
+            return resp.status_code, resolve_text(
+                resp.content,
+                http_charset_from_content_type(resp.headers.get("content-type")),
+            )
+
+        # httpx here is sync; run it off the scheduler's event loop so a paced/slow
+        # recheck fetch never blocks the run loop's other cadences.
+        return await asyncio.to_thread(_get)
+
+    return fetch
+
+
+def _own_host_robots_fetcher(client: httpx.Client) -> Callable[[str], str | None]:
+    """robots.txt fetcher for the recheck path, SSRF-checked against the file's *own* host.
+
+    Like :func:`_robots_fetcher` but scoped per-request to the requested host rather than a
+    fixed crawl allowlist, so robots for any public job-URL host can be consulted (the
+    recheck fetch is own-host, not fleet-scoped). Non-200 / unreachable → ``None`` so the
+    policy fails open, per the robots convention.
+    """
+
+    def fetch_text(url: str) -> str | None:
+        check_url(url, {normalize_host(url)})
         resp = client.get(url)
         if resp.status_code != 200:
             return None

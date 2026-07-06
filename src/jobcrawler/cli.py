@@ -55,6 +55,7 @@ from jobcrawler.metrics import (
 )
 from jobcrawler.profile import ProfileNotFound, load_profile
 from jobcrawler.runtime.contract import allowed_hosts_of
+from jobcrawler.runtime.live_ctx import build_recheck_fetch
 from jobcrawler.runtime.runner import (
     CrawlSummary,
     crawl_site_isolated,
@@ -1202,6 +1203,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         healer=_build_healer(store, sites),
         has_crawler=_has_live_crawler,  # route crawler-less sites to §4.2 bootstrap
         match_drain=match_drain,  # §4.7 profile watch + store-side pending drain
+        # §4.9 recheck: without this seam recheck_due() is always False, so neither the
+        # windowed 404/expired-marker re-verification NOR the fleet-wide expire_due()
+        # sweep (which lives inside recheck_tick) ever runs — stale/closed positions
+        # would never close. A host-side polite GET (per-host paced + robots, no page
+        # budget) mirrors the crawl fetch path so the sweep activates in production.
+        recheck_fetch=build_recheck_fetch(),
     )
 
     async def serve() -> None:
