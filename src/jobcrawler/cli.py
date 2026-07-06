@@ -1272,6 +1272,11 @@ def build_parser() -> argparse.ArgumentParser:
     target = gen.add_mutually_exclusive_group(required=True)
     target.add_argument("slug", nargs="?")
     target.add_argument("--all", action="store_true")
+    target.add_argument(
+        "--missing",
+        action="store_true",
+        help="every enabled site with no committed crawler yet (drain the §4.2 backlog)",
+    )
     target.add_argument("--stale", action="store_true")
     gen.set_defaults(func=cmd_generate)
 

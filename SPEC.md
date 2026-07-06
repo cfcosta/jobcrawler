@@ -1151,7 +1151,7 @@ The central risk is **executing model-written code against the live web**. Mitig
 |---|---|
 | `jobcrawl run` | **start the scheduler daemon** — crawl due boards, track lifecycle, match, retry, regenerate (§4.9) |
 | `jobcrawl serve [--host --port]` | **start the web tracker UI** (§16) — browse/search/track positions over the shared store; loopback-bound by default, no scheduler/LLM |
-| `jobcrawl generate <slug> \| --all \| --stale` | run RLM, gate (§6), write `crawlers/<slug>.py` |
+| `jobcrawl generate <slug> \| --all \| --missing \| --stale` | run RLM, gate (§6), write `crawlers/<slug>.py` (`--missing` = every enabled site with no committed crawler, to drain the §4.2 cold-start backlog operator-side) |
 | `jobcrawl validate <slug>` | dry-run a committed script through the §4.4 sandbox, report positions/errors, **no state/match** |
 | `jobcrawl crawl <slug> \| --all` | run committed scripts, dedup, track positions, match new/changed |
 | `jobcrawl promote <slug>` | move a self-heal crawler staged under `crawlers/_pending` (§8) to live |

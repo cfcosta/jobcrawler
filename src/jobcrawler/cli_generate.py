@@ -115,9 +115,29 @@ def _build_lms() -> tuple[dspy.LM, dspy.LM]:
     return root_lm, sub_lm
 
 
+def _committed_slugs(crawlers_dir: Path = _CRAWLERS_DIR) -> set[str]:
+    """Slugs with a live committed crawler on disk (``crawlers/<slug>.py``).
+
+    Only top-level modules count — the ``_pending``/``_history`` staging dirs and any
+    ``_``-prefixed helper (e.g. ``__init__.py``) are not crawlers, so a site with only a
+    staged candidate still reads as missing and ``--missing`` will (re-)generate it.
+    """
+    if not crawlers_dir.is_dir():
+        return set()
+    return {p.stem for p in crawlers_dir.glob("*.py") if not p.stem.startswith("_")}
+
+
 def _select(sites: list[Site], args: argparse.Namespace) -> list[Site]:
     if args.all:
         return [s for s in sites if s.enabled]
+    if getattr(args, "missing", False):
+        have = _committed_slugs()
+        missing = [s for s in sites if s.enabled and s.slug not in have]
+        print(
+            f"{len(missing)} enabled site(s) without a committed crawler "
+            f"({len(have)} already have one)"
+        )
+        return missing
     if args.stale:
         print("--stale is driven by `jobcrawl run`'s health loop (§4.8)")
         return []

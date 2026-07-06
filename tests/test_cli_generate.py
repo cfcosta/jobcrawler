@@ -429,3 +429,33 @@ def test_eligible_extra_hosts_bound_the_probe(
     many = [f"h{i}.example.net" for i in range(20)]
     assert len(cli_generate._eligible_extra_hosts(many)) == 8
     assert len(probed) == 8
+
+
+def test_committed_slugs_ignores_staging_and_helpers(tmp_path: Path) -> None:
+    # Only top-level crawlers/<slug>.py count — _pending/_history staging and any
+    # _-prefixed helper are not crawlers, so a staged-only site still reads as missing.
+    (tmp_path / "acme.py").write_text("x")
+    (tmp_path / "globex.py").write_text("x")
+    (tmp_path / "__init__.py").write_text("")
+    (tmp_path / "_pending").mkdir()
+    (tmp_path / "_pending" / "staged.py").write_text("x")
+    assert cli_generate._committed_slugs(tmp_path) == {"acme", "globex"}
+
+
+def test_committed_slugs_missing_dir_is_empty(tmp_path: Path) -> None:
+    assert cli_generate._committed_slugs(tmp_path / "nope") == set()
+
+
+def test_select_missing_returns_enabled_sites_without_a_crawler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # --missing drains the §4.2 backlog: enabled sites with no committed crawler. A site
+    # that already has one is skipped; a disabled one never generates.
+    sites = [
+        Site(slug="has", url="https://has.com"),
+        Site(slug="cold", url="https://cold.com"),
+        Site(slug="disabled", url="https://d.com", enabled=False),
+    ]
+    monkeypatch.setattr(cli_generate, "_committed_slugs", lambda: {"has"})
+    args = SimpleNamespace(all=False, missing=True, stale=False, slug=None)
+    assert [s.slug for s in cli_generate._select(sites, args)] == ["cold"]
