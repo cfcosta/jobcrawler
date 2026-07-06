@@ -583,6 +583,38 @@ def classify_workplace(workplace_type: str, location: str, description: str) -> 
     return _match_workplace(text) or "unspecified"
 
 
+# --- company dedup key -----------------------------------------------------
+# Legal/entity suffixes dropped when collapsing a hiring company to a grouping key,
+# in folded (lowercase, unaccented) form. Matched only as a *trailing* token, so an
+# "Inc" sitting mid-name survives; the cascade handles stacked suffixes ("Acme Corp Ltd").
+_COMPANY_SUFFIXES: frozenset[str] = frozenset(
+    {
+        "inc", "incorporated", "llc", "ltd", "limited", "llp", "plc", "co", "corp",
+        "corporation", "company", "holdings", "group", "gmbh", "ag", "sa", "sas",
+        "bv", "nv", "oy", "ab", "as", "pty", "pte", "srl", "spa", "kk", "kft", "ltda",
+    }
+)
+
+
+def canonical_company(name: str) -> str:
+    """A stable dedup key for a hiring company name (§16), or ``""`` if nothing to key on.
+
+    Folds case/accents, drops a leading "the" and any trailing legal-entity suffix
+    (Inc / LLC / Ltd / GmbH / …), and removes punctuation and whitespace, so
+    ``"Acme, Inc."``, ``"ACME"`` and ``"The Acme Company"`` collapse to one key
+    (``"acme"``). Used only for *grouping* — dedup and the "already applied at this
+    company" top-match rule (§16); the verbatim ``company`` is what's displayed.
+    Deliberately conservative: it normalizes surface variants of one name, and never
+    tries to merge genuinely different names.
+    """
+    tokens = [t for t in re.split(r"[^a-z0-9]+", _fold(name)) if t]
+    if len(tokens) > 1 and tokens[0] == "the":
+        tokens = tokens[1:]
+    while len(tokens) > 1 and tokens[-1] in _COMPANY_SUFFIXES:
+        tokens.pop()
+    return "".join(tokens)
+
+
 # --- salary parsing --------------------------------------------------------
 # Conservative text→range extraction (§4.6). A currency anchor is *mandatory*: a
 # bare '80,000 - 100,000' is ambiguous (which currency?) and returns None — we

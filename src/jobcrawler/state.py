@@ -157,6 +157,7 @@ class PositionRecord:
     content_hash: str
     title: str
     company: str
+    company_canonical: str | None
     location: str
     description: str | None
     discipline: str | None
@@ -235,6 +236,7 @@ CREATE TABLE IF NOT EXISTS positions (
     content_hash    TEXT NOT NULL,
     title           TEXT NOT NULL,
     company         TEXT NOT NULL,
+    company_canonical TEXT,
     location        TEXT NOT NULL,
     description     TEXT,
     discipline      TEXT,
@@ -302,6 +304,7 @@ _POSITION_FIELDS: frozenset[str] = frozenset(
         "external_id",
         "title",
         "company",
+        "company_canonical",
         "location",
         "description",
         "discipline",
@@ -336,6 +339,10 @@ _POSITION_ADD_COLUMNS: tuple[tuple[str, str], ...] = (
     ("salary_period", "TEXT"),
     ("employment_type", "TEXT"),
     ("department", "TEXT"),
+    # §16 hiring-company dedup key, derived host-side from ``company`` at upsert. Nullable so
+    # it backfills cleanly; rows written before it existed read NULL until their next crawl,
+    # and the ``matches`` grouping COALESCEs to ``lower(company)`` so dedup still holds.
+    ("company_canonical", "TEXT"),
     ("posted_at", "TEXT"),
     ("expires_at", "TEXT"),
     ("missing_streak", "INTEGER NOT NULL DEFAULT 0"),
@@ -867,19 +874,34 @@ class StateStore:
         limit: int = 50,
         exclude_applied: bool = False,
         exclude_dismissed: bool = False,
+        exclude_company_applied: bool = False,
     ) -> list[PositionRecord]:
         """Open, scored positions at or above ``min_score``, best fit first (§6).
 
         ``exclude_applied`` drops rows you've already applied to — ``applied_at`` is
         stamped for the §16 applied/interviewing/offer/accepted stages — so the
         dashboard's "top matches" surfaces only leads still worth pursuing rather than
-        ones already moving through your pipeline. ``exclude_dismissed`` additionally
-        drops rows you've hidden with the §16 dismiss button. Both are off by default:
-        the CLI listing and the score histogram want the full scored corpus.
+        ones already moving through your pipeline. ``exclude_company_applied`` widens that
+        to the whole hiring *company*: once you've applied to any position there, its other
+        openings drop out too — most companies accept one application company-wide, so a
+        second lead at a company you're already in is noise. Companies are grouped on the
+        derived ``company_canonical`` key (COALESCE'd to ``lower(company)`` for rows not yet
+        re-crawled), so 'Acme' and 'Acme, Inc.' count as one and an empty key groups with
+        nothing. ``exclude_dismissed`` additionally drops rows you've hidden with the §16
+        dismiss button. All are off by default: the CLI listing and the score histogram
+        want the full scored corpus.
         """
         clauses = ""
         if exclude_applied:
             clauses += "AND applied_at IS NULL "
+        if exclude_company_applied:
+            clauses += (
+                "AND NOT EXISTS (SELECT 1 FROM positions p2 "
+                "WHERE COALESCE(NULLIF(p2.company_canonical, ''), lower(p2.company)) "
+                "= COALESCE(NULLIF(positions.company_canonical, ''), lower(positions.company)) "
+                "AND COALESCE(NULLIF(p2.company_canonical, ''), lower(p2.company)) != '' "
+                "AND p2.applied_at IS NOT NULL) "
+            )
         if exclude_dismissed:
             clauses += "AND COALESCE(dismissed, 0) = 0 "
         rows = self._conn.execute(
@@ -1387,6 +1409,7 @@ def _to_position(row: sqlite3.Row) -> PositionRecord:
         content_hash=row["content_hash"],
         title=row["title"],
         company=row["company"],
+        company_canonical=row["company_canonical"],
         location=row["location"],
         description=row["description"],
         discipline=row["discipline"],

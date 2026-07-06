@@ -574,6 +574,18 @@ the valid set, transitions, and the "which stage implies applied" policy live ho
 `tracking.py` (the store records state, never invents policy). This axis is a pure operator surface:
 like the match `reasons` (§8), no generator/optimizer code path ever reads it.
 
+**Hiring-company dedup (§16).** Beyond the board it was found on, each position carries the hiring
+`company` and a derived `company_canonical` grouping key — the company folded to lowercase, stripped
+of a leading "the" and trailing legal-entity suffixes (Inc/LLC/Ltd/GmbH/…) and punctuation, so
+"Acme", "Acme, Inc." and "The Acme Company" collapse to one key (`canonical_company`, §4.6). It is
+recomputed host-side on every upsert and kept **out** of `content_hash` (which hashes the verbatim
+`company`), so refreshing it never forces a re-dedup or a match-cache miss. It backs the top-matches
+rule "show a company's roles only until I've applied to one of them": `matches(exclude_company_applied=…)`
+drops every open row whose canonical company already has an `applied_at` stamp — most employers accept
+one application company-wide, so a second lead at a company you're already in is noise. Grouping
+COALESCEs the key to `lower(company)` for rows written before the column existed (they converge on
+their next crawl), and an empty key groups with nothing.
+
 ### 4.8 Health & self-healing regeneration
 Each crawl records `positions_found`, `new_positions`, `errors`, `pages_fetched`, and a
 `description_quality` signal per board. A board is flagged **stale** on a *single* zero-**`positions_found`**

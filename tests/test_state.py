@@ -951,6 +951,90 @@ def test_matches_exclude_dismissed_drops_hidden_positions(store: StateStore) -> 
     assert [r.url for r in store.matches(70, exclude_dismissed=True)] == ["b"]
 
 
+def _upsert_scored(
+    store: StateStore, url: str, *, company: str, canonical: str, score: int = 90
+) -> None:
+    """Upsert one scored open position carrying an explicit §16 company dedup key."""
+    store.upsert_position(
+        "acme",
+        url,
+        fields={
+            "title": "Engineer",
+            "company": company,
+            "company_canonical": canonical,
+            "location": "Remote",
+        },
+        content_hash=url,
+    )
+    store.set_match("acme", url, score=score, verdict="strong", reasons="")
+
+
+def test_matches_exclude_company_applied_drops_sibling_openings(
+    store: StateStore,
+) -> None:
+    # Most companies accept one application company-wide (§16): once you apply to any role at
+    # Acme, its *other* open roles are noise. A different company's role is untouched.
+    _upsert_scored(store, "acme-1", company="Acme", canonical="acme")
+    _upsert_scored(store, "acme-2", company="Acme", canonical="acme")
+    _upsert_scored(store, "globex-1", company="Globex", canonical="globex")
+    store.set_track_status("acme", "acme-1", "applied", stamp_applied=True)
+
+    # default listing is unchanged — the full scored corpus
+    assert {r.url for r in store.matches(70)} == {"acme-1", "acme-2", "globex-1"}
+    # company-applied exclusion removes both Acme rows, leaving the other company's lead
+    assert [r.url for r in store.matches(70, exclude_company_applied=True)] == ["globex-1"]
+
+
+def test_matches_exclude_company_applied_groups_surface_variants(
+    store: StateStore,
+) -> None:
+    # "Acme" and "Acme, Inc." share the canonical key, so applying to one hides the other —
+    # the whole point of a normalized key over a raw string match.
+    _upsert_scored(store, "plain", company="Acme", canonical="acme")
+    _upsert_scored(store, "inc", company="Acme, Inc.", canonical="acme")
+    store.set_track_status("acme", "inc", "applied", stamp_applied=True)
+
+    assert store.matches(70, exclude_company_applied=True) == []
+
+
+def test_matches_exclude_company_applied_falls_back_to_lower_company(
+    store: StateStore,
+) -> None:
+    # Rows written before the company_canonical column read NULL. The grouping COALESCEs to
+    # lower(company), so same-company dedup still holds until they're re-crawled.
+    for url in ["a", "b"]:
+        store.upsert_position("acme", url, fields=FIELDS, content_hash=url)  # no canonical
+        store.set_match("acme", url, score=90, verdict="strong", reasons="")
+    store.set_track_status("acme", "a", "applied", stamp_applied=True)
+
+    assert store.matches(70, exclude_company_applied=True) == []
+
+
+def test_matches_exclude_company_applied_empty_key_never_cross_excludes(
+    store: StateStore,
+) -> None:
+    # Defensive: an unusable (empty) company key must gate nothing — not even itself — so a
+    # blank company can't silently swallow the whole board.
+    for url in ["a", "b"]:
+        store.upsert_position(
+            "acme",
+            url,
+            fields={"title": "E", "company": "", "company_canonical": "", "location": "R"},
+            content_hash=url,
+        )
+        store.set_match("acme", url, score=90, verdict="strong", reasons="")
+    store.set_track_status("acme", "a", "applied", stamp_applied=True)
+
+    assert {r.url for r in store.matches(70, exclude_company_applied=True)} == {"a", "b"}
+
+
+def test_upsert_persists_company_canonical(store: StateStore) -> None:
+    _upsert_scored(store, "u", company="Acme Inc", canonical="acme")
+    (rec,) = store.matches(70)
+    assert rec.company == "Acme Inc"
+    assert rec.company_canonical == "acme"
+
+
 def test_set_match_records_verdict_and_clears_pending() -> None:
     at = datetime(2026, 7, 2, 9, 30, tzinfo=timezone.utc)
     s = StateStore(":memory:", clock=lambda: at)

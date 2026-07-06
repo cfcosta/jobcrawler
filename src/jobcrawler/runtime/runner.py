@@ -66,7 +66,7 @@ from jobcrawler.match import Matcher, MatchVerdict, prefilter
 from jobcrawler.runtime.contract import CrawlFn, Job
 from jobcrawler.runtime.ctx import Ctx
 from jobcrawler.runtime.hardening import harden_xml
-from jobcrawler.runtime.normalize import EnrichedJob, enrich
+from jobcrawler.runtime.normalize import EnrichedJob, canonical_company, enrich
 from jobcrawler.runtime.sandbox import collect_crawler
 from jobcrawler.state import StateStore
 from jobcrawler.urls import canonicalize_url
@@ -554,6 +554,9 @@ def _position_fields(job: Job, enriched: EnrichedJob) -> dict[str, object]:
         "external_id": job.external_id,
         "title": job.title,
         "company": job.company,
+        # Derived §16 dedup key, refreshed on every crawl. Kept OUT of ``content_hash``
+        # (that hashes the verbatim ``company``), so recomputing it is churn-free.
+        "company_canonical": canonical_company(job.company),
         "location": job.location,
         "description": job.description,
         "discipline": enriched.discipline,

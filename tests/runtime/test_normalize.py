@@ -17,6 +17,7 @@ from jobcrawler.runtime.normalize import (
     LEVELS,
     WORKPLACES,
     SalaryRange,
+    canonical_company,
     classify_discipline,
     classify_level,
     classify_workplace,
@@ -322,3 +323,46 @@ def test_enrich_salary_none_when_absent() -> None:
 def test_enrich_workplace_prefers_structured_field() -> None:
     e = enrich(_job(location="Berlin", workplace_type="Hybrid"))
     assert e.workplace == "hybrid"
+
+
+# --- company dedup key (§16) -----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        # surface variants of one company collapse to a single key
+        ("Acme", "acme"),
+        ("ACME", "acme"),
+        ("Acme, Inc.", "acme"),
+        ("Acme Inc", "acme"),
+        ("Acme LLC", "acme"),
+        ("Acme Ltd.", "acme"),
+        ("Acme GmbH", "acme"),
+        ("The Acme Company", "acme"),
+        ("Acme  Labs", "acmelabs"),
+        # stacked suffixes cascade off
+        ("Acme Corp Ltd", "acme"),
+        # accents fold (pt-BR)
+        ("Padrão Tecnologia", "padraotecnologia"),
+        # a bare suffix is a real (if odd) name, never stripped to empty
+        ("Co", "co"),
+        ("Group", "group"),
+        # nothing to key on
+        ("", ""),
+        ("   ", ""),
+        (",.-", ""),
+    ],
+)
+def test_canonical_company(name: str, expected: str) -> None:
+    assert canonical_company(name) == expected
+
+
+def test_canonical_company_does_not_merge_distinct_names() -> None:
+    # "Meta" and "Meta Materials" are different companies — the key must keep them apart.
+    assert canonical_company("Meta") != canonical_company("Meta Materials")
+
+
+def test_canonical_company_keeps_mid_name_suffix_token() -> None:
+    # "Inc" only drops as a *trailing* token; a name that merely contains it survives.
+    assert canonical_company("Incredible Health") == "incrediblehealth"
