@@ -939,6 +939,18 @@ def test_matches_exclude_applied_keeps_interested_not_yet_applied(
     assert [r.url for r in store.matches(70, exclude_applied=True)] == ["u"]
 
 
+def test_matches_exclude_dismissed_drops_hidden_positions(store: StateStore) -> None:
+    # Dismissing a position (the §16 hide flag, independent of track_status) drops it
+    # from the exclude_dismissed view but leaves the default listing untouched.
+    for url, score in [("a", 95), ("b", 80)]:
+        store.upsert_position("acme", url, fields=FIELDS, content_hash=url)
+        store.set_match("acme", url, score=score, verdict="strong", reasons="")
+    store.set_dismissed("acme", "a", True)
+
+    assert [r.url for r in store.matches(70)] == ["a", "b"]  # default: unchanged
+    assert [r.url for r in store.matches(70, exclude_dismissed=True)] == ["b"]
+
+
 def test_set_match_records_verdict_and_clears_pending() -> None:
     at = datetime(2026, 7, 2, 9, 30, tzinfo=timezone.utc)
     s = StateStore(":memory:", clock=lambda: at)

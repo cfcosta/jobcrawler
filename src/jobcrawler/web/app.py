@@ -351,7 +351,9 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
                 "dismissed": tcounts.get("dismissed", 0),
                 "lifecycle": store.position_counts(),
                 "distribution": _score_distribution(store),
-                "top_matches": store.matches(0, limit=8, exclude_applied=True),
+                "top_matches": store.matches(
+                    0, limit=8, exclude_applied=True, exclude_dismissed=True
+                ),
                 "per_site": per_site,
                 "has_registry": bool(site_list),
             },
