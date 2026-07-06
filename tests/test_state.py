@@ -913,6 +913,32 @@ def test_matches_excludes_closed_positions(store: StateStore) -> None:
     assert store.matches(70) == []
 
 
+def test_matches_exclude_applied_drops_positions_in_the_pipeline(
+    store: StateStore,
+) -> None:
+    # Two scored open positions; applying to the top one stamps applied_at. With
+    # exclude_applied the "top matches" view drops it (a lead you're already pursuing)
+    # while the default listing still returns the full scored corpus.
+    for url, score in [("a", 95), ("b", 80)]:
+        store.upsert_position("acme", url, fields=FIELDS, content_hash=url)
+        store.set_match("acme", url, score=score, verdict="strong", reasons="")
+    store.set_track_status("acme", "a", "applied", stamp_applied=True)
+
+    assert [r.url for r in store.matches(70)] == ["a", "b"]  # default: unchanged
+    assert [r.url for r in store.matches(70, exclude_applied=True)] == ["b"]
+
+
+def test_matches_exclude_applied_keeps_interested_not_yet_applied(
+    store: StateStore,
+) -> None:
+    # "interested" is a pre-application stage (no applied_at stamp), so it is still a
+    # live lead and must survive the exclude_applied filter.
+    store.upsert_position("acme", "u", fields=FIELDS, content_hash="h")
+    store.set_match("acme", "u", score=88, verdict="strong", reasons="")
+    store.set_track_status("acme", "u", "interested", stamp_applied=False)
+    assert [r.url for r in store.matches(70, exclude_applied=True)] == ["u"]
+
+
 def test_set_match_records_verdict_and_clears_pending() -> None:
     at = datetime(2026, 7, 2, 9, 30, tzinfo=timezone.utc)
     s = StateStore(":memory:", clock=lambda: at)

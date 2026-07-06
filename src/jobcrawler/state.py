@@ -857,11 +857,23 @@ class StateStore:
         ).fetchall()
         return [row["url"] for row in rows]
 
-    def matches(self, min_score: int, *, limit: int = 50) -> list[PositionRecord]:
-        """Open, scored positions at or above ``min_score``, best fit first (§6)."""
+    def matches(
+        self, min_score: int, *, limit: int = 50, exclude_applied: bool = False
+    ) -> list[PositionRecord]:
+        """Open, scored positions at or above ``min_score``, best fit first (§6).
+
+        ``exclude_applied`` drops rows you've already applied to — ``applied_at`` is
+        stamped for the §16 applied/interviewing/offer/accepted stages — so the
+        dashboard's "top matches" surfaces only leads still worth pursuing rather than
+        ones already moving through your pipeline. Off by default: the CLI listing and
+        the score histogram want the full scored corpus.
+        """
+        applied_clause = "AND applied_at IS NULL " if exclude_applied else ""
         rows = self._conn.execute(
             "SELECT * FROM positions WHERE status = 'open' AND match_score IS NOT NULL "
-            "AND match_score >= ? ORDER BY match_score DESC, matched_at DESC, url LIMIT ?",
+            "AND match_score >= ? "
+            + applied_clause
+            + "ORDER BY match_score DESC, matched_at DESC, url LIMIT ?",
             (min_score, limit),
         ).fetchall()
         return [_to_position(r) for r in rows]

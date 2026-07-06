@@ -370,6 +370,27 @@ async def test_dashboard_with_registry_renders_per_site() -> None:
         store.close()
 
 
+async def test_dashboard_top_matches_hide_applied_positions() -> None:
+    # The one scored lead ("Staff Engineer") shows in the dashboard's top matches until
+    # you apply to it; once applied it belongs to your pipeline, not the fresh-leads list.
+    store = _seeded_store()
+    try:
+        async with _client(create_app(store)) as c:
+            r = await c.get("/")
+            assert "Staff Engineer" in r.text
+
+            r = await c.post(
+                f"/positions/{_ACME_PID}/status", data={"track_status": "applied"}
+            )
+            assert r.status_code == 303
+            assert _get(store).applied_at is not None
+
+            r = await c.get("/")
+            assert "Staff Engineer" not in r.text  # dropped from top matches
+    finally:
+        store.close()
+
+
 # -- CLI: `jobcrawl serve` wiring --------------------------------------------
 
 
