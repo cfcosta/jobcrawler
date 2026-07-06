@@ -235,6 +235,20 @@ def prefilter(enriched: _Enriched, prefs: ProfilePrefs) -> tuple[bool, str]:
         if company_lower in {c.lower() for c in prefs.exclude_companies}:
             return (False, f"excluded company {job.company!r}")
 
+    # Country/citizenship lock: a REMOTE posting whose stated location is scoped to a
+    # region the candidate can't legally work in is a definite reject for a remote-only
+    # profile (PROFILE.md "What to reject"). ``exclude_locations`` holds the lock markers
+    # ("remote, us", "united states", "remote (canada)", …), matched against the
+    # posting's location only — a worldwide marker ("anywhere in the world", "remote")
+    # never contains one, so a globally-open role passes. Gated to ``remote`` because on
+    # an onsite/hybrid posting a country name is the office address, not a remote-
+    # eligibility lock, and that axis is judged above / by the LLM.
+    if prefs.exclude_locations and enriched.workplace == "remote":
+        location_lower = (job.location or "").lower()
+        for marker in prefs.exclude_locations:
+            if marker and marker.lower() in location_lower:
+                return (False, f"remote role locked to excluded location ({marker!r})")
+
     return (True, "")
 
 

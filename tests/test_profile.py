@@ -40,6 +40,9 @@ languages:
 exclude_keywords:
   - clearance required
 exclude_companies: []
+exclude_locations:
+  - remote, us
+  - united states
 min_salary:
   amount: 8000
   currency: BRL
@@ -69,6 +72,7 @@ def test_load_parses_full_frontmatter(tmp_path: Path) -> None:
     assert prefs.languages == ("en", "pt")
     assert prefs.exclude_keywords == ("clearance required",)
     assert prefs.exclude_companies == ()
+    assert prefs.exclude_locations == ("remote, us", "united states")
 
 
 def test_body_is_extracted_without_the_frontmatter(tmp_path: Path) -> None:
@@ -98,6 +102,7 @@ def test_empty_frontmatter_yields_no_constraints(tmp_path: Path) -> None:
         languages=(),
         exclude_keywords=(),
         exclude_companies=(),
+        exclude_locations=(),
     )
     assert profile.body == "Just a body."
 

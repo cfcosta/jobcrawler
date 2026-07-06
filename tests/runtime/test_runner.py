@@ -179,6 +179,7 @@ def _profile(**prefs_kw: object) -> Profile:
         languages=(),
         exclude_keywords=(),
         exclude_companies=(),
+        exclude_locations=(),
     )
     if prefs_kw:
         prefs = replace(prefs, **prefs_kw)  # type: ignore[arg-type]

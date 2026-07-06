@@ -143,6 +143,7 @@ def _prefs(
     workplace=(),
     exclude_keywords=(),
     exclude_companies=(),
+    exclude_locations=(),
     min_salary=None,
 ) -> ProfilePrefs:
     return ProfilePrefs(
@@ -154,6 +155,7 @@ def _prefs(
         languages=(),
         exclude_keywords=tuple(exclude_keywords),
         exclude_companies=tuple(exclude_companies),
+        exclude_locations=tuple(exclude_locations),
     )
 
 
@@ -297,6 +299,43 @@ def test_prefilter_drops_excluded_company_case_insensitive() -> None:
     enriched = FakeEnriched(job=FakeJob(company="BodyShop LLC"))
     keep, reason = prefilter(enriched, _prefs(exclude_companies=("bodyshop llc",)))
     assert keep is False and "company" in reason
+
+
+def test_prefilter_drops_country_locked_remote_role() -> None:
+    # A remote posting whose location is scoped to an excluded country is a definite
+    # reject for a remote-only, worldwide-OK profile (PROFILE.md "What to reject").
+    enriched = FakeEnriched(job=FakeJob(location="Remote, US"), workplace="remote")
+    keep, reason = prefilter(enriched, _prefs(exclude_locations=("remote, us",)))
+    assert keep is False and "location" in reason
+
+
+def test_prefilter_country_lock_is_case_insensitive() -> None:
+    enriched = FakeEnriched(
+        job=FakeJob(location="United States - Remote Opportunity"), workplace="remote"
+    )
+    keep, _ = prefilter(enriched, _prefs(exclude_locations=("united states",)))
+    assert keep is False
+
+
+def test_prefilter_keeps_worldwide_remote_despite_lock_list() -> None:
+    # A globally-open remote role contains no lock marker, so it passes to the LLM.
+    enriched = FakeEnriched(
+        job=FakeJob(location="Anywhere in the World"), workplace="remote"
+    )
+    prefs = _prefs(exclude_locations=("remote, us", "united states", "north america"))
+    assert prefilter(enriched, prefs) == (True, "")
+
+
+def test_prefilter_country_lock_only_applies_to_remote() -> None:
+    # A country name on a hybrid/onsite posting is the office, not a remote lock — that
+    # axis is judged elsewhere, so the location filter leaves it alone (recall-safe).
+    enriched = FakeEnriched(job=FakeJob(location="Remote, US"), workplace="hybrid")
+    assert prefilter(enriched, _prefs(exclude_locations=("remote, us",)))[0] is True
+
+
+def test_prefilter_no_location_constraint_when_empty() -> None:
+    enriched = FakeEnriched(job=FakeJob(location="Remote, US"), workplace="remote")
+    assert prefilter(enriched, _prefs())[0] is True
 
 
 def test_prefilter_keeps_a_clean_match() -> None:

@@ -119,6 +119,7 @@ class ProfilePrefs:
     languages: tuple[str, ...]
     exclude_keywords: tuple[str, ...]
     exclude_companies: tuple[str, ...]
+    exclude_locations: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +217,9 @@ def _parse_prefs(frontmatter: str) -> ProfilePrefs:
         exclude_keywords=_str_tuple(data.get("exclude_keywords"), "exclude_keywords"),
         exclude_companies=_str_tuple(
             data.get("exclude_companies"), "exclude_companies"
+        ),
+        exclude_locations=_str_tuple(
+            data.get("exclude_locations"), "exclude_locations"
         ),
     )
 

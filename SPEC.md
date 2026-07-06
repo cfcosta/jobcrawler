@@ -867,8 +867,11 @@ the part they need:
   prefilter reads to drop definite mismatches *before* any token is spent. Every key is **optional** —
   an empty/omitted key means "no constraint" (recall-safe; the LLM still judges it):
   `disciplines`/`levels`/`workplace` (frozensets **validated against the §4.6 enums** — an unknown
-  value fails loud at load, naming it), `locations`/`languages`/`exclude_keywords`/`exclude_companies`
-  (free-text tuples), and `min_salary: SalaryFloor(amount, currency, period)` (structured, so the
+  value fails loud at load, naming it), `locations`/`languages`/`exclude_keywords`/`exclude_companies`/`exclude_locations`
+  (free-text tuples — the last drops a *remote* posting whose stated location is scoped to a region
+  needing work authorization the operator lacks, e.g. `remote, us`; matched case-insensitively against
+  the location and gated to remote so worldwide/timezone-overlap roles still pass), and
+  `min_salary: SalaryFloor(amount, currency, period)` (structured, so the
   comparison against a job's parsed salary needs no NL parsing).
 - **free markdown body** → the rich narrative (skills, domains, what to reject) handed **verbatim** to
   the matcher LM as context.
