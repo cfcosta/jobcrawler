@@ -32,6 +32,7 @@ import os
 import resource
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -137,6 +138,49 @@ def _child_env() -> dict[str, str]:
     return env
 
 
+def _run_child(
+    entry: str,
+    payload: str,
+    *,
+    timeout: float,
+    mem_mb: int,
+    cpu_seconds: int,
+) -> tuple[int, str, str]:
+    """Run a sandbox child; return ``(returncode, stderr, result_text)`` (§8).
+
+    The result is read from a private temp file the child is told to write — its
+    path is passed on argv — **not** from stdout. The child shares its stdout with
+    the untrusted crawler (a bare ``print``, ``ctx.log``), so writing the result
+    JSON there would let a posting that merely logged corrupt it, or a hostile
+    candidate that prints a forged ``CandidateResult`` *spoof* it. So the crawler's
+    stdout is discarded to ``DEVNULL`` (which also caps a print-flood memory DoS
+    against the parent), while stderr is captured for the crash tail. Raises
+    ``TimeoutExpired`` on a wall-clock breach — the caller maps it to a failure
+    result — and always unlinks the temp file.
+    """
+    fd, result_path = tempfile.mkstemp(prefix="jobcrawler-sandbox-", suffix=".json")
+    os.close(fd)
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", entry, result_path],
+            input=payload,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+            env=_child_env(),
+            preexec_fn=_apply_limits(mem_mb, cpu_seconds),
+        )
+        return proc.returncode, proc.stderr or "", Path(result_path).read_text(
+            encoding="utf-8"
+        )
+    finally:
+        try:
+            os.unlink(result_path)
+        except OSError:
+            pass
+
+
 def validate_crawler(
     source: str,
     *,
@@ -167,23 +211,31 @@ def validate_crawler(
         }
     )
     try:
-        proc = subprocess.run(
-            [sys.executable, "-m", _ENTRY],
-            input=payload,
-            capture_output=True,
-            text=True,
+        returncode, stderr, result_text = _run_child(
+            _ENTRY,
+            payload,
             timeout=timeout,
-            env=_child_env(),
-            preexec_fn=_apply_limits(mem_mb, int(timeout) + 1),
+            mem_mb=mem_mb,
+            cpu_seconds=int(timeout) + 1,
         )
     except subprocess.TimeoutExpired:
         return _failed("TimeoutError", f"crawler exceeded {timeout}s wall clock")
 
-    if proc.returncode != 0:
+    if returncode != 0:
         return _failed(
-            "SandboxError", f"child exited {proc.returncode}", tail=proc.stderr[-2000:]
+            "SandboxError", f"child exited {returncode}", tail=stderr[-2000:]
         )
-    return CandidateResult.model_validate_json(proc.stdout)
+    try:
+        return CandidateResult.model_validate_json(result_text)
+    except Exception as exc:
+        # Never raise into the fan-out: a truncated or empty result file (the child
+        # died mid-write, or crashed before emitting) is a sandbox failure, not a
+        # host crash. Fold it into a failed result like any other.
+        return _failed(
+            "SandboxError",
+            f"unparseable child result: {exc}",
+            tail=(stderr + "\n--- result ---\n" + result_text)[-2000:],
+        )
 
 
 def _failed(kind: str, message: str, *, tail: str = "") -> CandidateResult:
@@ -246,27 +298,34 @@ def collect_crawler(
 
     payload = json.dumps({"source": source, "allowed_hosts": list(allowed_hosts)})
     try:
-        proc = subprocess.run(
-            [sys.executable, "-m", _COLLECT_ENTRY],
-            input=payload,
-            capture_output=True,
-            text=True,
+        returncode, stderr, result_text = _run_child(
+            _COLLECT_ENTRY,
+            payload,
             timeout=timeout,
-            env=_child_env(),
-            preexec_fn=_apply_limits(mem_mb, int(cpu_seconds) + 1),
+            mem_mb=mem_mb,
+            cpu_seconds=int(cpu_seconds) + 1,
         )
     except subprocess.TimeoutExpired:
         return _collect_failed(
             "TimeoutError", f"crawler exceeded {timeout}s wall clock"
         )
 
-    if proc.returncode != 0:
+    if returncode != 0:
         # A non-zero exit is the kernel killing the child on a breached rlimit
         # (RLIMIT_AS / RLIMIT_CPU) or an interpreter-level crash — report, don't raise.
         return _collect_failed(
-            "SandboxError", f"child exited {proc.returncode}", tail=proc.stderr[-2000:]
+            "SandboxError", f"child exited {returncode}", tail=stderr[-2000:]
         )
-    return _parse_collect(proc.stdout)
+    try:
+        return _parse_collect(result_text)
+    except Exception as exc:
+        # Honour the never-raise contract: a truncated/empty result file becomes a
+        # failed CollectResult so one bad crawler can't abort the fleet (§4.4).
+        return _collect_failed(
+            "SandboxError",
+            f"unparseable child result: {exc}",
+            tail=(stderr + "\n--- result ---\n" + result_text)[-2000:],
+        )
 
 
 def _collect_failed(kind: str, message: str, *, tail: str = "") -> CollectResult:

@@ -14,7 +14,11 @@ from pathlib import Path
 
 import pytest
 
-from jobcrawler.runtime.sandbox import _child_env, validate_crawler
+from jobcrawler.runtime.sandbox import (
+    _child_env,
+    collect_crawler,
+    validate_crawler,
+)
 
 _GOOD = """
 from jobcrawler.runtime.contract import Job
@@ -266,3 +270,50 @@ def test_child_env_prepends_the_package_path_to_an_existing_pythonpath(
     parts = env["PYTHONPATH"].split(os.pathsep)
     assert parts[-1] == "/custom/deps"
     assert (Path(parts[0]) / "jobcrawler" / "__init__.py").exists()
+
+
+# -- result channel: off the crawler-shared stdout (§8, #22) -----------------
+
+
+_NOISY = """
+from jobcrawler.runtime.contract import Job
+
+SITE = "https://example.com"
+
+def crawl(ctx):
+    print("noise on stdout")           # a bare debug print...
+    ctx.log("chatty crawler")          # ...and a ctx.log both hit the child stdout
+    print('{"item_count": 9999, "samples": [], "pages_fetched": 0, "exception": null}')
+    ctx.fetch(SITE + "/feed")
+    yield Job(url=SITE + "/a", title="T", company="Acme", location="Remote",
+              description="x" * 500, source="example")
+"""
+
+
+def test_crawler_stdout_noise_neither_corrupts_nor_spoofs_the_result() -> None:
+    # The result now rides a private file, not stdout, so a crawler is free to
+    # print — its noise can't corrupt the JSON the parent parses, and the forged
+    # `item_count: 9999` line above is ignored in favour of the one real yield.
+    # Before #22 this candidate's stdout collapsed validation to a SandboxError.
+    result = validate_crawler(
+        _NOISY, allowed_hosts={"example.com"}, replay=_REPLAY, timeout=20.0
+    )
+    assert result.exception is None
+    assert result.item_count == 1
+
+
+def test_collect_result_survives_crawler_stdout_noise() -> None:
+    # Same decoupling on the committed-crawl path. This crawler yields without
+    # fetching, so it needs no network — the point is only that its stdout print
+    # doesn't reach the result channel.
+    src = (
+        "from jobcrawler.runtime.contract import Job\n"
+        'SITE = "https://example.com"\n'
+        "def crawl(ctx):\n"
+        '    print("noise")\n'
+        "    yield Job(url=SITE + '/a', title='T', company='Acme', location='Remote',\n"
+        "              description='x' * 500, source='example')\n"
+    )
+    result = collect_crawler(src, allowed_hosts={"example.com"}, timeout=20.0)
+    assert result.exception is None
+    assert len(result.items) == 1

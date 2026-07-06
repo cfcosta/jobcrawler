@@ -66,16 +66,23 @@ def main() -> None:
             "message": str(exc)[:500],
             "traceback_tail": traceback.format_exc()[-2000:],
         }
-    sys.stdout.write(
-        json.dumps(
-            {
-                "items": items,
-                "errors": errors,
-                "pages_fetched": ctx.pages_fetched,
-                "exception": exception,
-            }
-        )
+    _emit_result(
+        {
+            "items": items,
+            "errors": errors,
+            "pages_fetched": ctx.pages_fetched,
+            "exception": exception,
+        }
     )
+
+
+def _emit_result(result: dict[str, object]) -> None:
+    # The result goes to the private file the parent named on argv (argv[1]), never
+    # stdout: stdout is shared with the untrusted crawler (a bare print, ctx.log),
+    # so emitting the JSON there would let a posting's logging corrupt it or a
+    # hostile candidate forge the result (§8). See runtime.sandbox._run_child.
+    with open(sys.argv[1], "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(result))
 
 
 if __name__ == "__main__":

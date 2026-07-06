@@ -11,6 +11,7 @@ never the enforcement. ``render`` (the headless Playwright tier) lands in M2.
 
 from __future__ import annotations
 
+import sys
 import time
 from collections.abc import Callable, Collection, Mapping
 from datetime import datetime, timezone
@@ -282,7 +283,12 @@ class Ctx:
         )
 
     def log(self, *args: object, **kwargs: object) -> None:
-        print("[crawl]", *args)
+        # stderr, never stdout: the child's stdout is discarded (§8, the result
+        # travels on a private file), and stderr is what the parent captures for a
+        # crash tail — so a crawler's own log lines survive to explain a failure.
+        # kwargs are ignored (not forwarded to print) so a crawler can't redirect
+        # the stream with file=...
+        print("[crawl]", *args, file=sys.stderr)
 
 
 if TYPE_CHECKING:
