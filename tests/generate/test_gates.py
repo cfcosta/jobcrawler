@@ -369,12 +369,14 @@ def _result(
     item_count: int,
     samples: list[dict[str, str]],
     schema_errors: list[str] | None = None,
+    offdomain_hosts: list[str] | None = None,
     exception: ExceptionInfo | None = None,
 ) -> CandidateResult:
     return CandidateResult(
         item_count=item_count,
         samples=samples,
         schema_errors=schema_errors or [],
+        offdomain_hosts=offdomain_hosts or [],
         pages_fetched=1,
         exception=exception,
     )
@@ -472,6 +474,58 @@ def test_min_items_one_boundary() -> None:
         min_description_chars=400,
         allowed_hosts=_HOSTS,
     ).passed
+
+
+def test_full_yield_offdomain_tail_fails() -> None:
+    # The samples are all on-domain (first _SAMPLE_CAP), but the child reports an
+    # off-domain host somewhere in the tail: a crawler clean for five then yielding
+    # off-domain urls must NOT pass on the strength of the sample alone (§6/§8).
+    gate = check_completeness(
+        _result(
+            item_count=50,
+            samples=[_good_sample()],
+            offdomain_hosts=["evil.com"],
+        ),
+        min_items=5,
+        min_description_chars=400,
+        allowed_hosts=_HOSTS,
+    )
+    assert not gate.passed
+    assert any("full yield" in f and "evil.com" in f for f in gate.failures)
+
+
+def test_full_yield_offdomain_forgiven_on_widened_allowed() -> None:
+    # The child flags hosts against the NARROW fetch allowlist; the gate re-filters
+    # against its own url_evidence-widened set. A legitimate sibling link-host the
+    # generation gate admitted (e.g. a Greenhouse/Ashby board host) must be forgiven,
+    # never rejected as an off-domain tail.
+    assert check_completeness(
+        _result(
+            item_count=50,
+            samples=[_good_sample()],
+            offdomain_hosts=["jobs.ashbyhq.com"],
+        ),
+        min_items=5,
+        min_description_chars=400,
+        allowed_hosts=_HOSTS | {"jobs.ashbyhq.com"},
+    ).passed
+
+
+def test_full_yield_malformed_tail_url_fails() -> None:
+    # A malformed url in the tail (no host) surfaces as the "(no-host)" sentinel and
+    # fails the whole candidate — the tail is validated, not just the sample.
+    gate = check_completeness(
+        _result(
+            item_count=50,
+            samples=[_good_sample()],
+            offdomain_hosts=["(no-host)"],
+        ),
+        min_items=5,
+        min_description_chars=400,
+        allowed_hosts=_HOSTS,
+    )
+    assert not gate.passed
+    assert any("full yield" in f for f in gate.failures)
 
 
 def test_short_description_sample_fails() -> None:

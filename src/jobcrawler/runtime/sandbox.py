@@ -36,10 +36,12 @@ import tempfile
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from jobcrawler.generate.gates import check_ast
 from jobcrawler.generate.scoring import CandidateResult, ExceptionInfo
 from jobcrawler.runtime.contract import Job
+from jobcrawler.runtime.ssrf import SsrfError, check_url
 
 _ENTRY = "jobcrawler.runtime._sandbox_entry"
 _COLLECT_ENTRY = "jobcrawler.runtime._collect_entry"
@@ -337,15 +339,45 @@ def _collect_failed(kind: str, message: str, *, tail: str = "") -> CollectResult
     )
 
 
+def _url_is_safe_to_store(url: str) -> bool:
+    """A committed job's canonical url must be a real, non-internal http(s) target.
+
+    Applied in the trusted parent — the child execs the crawler in-process, so it
+    is not a hard boundary (that is #29's OS-enforced egress). Runs the §8 SSRF
+    kernel with the url's *own* host allowed, so the on-domain arm never fires:
+    this is a host-agnostic safety floor, not a board-domain check. It keeps a
+    committed crawler that drifts against live data from seeding the tracking
+    store (and the §4.9 recheck re-fetch) with a loopback / private / link-local /
+    cloud-metadata / malformed url, while leaving any legitimate public link-host
+    (e.g. a url_evidence sibling the generation gate admitted without a fetch
+    grant) untouched. Board-domain validity is the generation gate's job (§6),
+    which has the url_evidence the runtime lacks.
+    """
+    parts = urlsplit(url.strip())
+    host = (parts.hostname or "").lower()
+    if parts.scheme not in ("http", "https") or not host:
+        return False  # non-http(s) or hostless: the gate (§6) rejects these too
+    try:
+        check_url(url, {host})  # own host allowed → only the internal-target arm fires
+    except SsrfError:
+        return False
+    return True
+
+
 def _parse_collect(stdout: str) -> CollectResult:
     data = json.loads(stdout)
     items: list[Job] = []
     errors = int(data.get("errors", 0))
     for raw in data.get("items", []):
         try:
-            items.append(Job.model_validate(raw))
+            job = Job.model_validate(raw)
         except Exception:  # a malformed job dump from the child (should not happen)
             errors += 1
+            continue
+        if not _url_is_safe_to_store(job.url):
+            errors += 1  # an internal/malformed canonical url never enters the store
+            continue
+        items.append(job)
     exc = data.get("exception")
     exception = ExceptionInfo(**exc) if exc else None
     return CollectResult(

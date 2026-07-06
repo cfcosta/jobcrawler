@@ -50,6 +50,12 @@ class CandidateResult(BaseModel):
     item_count: int = Field(ge=0)
     samples: list[dict] = Field(default_factory=list)
     schema_errors: list[str] = Field(default_factory=list)
+    # Distinct hosts (capped) that a yielded ``Job.url`` pointed at *across the
+    # whole yield* but that were off the crawler's fetch allowlist — the §6
+    # completeness gate reads this so a crawler clean for the first ``_SAMPLE_CAP``
+    # samples then off-domain in the tail is still rejected (samples alone are
+    # first-N, not representative). ``"(no-host)"`` stands in for a malformed url.
+    offdomain_hosts: list[str] = Field(default_factory=list)
     pages_fetched: int = Field(ge=0)
     exception: ExceptionInfo | None = None
 

@@ -408,6 +408,22 @@ def check_completeness(
         if not valid_on_domain_url(url, allowed_hosts):
             failures.append(f"sample {i}: invalid/off-domain url {url!r}")
 
+    # The per-sample url check above only sees the first samples of the yield.
+    # ``offdomain_hosts`` is the child's FULL-yield signal — every distinct host a
+    # yielded url pointed at that was off the crawler's fetch allowlist — so a
+    # crawler that is clean for the sampled few then emits off-domain urls in the
+    # tail is still rejected. Re-filter against ``allowed_hosts`` here (the same
+    # url_evidence-widened set the per-sample check uses), so a legitimate sibling
+    # link-host the child flagged against the narrow fetch allowlist is forgiven
+    # while a genuinely unauthorized host fails the whole candidate (§6/§8).
+    tail_offdomain = sorted(
+        h for h in result.offdomain_hosts if not host_on_domain(h, allowed_hosts)
+    )
+    if tail_offdomain:
+        failures.append(
+            f"off-domain url hosts across the full yield: {', '.join(tail_offdomain)}"
+        )
+
     # Description completeness is a fraction, not all-or-nothing: a minority of
     # genuinely-terse postings (a one-line contract role) is fine — the runtime
     # filter drops them (§4.6), so generation isn't stricter than runtime. A

@@ -25,6 +25,7 @@ from jobcrawler.runtime.ctx import Ctx, crawler_facade
 from jobcrawler.runtime.hardening import harden_xml
 from jobcrawler.runtime.live_ctx import build_live_ctx
 from jobcrawler.runtime.safe_exec import exec_crawler
+from jobcrawler.urls import normalize_host, valid_on_domain_url
 
 _SAMPLE_CAP = 5
 # Samples are §6 *evidence*: the completeness gate and the §4.11 description axis
@@ -37,6 +38,10 @@ _SAMPLE_CAP = 5
 # *tool* (generate/tools.py), which owns the RLM bridge budget (§4.3).
 _DESCRIPTION_CAP = 20_000
 _ERROR_CAP = 10
+# Distinct off-domain hosts reported to the gate. A handful is all the gate needs
+# to reject; the cap only bounds the child→parent pipe against a pathological
+# candidate that yields thousands of distinct off-domain hosts.
+_OFFDOMAIN_HOST_CAP = 32
 
 
 def _build_ctx(
@@ -69,13 +74,15 @@ def _build_ctx(
 def main() -> None:
     harden_xml()  # XXE / billion-laughs off before any candidate XML parse (§8)
     data = json.loads(sys.stdin.read())
+    allowed_hosts = set(data["allowed_hosts"])
     ctx = _build_ctx(
-        set(data["allowed_hosts"]), data.get("replay"), bool(data.get("polite", False))
+        allowed_hosts, data.get("replay"), bool(data.get("polite", False))
     )
     result: dict[str, object] = {
         "item_count": 0,
         "samples": [],
         "schema_errors": [],
+        "offdomain_hosts": [],
         "pages_fetched": 0,
         "exception": None,
     }
@@ -88,6 +95,13 @@ def main() -> None:
         count = 0
         samples: list[dict[str, str]] = []
         errors: list[str] = []
+        # Distinct hosts a yielded url pointed at that are off the fetch allowlist,
+        # over the WHOLE yield (not just the first _SAMPLE_CAP samples). The §6
+        # completeness gate rejects on this so a crawler that is clean for five then
+        # emits off-domain urls in the tail can't slip past the sample check. The
+        # gate re-filters against its own (url_evidence-widened) allowed set, so a
+        # legitimate sibling link-host is not double-punished here.
+        offdomain: dict[str, None] = {}
         # Hand the crawler the capability facade, never the enforcing ctx (§8):
         # the real ctx stays here so pages_fetched below reads the true budget.
         for obj in crawl(crawler_facade(ctx)):
@@ -100,6 +114,10 @@ def main() -> None:
                         errors.append(str(exc)[:200])
                     continue
             count += 1
+            if not valid_on_domain_url(job.url, allowed_hosts):
+                host = normalize_host(job.url) or "(no-host)"
+                if host not in offdomain and len(offdomain) < _OFFDOMAIN_HOST_CAP:
+                    offdomain[host] = None
             if len(samples) < _SAMPLE_CAP:
                 samples.append(
                     {
@@ -116,6 +134,7 @@ def main() -> None:
         result["item_count"] = count
         result["samples"] = samples
         result["schema_errors"] = errors
+        result["offdomain_hosts"] = list(offdomain)
     except Exception as exc:
         result["exception"] = {
             "type": type(exc).__name__,

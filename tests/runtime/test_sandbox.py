@@ -9,6 +9,7 @@ are captured (not crashes), and the wall-clock timeout hard-stops a hang.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -16,6 +17,8 @@ import pytest
 
 from jobcrawler.runtime.sandbox import (
     _child_env,
+    _parse_collect,
+    _url_is_safe_to_store,
     collect_crawler,
     validate_crawler,
 )
@@ -317,3 +320,90 @@ def test_collect_result_survives_crawler_stdout_noise() -> None:
     result = collect_crawler(src, allowed_hosts={"example.com"}, timeout=20.0)
     assert result.exception is None
     assert len(result.items) == 1
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://169.254.169.254/latest/meta-data/",  # cloud-metadata (link-local)
+        "http://127.0.0.1/admin",  # loopback
+        "http://10.0.0.5/internal",  # private
+        "http://metadata.google.internal/",  # blocked metadata hostname
+        "not a url",  # malformed — no host
+        "ftp://example.com/x",  # a host, but check_url only guards http(s) hosts
+    ],
+)
+def test_url_is_not_safe_to_store(url: str) -> None:
+    # The committed-collect safety floor: an internal / malformed canonical url must
+    # never reach the tracking store (and thus the §4.9 recheck re-fetch), even
+    # though the Job schema (min_length=1) would happily accept it.
+    assert not _url_is_safe_to_store(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/jobs/1",  # the crawler's own fetch host
+        "https://jobs.ashbyhq.com/acme/1",  # a public sibling link-host, off the
+        "https://careers.acme.io/1",  # fetch allowlist — kept (recheck SSRF-guards
+    ],  # the fetch; board-domain validity is the generation gate's job, §6)
+)
+def test_url_is_safe_to_store(url: str) -> None:
+    # Host-agnostic: any real, external http(s) url passes — the floor drops only
+    # internal/malformed targets, never a legitimate public link-host the gate
+    # admitted via url_evidence without a fetch grant.
+    assert _url_is_safe_to_store(url)
+
+
+def test_parse_collect_drops_internal_url_and_counts_it() -> None:
+    # Two well-formed Jobs from the child; the one pointing at the metadata IP is
+    # dropped by the trusted parent and folded into ``errors`` — the store only ever
+    # sees the safe one, independent of whether the (in-process) child filtered.
+    stdout = json.dumps(
+        {
+            "items": [
+                {
+                    "url": "https://example.com/a",
+                    "title": "T",
+                    "company": "Acme",
+                    "location": "Remote",
+                    "description": "x" * 500,
+                    "source": "example",
+                },
+                {
+                    "url": "http://169.254.169.254/latest/meta-data/",
+                    "title": "T2",
+                    "company": "Acme",
+                    "location": "Remote",
+                    "description": "y" * 500,
+                    "source": "example",
+                },
+            ],
+            "errors": 0,
+            "pages_fetched": 1,
+            "exception": None,
+        }
+    )
+    result = _parse_collect(stdout)
+    assert [job.url for job in result.items] == ["https://example.com/a"]
+    assert result.errors == 1
+
+
+def test_collect_drops_internal_url_end_to_end() -> None:
+    # Full path: a committed crawler that yields one on-domain job and one pointing
+    # at the cloud-metadata endpoint. The parent keeps the safe job and drops the
+    # internal one — a drifted committed crawler can't seed the store with an SSRF
+    # target. Yields without fetching, so it needs no live network.
+    src = (
+        "from jobcrawler.runtime.contract import Job\n"
+        'SITE = "https://example.com"\n'
+        "def crawl(ctx):\n"
+        "    yield Job(url=SITE + '/a', title='T', company='Acme', location='Remote',\n"
+        "              description='x' * 500, source='example')\n"
+        "    yield Job(url='http://169.254.169.254/x', title='T2', company='Acme',\n"
+        "              location='Remote', description='y' * 500, source='example')\n"
+    )
+    result = collect_crawler(src, allowed_hosts={"example.com"}, timeout=20.0)
+    assert result.exception is None
+    assert [job.url for job in result.items] == ["https://example.com/a"]
+    assert result.errors == 1
