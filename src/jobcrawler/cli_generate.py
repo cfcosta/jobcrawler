@@ -46,6 +46,7 @@ from jobcrawler.generate.gates import (
 )
 from jobcrawler.generate.adversarial import cross_validate
 from jobcrawler.generate.budget import CappedLM
+from jobcrawler.lm import build_lm
 from jobcrawler.generate.generator import best_of_n, load_generator
 from jobcrawler.generate.scoring import CandidateResult, make_reward_fn
 from jobcrawler.generate.snapshot import prefetch_corpus
@@ -101,9 +102,13 @@ def _build_lms() -> tuple[dspy.LM, dspy.LM]:
     catch-and-continue loop). Both caps are host-side, never seen by the generator.
     """
     max_tokens = config.max_tokens()
-    root_lm = dspy.LM(config.require_model(), max_tokens=max_tokens)
-    sub_lm = CappedLM(
+    # build_lm routes a chatgpt/* slug to the Codex Responses backend (§9); an
+    # openrouter/... slug is constructed exactly as before. CappedLM rides through the
+    # same routing via cls= so the §4.2 sub-call kill still wraps the sub_lm.
+    root_lm = build_lm(config.require_model(), max_tokens=max_tokens)
+    sub_lm = build_lm(
         config.require_sub_model(),
+        cls=CappedLM,
         max_subcalls=config.max_subcalls(),
         max_tokens=max_tokens,
     )

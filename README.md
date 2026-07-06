@@ -159,6 +159,12 @@ export JOBCRAWLER_SUB_MODEL=openrouter/<vendor>/<cheap-code-model> # RLM sub_lm 
 # Optional: a dedicated match model (else the cheap sub_lm is reused).
 export JOBCRAWLER_MATCH_MODEL=openrouter/<vendor>/<cheap-model>
 
+# — or, instead of an OpenRouter key, bill against a ChatGPT subscription (§9).
+# Any slug above may be chatgpt/<model>; the token comes from the official Codex CLI:
+#   codex login                                  # writes ~/.codex/auth.json (browser flow)
+#   jobcrawl login                               # import that token into jobcrawler's store
+#   export JOBCRAWLER_MODEL=chatgpt/gpt-5-codex  # (and/or SUB_MODEL / MATCH_MODEL)
+
 # Describe what you're looking for (the matcher scores every job against this).
 $EDITOR PROFILE.md                             # YAML frontmatter + markdown body
 
@@ -202,6 +208,7 @@ inline in [`deploy/sites.example.yaml`](deploy/sites.example.yaml).
 | `status` | Observability read: per-board run aggregates, the fleet health distribution, position-lifecycle + match tallies, drift-recovery MTTR, the active generator, and the autonomy brake. Read-only. |
 | `optimize` `[--adopt]` | Offline §4.11 self-improvement: build the trainset, optimize the generator with GEPA, write a versioned `generator-N.json`. `--adopt` flips the active-generator pointer on a clearing result. |
 | `rollback-generator` | Undo the last generator adoption (flip the active-generator pointer back to the prior version, or baseline). Committed crawlers are unaffected. |
+| `login` | Import the ChatGPT-subscription (Codex) OAuth token from `codex login` into jobcrawler's store, so a `chatgpt/*` model slug bills against the subscription (§9). One-shot; run once after `codex login` (and again if the token is revoked). |
 
 `list` / `matches` output (read by an operator or a healthcheck):
 
@@ -231,7 +238,7 @@ starting point.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `OPENROUTER_API_KEY` | — | Provider key, read by litellm via the model slug's `openrouter/` prefix. Use `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` for those providers. Needed by `generate`/`optimize` and by matching (`run`/`crawl`); the crawl itself needs no LM. |
+| `OPENROUTER_API_KEY` | — | Provider key, read by litellm via the model slug's `openrouter/` prefix. Use `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` for those providers. Needed by `generate`/`optimize` and by matching (`run`/`crawl`); the crawl itself needs no LM. **Not needed if every configured slug is `chatgpt/*`** — those authenticate with the Codex OAuth token from `jobcrawl login` (see *ChatGPT subscription* below), not an API key. |
 | `JOBCRAWLER_MODEL` | — | RLM root planner — a strong, code-capable model. No default (errors loud rather than 404-ing deep in the provider). |
 | `JOBCRAWLER_SUB_MODEL` | — | RLM `sub_lm` — a cheaper code model for in-sandbox `llm_query`. Required so it can't silently bill at the root rate. Also the **default match model** when `JOBCRAWLER_MATCH_MODEL` is unset. |
 
@@ -256,6 +263,16 @@ not scored.
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `JOBCRAWLER_REFLECTION_MODEL` | unset | GEPA reflection LM for `optimize`; ideally a strong model from a different family than `JOBCRAWLER_MODEL`. |
+| `JOBCRAWLER_AUTH_DIR` | `~/.config/jobcrawler/chatgpt` | Where `jobcrawl login` stores the ChatGPT-subscription OAuth token (a token store, not an API key — keep it `chmod 600`). litellm reads and refreshes it there. Falls back to litellm's own `CHATGPT_TOKEN_DIR`. |
+
+**ChatGPT subscription (§9).** Any model slug may be `chatgpt/<model>` (e.g. `chatgpt/gpt-5-codex`)
+to bill LM calls against a ChatGPT Plus/Pro subscription via the Codex *Responses* backend instead of
+per-token OpenRouter credits. jobcrawler writes no OAuth flow of its own: run the official `codex login`
+once (it does the browser flow and writes `~/.codex/auth.json`), then `jobcrawl login` imports that token
+into `JOBCRAWLER_AUTH_DIR`; litellm refreshes it from there. `run`/`crawl` fail fast at startup with a
+`codex login` hint if a `chatgpt/*` slug has no usable token (they never block on an interactive prompt).
+Note that this backend **prepends the Codex coding-agent system prompt** to every request — expected for
+crawler generation, and tolerated for matching via the explicit output contract.
 
 ### Registry, state & artifacts
 
@@ -463,6 +480,10 @@ stay available, so you can drive changes by hand with the daemon's own initiativ
 - *`no match model configured`* — matching needs `JOBCRAWLER_MATCH_MODEL` or (the fallback)
   `JOBCRAWLER_SUB_MODEL`; it never uses the root planner. Without one, positions are tracked
   but unscored.
+- *`no Codex login found` / `token refresh failed`* (a `chatgpt/*` slug) — the ChatGPT-subscription
+  OAuth token is missing or dead. Run `codex login` (the official Codex CLI) then `jobcrawl login` to
+  import it. `run`/`crawl` preflight surfaces this at startup rather than blocking the daemon on an
+  interactive prompt; a revoked token needs the same two commands again.
 - *`no profile found at 'PROFILE.md'`* — the matcher can't score against nothing; create the
   file (frontmatter + body). A *malformed* profile is different: it raises a `ValueError`
   **naming the offending value** (an unknown discipline/level/workplace enum, a bad

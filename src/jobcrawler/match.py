@@ -54,6 +54,7 @@ from typing import TYPE_CHECKING, Callable, Iterable, Protocol, Sequence, cast
 
 import dspy
 
+from jobcrawler.lm import build_lm
 from jobcrawler.profile import Profile, ProfilePrefs
 
 if (
@@ -387,7 +388,10 @@ class Matcher:
         """
         payload = [_digest(index, e) for index, (_s, _u, e, _h) in enumerate(batch)]
         jobs_json = json.dumps(payload, ensure_ascii=False)
-        lm = dspy.LM(self._model, temperature=0.0, max_tokens=self._max_tokens)
+        # build_lm keeps the temperature=0 / bounded-max_tokens shape for an OpenRouter
+        # slug, but routes a chatgpt/* slug to the Codex Responses backend (dropping both,
+        # which that backend ignores and dspy's gpt-5 guard would reject) — §9.
+        lm = build_lm(self._model, temperature=0.0, max_tokens=self._max_tokens)
         with dspy.context(lm=lm):
             prediction = self._predict(profile=self._profile.body, jobs=jobs_json)
 

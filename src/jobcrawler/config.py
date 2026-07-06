@@ -127,6 +127,31 @@ def require_reflection_model() -> str:
     return value
 
 
+# --- ChatGPT (Codex) subscription OAuth (§9) -------------------------------
+# Any of the model slugs above may be `chatgpt/<model>` instead of an
+# `openrouter/...` slug: that routes through litellm's native ChatGPT provider —
+# the Codex Responses backend billed against a ChatGPT subscription, authenticated
+# by an OAuth token rather than an API key (see jobcrawler.lm / jobcrawler.auth).
+# `jobcrawl login` imports that token from the Codex CLI's own ~/.codex/auth.json;
+# this getter names where jobcrawler keeps its copy.
+
+
+def auth_dir() -> str:
+    """Directory holding the ChatGPT-subscription OAuth token (``auth.json``) a ``chatgpt/*``
+    model slug authenticates from (§9).
+
+    Resolves ``JOBCRAWLER_AUTH_DIR`` first, then litellm's own ``CHATGPT_TOKEN_DIR`` (so an
+    operator already pointing litellm somewhere is honored), else a jobcrawler-owned default
+    under ``~/.config``. :func:`jobcrawler.auth.apply_auth_env` pins ``CHATGPT_TOKEN_DIR`` to
+    this value in-process so litellm's provider reads the same store ``jobcrawl login`` writes
+    — a token store, not an API key, so it never appears in the provider-key line of §11."""
+    return (
+        os.getenv("JOBCRAWLER_AUTH_DIR")
+        or os.getenv("CHATGPT_TOKEN_DIR")
+        or os.path.expanduser("~/.config/jobcrawler/chatgpt")
+    )
+
+
 # --- profile & host-side matcher (§4.7) ------------------------------------
 # The profile matcher is the ONLY new LLM surface, and it runs *host-side*,
 # outside the crawl sandbox — batched and cache-keyed — so the committed crawl

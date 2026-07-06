@@ -1,5 +1,5 @@
 """Operator CLI (§10): ``run | generate | validate | crawl | promote | rollback |
-list | status | positions | matches | rematch | profile``.
+list | status | positions | matches | rematch | profile | login``.
 
 ``run`` is the primary deployment entrypoint (the service schedules itself, §4.9);
 ``crawl`` is for manual one-shot runs and CI; ``validate`` dry-runs a committed
@@ -612,6 +612,38 @@ class PreflightError(Exception):
     """
 
 
+def _preflight_auth() -> None:
+    """Fail fast if a daemon LM surface uses a ``chatgpt/*`` slug with no usable token (§9).
+
+    ``run``/``crawl`` bill LM tokens only through the §4.7 matcher, and ``run``'s §4.8
+    self-heal additionally drives the generator (root + ``sub_lm``); any of those slugs may
+    be ``chatgpt/*`` (ChatGPT-subscription OAuth). All ``chatgpt/*`` slugs share one OAuth
+    token store, so this validates it once per distinct configured slug —
+    :func:`jobcrawler.auth.ensure_logged_in` imports from ``codex login`` if jobcrawler's own
+    store is empty and refreshes non-interactively — raising :class:`PreflightError` (never
+    blocking on litellm's device-code prompt) when no valid credential is reachable.
+
+    Imported lazily and gated on :func:`jobcrawler.lm.is_chatgpt` (which pulls no heavy deps)
+    so a plain OpenRouter deployment pays nothing here.
+    """
+    from jobcrawler.lm import is_chatgpt
+
+    slugs = {
+        s
+        for s in (config.model(), config.sub_model(), config.match_model())
+        if s and is_chatgpt(s)
+    }
+    if not slugs:
+        return
+    from jobcrawler.auth import AuthError, ensure_logged_in
+
+    for slug in slugs:
+        try:
+            ensure_logged_in(slug)
+        except AuthError as exc:
+            raise PreflightError(str(exc)) from exc
+
+
 def _state_writability(db_path: str) -> str | None:
     """Return a reason the state path can't be written, or None if it's fine."""
     if db_path == ":memory:" or db_path.startswith("file::memory:"):
@@ -692,6 +724,11 @@ def preflight(
     reason = _state_writability(db_path)
     if reason is not None:
         raise PreflightError(f"state store is not writable: {reason}")
+
+    # A chatgpt/* model slug bills against a ChatGPT subscription via an OAuth token, not
+    # an API key — fail fast (with a `codex login` / `jobcrawl login` hint) if it's absent,
+    # rather than blocking the daemon on litellm's interactive device-code prompt (§9).
+    _preflight_auth()
 
     return sites
 
@@ -1185,6 +1222,24 @@ def cmd_rollback_generator(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_login(args: argparse.Namespace) -> int:
+    # Import the ChatGPT-subscription (Codex) OAuth token from the official `codex login`
+    # (~/.codex/auth.json) into jobcrawler's token store so a `chatgpt/*` model slug can
+    # bill against the subscription (§9). One-shot, no preflight; lazy import pulls litellm.
+    from jobcrawler.auth import AuthError, login
+
+    try:
+        info = login()
+    except AuthError as exc:
+        print(f"login failed: {exc}")
+        return 2
+    account = info["account_id"] or "unknown account"
+    print(
+        f"logged in to ChatGPT (account {account}); token stored under {info['auth_dir']}"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="jobcrawl", description="RLM job tracker")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1284,6 +1339,11 @@ def build_parser() -> argparse.ArgumentParser:
         "rollback-generator",
         help="revert the active generator to the previously-adopted version (§4.11)",
     ).set_defaults(func=cmd_rollback_generator)
+
+    sub.add_parser(
+        "login",
+        help="import the ChatGPT-subscription (Codex) OAuth token from `codex login` (§9)",
+    ).set_defaults(func=cmd_login)
     return parser
 
 

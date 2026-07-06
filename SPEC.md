@@ -1077,8 +1077,9 @@ The central risk is **executing model-written code against the live web**. Mitig
 - **Two distinct sandboxes:** RLM's Pyodide REPL (where the model *reasons and drafts*) and the host
   execution sandbox (§4.4, where crawlers actually *run*). `validate_crawler` is the bridge.
 - **The matcher does not touch either sandbox.** `dspy.Predict(MatchJobs)` is a plain host-side
-  prediction under `dspy.context(lm=dspy.LM(model, temperature=0.0))` — no Pyodide, no Deno, no crawler
-  execution. Its LM is bound per batch (never a process-global `configure`), mirroring the generator.
+  prediction under `dspy.context(lm=build_lm(model, temperature=0.0, …))` — no Pyodide, no Deno, no
+  crawler execution. Its LM is bound per batch (never a process-global `configure`), mirroring the
+  generator.
 - **`corpus` injection.** `corpus` is a plain **JSON-able dict** passed as an RLM input; dspy's
   `_serialize_value` injects it as a Python literal and **raises `CodeInterpreterError` on any non-JSON
   type**; values over 100 MB spill to `/tmp` and are `json.loads`-ed in-sandbox. So shape `corpus` as an
@@ -1097,6 +1098,24 @@ The central risk is **executing model-written code against the live web**. Mitig
   `_serialize_value` type behavior; `Evaluate` metric arity; `valset = valset or trainset`; 5k+5k
   truncation), re-audited on any dspy version bump, with **no runtime smoke test** (per project
   preference).
+- **LM construction is centralized in `build_lm` (`lm.py`) so a `chatgpt/*` slug bills against a
+  ChatGPT subscription instead of per-token OpenRouter credits.** Every LM site (RLM root/`sub_lm`,
+  GEPA `reflection_lm`, the §4.7 matcher) is built through `build_lm`; a plain `openrouter/…` slug is
+  constructed exactly as before, while a `chatgpt/<model>` slug is routed to litellm's native ChatGPT
+  provider — the Codex *Responses* backend — by forcing `model_type="responses"` and **dropping
+  `temperature`/`max_tokens`** (that backend ignores them, and dspy's reasoning-model guard
+  (`clients/lm.py`, 3.2.1) *raises* for a `gpt-5*` slug given `temperature≠1` or `max_tokens<16000` —
+  exactly the matcher's shape). litellm's provider **prepends the Codex coding-agent system prompt** to
+  every request (unavoidable on that backend): natural for crawler generation, tolerated for matching
+  via the explicit output contract.
+- **We write no OAuth flow.** The token comes from the official `codex login` (`~/.codex/auth.json`);
+  `jobcrawl login` (`auth.py`) imports it into litellm's store under `JOBCRAWLER_AUTH_DIR`, reusing
+  litellm's own `_build_auth_record`/`_write_auth_file` so the derived `expires_at`/`account_id` match
+  what its provider reads back. The **`refresh_token` is load-bearing** — the imported access token is
+  a short-lived JWT, so litellm mints a fresh one on first use. `run`/`crawl` **preflight** validates
+  the token **non-interactively** (refresh-or-fail, *never* litellm's blocking 15-min device-code
+  prompt), so a `chatgpt/*` deployment with a dead credential fails fast with a `codex login` hint
+  rather than hanging the daemon.
 
 ## 10. CLI & operations
 | command | does |
@@ -1111,14 +1130,17 @@ The central risk is **executing model-written code against the live web**. Mitig
 | `jobcrawl status` | per-board run aggregates, fleet health distribution, drift-recovery MTTR, active generator + held-out score + autonomy brake (§4.9/§4.11) |
 | `jobcrawl optimize [--adopt]` | the offline §4.11 job: build trainset → optimize → held-out promote (`--adopt` flips the active-generator pointer) |
 | `jobcrawl rollback-generator` | revert the active generator to the previously-adopted version (§4.11) |
+| `jobcrawl login` | import the ChatGPT-subscription (Codex) OAuth token from `codex login` into the store a `chatgpt/*` model slug bills against (§9) — one-shot, not a daemon |
 
 `jobcrawl run` is the primary deployment entrypoint (the service schedules itself); `crawl` stays for
 manual one-shot runs and CI. Startup **preflight** fails fast on a missing/malformed `sites.yaml`, an
 unwritable state path, or a missing `PROFILE.md`.
 
 ## 11. Configuration (env, all in `config.py`)
-All knobs are `JOBCRAWLER_*` (the lone exception is `FLARESOLVERR_URL`) and host-side (never exposed to
-the generator — §8). Selected knobs:
+All knobs are `JOBCRAWLER_*` (exceptions: `FLARESOLVERR_URL`, and the ChatGPT-OAuth interop env
+`CHATGPT_TOKEN_DIR`/`CODEX_HOME` honored by §9) and host-side (never exposed to the generator — §8).
+Any model slug above may be `chatgpt/<model>` to bill against a ChatGPT subscription (§9) instead of
+an `openrouter/…` slug billed per token. Selected knobs:
 
 | var | default | meaning |
 |---|---|---|
@@ -1126,6 +1148,7 @@ the generator — §8). Selected knobs:
 | `JOBCRAWLER_SUB_MODEL` | *(required)* | RLM `sub_lm`; unset ⇒ every `llm_query` bills at root rates (`require_sub_model` errors) |
 | `JOBCRAWLER_REFLECTION_MODEL` | *(required for GEPA)* | GEPA `reflection_lm` (§4.11), ideally a different family |
 | `JOBCRAWLER_MATCH_MODEL` | `sub_model()` fallback | the host-side §4.7 match LM; `require_match_model` falls back to the cheap `sub_lm`, **never** the root planner |
+| `JOBCRAWLER_AUTH_DIR` | `~/.config/jobcrawler/chatgpt` | store for the ChatGPT-subscription OAuth token a `chatgpt/*` slug uses (§9); `jobcrawl login` writes it, litellm reads+refreshes it. Falls back to `CHATGPT_TOKEN_DIR`. A token store, not an API key |
 | `JOBCRAWLER_MATCH_BATCH` | `10` | jobs per `dspy.Predict(MatchJobs)` call (§4.7) |
 | `JOBCRAWLER_MATCH_MIN_SCORE` | `70` | 0–100 score at/above which a match notifies (surface threshold, not a drop) |
 | `JOBCRAWLER_MATCH_DAILY_CAP` | `400` | hard per-UTC-day LLM-scored jobs; cache hits free; overflow → `match_pending` |

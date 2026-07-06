@@ -273,6 +273,22 @@ def test_require_reflection_model_returns_value_when_set(
     assert config.require_reflection_model() == "openrouter/strong/reflector"
 
 
+def test_auth_dir_prefers_jobcrawler_then_litellm_then_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The ChatGPT-subscription OAuth token store (§9): JOBCRAWLER_AUTH_DIR wins, then
+    # litellm's own CHATGPT_TOKEN_DIR is honored, else a jobcrawler-owned ~/.config default.
+    monkeypatch.delenv("JOBCRAWLER_AUTH_DIR", raising=False)
+    monkeypatch.delenv("CHATGPT_TOKEN_DIR", raising=False)
+    assert config.auth_dir().endswith("/.config/jobcrawler/chatgpt")
+
+    monkeypatch.setenv("CHATGPT_TOKEN_DIR", "/litellm/store")
+    assert config.auth_dir() == "/litellm/store"
+
+    monkeypatch.setenv("JOBCRAWLER_AUTH_DIR", "/jobcrawler/store")
+    assert config.auth_dir() == "/jobcrawler/store"  # wins over CHATGPT_TOKEN_DIR
+
+
 def test_promotion_eval_passes_defaults_to_three(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

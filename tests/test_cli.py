@@ -32,6 +32,7 @@ from jobcrawler.cli import (
     cmd_crawl,
     cmd_generate,
     cmd_list,
+    cmd_login,
     cmd_matches,
     cmd_positions,
     cmd_profile,
@@ -121,6 +122,8 @@ def test_parser_dispatches_each_command() -> None:
 
     assert parser.parse_args(["rollback-generator"]).func is cmd_rollback_generator
 
+    assert parser.parse_args(["login"]).func is cmd_login
+
     # --adopt is opt-in: off by default (cautious manual optimize), on when asked
     # (the path the autonomous reopt dispatch takes to flip the live pointer, §4.11).
     assert parser.parse_args(["optimize"]).adopt is False
@@ -206,6 +209,42 @@ def test_cmd_rollback_returns_one_when_no_backup(monkeypatch: MonkeyPatch) -> No
         lambda slug: (False, f"no backup to roll back to for {slug}"),
     )
     assert cmd_rollback(build_parser().parse_args(["rollback", "ghost"])) == 1
+
+
+def test_cmd_login_reports_success(
+    monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # cmd_login imports the Codex OAuth token and prints the account + store on success,
+    # returning exit 0 (§9). The import/verify mechanics live in test_auth.
+    from jobcrawler import auth
+
+    monkeypatch.setattr(
+        auth,
+        "login",
+        lambda: {
+            "account_id": "acct-42",
+            "auth_dir": "/home/u/.config/jobcrawler/chatgpt",
+        },
+    )
+    assert cmd_login(build_parser().parse_args(["login"])) == 0
+    out = capsys.readouterr().out
+    assert "acct-42" in out
+    assert "/home/u/.config/jobcrawler/chatgpt" in out
+
+
+def test_cmd_login_reports_failure(
+    monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # No Codex login (or a dead token) surfaces as a non-zero exit with the AuthError
+    # message, never a traceback — the operator sees the `codex login` hint.
+    from jobcrawler import auth
+
+    def boom() -> dict[str, object]:
+        raise auth.AuthError("no Codex login found — run `codex login` first")
+
+    monkeypatch.setattr(auth, "login", boom)
+    assert cmd_login(build_parser().parse_args(["login"])) == 2
+    assert "codex login" in capsys.readouterr().out
 
 
 def test_cmd_rollback_generator_returns_zero_on_success(

@@ -25,6 +25,7 @@ from typing import cast
 import dspy
 
 from jobcrawler import config
+from jobcrawler.lm import build_lm
 from jobcrawler.generate.budget import CappedLM
 from jobcrawler.generate.evaluate import evaluate_generator
 from jobcrawler.generate.generator import (
@@ -157,11 +158,14 @@ def _optimize(
 ) -> dict[str, object]:
     """The live optimize step — build the metrics + incumbent, then run_optimization."""
     max_tokens = config.max_tokens()
-    root_lm = dspy.LM(config.require_model(), max_tokens=max_tokens)
+    # build_lm routes a chatgpt/* slug to the Codex Responses backend (§9); an
+    # openrouter/... slug is unchanged.
+    root_lm = build_lm(config.require_model(), max_tokens=max_tokens)
     # Required cheap sub_lm + the §4.2 host sub-call kill (never the silent root
     # fallback, which bills every llm_query at planner rates).
-    sub_lm = CappedLM(
+    sub_lm = build_lm(
         config.require_sub_model(),
+        cls=CappedLM,
         max_subcalls=config.max_subcalls(),
         max_tokens=max_tokens,
     )
@@ -257,7 +261,7 @@ def _build_factory(
         reflection_model = config.require_reflection_model()
 
         def gepa_factory() -> object:
-            reflection_lm = dspy.LM(reflection_model, max_tokens=max_tokens)
+            reflection_lm = build_lm(reflection_model, max_tokens=max_tokens)
             return gepa_compile(
                 baseline,
                 trainset=train,
