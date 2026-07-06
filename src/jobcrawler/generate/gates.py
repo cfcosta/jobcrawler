@@ -79,6 +79,20 @@ def _is_dunder(name: str) -> bool:
     return len(name) > 4 and name.startswith("__") and name.endswith("__")
 
 
+# ``str.format`` / ``str.format_map`` parse a replacement-field mini-language at
+# *runtime* — ``"{0.__class__.__init__.__globals__[...]}".format(obj)`` walks
+# attributes and indexes on the arguments from inside a plain string literal, so
+# none of that traversal is an ``ast.Attribute`` this gate can see. That is the
+# canonical way to reach a dunder past the static dunder-attribute ban, and with
+# the capability facade (§8) it is how hostile code would try to prise the real
+# ctx back out of a method closure. Ban the two method *names* outright (any
+# ``.format``/``.format_map`` access, so ``f = s.format; f(...)`` is caught too);
+# f-strings do the same job and *are* AST-visible, so the existing dunder checks
+# already cover them. The sibling ``string.Formatter`` route is closed by dropping
+# ``string`` from the import allowlist (``runtime.safe_exec``).
+_FORMAT_METHODS = frozenset({"format", "format_map"})
+
+
 def check_ast(source: str) -> GateResult:
     """Gate 1: import/builtin allowlist + §4.3 contract shape (§8)."""
     try:
@@ -109,6 +123,12 @@ def check_ast(source: str) -> GateResult:
             failures.append(f"banned dunder name: {node.id}")
         elif isinstance(node, ast.Attribute) and _is_dunder(node.attr):
             failures.append(f"banned dunder access: {node.attr}")
+        elif isinstance(node, ast.Attribute) and node.attr in _FORMAT_METHODS:
+            failures.append(
+                f"banned str method: .{node.attr} — its replacement fields resolve "
+                "attribute/index access at runtime, past this gate (the "
+                "'{0.__class__}' escape); build strings with f-strings instead"
+            )
 
     failures.extend(_check_contract(tree))
     return GateResult(not failures, tuple(failures))

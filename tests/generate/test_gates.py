@@ -135,6 +135,46 @@ def test_banned_builtins_name_escape() -> None:
     assert any("__builtins__" in f for f in res.failures)
 
 
+def test_banned_str_format_escape() -> None:
+    # str.format / str.format_map resolve {0.__class__...} field access at runtime,
+    # past the AST dunder ban — the classic format-string sandbox escape. The
+    # method names are rejected outright (f-strings are the AST-visible substitute).
+    for snippet in (
+        'x = "{0.__class__}".format(ctx)',
+        'x = "{}".format_map({})',
+    ):
+        src = f'SITE="https://x.com"\ndef crawl(ctx):\n    {snippet}\n    yield 1\n'
+        res = check_ast(src)
+        assert not res.passed, snippet
+        assert any("format" in f for f in res.failures), snippet
+
+
+def test_format_indirection_is_caught_not_just_the_call() -> None:
+    # Banning only the call would miss `f = s.format; f(...)`. We ban the attribute
+    # access itself, so binding the bound method to a name fails too.
+    src = (
+        'SITE="https://x.com"\n'
+        "def crawl(ctx):\n"
+        '    fmt = "{0.__class__}".format\n'
+        "    yield fmt(ctx)\n"
+    )
+    assert not check_ast(src).passed
+
+
+def test_banned_string_module_closes_formatter() -> None:
+    # string.Formatter().vformat is the sibling of str.format; dropping `string`
+    # from the import allowlist closes it, and the AST import gate enforces that.
+    src = (
+        "import string\n"
+        'SITE="https://x.com"\n'
+        "def crawl(ctx):\n"
+        '    yield string.Formatter().vformat("{0}", (ctx,), {})\n'
+    )
+    res = check_ast(src)
+    assert not res.passed
+    assert any("string" in f for f in res.failures)
+
+
 def test_missing_site_or_crawl_fails() -> None:
     assert not check_ast("def crawl(ctx):\n    yield 1\n").passed
     assert not check_ast('SITE = "https://x.com"\n').passed

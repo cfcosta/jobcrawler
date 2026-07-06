@@ -45,12 +45,18 @@ ALLOWED_EXACT = frozenset(
         "itertools",
         "math",
         "html",
-        "string",
         "typing",
         "dataclasses",
         "jobcrawler.runtime.contract",
     }
 )
+# ``string`` is deliberately absent: its only sandbox-relevant surface is
+# ``string.Formatter``, whose ``format``/``vformat``/``get_field`` methods parse a
+# replacement-field mini-language and resolve attribute/index access at runtime —
+# the same ``{0.__class__...}`` dunder-pivot the §6 AST gate bans on
+# ``str.format``. No crawler needs the module (f-strings + ``str`` methods cover
+# it), so withholding it closes the Formatter route the AST attribute ban cannot
+# see. Keep it off the allowlist.
 # Parser packages: the package and any submodule (lxml.etree, selectolax.parser).
 # stdlib ``xml`` is permitted because the §8 hardening (runtime/hardening.py,
 # applied before any crawler runs) defuses XXE / entity-expansion in every path.
