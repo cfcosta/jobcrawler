@@ -10,6 +10,13 @@ dependencies = [
   "httpx>=0.27.0",
   "pydantic>=2.0",
   "pyyaml>=6.0",
+  # Position-tracking web UI (`jobcrawl serve`): a FastAPI app served by uvicorn
+  # with Jinja2 templates; python-multipart backs the HTML form posts (status
+  # changes, notes). Reads/writes the same §4.7 state store the daemon owns.
+  "fastapi>=0.110",
+  "uvicorn>=0.29",
+  "jinja2>=3.1",
+  "python-multipart>=0.0.9",
 ]
 
 [project.scripts]

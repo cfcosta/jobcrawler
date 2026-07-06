@@ -16,6 +16,13 @@ a host-side **profile matcher** that scores each new opening against your
 content-addressed-cached, daily-capped, and rate-paced, so the token bill stays
 bounded and a job is scored *at most once* per (job, profile, model, prompt).
 
+Once positions are in the store, `jobcrawl serve` gives you a **web tracker** (§16) to
+work them: browse and search the corpus, move a posting through a personal application
+pipeline (interested → applied → interviewing → offer), take notes, and watch a
+dashboard. It's a small loopback-bound UI over the same store the daemon writes — no
+scheduler, no LLM of its own — so tracking runs orthogonally to the crawler's own
+open/closed lifecycle.
+
 The design is captured in the internal §-numbered spec; this README is the operator-
 and developer-facing summary. For running it as a service, see [`deploy/`](deploy/).
 
@@ -183,6 +190,10 @@ jobcrawl crawl acme
 # See what matched your profile, then run the self-scheduling daemon.
 jobcrawl matches
 jobcrawl run
+
+# Track, search, and work positions in the browser — a separate loopback UI
+# over the same store, run alongside the daemon.
+jobcrawl serve                 # → http://127.0.0.1:8765
 ```
 
 The site registry is `sites.yaml` (`JOBCRAWLER_SITES`); its schema is documented
@@ -195,6 +206,7 @@ inline in [`deploy/sites.example.yaml`](deploy/sites.example.yaml).
 | Command | What it does |
 | --- | --- |
 | `run` | Start the scheduler daemon (§4.9): paces per-board crawls, runs the recheck/expiry sweep, the self-heal and regen timers, scores new positions against `PROFILE.md`, and drains gracefully on SIGINT/SIGTERM. The primary production entrypoint. |
+| `serve` `[--host --port]` | Start the web tracker UI (§16): browse/search positions, move them through a personal application pipeline (interested → applied → offer…), take notes, and see a dashboard — all over the same store the daemon writes. Binds `127.0.0.1:8765` by default; runs no scheduler and no LLM. |
 | `generate <slug>` / `--all` / `--stale` | Run the RLM, gate the winner, and write `crawlers/<slug>.py`. Needs a configured LM + Deno + live fetch. `--stale` is driven by the daemon's health loop, not run by hand. |
 | `validate <slug>` | Dry-run a committed crawler in the §4.4 sandbox and report position count + schema errors. **No tracking, no scoring.** |
 | `crawl <slug>` / `--all` | Run committed crawlers, dedup, upsert into the positions store, enrich, prefilter, and score new/changed positions against the profile. |
@@ -279,11 +291,20 @@ crawler generation, and tolerated for matching via the explicit output contract.
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `JOBCRAWLER_SITES` | `sites.yaml` | The board registry (§4.1). |
-| `JOBCRAWLER_STATE_URL` | `sqlite:///jobcrawler.db` | Run-history, health, **positions**, and match-cache/spend store. |
+| `JOBCRAWLER_STATE_URL` | `sqlite:///jobcrawler.db` | Run-history, health, **positions**, match-cache/spend, and the §16 operator tracking axis. Shared read/write by the daemon and `jobcrawl serve` (WAL). |
 | `JOBCRAWLER_CRAWLERS_DIR` | in-package `crawlers/` | Committed crawlers + `_pending` staging + `_history` backups. **Relocate to a writable, persistent path in production** (the package dir is read-only on native Nix and ephemeral in a container). |
 | `JOBCRAWLER_GENERATOR_DIR` | `generators` | Where `optimize` writes versioned `generator-N.json`. |
 | `JOBCRAWLER_GENERATOR_PATH` | unset | *Fallback* pointer to the active `generator.json` (resolution: CLI arg › `ACTIVE` pointer file › this env var › baseline). The autonomous loop adopts/rolls back via the `ACTIVE` pointer with no restart; roll back with `jobcrawl rollback-generator`. |
 | `JOBCRAWLER_TRAINSET_PATH` | `trainset.jsonl` | §4.11 trainset (one row per admitted generation / recorded failure). |
+
+### Web tracker (§16) — `jobcrawl serve`
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `JOBCRAWLER_SERVE_HOST` | `127.0.0.1` | Bind address for the tracker UI. **Loopback by default** — the UI exposes your personal application data (which roles you applied to, private notes). Set `0.0.0.0` only behind a trusted authenticating reverse proxy. |
+| `JOBCRAWLER_SERVE_PORT` | `8765` | Listen port for the tracker UI. |
+
+Both are overridden per-invocation by `jobcrawl serve --host … --port …` (flag › env › default).
 
 ### Generation caps (§4.2)
 

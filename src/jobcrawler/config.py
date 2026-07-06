@@ -911,3 +911,24 @@ def notify_timeout() -> float:
     Bounds how long a single best-effort delivery attempt waits before giving up, so a
     hung receiver can't pile up background threads. Default 10s."""
     return _float("JOBCRAWLER_NOTIFY_TIMEOUT", 10.0)
+
+
+# --- web UI (jobcrawl serve, §16) ------------------------------------------
+
+
+def serve_host() -> str:
+    """Bind address for the position-tracking web UI (``JOBCRAWLER_SERVE_HOST``).
+
+    Loopback (``127.0.0.1``) by default: the UI reads and writes personal application data
+    (who you've applied to, private notes) over the same §4.7 store the daemon owns, so it
+    must not be exposed on the network out of the box. Only set ``0.0.0.0`` when the UI sits
+    behind a trusted reverse proxy that adds authentication."""
+    return _str("JOBCRAWLER_SERVE_HOST", "127.0.0.1")
+
+
+def serve_port() -> int:
+    """TCP port for the position-tracking web UI (``JOBCRAWLER_SERVE_PORT``).
+
+    Default 8765 — deliberately clear of the common dev-server ports (3000/5173/8000/8080/
+    8888) so ``jobcrawl serve`` doesn't collide with whatever else you're running."""
+    return _int("JOBCRAWLER_SERVE_PORT", 8765)

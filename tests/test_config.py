@@ -752,3 +752,30 @@ def test_match_max_tokens_default_and_override(monkeypatch) -> None:
     assert config.match_max_tokens() == 4000
     monkeypatch.setenv("JOBCRAWLER_MATCH_MAX_TOKENS", "2500")
     assert config.match_max_tokens() == 2500
+
+
+# -- web UI (jobcrawl serve, §16) --------------------------------------------
+
+
+def test_serve_host_defaults_to_loopback(monkeypatch) -> None:
+    # Personal application data must not be network-exposed by default (§16).
+    monkeypatch.delenv("JOBCRAWLER_SERVE_HOST", raising=False)
+    assert config.serve_host() == "127.0.0.1"
+
+
+def test_serve_host_override(monkeypatch) -> None:
+    monkeypatch.setenv("JOBCRAWLER_SERVE_HOST", "0.0.0.0")
+    assert config.serve_host() == "0.0.0.0"
+
+
+def test_serve_port_default_and_override(monkeypatch) -> None:
+    monkeypatch.delenv("JOBCRAWLER_SERVE_PORT", raising=False)
+    assert config.serve_port() == 8765
+    monkeypatch.setenv("JOBCRAWLER_SERVE_PORT", "9100")
+    assert config.serve_port() == 9100
+
+
+def test_serve_port_invalid_raises(monkeypatch) -> None:
+    monkeypatch.setenv("JOBCRAWLER_SERVE_PORT", "notaport")
+    with pytest.raises(ValueError):
+        config.serve_port()

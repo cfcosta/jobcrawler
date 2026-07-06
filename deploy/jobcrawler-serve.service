@@ -1,0 +1,65 @@
+# jobcrawler — web tracker UI (§16), native (non-container) deployment.
+#
+# Runs `jobcrawl serve` (the position tracker) as a SECOND unit alongside the
+# `jobcrawl run` daemon (deploy/jobcrawler-native.service). Both processes share
+# the one state DB — SQLite WAL makes the daemon-writer / UI-writer overlap safe —
+# so this unit needs only the state path and (for dashboard site names) the
+# registry. It runs NO scheduler and NO LLM, so it needs none of the model slugs
+# or the provider API key; sharing the same EnvironmentFile is harmless (the LM
+# creds simply go unused).
+#
+# It binds 127.0.0.1:8765 by default: the UI exposes personal application data
+# (which roles you applied to, private notes), so it must not be world-reachable.
+# To reach it from another host, DO NOT flip JOBCRAWLER_SERVE_HOST to 0.0.0.0 on a
+# public interface — put an authenticating reverse proxy (or an SSH tunnel) in
+# front and keep this bound to loopback.
+#
+# Install (after the daemon unit is up):
+#   nix build .#default --out-link /var/lib/jobcrawler/app   # if not already built
+#   sudo install -m 644 deploy/jobcrawler-serve.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now jobcrawler-serve
+#   # then browse http://127.0.0.1:8765 (tunnel with `ssh -L 8765:127.0.0.1:8765 host`)
+
+[Unit]
+Description=jobcrawler — position tracker web UI (§16)
+Documentation=file:///etc/jobcrawler https://github.com/cfcosta/jobcrawler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jobcrawler
+Group=jobcrawler
+WorkingDirectory=/var/lib/jobcrawler
+EnvironmentFile=/etc/jobcrawler/jobcrawler.env
+# The same state DB the daemon writes — the UI reads positions/matches and writes
+# the operator tracking axis (status/notes/dismiss) + crawl/rescore requests.
+Environment=JOBCRAWLER_STATE_URL=sqlite:////var/lib/jobcrawler/jobcrawler.db
+# The registry backs the dashboard's per-site labels (best-effort; absent → slugs).
+Environment=JOBCRAWLER_SITES=/var/lib/jobcrawler/sites.yaml
+# Loopback by default (personal data). Override the bind here only behind a proxy.
+Environment=JOBCRAWLER_SERVE_HOST=127.0.0.1
+Environment=JOBCRAWLER_SERVE_PORT=8765
+ExecStart=/var/lib/jobcrawler/app/bin/jobcrawl serve
+Restart=on-failure
+RestartSec=10s
+StartLimitIntervalSec=300
+StartLimitBurst=5
+TimeoutStartSec=60
+
+# --- hardening (it runs on the host, so confine it) ---
+# It writes only the state DB (+ WAL sidecars) under the state dir; lock the rest down.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/jobcrawler
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+# Inbound HTTP listener on loopback + outbound none required; AF_INET/INET6 for the
+# socket, AF_UNIX for logging.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

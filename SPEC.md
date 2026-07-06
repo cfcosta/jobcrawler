@@ -562,6 +562,18 @@ daemon was down is caught immediately:
 rows, then one capped LLM drain from the store) and refreshes `meta.profile_hash`, so the
 daemon doesn't requeue a second time for an edit the operator already rematched by hand.
 
+**Operator tracking axis (host-side policy, §16).** Orthogonal to the crawler's `open`/`closed`
+lifecycle above, the store carries a second, purely operator-owned axis for the §16 tracker:
+`track_status` (a personal pipeline — `new → interested → applied → interviewing → offer` with
+terminal `accepted`/`rejected`/`withdrawn`), a `dismissed` flag, free-text `notes`, and an
+`applied_at` date stamped once when a status first implies an application was sent. These columns are
+**not** in the crawler-supplied `fields` set, so an upsert or reopen (above) never clobbers them — a
+posting you marked `applied` that the board edits stays `applied`. Per §4.7's own division of labour
+the store persists `track_status` as an **opaque string** and stamps `applied_at` only when told to;
+the valid set, transitions, and the "which stage implies applied" policy live host-side in
+`tracking.py` (the store records state, never invents policy). This axis is a pure operator surface:
+like the match `reasons` (§8), no generator/optimizer code path ever reads it.
+
 ### 4.8 Health & self-healing regeneration
 Each crawl records `positions_found`, `new_positions`, `errors`, `pages_fetched`, and a
 `description_quality` signal per board. A board is flagged **stale** on a *single* zero-**`positions_found`**
@@ -651,8 +663,9 @@ operates the whole loop itself rather than relying on an external cron.
   crash-safe and restart-idempotent.
 
 v1 uses an **in-process async scheduler** (no external broker) — appropriate for a checked-in board
-list; a task queue is a later scale-up (§14). An optional thin HTTP surface (status, manual trigger)
-can be added if operators want one.
+list; a task queue is a later scale-up (§14). The optional thin HTTP surface (status, manual trigger)
+this reserved is realized by the separate **`jobcrawl serve` tracker (§16)** — a read/write UI over the
+same store; it never runs a scheduler or an LLM, only flagging crawl/rescore work for this loop to drain.
 
 ### 4.10 Cloudflare / anti-bot challenge handling
 Some job boards sit behind Cloudflare, but most use it only as a CDN (plain `httpx` works), and
@@ -984,6 +997,7 @@ jobcrawler/
     sites.py                # load/validate sites.yaml → list[Site]
     profile.py              # PROFILE.md → Profile/ProfilePrefs; profile_hash (§5a) — NEW
     match.py                # host-side batched/cached LLM matcher: MatchJobs, prefilter, Matcher (§4.7) — NEW
+    tracking.py             # operator status policy: TrackStatus enum, labels/colours, applied-implies (§16) — NEW
     generate/               # generation + self-improvement
       signatures.py         #   GenerateCrawler (+ owned strategy sub-signature, §4.11)
       tools.py              #   fetch/render/find_feeds/get_sitemap/validate_crawler
@@ -998,12 +1012,16 @@ jobcrawler/
       solver.py ssrf.py     #   ChallengeSolver + clearance cache (§4.10); SSRF guard (§8)
       sandbox.py hardening.py safe_exec.py  # constrained execution + XML hardening (§4.4, §8)
       runner.py             #   import → crawl → validate → lifecycle → enrich → match (§4.7)
-    state.py                # positions/match lifecycle + run/health store (§4.7) — extended
+    state.py                # positions/match lifecycle + run/health store (§4.7); operator tracking axis + crawl-request seam (§16) — extended
     schedule.py adaptive.py governor.py durations.py  # scheduler + adaptive cadence + pacing (§4.9)
     health.py               # staleness detection → regeneration (§4.8)
     generator_pointer.py adopt_watch.py optimize_job.py trainset.py  # §4.11 versioning/adoption/trainset
     notify.py metrics.py    # operator notifications (§4.7/§4.8/§4.11) + observability (§4.9)
     cli.py cli_generate.py cli_optimize.py  # operator commands (§10)
+    web/                    # `jobcrawl serve` FastAPI tracker over the shared store (§16) — NEW
+      app.py                #   create_app(store) factory + serve_app(); routes, JSON api, presentation helpers
+      templates/            #   Jinja2: base/index/detail/dashboard (browse, funnel, per-position track panel)
+      static/               #   app.css (dark theme) + app.js (progressive-enhancement auto-submit)
     crawlers/               # GENERATED, committed: <slug>.py; _pending/ staging, _history/ backups
     generators/             # GEPA-optimized generator-N.json artifacts (JSON, versioned; §4.11)
   tests/                    # mirror src; MockInterpreter (dspy ships none), recorded HTTP + golden fixtures
@@ -1068,6 +1086,14 @@ The central risk is **executing model-written code against the live web**. Mitig
   reasons/concerns are **operator-facing only**; they are never read back by the generator (they can't
   breach the §8 hidden-scorer invariant). No LLM scores its own output; every signal the §6 scorer
   reads is host code the optimized loop can't touch.
+- **The web tracker is a loopback-bound read/write store client, not a new trust boundary (§16).** `jobcrawl
+  serve` runs no scheduler and no LLM: it reads the store and flags work (`request_crawl` / requeue) for the
+  daemon to drain — it never imports a crawler, executes generated code, or calls a model, so it can't widen
+  the §4.4 sandbox surface. It holds **personal application data** (which roles you applied to, private notes),
+  so it binds `127.0.0.1` by default (`JOBCRAWLER_SERVE_HOST`); `0.0.0.0` is opt-in and only sound behind a
+  trusted reverse proxy with auth. The operator tracking axis (`track_status`/`notes`/`dismissed`) is, like the
+  match reasons above, **operator-facing only** — no generator/optimizer code path reads these columns, so the
+  UI can't become a channel into the §8 hidden-scorer invariant.
 
 ## 9. DSPy / runtime notes
 - `dspy.RLM` is `@experimental` — pin DSPy `3.2.x`.
@@ -1121,6 +1147,7 @@ The central risk is **executing model-written code against the live web**. Mitig
 | command | does |
 |---|---|
 | `jobcrawl run` | **start the scheduler daemon** — crawl due boards, track lifecycle, match, retry, regenerate (§4.9) |
+| `jobcrawl serve [--host --port]` | **start the web tracker UI** (§16) — browse/search/track positions over the shared store; loopback-bound by default, no scheduler/LLM |
 | `jobcrawl generate <slug> \| --all \| --stale` | run RLM, gate (§6), write `crawlers/<slug>.py` |
 | `jobcrawl validate <slug>` | dry-run a committed script through the §4.4 sandbox, report positions/errors, **no state/match** |
 | `jobcrawl crawl <slug> \| --all` | run committed scripts, dedup, track positions, match new/changed |
@@ -1166,7 +1193,9 @@ an `openrouter/…` slug billed per token. Selected knobs:
 | `JOBCRAWLER_EXPIRED_MARKERS` | 5 EN+pt-BR defaults | `\|`-separated closed-posting markers; empty disables (§4.6) |
 | `JOBCRAWLER_STABILITY_JACCARD` | `0.6` | §6 gate-3 URL-overlap threshold |
 | `JOBCRAWLER_ENUM_FLOOR_RATIO` | `0.5` | §6 enum floor vs the corpus posting-count oracle |
-| `JOBCRAWLER_STATE_URL` | `sqlite:///jobcrawler.db` | position/match/run/health store (§4.7) |
+| `JOBCRAWLER_STATE_URL` | `sqlite:///jobcrawler.db` | position/match/run/health/tracking store (§4.7/§16) |
+| `JOBCRAWLER_SERVE_HOST` | `127.0.0.1` | `jobcrawl serve` bind address (§16); **loopback by default** — the UI holds personal application data, so `0.0.0.0` only behind a trusted proxy/auth |
+| `JOBCRAWLER_SERVE_PORT` | `8765` | `jobcrawl serve` listen port (§16) |
 | `JOBCRAWLER_USER_AGENT` | `jobcrawler/0.1 (+job tracker)` | sent on every request |
 | `JOBCRAWLER_RATE_LIMIT` | `1/s/host` | §4.5 politeness cap |
 | `JOBCRAWLER_MAX_PAGES` | `200` | per-crawl page budget (sized for paginated boards, §4.5) |
@@ -1335,3 +1364,59 @@ domain-agnostic); the posting-domain facts are new.
   **iStar/over-optimization** (`#acb2cc`), **ShinkaEvolve** (`#f3ea65`), **Self-Attribution-Bias** (`#5622de`).
 - Supporting: **LLM-in-Sandbox** (`#00c82a`), **CodeAct** (`#7a8470`), **Sanjaya** (`#745267`), **JudgeFlow**
   (`#e3bbdd`), **Feedback Descent** (`#244e30`), **TextGrad** (`#be34e3`), **gskill** (`#39b2ab`).
+
+## 16. Web tracker (`jobcrawl serve`)
+
+The crawler *finds* positions (§4.7); the tracker is where an operator *works* them — browse and search the
+standing corpus, then move a posting through a personal application pipeline until it's applied, offered, or
+dropped. It is a small **FastAPI + Jinja2** app (`web/`) served by uvicorn as a **separate `jobcrawl serve`
+process** over the **same WAL SQLite store** the daemon owns. This realizes the "optional thin HTTP surface"
+§4.9 reserved, deliberately kept to the narrowest possible role.
+
+**The tracking axis (operator-owned, orthogonal to the crawl lifecycle).** The store's `open`/`closed` state
+is the *crawler's* view (§4.7); the tracker adds a second axis that is entirely the operator's, defined
+host-side in `tracking.py` and persisted opaquely by the store (§4.7 — "the store records state, never invents
+policy"):
+
+- **`track_status`** — a personal pipeline `new → interested → applied → interviewing → offer`, with terminal
+  outcomes `accepted` / `rejected` / `withdrawn`. `tracking.py` owns the valid set, display order, labels, and
+  colour tokens; `parse()` validates a submitted value **exactly** (no case-folding) before the store writes
+  it, and rejects the unknown with the option list — a bad value is a 400 that writes nothing.
+- **`applied_at`** — stamped **once**, the first time a status implies an application was sent
+  (`implies_applied`: applied/interviewing/offer/accepted, but *not* rejected/withdrawn — you can bail before
+  ever applying). The web layer decides the policy and passes `stamp_applied=`; the store stamps via
+  `COALESCE(applied_at, ?)` so moving back down the funnel never rewrites the original date.
+- **`dismissed`** (hide noise without closing — a dismiss is *not* a §4.7 close) and free-text **`notes`**.
+
+These columns sit **outside** the crawler-supplied `fields` set, so a re-crawl, content change, or reopen
+never clobbers them (§4.7). Per §8 this axis is **operator-facing only** — no generator/optimizer path reads
+it, exactly like the match `reasons`.
+
+**Surfaces.**
+
+- **Browse / search** (`GET /`) — full-text query plus rich filters (site, company, lifecycle, `track_status`,
+  workplace, level, min score, min salary, dismissed) and sort (recent / score / posted); dismissed rows are
+  hidden by default, both lifecycle states shown (you still care about a posting you applied to after the board
+  closes it). Paginated; every position links to its detail page and carries lifecycle + match-score pills.
+- **Position detail** (`GET /positions/{pid}`) — the full posting (structured fields + verbatim description),
+  the "why this matched" reasons (§4.7, operator-facing), a **track panel** (status select, applied/updated/seen
+  dates, dismiss/restore, and — for a crawlable board — a "crawl now" button), and a **notes** textarea. `pid`
+  is urlsafe-base64 of `(site, url)` since the url can't be a path segment.
+- **Dashboard** (`GET /dashboard`) — the pipeline **funnel** (counts per `track_status`), open/closed/matched
+  tallies, the match-score distribution, per-site open counts, and recent run health.
+- **Manual triggers** — "crawl now" calls `store.request_crawl(slug)` to flag a board for the daemon's
+  `due_sites` to pick up (§4.9 single-owner: the UI must **not** run the crawl itself and overlap the board's
+  own schedule); "rescore" parks open rows via `requeue_open_matches` for the §4.7 match-drain to flush (no
+  crawl needed — the description is already persisted). Both return promptly; the daemon does the work.
+- A small **JSON `/api`** mirrors the browse/detail reads for scripting; each mutation also has an HTML form
+  path (POST → 303 redirect) so the UI degrades without JavaScript. `app.js` is progressive enhancement only
+  (auto-submit a changed status select); nothing requires it.
+
+**Boundaries (what it must not do).** No scheduler, no LLM, no crawler import, no generated-code execution — it
+only reads/writes the store and *flags* work, so it cannot widen the §4.4 sandbox surface or the §8 trust
+boundary. Store handlers are plain `def` (Starlette threadpools them) so the blocking, lock-serialized
+`sqlite3` calls never stall the event loop; the store's WAL + `busy_timeout` make the daemon-writer /
+UI-occasional-writer overlap safe. **Profile editing is out of scope** for v1 (a `PROFILE.md` edit is still a
+file edit the §4.7 drain picks up). Because it holds **personal application data**, `serve` binds `127.0.0.1`
+by default (`JOBCRAWLER_SERVE_HOST` / `JOBCRAWLER_SERVE_PORT`, flag > env > config); `0.0.0.0` is opt-in and
+only sound behind a trusted authenticating proxy (§8).

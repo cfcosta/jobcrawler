@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}Positions · Position tracker{% endblock %}
+{% block content %}
+<h1>Positions</h1>
+
+<form class="filters" method="get" action="/positions">
+  <input type="search" name="q" placeholder="Search…" value="{{ filters.q }}">
+  <select name="site" aria-label="Site">
+    <option value="">All sites</option>
+    {% for s in sites %}
+    <option value="{{ s.slug }}"{{ ' selected' if filters.site == s.slug else '' }}>{{ s.company or s.name or s.slug }}</option>
+    {% endfor %}
+  </select>
+  <select name="track_status" aria-label="Stage">
+    <option value="">Any stage</option>
+    {% for value, label, token in tracking.choices() %}
+    <option value="{{ value }}"{{ ' selected' if filters.track_status == value else '' }}>{{ label }}</option>
+    {% endfor %}
+  </select>
+  <select name="status" aria-label="Lifecycle">
+    <option value="">Open + closed</option>
+    <option value="open"{{ ' selected' if filters.status == 'open' else '' }}>Open only</option>
+    <option value="closed"{{ ' selected' if filters.status == 'closed' else '' }}>Closed only</option>
+  </select>
+  <input type="text" name="workplace" placeholder="Workplace" value="{{ filters.workplace }}" size="8">
+  <input type="text" name="level" placeholder="Level" value="{{ filters.level }}" size="8">
+  <input type="number" name="min_score" placeholder="Min score" value="{{ filters.min_score }}" min="0" max="100">
+  <input type="number" name="min_salary" placeholder="Min salary" value="{{ filters.min_salary }}">
+  <select name="sort" aria-label="Sort">
+    {% for value, label in [('recent', 'Newest'), ('score', 'Best match'), ('updated', 'Recently updated'), ('salary', 'Salary'), ('title', 'Title')] %}
+    <option value="{{ value }}"{{ ' selected' if filters.sort == value else '' }}>{{ label }}</option>
+    {% endfor %}
+  </select>
+  <label class="chk"><input type="checkbox" name="show_dismissed" value="1"{{ ' checked' if filters.show_dismissed else '' }}> Show dismissed</label>
+  <button type="submit">Apply</button>
+  <a class="clear" href="/positions">Clear</a>
+</form>
+
+{% if rows %}
+<table class="grid positions">
+  <thead><tr>
+    <th>Score</th><th>Title</th><th>Company</th><th>Location</th><th>Salary</th><th>Status</th><th>Stage</th><th>Age</th>
+  </tr></thead>
+  <tbody>
+  {% for p in rows %}
+  <tr class="{{ 'dimmed' if p.dismissed else '' }}">
+    <td class="score">{{ p.match_score if p.match_score is not none else '—' }}</td>
+    <td class="title"><a href="/positions/{{ encode_pid(p.site, p.url) }}">{{ p.title }}</a>
+        {% if p.dismissed %}<span class="tag">dismissed</span>{% endif %}</td>
+    <td>{{ p.company }}</td>
+    <td>{{ p.location }}{% if p.workplace %} · {{ p.workplace }}{% endif %}</td>
+    <td class="nowrap">{{ p | salary }}</td>
+    <td><span class="lifecycle lc-{{ p.status }}">{{ p.status }}</span></td>
+    <td>
+      <form class="rowstatus" method="post" action="/positions/{{ encode_pid(p.site, p.url) }}/status">
+        <select name="track_status" data-autosubmit class="badge-{{ tracking.css_token(p.track_status) }}">
+          {% for value, label, token in tracking.choices() %}
+          <option value="{{ value }}"{{ ' selected' if p.track_status == value else '' }}>{{ label }}</option>
+          {% endfor %}
+        </select>
+        <noscript><button type="submit" class="small">Set</button></noscript>
+      </form>
+    </td>
+    <td class="age">{{ (p.posted_at or p.first_seen) | age }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<nav class="pager">
+  {% if prev_url %}<a href="{{ prev_url }}">← Prev</a>{% else %}<span class="disabled">← Prev</span>{% endif %}
+  <span class="page">Page {{ page }}</span>
+  {% if next_url %}<a href="{{ next_url }}">Next →</a>{% else %}<span class="disabled">Next →</span>{% endif %}
+</nav>
+{% else %}
+<p class="empty">No positions match these filters. <a href="/positions">Clear filters</a></p>
+{% endif %}
+{% endblock %}

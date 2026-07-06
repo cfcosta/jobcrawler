@@ -143,9 +143,12 @@ class PositionRecord:
     than a raw ``sqlite3.Row``. ISO-text timestamps are parsed back to aware
     ``datetime`` (``None`` when unset) and the ``match_pending`` flag reads back as a
     ``bool``, matching the ``RunRecord`` precedent. The store owns the lifecycle columns
-    (``first_seen``/``last_seen``/``missing_streak``/``status``/``closed_at``) and the
-    ``match_*`` verdict columns; the remainder are the crawler-supplied job fields
-    threaded verbatim through :meth:`StateStore.upsert_position`.
+    (``first_seen``/``last_seen``/``missing_streak``/``status``/``closed_at``), the
+    ``match_*`` verdict columns, and the operator-owned tracking axis
+    (``track_status``/``applied_at``/``notes``/``dismissed``/``track_updated_at``, §16);
+    the remainder are the crawler-supplied job fields threaded verbatim through
+    :meth:`StateStore.upsert_position`. The tracking axis is orthogonal to the crawler
+    ``status`` — a posting can be board-``closed`` while ``track_status='interviewing'``.
     """
 
     site: str
@@ -177,6 +180,11 @@ class PositionRecord:
     match_reasons: str | None
     matched_at: datetime | None
     match_pending: bool
+    track_status: str
+    applied_at: datetime | None
+    notes: str | None
+    dismissed: bool
+    track_updated_at: datetime | None
 
 
 _SCHEMA = """
@@ -249,6 +257,11 @@ CREATE TABLE IF NOT EXISTS positions (
     match_reasons   TEXT,
     matched_at      TEXT,
     match_pending   INTEGER NOT NULL DEFAULT 0,
+    track_status     TEXT NOT NULL DEFAULT 'new',
+    applied_at       TEXT,
+    notes            TEXT,
+    dismissed        INTEGER NOT NULL DEFAULT 0,
+    track_updated_at TEXT,
     PRIMARY KEY (site, url)
 );
 CREATE TABLE IF NOT EXISTS match_cache (
@@ -267,6 +280,10 @@ CREATE TABLE IF NOT EXISTS match_spend (
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS crawl_requests (
+    slug         TEXT PRIMARY KEY,
+    requested_at TEXT NOT NULL
 );
 """
 
@@ -327,6 +344,14 @@ _POSITION_ADD_COLUMNS: tuple[tuple[str, str], ...] = (
     ("match_reasons", "TEXT"),
     ("matched_at", "TEXT"),
     ("match_pending", "INTEGER NOT NULL DEFAULT 0"),
+    # The §16 operator tracking axis, landed on top of the match layer. Like ``match_*``
+    # these are store-owned and never taken from a crawler's ``fields`` dict, so a re-crawl
+    # of an already-tracked posting can never clobber the application state you set.
+    ("track_status", "TEXT NOT NULL DEFAULT 'new'"),
+    ("applied_at", "TEXT"),
+    ("notes", "TEXT"),
+    ("dismissed", "INTEGER NOT NULL DEFAULT 0"),
+    ("track_updated_at", "TEXT"),
 )
 
 
@@ -916,6 +941,224 @@ class StateStore:
         ).fetchall()
         return [_to_position(r) for r in rows]
 
+    # -- operator tracking axis (§16 web UI) -----------------------------------
+    #
+    # The personal application pipeline, orthogonal to the crawler-owned open/closed
+    # lifecycle above. These are thin persisted-string writers: the *valid set*, the
+    # transition policy, and which stages stamp ``applied_at`` are host-side policy
+    # (``jobcrawler.tracking``, read by the web layer) — the store never adjudicates a
+    # value, mirroring how ``set_match`` is threshold-agnostic (§4.7). None of these touch
+    # the crawler ``status``/``closed_at`` or the ``match_*`` columns.
+
+    def get_position(self, site: str, url: str) -> PositionRecord | None:
+        """One position by identity ``(site, url)``, any lifecycle state, or None."""
+        row = self._conn.execute(
+            "SELECT * FROM positions WHERE site = ? AND url = ?", (site, url)
+        ).fetchone()
+        return _to_position(row) if row is not None else None
+
+    def set_track_status(
+        self, site: str, url: str, status: str, *, stamp_applied: bool = False
+    ) -> None:
+        """Set the operator's pipeline stage on a position (§16); stamp ``track_updated_at``.
+
+        ``status`` is persisted as an opaque string (the caller validates it host-side via
+        ``tracking.parse`` — the store adjudicates neither the value nor the transition, so
+        a personal search can move backwards or skip stages freely). When ``stamp_applied``
+        is set — the caller saw an application-implying stage
+        (``applied``/``interviewing``/``offer``/``accepted``) — ``applied_at`` is stamped
+        too, but only if not already set (``COALESCE``), so the original apply date survives
+        a later stage change or a move back down the funnel. The crawler ``status`` and the
+        ``match_*`` verdict are never touched (the axes are orthogonal, §4.7).
+        """
+        now = self._clock().isoformat()
+        with self._lock:
+            if stamp_applied:
+                self._conn.execute(
+                    "UPDATE positions SET track_status = ?, track_updated_at = ?, "
+                    "applied_at = COALESCE(applied_at, ?) WHERE site = ? AND url = ?",
+                    (status, now, now, site, url),
+                )
+            else:
+                self._conn.execute(
+                    "UPDATE positions SET track_status = ?, track_updated_at = ? "
+                    "WHERE site = ? AND url = ?",
+                    (status, now, site, url),
+                )
+            self._conn.commit()
+
+    def set_notes(self, site: str, url: str, notes: str | None) -> None:
+        """Overwrite the free-text notes on a position (§16); empty/``None`` clears them.
+
+        Stamps ``track_updated_at`` (a notes edit is an operator touch). Orthogonal to the
+        crawler lifecycle and the ``match_*`` columns.
+        """
+        text = notes if notes else None
+        now = self._clock().isoformat()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE positions SET notes = ?, track_updated_at = ? "
+                "WHERE site = ? AND url = ?",
+                (text, now, site, url),
+            )
+            self._conn.commit()
+
+    def set_dismissed(self, site: str, url: str, dismissed: bool) -> None:
+        """Toggle the hide flag on a position (§16) — a soft UI hide, NOT a crawler close.
+
+        A dismissed row stays ``status='open'`` on the board (``close_missing`` still owns
+        that axis); the UI simply filters it out by default. Stamps ``track_updated_at``.
+        """
+        now = self._clock().isoformat()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE positions SET dismissed = ?, track_updated_at = ? "
+                "WHERE site = ? AND url = ?",
+                (1 if dismissed else 0, now, site, url),
+            )
+            self._conn.commit()
+
+    def search_positions(
+        self,
+        query: str = "",
+        *,
+        site: str | None = None,
+        company: str | None = None,
+        status: str | None = None,
+        track_status: str | None = None,
+        workplace: str | None = None,
+        level: str | None = None,
+        min_score: int | None = None,
+        min_salary: float | None = None,
+        dismissed: bool | None = None,
+        sort: str = "recent",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[PositionRecord]:
+        """The web UI's browse/filter reader (§16) — positions across *any* lifecycle state.
+
+        Unlike :meth:`open_positions`/:meth:`matches`, this reads open *and* closed rows so
+        the operator can still find a role they applied to after the board closed it. Every
+        filter is optional and ANDed; all are host-supplied (no crawler/generator input):
+
+        - ``query``   case-insensitive substring over title/company/location/description.
+        - ``site``    exact slug; ``company`` case-insensitive substring.
+        - ``status``  crawler lifecycle ``'open'``/``'closed'`` (``None``/``'all'`` = both).
+        - ``track_status``  exact personal stage (``'applied'`` …).
+        - ``workplace``/``level``  exact, case-insensitive (e.g. ``'remote'``).
+        - ``min_score``  only rows scored at/above it (drops unscored).
+        - ``min_salary``  ``COALESCE(salary_max, salary_min) >= min_salary`` (drops unstated).
+        - ``dismissed``  ``None`` = both, ``False`` = hide dismissed, ``True`` = only dismissed.
+
+        ``sort`` ∈ {recent, score, updated, salary, title}; NULL scores/salaries sink last
+        under a DESC sort. ``limit``/``offset`` paginate. Returns ``list[PositionRecord]``.
+        """
+        clauses: list[str] = []
+        params: list[object] = []
+        q = query.strip()
+        if q:
+            like = f"%{q.lower()}%"
+            clauses.append(
+                "(lower(title) LIKE ? OR lower(company) LIKE ? "
+                "OR lower(location) LIKE ? OR lower(COALESCE(description, '')) LIKE ?)"
+            )
+            params += [like, like, like, like]
+        if site:
+            clauses.append("site = ?")
+            params.append(site)
+        if company:
+            clauses.append("lower(company) LIKE ?")
+            params.append(f"%{company.lower()}%")
+        if status and status != "all":
+            clauses.append("status = ?")
+            params.append(status)
+        if track_status:
+            clauses.append("track_status = ?")
+            params.append(track_status)
+        if workplace:
+            clauses.append("lower(COALESCE(workplace, '')) = ?")
+            params.append(workplace.lower())
+        if level:
+            clauses.append("lower(COALESCE(level, '')) = ?")
+            params.append(level.lower())
+        if min_score is not None:
+            clauses.append("match_score IS NOT NULL AND match_score >= ?")
+            params.append(min_score)
+        if min_salary is not None:
+            clauses.append("COALESCE(salary_max, salary_min) >= ?")
+            params.append(min_salary)
+        if dismissed is not None:
+            clauses.append("dismissed = ?")
+            params.append(1 if dismissed else 0)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        order = {
+            "recent": "first_seen DESC, site, url",
+            "score": "match_score DESC, matched_at DESC, url",
+            "updated": "track_updated_at DESC, first_seen DESC, url",
+            "salary": "COALESCE(salary_max, salary_min) DESC, url",
+            "title": "lower(title) ASC, url",
+        }.get(sort, "first_seen DESC, site, url")
+        rows = self._conn.execute(
+            f"SELECT * FROM positions{where} ORDER BY {order} LIMIT ? OFFSET ?",
+            [*params, limit, offset],
+        ).fetchall()
+        return [_to_position(r) for r in rows]
+
+    def track_counts(self) -> dict[str, int]:
+        """Tallies for the personal tracking axis (§16): one entry per *present*
+        ``track_status`` plus ``dismissed`` (counted separately — a dismissed row keeps its
+        stage). Stages with no rows are absent (the store does not know the enum — that is
+        host policy in ``tracking``; the web layer zero-fills). Orthogonal to
+        :meth:`position_counts` (the crawler lifecycle).
+        """
+        rows = self._conn.execute(
+            "SELECT track_status, COUNT(*) AS n FROM positions GROUP BY track_status"
+        ).fetchall()
+        out: dict[str, int] = {row["track_status"]: int(row["n"]) for row in rows}
+        dm = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM positions WHERE dismissed = 1"
+        ).fetchone()
+        out["dismissed"] = int(dm["n"])
+        return out
+
+    # -- manual crawl requests (§16 crawl-now button) --------------------------
+    #
+    # A tiny queue the web UI writes and the §4.9 scheduler drains: the UI cannot run a
+    # second scheduler (that would violate the single-owner "a board never overlaps its own
+    # run" rule), so "crawl now" just flags the slug here and the daemon folds it into its
+    # next due set. Requesting a slug the daemon does not know is a silent no-op there.
+
+    def request_crawl(self, slug: str) -> None:
+        """Queue a manual crawl of ``slug`` for the scheduler to pick up (§16).
+
+        Idempotent upsert keyed by slug — a second request before the daemon drains
+        collapses to one pending request. Does nothing itself; the daemon owns the crawl.
+        """
+        now = self._clock().isoformat()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO crawl_requests (slug, requested_at) VALUES (?, ?) "
+                "ON CONFLICT (slug) DO UPDATE SET requested_at = excluded.requested_at",
+                (slug, now),
+            )
+            self._conn.commit()
+
+    def take_crawl_requests(self) -> list[str]:
+        """Atomically drain and return all queued manual-crawl slugs (§16).
+
+        The §4.9 scheduler calls this each tick and unions the slugs into its due set.
+        Read-then-delete under the write lock (single connection) is atomic, so a slug is
+        never handed out twice or lost to a concurrent :meth:`request_crawl`. Oldest
+        request first, though order is immaterial (the daemon dedups against ``_inflight``).
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT slug FROM crawl_requests ORDER BY requested_at, slug"
+            ).fetchall()
+            self._conn.execute("DELETE FROM crawl_requests")
+            self._conn.commit()
+            return [row["slug"] for row in rows]
+
     # -- meta (small persisted key/value scalars) ------------------------------
 
     def get_meta(self, key: str) -> str | None:
@@ -962,6 +1205,14 @@ class StateStore:
             "matched": _count("status = 'open' AND match_score IS NOT NULL"),
             "pending": _count("status = 'open' AND match_pending = 1"),
         }
+
+    def open_counts_by_site(self) -> dict[str, int]:
+        """Open-position count per site slug — the §16 dashboard's per-board tally."""
+        rows = self._conn.execute(
+            "SELECT site, COUNT(*) AS n FROM positions WHERE status = 'open' "
+            "GROUP BY site"
+        ).fetchall()
+        return {row["site"]: int(row["n"]) for row in rows}
 
     # -- LLM match cache & daily spend (§6/§8) --------------------------------
 
@@ -1126,4 +1377,9 @@ def _to_position(row: sqlite3.Row) -> PositionRecord:
         match_reasons=row["match_reasons"],
         matched_at=_dt("matched_at"),
         match_pending=bool(row["match_pending"]),
+        track_status=row["track_status"],
+        applied_at=_dt("applied_at"),
+        notes=row["notes"],
+        dismissed=bool(row["dismissed"]),
+        track_updated_at=_dt("track_updated_at"),
     )

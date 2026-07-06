@@ -333,10 +333,35 @@ class Scheduler:
         )
 
     def due_sites(self) -> list[Site]:
+        """Sites to crawl this tick: those past their cadence, plus any a §16 web-UI
+        "crawl now" button requested.
+
+        Drains the manual-request queue exactly once — this is the queue's sole consumer
+        and :meth:`tick` its sole caller — and folds those slugs into the due set even when
+        their cadence hasn't elapsed. A forced slug still respects the invariants that
+        matter: a disabled site or one already ``_inflight`` is skipped (so a button press
+        never overlaps a board's own run, §4.9), and a request naming a slug outside the
+        registry is logged and dropped, since the daemon can only crawl boards it knows.
+        """
+        forced = set(self._store.take_crawl_requests())
+        if forced:
+            known = {s.slug for s in self._sites}
+            if forced & known:
+                _log.info(
+                    "manual crawl requested slugs=%s", ",".join(sorted(forced & known))
+                )
+            if forced - known:
+                _log.warning(
+                    "manual crawl requested for unknown slug(s)=%s "
+                    "(not in the site registry; ignored)",
+                    ",".join(sorted(forced - known)),
+                )
         return [
             s
             for s in self._sites
-            if s.enabled and s.slug not in self._inflight and self._is_due(s)
+            if s.enabled
+            and s.slug not in self._inflight
+            and (s.slug in forced or self._is_due(s))
         ]
 
     def _is_due(self, site: Site) -> bool:

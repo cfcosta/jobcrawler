@@ -1,4 +1,4 @@
-"""Operator CLI (§10): ``run | generate | validate | crawl | promote | rollback |
+"""Operator CLI (§10): ``run | serve | generate | validate | crawl | promote | rollback |
 list | status | positions | matches | rematch | profile | login``.
 
 ``run`` is the primary deployment entrypoint (the service schedules itself, §4.9);
@@ -1164,6 +1164,19 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_serve(args: argparse.Namespace) -> int:
+    _configure_logging()  # the web server must not run silent either (§4.9)
+    # The §16 tracker UI is a second long-running process over the SAME store the daemon
+    # owns; WAL mode (§4.7) makes the shared file safe for concurrent readers + this
+    # writer. FastAPI/uvicorn/jinja2 are heavy and only this command needs them, so import
+    # lazily — the rest of the CLI must not pay startup cost for a UI it never launches.
+    # serve_app resolves host/port (flag > env > config default), opens the store, loads
+    # the site registry best-effort, and blocks in uvicorn until SIGINT/SIGTERM.
+    from jobcrawler.web import serve_app
+
+    return serve_app(host=args.host, port=args.port)
+
+
 def cmd_generate(args: argparse.Namespace) -> int:
     # The generator needs a configured LM + Deno sandbox + live fetch; its deps
     # are heavy, so import lazily and let the runtime surface any missing setup.
@@ -1245,6 +1258,15 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("run", help="start the scheduler daemon").set_defaults(func=cmd_run)
+
+    srv = sub.add_parser("serve", help="start the web tracker UI (§16)")
+    srv.add_argument(
+        "--host", help="bind address (default: JOBCRAWLER_SERVE_HOST or 127.0.0.1)"
+    )
+    srv.add_argument(
+        "--port", type=int, help="listen port (default: JOBCRAWLER_SERVE_PORT or 8765)"
+    )
+    srv.set_defaults(func=cmd_serve)
 
     gen = sub.add_parser("generate", help="run RLM, gate, write crawlers/<slug>.py")
     target = gen.add_mutually_exclusive_group(required=True)

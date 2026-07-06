@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}{{ p.title }} · {{ p.company }}{% endblock %}
+{% block content %}
+<div class="detail">
+  <p><a class="back" href="/positions">← All positions</a></p>
+
+  <header class="detail-head">
+    <h1>{{ p.title }}</h1>
+    <p class="sub">{{ p.company }} · {{ p.location }}{% if p.workplace %} · {{ p.workplace }}{% endif %}</p>
+    <p class="meta">
+      <span class="lifecycle lc-{{ p.status }}">{{ p.status }}</span>
+      {% if p.match_score is not none %}<span class="score-pill">Match {{ p.match_score }}{% if p.match_verdict %} · {{ p.match_verdict }}{% endif %}</span>{% endif %}
+      {% if p.level %}<span class="tag">{{ p.level }}</span>{% endif %}
+      {% if p | salary %}<span class="tag">{{ p | salary }}</span>{% endif %}
+      {% if p.employment_type %}<span class="tag">{{ p.employment_type }}</span>{% endif %}
+      {% if p.department %}<span class="tag">{{ p.department }}</span>{% endif %}
+    </p>
+    <p><a class="ext" href="{{ p.url }}" target="_blank" rel="noopener noreferrer">Open original posting ↗</a></p>
+  </header>
+
+  <div class="cols">
+    <section class="panel">
+      <h2>Track</h2>
+      <form method="post" action="/positions/{{ pid }}/status" class="stack">
+        <label>Stage
+          <select name="track_status" data-autosubmit>
+            {% for value, label, token in tracking.choices() %}
+            <option value="{{ value }}"{{ ' selected' if p.track_status == value else '' }}>{{ label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <noscript><button type="submit">Update</button></noscript>
+      </form>
+      <dl class="kv">
+        <dt>Applied</dt><dd>{{ p.applied_at | date }}</dd>
+        <dt>Updated</dt><dd>{% if p.track_updated_at %}{{ p.track_updated_at | age }} ago{% else %}—{% endif %}</dd>
+        <dt>First seen</dt><dd>{{ p.first_seen | date }}</dd>
+        <dt>Posted</dt><dd>{{ p.posted_at | date }}</dd>
+      </dl>
+      <div class="actions">
+        <form method="post" action="/positions/{{ pid }}/dismiss">
+          <input type="hidden" name="dismissed" value="{{ '0' if p.dismissed else '1' }}">
+          <button type="submit" class="secondary">{{ 'Restore' if p.dismissed else 'Dismiss' }}</button>
+        </form>
+        {% if crawlable %}
+        <form method="post" action="/sites/{{ p.site }}/crawl">
+          <button type="submit" class="secondary">Crawl {{ site_names.get(p.site, p.site) }} now</button>
+        </form>
+        {% endif %}
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Notes</h2>
+      <form method="post" action="/positions/{{ pid }}/notes" class="stack">
+        <textarea name="notes" rows="7" placeholder="Private notes — recruiter, next step, referral, salary talk…">{{ p.notes or '' }}</textarea>
+        <button type="submit">Save notes</button>
+      </form>
+    </section>
+  </div>
+
+  {% if reasons %}
+  <section class="panel">
+    <h2>Why this matched</h2>
+    <ul class="reasons">{% for r in reasons %}<li>{{ r }}</li>{% endfor %}</ul>
+  </section>
+  {% endif %}
+
+  <section class="panel">
+    <h2>Description</h2>
+    {% if p.description %}<div class="description">{{ p.description }}</div>{% else %}<p class="empty">No description stored for this posting.</p>{% endif %}
+  </section>
+</div>
+{% endblock %}

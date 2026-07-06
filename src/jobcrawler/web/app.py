@@ -1,0 +1,564 @@
+"""FastAPI app for the position tracker (§16), over the shared §4.7 store.
+
+Realizes the "optional thin HTTP surface (status, manual trigger)" that §4.9 reserved. A
+separate ``jobcrawl serve`` process reads/writes the SAME WAL SQLite store the daemon owns
+— safe because the store runs WAL + ``busy_timeout`` (one writer, many readers/occasional
+writers don't corrupt each other). The UI exposes the operator-owned tracking axis
+(`jobcrawler.tracking`): browse/search/filter, move a posting through your personal
+pipeline, take notes, dismiss noise, plus a dashboard and manual crawl/rescore triggers.
+
+Boundaries it must respect:
+
+* It never runs a scheduler or calls an LLM. "Crawl now" flags a slug via
+  :meth:`StateStore.request_crawl` for the daemon's ``due_sites`` to pick up (§4.9
+  single-owner: the UI must not overlap a board's own run); "rescore" parks open rows via
+  :meth:`StateStore.requeue_open_matches` for the daemon's match-drain to flush (§4.7 —
+  no crawl needed, the description is persisted on the row).
+* Per §8 the match verdict's ``reasons``/``concerns`` are *operator-facing only* — shown
+  to you here, never fed back into any generator/optimizer. The status/notes/dismissed
+  axis is likewise a pure operator surface: no optimizer code path reads these columns.
+* Status *values* are validated host-side (`tracking.parse`) before the store persists the
+  string; the store never adjudicates the value or the transition.
+
+Handlers that touch the store are plain ``def`` (Starlette runs them in a threadpool), so
+the blocking ``sqlite3`` calls — each already serialized by the store's own lock, with
+``check_same_thread=False`` for the threadpool hop — never stall the event loop.
+"""
+
+from __future__ import annotations
+
+import base64
+import binascii
+import json
+import logging
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, cast
+
+from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
+
+from jobcrawler import tracking
+from jobcrawler.state import PositionRecord, StateStore
+
+_log = logging.getLogger("jobcrawler.web")
+
+_WEB_DIR = Path(__file__).parent
+_TEMPLATES_DIR = _WEB_DIR / "templates"
+_STATIC_DIR = _WEB_DIR / "static"
+
+_PAGE_SIZE = 50
+
+
+# -- identity encoding ------------------------------------------------------
+#
+# A position's identity is ``(site, url)``; the url carries slashes and query strings, so
+# it can't be a path segment. Encode the pair as urlsafe base64 of ``site\nurl`` for a
+# clean, reversible ``/positions/{pid}`` path.
+
+
+def encode_pid(site: str, url: str) -> str:
+    """Reversible id for a position's ``(site, url)`` — urlsafe base64, padding stripped."""
+    return base64.urlsafe_b64encode(f"{site}\n{url}".encode()).decode().rstrip("=")
+
+
+def decode_pid(pid: str) -> tuple[str, str]:
+    """Inverse of :func:`encode_pid`; raise 404 for anything that isn't a valid id."""
+    pad = "=" * (-len(pid) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(pid + pad).decode()
+        site, url = raw.split("\n", 1)
+    except (binascii.Error, ValueError, UnicodeDecodeError):
+        raise HTTPException(status_code=404, detail="unknown position id") from None
+    return site, url
+
+
+# -- small presentation helpers ---------------------------------------------
+
+
+def _iso(dt: datetime | None) -> str | None:
+    return dt.isoformat() if dt is not None else None
+
+
+def reasons_list(raw: str | None) -> list[str]:
+    """Decode the stored match reasons (a JSON list string, §4.7) to a list of strings."""
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return [raw]
+    return [str(x) for x in data] if isinstance(data, list) else [str(data)]
+
+
+def humanize_age(dt: datetime | None, *, now: datetime | None = None) -> str:
+    """A compact age (``2h``/``3d``) since ``dt``; ``—`` when unknown, ``0s`` if future."""
+    if dt is None:
+        return "—"
+    now = now or datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    secs = max(0.0, (now - dt).total_seconds())
+    for unit, size in (("d", 86400.0), ("h", 3600.0), ("m", 60.0)):
+        if secs >= size:
+            return f"{int(secs // size)}{unit}"
+    return f"{int(secs)}s"
+
+
+def format_date(dt: datetime | None) -> str:
+    """A calendar date (``2026-07-06``) for stamped events like ``applied_at``; ``—`` if unset."""
+    return dt.date().isoformat() if dt is not None else "—"
+
+
+def format_salary(p: PositionRecord) -> str:
+    """A compact salary string from a record's ``salary_*`` fields; ``''`` when unstated."""
+    lo, hi = p.salary_min, p.salary_max
+    if lo is None and hi is None:
+        return ""
+    cur = (p.salary_currency or "").strip()
+    body = (
+        f"{lo:,.0f}–{hi:,.0f}"
+        if lo is not None and hi is not None
+        else f"{(hi if hi is not None else lo):,.0f}"
+    )
+    per = f"/{p.salary_period}" if p.salary_period else ""
+    return f"{cur} {body}{per}".strip()
+
+
+def _position_dict(p: PositionRecord) -> dict[str, Any]:
+    """A JSON-serialisable view of a position for the ``/api`` surface."""
+    return {
+        "pid": encode_pid(p.site, p.url),
+        "site": p.site,
+        "url": p.url,
+        "title": p.title,
+        "company": p.company,
+        "location": p.location,
+        "workplace": p.workplace,
+        "level": p.level,
+        "discipline": p.discipline,
+        "employment_type": p.employment_type,
+        "department": p.department,
+        "salary": format_salary(p) or None,
+        "salary_min": p.salary_min,
+        "salary_max": p.salary_max,
+        "salary_currency": p.salary_currency,
+        "salary_period": p.salary_period,
+        "description": p.description,
+        "status": p.status,
+        "closed_at": _iso(p.closed_at),
+        "match_score": p.match_score,
+        "match_verdict": p.match_verdict,
+        "match_reasons": reasons_list(p.match_reasons),
+        "matched_at": _iso(p.matched_at),
+        "track_status": p.track_status,
+        "track_label": tracking.label(p.track_status),
+        "applied_at": _iso(p.applied_at),
+        "notes": p.notes,
+        "dismissed": p.dismissed,
+        "track_updated_at": _iso(p.track_updated_at),
+        "posted_at": _iso(p.posted_at),
+        "first_seen": _iso(p.first_seen),
+        "last_seen": _iso(p.last_seen),
+    }
+
+
+def _int_param(params: Any, name: str) -> int | None:
+    raw = params.get(name)
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _float_param(params: Any, name: str) -> float | None:
+    raw = params.get(name)
+    if raw is None or raw == "":
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def _read_filters(params: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Parse the browse query-string into (``search_positions`` kwargs, raw values).
+
+    The raw dict re-populates the filter form so the UI reflects the active query. By
+    default dismissed rows are hidden and both lifecycle states are shown (a tracker cares
+    about a posting it applied to even after the board closes it).
+    """
+
+    def _s(name: str) -> str | None:
+        v = params.get(name)
+        v = v.strip() if isinstance(v, str) else v
+        return v or None
+
+    show_dismissed = (params.get("show_dismissed") or "") in {"1", "true", "on", "yes"}
+    status = _s("status")  # None/'all' => both open and closed
+    track_status = _s("track_status")
+    sort = _s("sort") or "recent"
+    kwargs: dict[str, Any] = {
+        "query": (params.get("q") or "").strip(),
+        "site": _s("site"),
+        "company": _s("company"),
+        "status": status,
+        "track_status": track_status,
+        "workplace": _s("workplace"),
+        "level": _s("level"),
+        "min_score": _int_param(params, "min_score"),
+        "min_salary": _float_param(params, "min_salary"),
+        "dismissed": None if show_dismissed else False,
+        "sort": sort,
+    }
+    raw = {
+        "q": params.get("q") or "",
+        "site": params.get("site") or "",
+        "company": params.get("company") or "",
+        "status": params.get("status") or "",
+        "track_status": track_status or "",
+        "workplace": params.get("workplace") or "",
+        "level": params.get("level") or "",
+        "min_score": params.get("min_score") or "",
+        "min_salary": params.get("min_salary") or "",
+        "sort": sort,
+        "show_dismissed": show_dismissed,
+    }
+    return kwargs, raw
+
+
+def _score_distribution(store: StateStore) -> list[dict[str, Any]]:
+    """Bucketed histogram of open match scores, high band first (dashboard)."""
+    bands = [(80, 100), (60, 79), (40, 59), (20, 39), (0, 19)]
+    counts = [0] * len(bands)
+    for p in store.matches(0, limit=5000):
+        s = p.match_score or 0
+        for i, (lo, hi) in enumerate(bands):
+            if lo <= s <= hi:
+                counts[i] += 1
+                break
+    peak = max(counts) if counts else 0
+    return [
+        {
+            "label": f"{lo}–{hi}",
+            "count": n,
+            "pct": (100 * n // peak) if peak else 0,
+            "strong": lo >= 60,
+        }
+        for (lo, hi), n in zip(bands, counts)
+    ]
+
+
+def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
+    """Build the FastAPI app over an injected ``store`` (the DI seam the tests rely on).
+
+    A ``":memory:"`` store is per-connection, so the app and its caller MUST share one
+    instance — hence the factory rather than opening a store inside the handlers. ``sites``
+    is the §4.1 registry (optional): it names the boards the crawl-now buttons can target
+    and drives the dashboard's per-site panel; when absent those degrade gracefully.
+    """
+    app = FastAPI(title="jobcrawler — position tracker", docs_url="/api/docs")
+    app.state.store = store
+    site_list = list(sites or [])
+    known_slugs = {getattr(s, "slug", None) for s in site_list}
+    site_names = {
+        getattr(s, "slug", ""): (
+            getattr(s, "company", None)
+            or getattr(s, "name", "")
+            or getattr(s, "slug", "")
+        )
+        for s in site_list
+    }
+
+    templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+    # Jinja's globals/filters are dynamically-typed namespaces; ty infers a narrow value
+    # type from the built-in defaults, so cast to the real ``dict[str, Any]`` before adding
+    # our template helpers (the tracking policy, the pid encoder, and presentation filters).
+    jinja_globals = cast("dict[str, Any]", templates.env.globals)
+    jinja_globals["tracking"] = tracking
+    jinja_globals["encode_pid"] = encode_pid
+    jinja_globals["site_names"] = site_names
+    jinja_filters = cast("dict[str, Any]", templates.env.filters)
+    jinja_filters["reasons"] = reasons_list
+    jinja_filters["age"] = humanize_age
+    jinja_filters["salary"] = format_salary
+    jinja_filters["date"] = format_date
+
+    if _STATIC_DIR.is_dir():
+        app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+    def _require(site: str, url: str) -> PositionRecord:
+        rec = store.get_position(site, url)
+        if rec is None:
+            raise HTTPException(status_code=404, detail="position not found")
+        return rec
+
+    def _back(
+        request: Request, fallback: str, msg: str | None = None
+    ) -> RedirectResponse:
+        target = request.headers.get("referer") or fallback
+        if msg:
+            sep = "&" if "?" in target else "?"
+            target = f"{target}{sep}msg={msg.replace(' ', '+')}"
+        return RedirectResponse(target, status_code=303)
+
+    def _apply_track(site: str, url: str, value: str) -> PositionRecord:
+        status = tracking.parse(value)  # host-side validation (§8) — 400 on bad value
+        store.set_track_status(
+            site, url, status.value, stamp_applied=tracking.implies_applied(status)
+        )
+        return _require(site, url)
+
+    # -- HTML: dashboard ----------------------------------------------------
+
+    @app.get("/", response_class=HTMLResponse)
+    def dashboard(request: Request) -> Response:
+        tcounts = store.track_counts()
+        funnel = [
+            {
+                "value": s.value,
+                "label": tracking.LABELS[s],
+                "token": tracking.CSS_TOKENS[s],
+                "count": tcounts.get(s.value, 0),
+                "terminal": s in tracking.TERMINAL,
+            }
+            for s in tracking.ORDER
+        ]
+        open_by_site = store.open_counts_by_site()
+        per_site = [
+            {
+                "slug": getattr(s, "slug", ""),
+                "name": site_names.get(getattr(s, "slug", ""), getattr(s, "slug", "")),
+                "enabled": getattr(s, "enabled", True),
+                "open": open_by_site.get(getattr(s, "slug", ""), 0),
+                "health": store.get_health(getattr(s, "slug", "")) or "—",
+                "last_run": store.last_run(getattr(s, "slug", "")),
+            }
+            for s in site_list
+        ]
+        return templates.TemplateResponse(
+            request=request,
+            name="dashboard.html",
+            context={
+                "nav": "dashboard",
+                "msg": request.query_params.get("msg"),
+                "funnel": funnel,
+                "dismissed": tcounts.get("dismissed", 0),
+                "lifecycle": store.position_counts(),
+                "distribution": _score_distribution(store),
+                "top_matches": store.matches(0, limit=8),
+                "per_site": per_site,
+                "has_registry": bool(site_list),
+            },
+        )
+
+    # -- HTML: browse / search / filter -------------------------------------
+
+    @app.get("/positions", response_class=HTMLResponse)
+    def list_positions(request: Request) -> Response:
+        kwargs, raw = _read_filters(request.query_params)
+        page = max(1, _int_param(request.query_params, "page") or 1)
+        rows = store.search_positions(
+            **kwargs, limit=_PAGE_SIZE + 1, offset=(page - 1) * _PAGE_SIZE
+        )
+        has_next = len(rows) > _PAGE_SIZE
+        rows = rows[:_PAGE_SIZE]
+        url = request.url
+        return templates.TemplateResponse(
+            request=request,
+            name="positions.html",
+            context={
+                "nav": "positions",
+                "msg": request.query_params.get("msg"),
+                "rows": rows,
+                "filters": raw,
+                "sites": site_list,
+                "page": page,
+                "has_next": has_next,
+                "prev_url": str(url.include_query_params(page=page - 1))
+                if page > 1
+                else None,
+                "next_url": str(url.include_query_params(page=page + 1))
+                if has_next
+                else None,
+            },
+        )
+
+    @app.get("/positions/{pid}", response_class=HTMLResponse)
+    def position_detail(request: Request, pid: str) -> Response:
+        site, url = decode_pid(pid)
+        rec = _require(site, url)
+        return templates.TemplateResponse(
+            request=request,
+            name="detail.html",
+            context={
+                "nav": "positions",
+                "msg": request.query_params.get("msg"),
+                "p": rec,
+                "pid": pid,
+                "reasons": reasons_list(rec.match_reasons),
+                "crawlable": rec.site in known_slugs,
+            },
+        )
+
+    # -- HTML: mutations (form POST -> redirect back) -----------------------
+
+    @app.post("/positions/{pid}/status")
+    def post_status(
+        request: Request, pid: str, track_status: str = Form(...)
+    ) -> Response:
+        site, url = decode_pid(pid)
+        _require(site, url)
+        try:
+            _apply_track(site, url, track_status)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        return _back(
+            request, f"/positions/{pid}", f"Status → {tracking.label(track_status)}"
+        )
+
+    @app.post("/positions/{pid}/notes")
+    def post_notes(request: Request, pid: str, notes: str = Form("")) -> Response:
+        site, url = decode_pid(pid)
+        _require(site, url)
+        store.set_notes(site, url, notes)
+        return _back(request, f"/positions/{pid}", "Notes saved")
+
+    @app.post("/positions/{pid}/dismiss")
+    def post_dismiss(
+        request: Request, pid: str, dismissed: str = Form("1")
+    ) -> Response:
+        site, url = decode_pid(pid)
+        _require(site, url)
+        on = dismissed in {"1", "true", "on", "yes"}
+        store.set_dismissed(site, url, on)
+        return _back(request, f"/positions/{pid}", "Dismissed" if on else "Restored")
+
+    @app.post("/sites/{slug}/crawl")
+    def post_crawl(request: Request, slug: str) -> Response:
+        store.request_crawl(slug)
+        known = slug in known_slugs or not site_list
+        msg = (
+            f"Crawl of {slug} queued for the daemon"
+            if known
+            else f"{slug} is not in the registry — request ignored by the daemon"
+        )
+        return _back(request, "/", msg)
+
+    @app.post("/rescore")
+    def post_rescore(request: Request) -> Response:
+        n = store.requeue_open_matches()
+        return _back(request, "/", f"Requeued {n} open positions for rescoring")
+
+    # -- JSON API (programmatic + tests) ------------------------------------
+
+    @app.get("/api/positions")
+    def api_positions(request: Request) -> JSONResponse:
+        kwargs, _ = _read_filters(request.query_params)
+        page = max(1, _int_param(request.query_params, "page") or 1)
+        rows = store.search_positions(
+            **kwargs, limit=_PAGE_SIZE, offset=(page - 1) * _PAGE_SIZE
+        )
+        return JSONResponse([_position_dict(p) for p in rows])
+
+    @app.get("/api/positions/{pid}")
+    def api_position(pid: str) -> JSONResponse:
+        site, url = decode_pid(pid)
+        return JSONResponse(_position_dict(_require(site, url)))
+
+    @app.post("/api/positions/track")
+    def api_track(body: "TrackBody") -> JSONResponse:
+        _require(body.site, body.url)
+        try:
+            rec = _apply_track(body.site, body.url, body.track_status)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        return JSONResponse(_position_dict(rec))
+
+    @app.post("/api/positions/notes")
+    def api_notes(body: "NotesBody") -> JSONResponse:
+        _require(body.site, body.url)
+        store.set_notes(body.site, body.url, body.notes)
+        return JSONResponse(_position_dict(_require(body.site, body.url)))
+
+    @app.post("/api/positions/dismiss")
+    def api_dismiss(body: "DismissBody") -> JSONResponse:
+        _require(body.site, body.url)
+        store.set_dismissed(body.site, body.url, body.dismissed)
+        return JSONResponse(_position_dict(_require(body.site, body.url)))
+
+    @app.post("/api/crawl", status_code=202)
+    def api_crawl(body: "CrawlBody") -> JSONResponse:
+        store.request_crawl(body.slug)
+        known = body.slug in known_slugs or not site_list
+        return JSONResponse({"queued": body.slug, "known": known}, status_code=202)
+
+    @app.post("/api/rescore", status_code=202)
+    def api_rescore() -> JSONResponse:
+        return JSONResponse({"requeued": store.requeue_open_matches()}, status_code=202)
+
+    @app.get("/health")
+    def health() -> dict[str, bool]:
+        return {"ok": True}
+
+    return app
+
+
+class TrackBody(BaseModel):
+    site: str
+    url: str
+    track_status: str
+
+
+class NotesBody(BaseModel):
+    site: str
+    url: str
+    notes: str | None = None
+
+
+class DismissBody(BaseModel):
+    site: str
+    url: str
+    dismissed: bool = True
+
+
+class CrawlBody(BaseModel):
+    slug: str
+
+
+def serve_app(*, host: str | None = None, port: int | None = None) -> int:
+    """Open the store, load the registry best-effort, and run uvicorn (blocking).
+
+    The store path comes from ``JOBCRAWLER_STATE_URL`` (same DB the daemon writes); the
+    registry is optional — if it's missing or invalid the UI still serves (browse/track
+    work; only the crawl-now buttons go dark). ``host``/``port`` override the config
+    defaults so the CLI flags win over env, which wins over the loopback default.
+    """
+    import uvicorn
+
+    from jobcrawler import config
+    from jobcrawler.sites import load_sites
+
+    url = config.state_url()
+    db_path = url.removeprefix("sqlite:///") if url.startswith("sqlite:") else url
+    store = StateStore(db_path)
+
+    sites: list[Any] | None = None
+    try:
+        sites = load_sites(config.sites_path())
+    except Exception as exc:  # registry optional for the UI — noqa: BLE001
+        _log.warning(
+            "serve: site registry unavailable (%s); crawl-now buttons disabled", exc
+        )
+
+    app = create_app(store, sites=sites)
+    bind_host = host if host is not None else config.serve_host()
+    bind_port = port if port is not None else config.serve_port()
+    _log.info("position tracker serving on http://%s:%d", bind_host, bind_port)
+    uvicorn.run(app, host=bind_host, port=bind_port, log_level="info")
+    return 0

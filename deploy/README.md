@@ -15,6 +15,7 @@ Files in this directory:
 | `sites.example.yaml` | A minimal, schema-correct site registry (with ATS `company`/`enumerates_all` examples) to copy into your state dir. |
 | `jobcrawler.service` | systemd unit running the OCI image via podman/docker (**recommended**). |
 | `jobcrawler-native.service` | systemd unit running the Nix-built console script directly (no container runtime). |
+| `jobcrawler-serve.service` | **optional** companion unit running the §16 web tracker UI (`jobcrawl serve`) alongside the daemon, over the same state DB. Loopback-bound; its header has the install + reverse-proxy notes. |
 
 ## What you must provide
 
@@ -167,6 +168,24 @@ Install `jobcrawler-native.service` (its header has the full sequence,
 including the system user and absolute state paths). It adds systemd hardening
 (`ProtectSystem=strict`, a single `ReadWritePaths`, outbound-only address families)
 since it runs directly on the host.
+
+## The web tracker (§16) — optional
+
+To browse, search, and *work* the positions the daemon finds — move each through a
+personal application pipeline (interested → applied → offer…), take notes, watch a
+dashboard — run the `jobcrawl serve` UI. It's a separate process over the **same**
+state DB (SQLite WAL makes the daemon-writer / UI-writer overlap safe), so it runs no
+scheduler and no LLM and needs none of the model/API config.
+
+Install the companion `jobcrawler-serve.service` alongside the native daemon (its
+header has the sequence). It **binds `127.0.0.1:8765` by default** because the UI holds
+personal application data — reach it over an SSH tunnel
+(`ssh -L 8765:127.0.0.1:8765 host`) or an authenticating reverse proxy, and keep it off
+public interfaces (don't set `JOBCRAWLER_SERVE_HOST=0.0.0.0` in the open). Ad-hoc, it's
+just `jobcrawl serve` with the same env. Under the container image the same command runs
+in the baked venv — publish it loopback-pinned (`-p 127.0.0.1:8765:8765`) with
+`JOBCRAWLER_SERVE_HOST=0.0.0.0` *inside* the container so the host-loopback port-forward
+can reach it.
 
 ## Healthcheck story
 
