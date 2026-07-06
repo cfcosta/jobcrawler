@@ -10,6 +10,7 @@ These are asserted by capturing the constructor kwargs — no LM is ever really 
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import dspy
@@ -106,3 +107,208 @@ def test_capped_lm_non_chatgpt_keeps_max_tokens(
     (call,) = captured
     assert call["kwargs"]["max_tokens"] == 16000
     assert "model_type" not in call["kwargs"]
+
+
+# --- §9 Codex responses transform repair -----------------------------------------
+#
+# litellm's stock Codex transform drops the streamed output and returns an empty reply,
+# which crashes dspy with ``KeyError: 'text'`` and parks every match batch.
+# :func:`lm._codex_transform_keep_output` walks the SSE body itself and refills the
+# empty ``output``. These exercise that walk directly against synthetic SSE bodies —
+# no network — so a regression in the aggregation is caught without live credentials.
+
+
+class _FakeResponse:
+    """Minimal stand-in for the httpx response litellm hands the transform."""
+
+    def __init__(
+        self, text: str, *, content_type: str = "text/event-stream", status: int = 200
+    ) -> None:
+        self.text = text
+        self.headers = {"content-type": content_type}
+        self.status_code = status
+
+
+class _FakeLogging:
+    def post_call(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+
+def _boom_stock(*args: Any, **kwargs: Any) -> Any:
+    raise AssertionError("stock transform must not run for an SSE body")
+
+
+def _sse(*events: dict[str, Any]) -> str:
+    """Render event dicts as an SSE ``data:`` stream terminated by ``[DONE]``."""
+    lines: list[str] = []
+    for event in events:
+        lines.append(f"data: {json.dumps(event)}")
+        lines.append("")
+    lines.append("data: [DONE]")
+    return "\n".join(lines)
+
+
+def _delta(text: str) -> dict[str, Any]:
+    return {"type": "response.output_text.delta", "delta": text}
+
+
+def _item_done(item: dict[str, Any]) -> dict[str, Any]:
+    return {"type": "response.output_item.done", "item": item}
+
+
+def _message(text: str) -> dict[str, Any]:
+    return {
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "id": "msg_test",
+        "content": [{"type": "output_text", "text": text, "annotations": []}],
+    }
+
+
+def _completed(output: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    # A stock Codex ``response.completed`` — note ``output`` comes back EMPTY, which is
+    # exactly the defect the repair works around.
+    return {
+        "type": "response.completed",
+        "response": {
+            "id": "resp_test",
+            "object": "response",
+            "created_at": 1234567890,
+            "status": "completed",
+            "model": "gpt-5.5",
+            "output": output if output is not None else [],
+            "usage": {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7},
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+        },
+    }
+
+
+def _transform(body: str, *, content_type: str = "text/event-stream") -> Any:
+    return lm._codex_transform_keep_output(
+        None,
+        "gpt-5.5",
+        _FakeResponse(body, content_type=content_type),
+        _FakeLogging(),
+        _boom_stock,
+    )
+
+
+def _output_items(response: Any) -> list[Any]:
+    return list(getattr(response, "output", None) or [])
+
+
+def _item_type(item: Any) -> Any:
+    return item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
+
+
+def _message_text(response: Any) -> str:
+    """Concatenate all ``output_text`` from message items — object OR dict shaped.
+
+    ``ResponsesAPIResponse`` coerces valid payloads into typed items but falls back to
+    ``model_construct`` (raw dicts) on a partial one, so tolerate both here.
+    """
+    out: list[str] = []
+    for item in _output_items(response):
+        if _item_type(item) != "message":
+            continue
+        content = (
+            item.get("content")
+            if isinstance(item, dict)
+            else getattr(item, "content", None)
+        )
+        for part in content or []:
+            text = (
+                part.get("text")
+                if isinstance(part, dict)
+                else getattr(part, "text", None)
+            )
+            if isinstance(text, str):
+                out.append(text)
+    return "".join(out)
+
+
+def test_codex_transform_refills_output_from_the_streamed_message() -> None:
+    # The normal case: a complete message rides in on output_item.done while the
+    # completed event's output is empty — the message (and its text) must survive.
+    body = _sse(
+        _delta("Hel"),
+        _delta("lo"),
+        _item_done(_message("Hello")),
+        _completed(),
+    )
+    response = _transform(body)
+    messages = [i for i in _output_items(response) if _item_type(i) == "message"]
+    assert messages, "the repaired output must contain a message item"
+    assert _message_text(response) == "Hello"
+
+
+def test_codex_transform_synthesizes_a_message_from_deltas_only() -> None:
+    # No output_item.done at all — the text lives solely in the deltas, so a message
+    # item must be synthesized from them (otherwise dspy sees no `text`).
+    body = _sse(_delta("O"), _delta("K"), _completed())
+    response = _transform(body)
+    assert _message_text(response) == "OK"
+
+
+def test_codex_transform_degrades_reasoning_only_reply_to_empty_text() -> None:
+    # A reasoning/tool-only reply carries no message and no deltas. Rather than crash
+    # with KeyError: 'text', the repair guarantees an (empty) message so the batch
+    # parks gracefully. The reasoning item itself is preserved.
+    reasoning = {"type": "reasoning", "id": "rs_1", "summary": []}
+    body = _sse(_item_done(reasoning), _completed())
+    response = _transform(body)
+    assert any(_item_type(i) == "reasoning" for i in _output_items(response))
+    assert any(_item_type(i) == "message" for i in _output_items(response))
+    assert _message_text(response) == ""
+
+
+def test_codex_transform_raises_without_a_completed_event() -> None:
+    from litellm.llms.openai.common_utils import OpenAIError
+
+    # A truncated stream (deltas, never completed) is a genuine failure — surface it so
+    # the caller parks the batch, don't fabricate a success.
+    body = "data: " + json.dumps(_delta("partial"))
+    with pytest.raises(OpenAIError):
+        _transform(body)
+
+
+def test_codex_transform_delegates_a_plain_json_body_to_stock() -> None:
+    # A non-streaming JSON body is already handled correctly upstream — the repair must
+    # defer to the stock transform rather than mis-parse it as SSE.
+    sentinel = object()
+
+    def stock(_self: Any, _model: str, _raw: Any, _log: Any) -> Any:
+        return sentinel
+
+    body = json.dumps({"id": "resp", "object": "response", "output": []})
+    result = lm._codex_transform_keep_output(
+        None,
+        "gpt-5.5",
+        _FakeResponse(body, content_type="application/json"),
+        _FakeLogging(),
+        stock,
+    )
+    assert result is sentinel
+
+
+def test_install_codex_responses_fix_replaces_the_transform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from litellm.llms.chatgpt.responses.transformation import ChatGPTResponsesAPIConfig
+
+    stock = ChatGPTResponsesAPIConfig.transform_response_api_response
+    # Pre-register with monkeypatch so the stock method is restored on teardown no matter
+    # what install() assigns, and reset the module's one-shot guard so install() runs.
+    monkeypatch.setattr(
+        ChatGPTResponsesAPIConfig, "transform_response_api_response", stock
+    )
+    monkeypatch.setattr(lm, "_codex_responses_fix_installed", False)
+
+    lm._install_codex_responses_fix()
+
+    installed = ChatGPTResponsesAPIConfig.transform_response_api_response
+    assert installed is not stock
+    assert installed.__name__ == "patched"

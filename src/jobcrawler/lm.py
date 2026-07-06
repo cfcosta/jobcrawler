@@ -13,6 +13,10 @@ gets wrong:
      ``max_tokens < 16000`` (``clients/lm.py`` in the pinned 3.2.1). The §4.7 matcher builds
      its LM at ``temperature=0, max_tokens=4000`` — exactly the shape that trips the guard —
      so those kwargs must be dropped for a ``chatgpt/*`` slug.
+  3. **A repaired response transform** — litellm's stock Codex transform rebuilds the reply
+     from the empty terminal ``response.completed`` event and discards the streamed output,
+     so dspy crashes with ``KeyError: 'text'`` (0 jobs scored). :func:`_install_codex_responses_fix`
+     patches that transform in place before the first request; see its comment for the details.
 
 Every LM construction site (generation root/sub, GEPA reflection, the matcher) goes through
 :func:`build_lm` so this routing lives in one place; a non-``chatgpt`` slug is constructed
@@ -37,6 +41,179 @@ CHATGPT_PREFIX = "chatgpt/"
 def is_chatgpt(model: str) -> bool:
     """True if ``model`` routes through litellm's ChatGPT (Codex OAuth) provider (§9)."""
     return model.startswith(CHATGPT_PREFIX)
+
+
+# --- §9 Codex Responses backend: repair litellm's output-dropping transform -------
+#
+# litellm's ChatGPT/Codex provider (``chatgpt/*``) speaks the Responses API and forces
+# server-side streaming, but its ``transform_response_api_response`` rebuilds the reply
+# SOLELY from the terminal ``response.completed`` SSE event — whose ``output`` array
+# comes back EMPTY for this backend. The message text is delivered incrementally, via
+# ``response.output_text.delta`` and ``response.output_item.done`` events, and never
+# re-embedded in the completed event. So the stock transform hands back a reply with no
+# output items; dspy's ``base_lm._process_response`` then builds a dict with no ``text``
+# key and its adapter indexes ``output["text"]`` unconditionally, raising a bare
+# ``KeyError: 'text'`` that fails EVERY match batch (0 jobs scored, §4.7 fail-open parks
+# them all). Both litellm and dspy are pinned, read-only store paths, so we repair the
+# one broken method in place: read the SSE body once (as the original does) and refill
+# the empty ``output`` from the streamed items/deltas. Installed once, idempotent, and a
+# no-op if litellm's layout changes or it ever starts returning a populated ``output``.
+
+_codex_responses_fix_installed = False
+
+
+def _install_codex_responses_fix() -> None:
+    """Idempotently patch litellm's Codex responses transform to keep the output (§9)."""
+    global _codex_responses_fix_installed
+    if _codex_responses_fix_installed:
+        return
+    # Set first: a failed/again-unavailable patch must not be retried on every build.
+    _codex_responses_fix_installed = True
+    try:
+        from litellm.llms.chatgpt.responses.transformation import (
+            ChatGPTResponsesAPIConfig,
+        )
+    except Exception:  # pragma: no cover - litellm layout changed; leave stock behavior
+        return
+
+    # Capture the stock method and delegate to our corrected walk. The module-level
+    # flag above already guarantees this body runs at most once per process, so no
+    # per-function re-patch marker is needed.
+    stock = ChatGPTResponsesAPIConfig.transform_response_api_response
+
+    def patched(self, model: str, raw_response: Any, logging_obj: Any) -> Any:
+        return _codex_transform_keep_output(
+            self, model, raw_response, logging_obj, stock
+        )
+
+    ChatGPTResponsesAPIConfig.transform_response_api_response = patched  # ty: ignore[invalid-assignment]
+
+
+def _codex_transform_keep_output(
+    self: Any, model: str, raw_response: Any, logging_obj: Any, stock: Any
+) -> Any:
+    """Corrected Codex responses transform: refill the dropped ``output`` array (§9).
+
+    Mirrors litellm's own SSE walk (single read of ``raw_response.text``), but also
+    collects the streamed ``output_item.done`` items and ``output_text.delta`` chunks
+    and injects them into the completed event's empty ``output`` — guaranteeing a
+    message item so downstream parsing always finds a ``text`` field (a reasoning- or
+    tool-only reply degrades to an empty string instead of crashing).
+    """
+    import json
+
+    from litellm.constants import STREAM_SSE_DONE_STRING
+    from litellm.litellm_core_utils.llm_response_utils.convert_dict_to_response import (
+        _safe_convert_created_field,
+    )
+    from litellm.llms.openai.common_utils import OpenAIError
+    from litellm.types.llms.openai import ResponsesAPIResponse, ResponsesAPIStreamEvents
+    from litellm.utils import CustomStreamWrapper
+
+    content_type = (raw_response.headers or {}).get("content-type", "")
+    body_text = raw_response.text or ""
+    trimmed = body_text.lstrip()
+    looks_like_sse = (
+        "text/event-stream" in content_type.lower()
+        or trimmed.startswith("event:")
+        or trimmed.startswith("data:")
+        or "\nevent:" in body_text
+        or "\ndata:" in body_text
+    )
+    if not looks_like_sse:
+        # A plain JSON body — the stock transform already handles that correctly.
+        return stock(self, model, raw_response, logging_obj)
+
+    logging_obj.post_call(
+        original_response=body_text, additional_args={"complete_input_dict": {}}
+    )
+
+    completed_payload = None
+    error_message = None
+    stream_items: list[dict[str, Any]] = []
+    text_deltas: list[str] = []
+    for chunk in body_text.splitlines():
+        stripped = CustomStreamWrapper._strip_sse_data_from_chunk(chunk)
+        if not stripped:
+            continue
+        stripped = stripped.strip()
+        if not stripped:
+            continue
+        if stripped == STREAM_SSE_DONE_STRING:
+            break
+        try:
+            event = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        event_type = event.get("type")
+        if event_type == "response.output_item.done":
+            item = event.get("item")
+            if isinstance(item, dict):
+                stream_items.append(item)
+        elif event_type == "response.output_text.delta":
+            delta = event.get("delta")
+            if isinstance(delta, str):
+                text_deltas.append(delta)
+        elif event_type == ResponsesAPIStreamEvents.RESPONSE_COMPLETED:
+            completed_payload = event.get("response")
+            break
+        elif event_type in (
+            ResponsesAPIStreamEvents.RESPONSE_FAILED,
+            ResponsesAPIStreamEvents.ERROR,
+        ):
+            err = event.get("error") or (event.get("response") or {}).get("error")
+            if err is not None:
+                error_message = (
+                    err.get("message") if isinstance(err, dict) else str(err)
+                )
+
+    if not isinstance(completed_payload, dict):
+        raise OpenAIError(
+            message=error_message or body_text,
+            status_code=raw_response.status_code,
+        )
+
+    completed_payload = dict(completed_payload)
+    if "created_at" in completed_payload:
+        completed_payload["created_at"] = _safe_convert_created_field(
+            completed_payload["created_at"]
+        )
+
+    # The repair: refill the empty ``output`` from the streamed items, and guarantee a
+    # message item so ``_process_response`` always yields a ``text`` field.
+    output_items = list(completed_payload.get("output") or [])
+    if not output_items:
+        output_items = [it for it in stream_items if isinstance(it, dict)]
+    has_message = any(
+        isinstance(it, dict) and it.get("type") == "message" for it in output_items
+    )
+    if not has_message:
+        output_items.append(
+            {
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "id": "msg_jobcrawler_aggregated",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "".join(text_deltas),
+                        "annotations": [],
+                    }
+                ],
+            }
+        )
+    completed_payload["output"] = output_items
+
+    try:
+        completed = ResponsesAPIResponse(**completed_payload)
+    except Exception:
+        completed = ResponsesAPIResponse.model_construct(**completed_payload)
+    if not hasattr(completed, "_hidden_params"):
+        completed._hidden_params = {}
+    return completed
 
 
 def build_lm(
@@ -69,6 +246,9 @@ def build_lm(
         from jobcrawler.auth import apply_auth_env
 
         apply_auth_env()
+        # Repair litellm's Codex responses transform (drops the streamed output →
+        # KeyError: 'text') before any request goes out. Idempotent; see above.
+        _install_codex_responses_fix()
         kwargs.setdefault("model_type", "responses")
         return cls(model, **kwargs)
 
