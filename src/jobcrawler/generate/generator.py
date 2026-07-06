@@ -144,12 +144,13 @@ async def best_of_n(
     the break, not parallelism). Unlike ``select_best`` (stock sync ``BestOfN``),
     this drives an ``aforward``-only module directly — the §4.11 async caveat.
 
-    ``cost`` + ``spend_cap`` enforce the §4.2 aggregate ``FANOUT_SPEND_CAP``: the
+    ``cost`` + ``spend_cap`` enforce the §4.2 aggregate ``FANOUT_TOKEN_CAP``: the
     cumulative ``cost(pred)`` is tracked and the fan-out stops once it reaches the
     cap (after keeping the best so far), so a long tail of expensive candidates
-    can't run away. With no cap (or a cost that reports 0 — no usage signal), the
-    fan-out is still bounded structurally by ``n`` and each candidate by the
-    per-trajectory ``MAX_SUBCALLS`` kill.
+    can't run away. The units are the caller's (the fan-out feeds token counts);
+    with no cap (or a cost that reports 0 — no usage signal), the fan-out is still
+    bounded structurally by ``n`` and each candidate by the per-trajectory
+    ``MAX_SUBCALLS`` kill.
 
     ``retries`` grants extra draws for attempts that die before producing a
     prediction (an LM/adapter failure — unparseable model output, a dropped
@@ -182,9 +183,10 @@ async def best_of_n(
         if cost is not None and spend_cap is not None:
             spent += cost(pred)
             if spent >= spend_cap:
+                # Unit-agnostic (the fan-out feeds token counts): report the raw scalar.
                 print(
-                    f"[best_of_n] fan-out spend cap reached: ${spent:.2f} >= "
-                    f"${spend_cap:.2f} — stopping after {i + 1} candidate(s)"
+                    f"[best_of_n] fan-out cap reached: {spent:,.0f} >= "
+                    f"{spend_cap:,.0f} — stopping after {i + 1} candidate(s)"
                 )
                 break
     return best, best_reward

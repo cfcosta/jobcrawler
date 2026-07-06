@@ -45,6 +45,31 @@ def _pred(
     return SimpleNamespace(trajectory=trajectory, discovery_method=discovery_method)
 
 
+def test_pred_tokens_sums_token_only_usage() -> None:
+    # dspy's get_lm_usage() records token counts and NEVER a `cost` key, so the §4.2
+    # fan-out cap must read tokens — a token-only usage dict has to come back non-zero.
+    # (The old $-cost accounting keyed on "cost" and silently returned 0, making the
+    # cap inert.) total_tokens is preferred; otherwise prompt+completion are summed,
+    # across every LM a candidate touched (root + sub_lm).
+    pred = SimpleNamespace(
+        get_lm_usage=lambda: {
+            "openrouter/root": {"prompt_tokens": 100, "completion_tokens": 200},
+            "chatgpt/sub": {
+                "prompt_tokens": 50,
+                "completion_tokens": 25,
+                "total_tokens": 75,
+            },
+        }
+    )
+    assert cli_generate._pred_tokens(pred) == 375.0  # (100 + 200) + 75
+
+
+def test_pred_tokens_is_zero_without_a_usage_signal() -> None:
+    # No usage getter → 0.0; the fan-out then falls back to the structural fanout_n
+    # bound and the per-trajectory MAX_SUBCALLS kill, never a fabricated number.
+    assert cli_generate._pred_tokens(SimpleNamespace()) == 0.0
+
+
 def test_good_winner_passes_all_gates() -> None:
     ok, reason = gate_winner(_pred(), _GOOD, _HOSTS)
     assert ok, reason

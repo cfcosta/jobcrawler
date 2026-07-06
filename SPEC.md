@@ -285,8 +285,9 @@ caps — not a *separate* host layer (only `MAX_SUBCALLS` is). Two real gaps rem
 **fan-out** multiplies whole generations, which no single RLM cap bounds. So the host adds an
 **unconditional** sub-call kill (`JOBCRAWLER_MAX_SUBCALLS`, set ≥ `max_llm_calls`) that aborts
 the trajectory regardless — the *only* hard stop on a catch-and-continue sub-call loop — and an
-aggregate `FANOUT_SPEND_CAP` across the fan-out; plus a one-line anti-over-subcall prompt guard.
-(Size the $ cap against the **p95 tail**, not the mean.) The Pyodide/Deno sandbox adds ~2–3 s
+aggregate `FANOUT_TOKEN_CAP` across the fan-out; plus a one-line anti-over-subcall prompt guard.
+(Size the token cap against the **p95 tail**, not the mean — dspy records tokens for every
+provider, whereas USD pricing is missing for many OpenRouter/Codex slugs.) The Pyodide/Deno sandbox adds ~2–3 s
 cold-start + per-call bridge tax per loop [Sanjaya] — confirm RLM reuses one warm sandbox per
 generation, else fold that into the cap.
 
@@ -1010,8 +1011,8 @@ three adapters.
 
 **Candidate selection.** Generate N candidates (`fanout_n`, default 4) and take the **argmax over the
 graded scalar**. They run **sequentially** (stock `dspy.BestOfN`/`dspy.Refine` are sequential for-loops
-with an early break, verified in installed 3.2.1) — so N costs ~N× wall-clock and ~N× spend (sized
-against `FANOUT_SPEND_CAP`); the real win is the **early break**, not parallelism. For feedback-carrying
+with an early break, verified in installed 3.2.1) — so N costs ~N× wall-clock and ~N× tokens (sized
+against `FANOUT_TOKEN_CAP`); the real win is the **early break**, not parallelism. For feedback-carrying
 retries use a **small custom loop**, not stock `dspy.Refine` (its hint comes from
 `inspect.getsource(reward_fn)`, never our `gate_failures`): add a `prior_feedback` `InputField` and
 re-invoke generation with the prior `CandidateResult.gate_failures` injected; cap retry depth.
@@ -1260,7 +1261,7 @@ an `openrouter/…` slug billed per token. Selected knobs:
 | `JOBCRAWLER_ADOPT_PROBATION` | `48h` | post-adoption window the §4.11 rollback watcher judges (`off` disables) |
 | `JOBCRAWLER_ADOPT_REGRESSION_DELTA` | `2` | extra generation-failures over baseline that trip auto-rollback |
 | `JOBCRAWLER_MAX_ITERATIONS` / `MAX_LLM_CALLS` / `MAX_SUBCALLS` | `20` / `40` / `60` | RLM caps + the unconditional host sub-call kill (§4.2) |
-| `JOBCRAWLER_FANOUT_N` / `FANOUT_SPEND_CAP` | `4` / `$8/site` | §6 best-of-N width + the aggregate fan-out $ ceiling |
+| `JOBCRAWLER_FANOUT_N` / `FANOUT_TOKEN_CAP` | `4` / `2M/site` | §6 best-of-N width + the aggregate fan-out token ceiling (dspy records tokens for every provider; USD isn't priced for many slugs) |
 | `JOBCRAWLER_FANOUT_RETRIES` | `= FANOUT_N` | §6 redraws for LM/adapter-dead attempts (a failure never eats a comparison slot; attempts ≤ 2N) |
 | `JOBCRAWLER_BOOTSTRAP_BUDGET` | `60s` | §4.9 per-tick time budget for the cold-start bootstrap pass (over budget → roster defers to next tick) |
 | `JOBCRAWLER_SOLVER` / `FLARESOLVERR_URL` / `JOBCRAWLER_CLEARANCE_TTL` / `JOBCRAWLER_EGRESS_PROXY` | `none` / — / `30m` / — | §4.10 challenge backend + clearance + IP/UA-pinned egress |

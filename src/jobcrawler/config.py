@@ -307,19 +307,26 @@ def max_subcalls() -> int:
     return _int("JOBCRAWLER_MAX_SUBCALLS", 60)
 
 
-def fanout_spend_cap() -> str:
-    return _str("JOBCRAWLER_FANOUT_SPEND_CAP", "$8/site")
+def fanout_token_cap() -> int:
+    """The §4.2 aggregate fan-out token ceiling per site (prompt + completion).
 
-
-def fanout_spend_cap_usd() -> float:
-    """The §4.2 aggregate fan-out spend ceiling as a float USD/site.
-
-    Parses the human-friendly ``$8/site`` form (and a bare ``8`` / ``8.0``) into the
-    dollar budget the selection fan-out is bounded by. Size it against the p95 tail,
-    not the mean (§4.2).
+    The fan-out is bounded by a *token* budget rather than a dollar figure: dspy records
+    per-candidate token usage for every provider, whereas USD pricing is not universally
+    available (litellm has no cost map for many OpenRouter / Codex slugs, and dspy never
+    records ``response_cost`` regardless) — a dollar cap silently read as $0 and never
+    fired. The cumulative tokens across candidates stop the fan-out once they reach this
+    cap (after keeping the best so far), so a long tail of expensive candidates can't run
+    away. Parses a human-friendly ``2M/site`` / ``1500k`` / bare-integer form; size it
+    against the p95 tail, not the mean (§4.2). Default 2,000,000 tokens/site.
     """
-    raw = fanout_spend_cap().strip().lstrip("$").split("/")[0].strip()
-    return float(raw)
+    core = _str("JOBCRAWLER_FANOUT_TOKEN_CAP", "2M/site").strip().split("/")[0].strip()
+    lowered = core.lower()
+    mult = 1
+    if lowered.endswith("k"):
+        mult, lowered = 1_000, lowered[:-1].strip()
+    elif lowered.endswith("m"):
+        mult, lowered = 1_000_000, lowered[:-1].strip()
+    return int(float(lowered) * mult)
 
 
 def fanout_n() -> int:

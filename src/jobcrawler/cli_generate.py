@@ -217,7 +217,7 @@ async def _generate_one(
     )
 
     async def make_attempt(i: int) -> object:
-        # track_usage so each candidate's $ cost is readable for the §4.2 fan-out cap.
+        # track_usage so each candidate's token count is readable for the §4.2 fan-out cap.
         with dspy.context(
             lm=root_lm.copy(rollout_id=i, temperature=1.0), track_usage=True
         ):
@@ -233,8 +233,8 @@ async def _generate_one(
         reward=lambda pred: reward_fn(inputs, pred),
         n=config.fanout_n(),
         threshold=1.0,
-        cost=_pred_cost,  # aggregate FANOUT_SPEND_CAP across the fan-out (§4.2)
-        spend_cap=config.fanout_spend_cap_usd(),
+        cost=_pred_tokens,  # aggregate FANOUT_TOKEN_CAP across the fan-out (§4.2)
+        spend_cap=float(config.fanout_token_cap()),
         retries=config.fanout_retries(),
     )
     if best is None:
@@ -543,13 +543,18 @@ def gate_winner(
     return True, "ok"
 
 
-def _pred_cost(pred: object) -> float:
-    """Best-effort USD cost of one candidate from dspy's LM-usage tracking.
+def _pred_tokens(pred: object) -> float:
+    """Best-effort total tokens (prompt + completion) of one candidate from dspy usage.
 
-    Returns 0.0 when no usage/cost signal is available (e.g. a provider litellm has
-    no cost map for) — the §4.2 fan-out is then bounded structurally by ``fanout_n``
-    and each candidate by the per-trajectory ``MAX_SUBCALLS`` kill, never by a
-    fabricated number.
+    dspy's ``get_lm_usage()`` records per-LM *token counts* for every provider — never a
+    ``cost`` key, and litellm can't price many of the slugs this runs on (OpenRouter /
+    Codex) — so the §4.2 fan-out cap is denominated in tokens, not dollars. Sums
+    ``total_tokens`` (or ``prompt_tokens + completion_tokens`` when only the components
+    are present) across every LM a candidate touched (root + ``sub_lm``).
+
+    Returns 0.0 when no usage signal is available — the fan-out is then bounded
+    structurally by ``fanout_n`` and each candidate by the per-trajectory
+    ``MAX_SUBCALLS`` kill, never by a fabricated number.
     """
     getter = getattr(pred, "get_lm_usage", None)
     if not callable(getter):
@@ -562,8 +567,17 @@ def _pred_cost(pred: object) -> float:
         return 0.0
     total = 0.0
     for entry in usage.values():
-        if isinstance(entry, dict) and isinstance(entry.get("cost"), (int, float)):
-            total += float(entry["cost"])
+        if not isinstance(entry, dict):
+            continue
+        rolled_up = entry.get("total_tokens")
+        if isinstance(rolled_up, (int, float)):
+            total += float(rolled_up)
+            continue
+        # No rolled-up total on this entry: sum the components dspy does record.
+        for key in ("prompt_tokens", "completion_tokens"):
+            value = entry.get(key)
+            if isinstance(value, (int, float)):
+                total += float(value)
     return total
 
 

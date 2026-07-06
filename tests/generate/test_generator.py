@@ -252,9 +252,10 @@ async def test_best_of_n_retry_budget_is_for_failures_only() -> None:
     assert best == 1
 
 
-async def test_best_of_n_stops_at_the_fanout_spend_cap() -> None:
-    # The §4.2 aggregate spend cap bounds the fan-out: at $3/candidate with a $5 cap,
-    # the loop stops after the candidate that crosses it — never launching the rest.
+async def test_best_of_n_stops_at_the_fanout_cost_cap() -> None:
+    # The §4.2 aggregate cap bounds the fan-out (units are the caller's — production feeds
+    # token counts): at 3/candidate with a cap of 5, the loop stops after the candidate
+    # that crosses it — never launching the rest.
     seen: list[int] = []
 
     async def make_attempt(i: int) -> object:
@@ -269,7 +270,7 @@ async def test_best_of_n_stops_at_the_fanout_spend_cap() -> None:
         cost=lambda p: 3.0,
         spend_cap=5.0,
     )
-    assert seen == [0, 1]  # $3 then $6 ≥ $5 → stop, candidates 2..9 never run
+    assert seen == [0, 1]  # 3 then 6 ≥ 5 → stop, candidates 2..9 never run
     assert best == 0  # constant reward → the first candidate stays the argmax
 
 

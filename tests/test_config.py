@@ -149,23 +149,25 @@ def test_require_sub_model_returns_value_when_set(
     assert config.require_sub_model() == "openrouter/cheap/model"
 
 
-def test_fanout_spend_cap_usd_parses_dollar_per_site(
+def test_fanout_token_cap_parses_m_suffix_per_site(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("JOBCRAWLER_FANOUT_SPEND_CAP", "$8/site")
-    assert config.fanout_spend_cap_usd() == 8.0
+    monkeypatch.setenv("JOBCRAWLER_FANOUT_TOKEN_CAP", "1.5M/site")
+    assert config.fanout_token_cap() == 1_500_000
 
 
-def test_fanout_spend_cap_usd_accepts_bare_number(
+def test_fanout_token_cap_accepts_k_suffix_and_bare_int(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("JOBCRAWLER_FANOUT_SPEND_CAP", "12.5")
-    assert config.fanout_spend_cap_usd() == 12.5
+    monkeypatch.setenv("JOBCRAWLER_FANOUT_TOKEN_CAP", "750k")
+    assert config.fanout_token_cap() == 750_000
+    monkeypatch.setenv("JOBCRAWLER_FANOUT_TOKEN_CAP", "2000000")
+    assert config.fanout_token_cap() == 2_000_000
 
 
-def test_fanout_spend_cap_usd_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("JOBCRAWLER_FANOUT_SPEND_CAP", raising=False)
-    assert config.fanout_spend_cap_usd() == 8.0
+def test_fanout_token_cap_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("JOBCRAWLER_FANOUT_TOKEN_CAP", raising=False)
+    assert config.fanout_token_cap() == 2_000_000
 
 
 def test_crawl_isolation_knobs_default(monkeypatch: pytest.MonkeyPatch) -> None:
