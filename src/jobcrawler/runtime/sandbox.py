@@ -28,11 +28,13 @@ escalates to them transparently (§4.10); see ``solver.py``.
 from __future__ import annotations
 
 import json
+import os
 import resource
 import subprocess
 import sys
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 from jobcrawler.generate.gates import check_ast
 from jobcrawler.generate.scoring import CandidateResult, ExceptionInfo
@@ -40,6 +42,99 @@ from jobcrawler.runtime.contract import Job
 
 _ENTRY = "jobcrawler.runtime._sandbox_entry"
 _COLLECT_ENTRY = "jobcrawler.runtime._collect_entry"
+
+
+# -- child environment scrub (§8): the child never sees a provider secret ------
+# The child runs untrusted, model-written crawler code. If it inherited the
+# daemon's whole environment (the default when ``subprocess.run`` gets no
+# ``env=``), a read primitive that slipped the AST + restricted-builtins gates
+# could exfiltrate the provider API keys, the ChatGPT OAuth token-store path
+# (``config.auth_dir`` → ``JOBCRAWLER_AUTH_DIR`` / ``CHATGPT_TOKEN_DIR``), and any
+# other ambient secret. So the child is spawned with a *curated* env: exactly the
+# crawl knobs its live-ctx path reads, plus the OS/interpreter vars it needs to
+# boot and verify TLS — nothing else. This is the loot-removal half of the
+# sandbox's defense in depth; the exfil-channel half is the egress allowlist.
+
+# The JOBCRAWLER_* (+ FLARESOLVERR_URL) knobs the child's ``build_live_ctx`` / Ctx
+# path actually reads (live_ctx.py, ctx.py, solver.py). Must stay COMPLETE: a knob
+# omitted here silently reverts the child to that getter's default, so an operator
+# override (a tighter rate limit, a longer timeout, the egress proxy) would be lost
+# inside the sandbox. Deliberately excludes every model/provider knob — the child
+# never talks to an LLM, so JOBCRAWLER_MODEL/keys and the OAuth dir have no business
+# here even though they are JOBCRAWLER_*-shaped.
+_CRAWL_ENV_KEYS = frozenset(
+    {
+        "JOBCRAWLER_USER_AGENT",
+        "JOBCRAWLER_RATE_LIMIT",
+        "JOBCRAWLER_MAX_PAGES",
+        "JOBCRAWLER_FETCH_TIMEOUT",
+        "JOBCRAWLER_FETCH_RETRIES",
+        "JOBCRAWLER_FETCH_BACKOFF",
+        "JOBCRAWLER_FETCH_RETRY_CAP",
+        "JOBCRAWLER_SOLVER",
+        "FLARESOLVERR_URL",
+        "JOBCRAWLER_CLEARANCE_TTL",
+        "JOBCRAWLER_EGRESS_PROXY",
+    }
+)
+
+# OS / interpreter vars the child needs merely to *start* and import (it is
+# ``python -m`` re-exec'ing the package) and to verify TLS. These carry no
+# application secret — they are paths, locale, and CA-bundle pointers. Under
+# ``nix develop`` the interpreter resolves its dependencies through PYTHONPATH and
+# its CA bundle through NIX_SSL_CERT_FILE / LOCALE_ARCHIVE, so dropping them would
+# stop the child from importing httpx/lxml or from verifying any HTTPS cert — i.e.
+# break every production crawl. Passed through only when actually set in the parent.
+_SYSTEM_ENV_KEYS = frozenset(
+    {
+        "PATH",
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "PYTHONNOUSERSITE",
+        "PYTHONDONTWRITEBYTECODE",
+        "LD_LIBRARY_PATH",
+        "HOME",
+        "TMPDIR",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "NIX_SSL_CERT_FILE",
+        "REQUESTS_CA_BUNDLE",
+        "LOCALE_ARCHIVE",
+    }
+)
+
+
+def _child_env() -> dict[str, str]:
+    """The curated environment for a sandbox child — crawl knobs + boot/TLS vars only.
+
+    An *allowlist*, not a scrub-list: only the keys in :data:`_CRAWL_ENV_KEYS` and
+    :data:`_SYSTEM_ENV_KEYS` that are present in the parent env are forwarded, so a
+    provider API key or OAuth-dir pointer added to the daemon's environment later
+    can never reach the untrusted child by default (§8). Callers pass this as
+    ``env=`` to every crawler subprocess.
+
+    Because the scrub drops whatever ambient var put the package on the path (an
+    editable src layout, a nix dev-shell ``REPO_ROOT`` sitecustomize, a venv
+    activation), it then hands the child an explicit ``PYTHONPATH`` naming the
+    directory that CONTAINS the ``jobcrawler`` package — ``parents[2]`` of this
+    file (``…/src`` in a checkout, ``…/site-packages`` once installed, harmless
+    either way). Third-party deps already sit on the interpreter's own site-path,
+    which is resolved from ``sys.executable`` and needs no env var. Without this
+    the scrubbed child would fail to import the package and every crawl would come
+    back as a ``SandboxError``.
+    """
+    allowed = _CRAWL_ENV_KEYS | _SYSTEM_ENV_KEYS
+    env = {key: value for key, value in os.environ.items() if key in allowed}
+    pkg_parent = str(Path(__file__).resolve().parents[2])
+    existing = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        pkg_parent if not existing else pkg_parent + os.pathsep + existing
+    )
+    return env
 
 
 def validate_crawler(
@@ -78,6 +173,7 @@ def validate_crawler(
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=_child_env(),
             preexec_fn=_apply_limits(mem_mb, int(timeout) + 1),
         )
     except subprocess.TimeoutExpired:
@@ -156,6 +252,7 @@ def collect_crawler(
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=_child_env(),
             preexec_fn=_apply_limits(mem_mb, int(cpu_seconds) + 1),
         )
     except subprocess.TimeoutExpired:

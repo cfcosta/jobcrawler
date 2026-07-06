@@ -9,7 +9,12 @@ are captured (not crashes), and the wall-clock timeout hard-stops a hang.
 
 from __future__ import annotations
 
-from jobcrawler.runtime.sandbox import validate_crawler
+import os
+from pathlib import Path
+
+import pytest
+
+from jobcrawler.runtime.sandbox import _child_env, validate_crawler
 
 _GOOD = """
 from jobcrawler.runtime.contract import Job
@@ -197,3 +202,67 @@ def test_build_ctx_live_polite_mirrors_the_production_crawl() -> None:
     ctx = _build_ctx({"example.com"}, None, polite=True)
     assert ctx._pacer is not None
     assert ctx._robots is not None
+
+
+# -- child env scrub (§8, #19a) ----------------------------------------------
+
+
+def test_child_env_forwards_crawl_knobs_and_drops_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The crawl knobs the child's live-ctx path legitimately reads ride through...
+    monkeypatch.setenv("JOBCRAWLER_USER_AGENT", "ua/1")
+    monkeypatch.setenv("JOBCRAWLER_RATE_LIMIT", "5/s")
+    monkeypatch.setenv("JOBCRAWLER_EGRESS_PROXY", "http://proxy:8080")
+    monkeypatch.setenv("FLARESOLVERR_URL", "http://fs:8191")
+    # ...but no provider key, model slug, or OAuth-dir pointer ever does: the
+    # untrusted child never talks to an LLM, so these are pure loot to withhold.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-secret2")
+    monkeypatch.setenv("JOBCRAWLER_MODEL", "openrouter/vendor/model")
+    monkeypatch.setenv("JOBCRAWLER_AUTH_DIR", "/run/secrets/chatgpt")
+    monkeypatch.setenv("CHATGPT_TOKEN_DIR", "/run/secrets/codex")
+
+    env = _child_env()
+
+    assert env["JOBCRAWLER_USER_AGENT"] == "ua/1"
+    assert env["JOBCRAWLER_RATE_LIMIT"] == "5/s"
+    assert env["JOBCRAWLER_EGRESS_PROXY"] == "http://proxy:8080"
+    assert env["FLARESOLVERR_URL"] == "http://fs:8191"
+    for secret in (
+        "OPENROUTER_API_KEY",
+        "OPENAI_API_KEY",
+        "JOBCRAWLER_MODEL",
+        "JOBCRAWLER_AUTH_DIR",
+        "CHATGPT_TOKEN_DIR",
+    ):
+        assert secret not in env
+
+
+def test_child_env_injects_an_importable_package_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The scrub drops whatever ambient var put the src layout on the path, so the
+    # child is handed an explicit PYTHONPATH naming the dir that CONTAINS the
+    # package — without it the scrubbed child can't import jobcrawler at all.
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    import jobcrawler
+
+    pkg_parent = str(Path(jobcrawler.__file__).resolve().parents[1])
+    env = _child_env()
+
+    assert env["PYTHONPATH"] == pkg_parent
+    assert (Path(env["PYTHONPATH"]) / "jobcrawler" / "__init__.py").exists()
+
+
+def test_child_env_prepends_the_package_path_to_an_existing_pythonpath(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A deployment that already sets PYTHONPATH keeps it — the package dir is
+    # prepended (wins on collision) rather than clobbering the operator's value.
+    monkeypatch.setenv("PYTHONPATH", "/custom/deps")
+    env = _child_env()
+
+    parts = env["PYTHONPATH"].split(os.pathsep)
+    assert parts[-1] == "/custom/deps"
+    assert (Path(parts[0]) / "jobcrawler" / "__init__.py").exists()
