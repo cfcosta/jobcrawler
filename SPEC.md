@@ -1398,7 +1398,8 @@ it, exactly like the match `reasons`.
 **Surfaces.**
 
 - **Browse / search** (`GET /`) — full-text query plus rich filters (site, company, lifecycle, `track_status`,
-  workplace, level, min score, min salary, dismissed) and sort (recent / score / posted); dismissed rows are
+  workplace, level, min score, min salary, dismissed) and sort (score / recent / updated / salary / title —
+  **default score desc**, so the listing leads with the best match and unscored rows sink last); dismissed rows are
   hidden by default, both lifecycle states shown (you still care about a posting you applied to after the board
   closes it). Paginated; every position links to its detail page and carries lifecycle + match-score pills.
 - **Position detail** (`GET /positions/{pid}`) — the full posting (structured fields + verbatim description),

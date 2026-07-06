@@ -145,6 +145,8 @@ def test_parser_dispatches_the_job_tracking_commands() -> None:
             "all",
             "--min-score",
             "80",
+            "--sort",
+            "salary",
             "--limit",
             "10",
         ]
@@ -152,8 +154,10 @@ def test_parser_dispatches_the_job_tracking_commands() -> None:
     assert pos.site == "acme"
     assert pos.status == "all"
     assert pos.min_score == 80
+    assert pos.sort == "salary"
     assert pos.limit == 10
     assert parser.parse_args(["positions"]).status == "open"  # default
+    assert parser.parse_args(["positions"]).sort == "score"  # best-match-first default
 
     assert parser.parse_args(["matches"]).func is cmd_matches
     assert parser.parse_args(["matches", "--min", "50"]).min == 50
@@ -986,7 +990,7 @@ def test_cmd_positions_empty_says_so(
     StateStore(str(db)).close()  # empty store
 
     assert cmd_positions(build_parser().parse_args(["positions"])) == 0
-    assert "no open positions" in capsys.readouterr().out
+    assert "no positions" in capsys.readouterr().out
 
 
 def test_render_matches_shows_score_verdict_and_reasons() -> None:

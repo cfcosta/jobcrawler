@@ -202,7 +202,7 @@ def _read_filters(params: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     show_dismissed = (params.get("show_dismissed") or "") in {"1", "true", "on", "yes"}
     status = _s("status")  # None/'all' => both open and closed
     track_status = _s("track_status")
-    sort = _s("sort") or "recent"
+    sort = _s("sort") or "score"
     kwargs: dict[str, Any] = {
         "query": (params.get("q") or "").strip(),
         "site": _s("site"),

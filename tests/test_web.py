@@ -148,6 +148,21 @@ async def test_api_positions_list_and_filters() -> None:
         store.close()
 
 
+async def test_api_positions_default_sort_is_score() -> None:
+    # #17: with no ?sort, the listing uses best-match order (score desc) so the default
+    # view leads with the strongest match rather than the newest crawl. The unscored beta
+    # row sinks last under the DESC sort.
+    store = _seeded_store()
+    try:
+        async with _client(create_app(store)) as c:
+            default = (await c.get("/api/positions")).json()
+            by_score = (await c.get("/api/positions?sort=score")).json()
+            assert [r["url"] for r in default] == [r["url"] for r in by_score]
+            assert default[0]["site"] == "acme"  # scored 91 leads the unscored row
+    finally:
+        store.close()
+
+
 async def test_api_dismissed_hidden_by_default() -> None:
     store = _seeded_store()
     try:

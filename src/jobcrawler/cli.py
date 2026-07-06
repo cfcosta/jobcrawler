@@ -769,26 +769,23 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_positions(args: argparse.Namespace) -> int:
-    # List open positions with aligned columns (score/title/company/location/workplace/
-    # age). The pinned StateStore reader surface exposes only open positions; --status
-    # closed/all would need a reader it does not provide, so those degrade to the open
-    # set with a one-line note rather than silently showing the wrong rows.
+    # List positions with aligned columns (score/title/company/location/workplace/age),
+    # ordered by §4.7 match score desc by default. Routes through search_positions so the
+    # sort and the open/closed/all lifecycle filter are resolved in SQL: sorting or
+    # min-score filtering in Python *after* a LIMIT would only touch a truncated window.
     store = StateStore(_db_path())
     try:
-        rows = store.open_positions(args.site, limit=args.limit)
-        if args.status != "open":
-            print(
-                f"note: showing open positions ('{args.status}' needs a closed-position "
-                "reader the store does not expose)"
-            )
-        if args.min_score is not None:
-            rows = [
-                p
-                for p in rows
-                if p.match_score is not None and p.match_score >= args.min_score
-            ]
+        status = None if args.status == "all" else args.status
+        rows = store.search_positions(
+            site=args.site,
+            status=status,
+            min_score=args.min_score,
+            sort=args.sort,
+            dismissed=None,
+            limit=args.limit,
+        )
         if not rows:
-            print("no open positions")
+            print("no positions")
         for line in render_positions(rows):
             print(line)
     finally:
@@ -1319,13 +1316,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--status",
         choices=["open", "closed", "all"],
         default="open",
-        help="lifecycle filter (only 'open' is served by the store reader)",
+        help="lifecycle filter (default: open)",
     )
     pos.add_argument(
         "--min-score",
         type=int,
         dest="min_score",
         help="keep only positions scored at or above this §4.7 match score",
+    )
+    pos.add_argument(
+        "--sort",
+        choices=["score", "recent", "salary", "title", "updated"],
+        default="score",
+        help="ordering (default: best §4.7 match score, desc)",
     )
     pos.add_argument("--limit", type=int, default=50)
     pos.set_defaults(func=cmd_positions)
