@@ -1,747 +1,2674 @@
-# Site registry generated from the operator profile.
+# Expanded site registry generated from the operator profile.
 # Focus: senior/staff backend and distributed-systems roles in Rust/Go,
 # payments/settlement/fintech, crypto/protocol infrastructure, observability,
 # search/retrieval/vector databases, and remote-friendly infrastructure teams.
-# Generated from the provided CV and the example registry format on 2026-07-06.
+# Generated from the provided CV and example registry format on 2026-07-06.
+#
+# Notes:
+# - Single-company ATS/API boards generally enumerate the whole public board.
+# - Aggregators, search pages, ecosystem boards and portfolio boards are marked
+#   enumerates_all:false unless the feed explicitly returns all active jobs.
+# - Hints intentionally describe parsing shape and domain fit without leaking
+#   host-side admission thresholds.
 
-# -----------------------------------------------------------------------------
-# Greenhouse boards: one call to the boards API enumerates the whole public board.
-# Shape: jobs[] with id/title/location.name/absolute_url/updated_at/content.
-# `content` is HTML-entity-escaped; html.unescape it, then strip tags.
-# Greenhouse has no salary/employment_type fields in this API.
-# -----------------------------------------------------------------------------
+
 - slug: gitlab
-  name: GitLab
+  name: "GitLab"
   url: https://boards-api.greenhouse.io/v1/boards/gitlab/jobs?content=true
   render: static
-  company: GitLab
+  company: "GitLab"
   hints: >-
-    Greenhouse board API, token `gitlab`. Whole board in one GET. Each job has
-    stable `id`, `title`, flattened `location.name`, `absolute_url`,
-    `updated_at`, and `content` = full HTML-ENTITY-ESCAPED description. Use
-    html.unescape, then strip tags. No salary or employment_type fields.
-    Strong match for remote backend, platform, infrastructure and security roles.
+    Greenhouse board API, token `gitlab`. Whole board in one GET. Each job has stable `id`,
+    `title`, flattened `location.name`, `absolute_url`, `updated_at`, and `content` = full
+    HTML-ENTITY-ESCAPED description. Use html.unescape, then strip tags. No salary or
+    employment_type fields. Strong match for remote backend, platform, infrastructure and
+    security roles.
 
 - slug: anthropic
-  name: Anthropic
+  name: "Anthropic"
   url: https://boards-api.greenhouse.io/v1/boards/anthropic/jobs?content=true
   render: static
-  company: Anthropic
+  company: "Anthropic"
   hints: >-
-    Greenhouse board API, token `anthropic`. Whole board in one GET. Parse `id`,
-    `title`, `location.name`, `absolute_url`, `updated_at`, and HTML-escaped
-    full `content`. No salary/employment_type fields. Strong match for backend,
-    infrastructure, performance, inference systems, knowledge/retrieval and
-    reliability roles.
+    Greenhouse board API, token `anthropic`. Whole board in one GET. Parse `id`, `title`,
+    `location.name`, `absolute_url`, `updated_at`, and HTML-escaped full `content`. No
+    salary/employment_type fields. Strong match for backend, infrastructure, performance,
+    inference systems, knowledge/retrieval and reliability roles.
 
 - slug: tailscale
-  name: Tailscale
+  name: "Tailscale"
   url: https://boards-api.greenhouse.io/v1/boards/tailscale/jobs?content=true
   render: static
-  company: Tailscale
+  company: "Tailscale"
   hints: >-
-    Greenhouse board API, token `tailscale`. Whole board in one GET. Parse
-    `id`, `title`, `location.name`, `absolute_url`, `updated_at`, and HTML-
-    escaped full `content`. No salary/employment_type fields. Strong match for
-    Go backend, identity, networking, infrastructure, security and remote-first
-    systems engineering roles.
+    Greenhouse board API, token `tailscale`. Whole board in one GET. Parse `id`, `title`,
+    `location.name`, `absolute_url`, `updated_at`, and HTML- escaped full `content`. No
+    salary/employment_type fields. Strong match for Go backend, identity, networking,
+    infrastructure, security and remote-first systems engineering roles.
 
 - slug: temporal_technologies
-  name: Temporal Technologies
+  name: "Temporal Technologies"
   url: https://boards-api.greenhouse.io/v1/boards/temporaltechnologies/jobs?content=true
   render: static
-  company: Temporal Technologies
+  company: "Temporal Technologies"
   hints: >-
-    Greenhouse board API, token `temporaltechnologies`. Whole board in one GET.
-    Parse the standard Greenhouse fields. Strong match for distributed systems,
-    workflow engines, durable execution, storage, observability, reliability and
-    cloud infrastructure roles.
+    Greenhouse board API, token `temporaltechnologies`. Whole board in one GET. Parse the
+    standard Greenhouse fields. Strong match for distributed systems, workflow engines,
+    durable execution, storage, observability, reliability and cloud infrastructure roles.
 
 - slug: mercury
-  name: Mercury
+  name: "Mercury"
   url: https://boards-api.greenhouse.io/v1/boards/mercury/jobs?content=true
   render: static
-  company: Mercury
+  company: "Mercury"
   hints: >-
-    Greenhouse board API, token `mercury`. Whole board in one GET. Parse the
-    standard Greenhouse fields. Strong match for fintech backend, banking rails,
-    product infrastructure, fraud/risk systems and senior/staff remote roles.
+    Greenhouse board API, token `mercury`. Whole board in one GET. Parse the standard
+    Greenhouse fields. Strong match for fintech backend, banking rails, product
+    infrastructure, fraud/risk systems and senior/staff remote roles.
 
 - slug: adyen
-  name: Adyen
+  name: "Adyen"
   url: https://boards-api.greenhouse.io/v1/boards/adyen/jobs?content=true
   render: static
-  company: Adyen
+  company: "Adyen"
   hints: >-
-    Greenhouse board API, token `adyen`. Whole board in one GET. Parse the
-    standard Greenhouse fields. Strong match for payment infrastructure,
-    acquiring, issuing, settlement, platform reliability and distributed
-    financial systems roles.
+    Greenhouse board API, token `adyen`. Whole board in one GET. Parse the standard
+    Greenhouse fields. Strong match for payment infrastructure, acquiring, issuing,
+    settlement, platform reliability and distributed financial systems roles.
 
 - slug: nubank
-  name: Nubank
+  name: "Nubank"
   url: https://boards-api.greenhouse.io/v1/boards/nubank/jobs?content=true
   render: static
-  company: Nubank
+  company: "Nubank"
   hints: >-
-    Greenhouse board API, token `nubank`. Whole board in one GET. Parse the
-    standard Greenhouse fields. Strong local/regional match for Brazil/LatAm
-    fintech backend, distributed systems, payments, risk and staff engineering
-    roles.
+    Greenhouse board API, token `nubank`. Whole board in one GET. Parse the standard
+    Greenhouse fields. Strong local/regional match for Brazil/LatAm fintech backend,
+    distributed systems, payments, risk and staff engineering roles.
 
 - slug: modulr_finance
-  name: Modulr Finance
+  name: "Modulr Finance"
   url: https://boards-api.greenhouse.io/v1/boards/modulrfinance/jobs?content=true
   render: static
-  company: Modulr Finance
+  company: "Modulr Finance"
   hints: >-
-    Greenhouse board API, token `modulrfinance`. Whole board in one GET. Parse
-    the standard Greenhouse fields. Strong match for embedded payments, account
-    infrastructure, ledgers, reconciliation, settlement and backend platform
-    roles.
+    Greenhouse board API, token `modulrfinance`. Whole board in one GET. Parse the standard
+    Greenhouse fields. Strong match for embedded payments, account infrastructure, ledgers,
+    reconciliation, settlement and backend platform roles.
 
 - slug: bvnk
-  name: BVNK
+  name: "BVNK"
   url: https://boards-api.eu.greenhouse.io/v1/boards/bvnk/jobs?content=true
   render: static
-  company: BVNK
+  company: "BVNK"
   hints: >-
-    Greenhouse EU board API, token `bvnk`. Whole board in one GET on the EU
-    Greenhouse API host. Parse the standard Greenhouse fields. Strong match for
-    stablecoin payments, crypto/fiat settlement, card issuing, transaction
-    infrastructure and backend platform roles.
+    Greenhouse EU board API, token `bvnk`. Whole board in one GET on the EU Greenhouse API
+    host. Parse the standard Greenhouse fields. Strong match for stablecoin payments,
+    crypto/fiat settlement, card issuing, transaction infrastructure and backend platform
+    roles.
 
 - slug: alchemy
-  name: Alchemy
+  name: "Alchemy"
   url: https://boards-api.greenhouse.io/v1/boards/alchemy/jobs?content=true
   render: static
-  company: Alchemy
+  company: "Alchemy"
   hints: >-
-    Greenhouse board API, token `alchemy`. Whole board in one GET. Parse the
-    standard Greenhouse fields. Strong match for blockchain infrastructure,
-    protocol APIs, wallet/developer tooling, high-scale backend and distributed
-    systems roles.
+    Greenhouse board API, token `alchemy`. Whole board in one GET. Parse the standard
+    Greenhouse fields. Strong match for blockchain infrastructure, protocol APIs,
+    wallet/developer tooling, high-scale backend and distributed systems roles.
 
 - slug: fireblocks
-  name: Fireblocks
+  name: "Fireblocks"
   url: https://boards-api.greenhouse.io/v1/boards/fireblocks/jobs?content=true
   render: static
-  company: Fireblocks
+  company: "Fireblocks"
   hints: >-
-    Greenhouse board API, token `fireblocks`. Whole board in one GET. Parse the
-    standard Greenhouse fields. Strong match for wallet security, custody,
-    transaction authorization, policy engines, crypto payments and backend
-    security infrastructure roles.
+    Greenhouse board API, token `fireblocks`. Whole board in one GET. Parse the standard
+    Greenhouse fields. Strong match for wallet security, custody, transaction authorization,
+    policy engines, crypto payments and backend security infrastructure roles.
 
 - slug: aptos_labs
-  name: Aptos Labs
+  name: "Aptos Labs"
   url: https://boards-api.greenhouse.io/v1/boards/aptoslabs/jobs?content=true
   render: static
-  company: Aptos Labs
+  company: "Aptos Labs"
   hints: >-
-    Greenhouse board API, token `aptoslabs`. Whole board in one GET. Parse the
-    standard Greenhouse fields. Strong match for blockchain platform,
-    infrastructure security, protocol engineering, distributed systems and
-    on-chain application infrastructure roles.
+    Greenhouse board API, token `aptoslabs`. Whole board in one GET. Parse the standard
+    Greenhouse fields. Strong match for blockchain platform, infrastructure security,
+    protocol engineering, distributed systems and on-chain application infrastructure roles.
 
 - slug: blockchain_com
-  name: Blockchain.com
+  name: "Blockchain.com"
   url: https://boards-api.greenhouse.io/v1/boards/blockchain/jobs?content=true
   render: static
-  company: Blockchain.com
+  company: "Blockchain.com"
   hints: >-
-    Greenhouse board API, token `blockchain`. Whole board in one GET. Parse the
-    standard Greenhouse fields. Strong match for crypto wallets, exchange,
-    payments, custody, settlement and backend platform roles.
+    Greenhouse board API, token `blockchain`. Whole board in one GET. Parse the standard
+    Greenhouse fields. Strong match for crypto wallets, exchange, payments, custody,
+    settlement and backend platform roles.
 
 - slug: cloudflare
-  name: Cloudflare
+  name: "Cloudflare"
   url: https://boards-api.greenhouse.io/v1/boards/cloudflare/jobs?content=true
   render: static
-  company: Cloudflare
+  company: "Cloudflare"
   hints: >-
-    Greenhouse board API, token `cloudflare`. Whole board in one GET. Parse the
-    standard Greenhouse fields. Strong match for distributed systems, networking,
-    edge infrastructure, security services, Go/Rust systems and reliability
-    engineering roles.
+    Greenhouse board API, token `cloudflare`. Whole board in one GET. Parse the standard
+    Greenhouse fields. Strong match for distributed systems, networking, edge
+    infrastructure, security services, Go/Rust systems and reliability engineering roles.
 
 - slug: grafana_labs
-  name: Grafana Labs
+  name: "Grafana Labs"
   url: https://boards-api.greenhouse.io/v1/boards/grafanalabs/jobs?content=true
   render: static
-  company: Grafana Labs
+  company: "Grafana Labs"
   hints: >-
-    Greenhouse board API, token `grafanalabs`. Whole board in one GET. Parse the
-    standard Greenhouse fields. Strong match for observability, distributed
-    telemetry, Go backend services, Kubernetes, cloud infrastructure and fully
-    remote platform engineering roles.
+    Greenhouse board API, token `grafanalabs`. Whole board in one GET. Parse the standard
+    Greenhouse fields. Strong match for observability, distributed telemetry, Go backend
+    services, Kubernetes, cloud infrastructure and fully remote platform engineering roles.
 
 - slug: glean
-  name: Glean
+  name: "Glean"
   url: https://boards-api.greenhouse.io/v1/boards/gleanwork/jobs?content=true
   render: static
-  company: Glean
+  company: "Glean"
   hints: >-
-    Greenhouse board API, token `gleanwork`. Whole board in one GET. Parse the
-    standard Greenhouse fields. Strong match for search, retrieval, AI platform,
-    permissions-aware data systems, backend APIs and storage infrastructure roles.
+    Greenhouse board API, token `gleanwork`. Whole board in one GET. Parse the standard
+    Greenhouse fields. Strong match for search, retrieval, AI platform, permissions-aware
+    data systems, backend APIs and storage infrastructure roles.
 
 - slug: sourcegraph
-  name: Sourcegraph
+  name: "Sourcegraph"
   url: https://boards-api.greenhouse.io/v1/boards/sourcegraph91/jobs?content=true
   render: static
-  company: Sourcegraph
+  company: "Sourcegraph"
   hints: >-
-    Greenhouse board API, token `sourcegraph91`. Whole board in one GET. Parse
-    the standard Greenhouse fields. Strong match for code search, developer
-    infrastructure, remote backend/platform, security and AI-assisted coding
-    systems roles.
+    Greenhouse board API, token `sourcegraph91`. Whole board in one GET. Parse the standard
+    Greenhouse fields. Strong match for code search, developer infrastructure, remote
+    backend/platform, security and AI-assisted coding systems roles.
 
 - slug: canonical
-  name: Canonical
+  name: "Canonical"
   url: https://boards-api.greenhouse.io/v1/boards/canonical/jobs?content=true
   render: static
-  company: Canonical
+  company: "Canonical"
   hints: >-
-    Greenhouse board API, token `canonical`. Whole board in one GET. Parse the
-    standard Greenhouse fields. Strong match for Linux, Kubernetes, cloud
-    infrastructure, Go backend, systems programming, release automation and
-    globally remote engineering roles.
+    Greenhouse board API, token `canonical`. Whole board in one GET. Parse the standard
+    Greenhouse fields. Strong match for Linux, Kubernetes, cloud infrastructure, Go backend,
+    systems programming, release automation and globally remote engineering roles.
 
 - slug: remotecom
-  name: Remote
+  name: "Remote"
   url: https://boards-api.greenhouse.io/v1/boards/remotecom/jobs?content=true
   render: static
-  company: Remote
+  company: "Remote"
   hints: >-
-    Greenhouse board API, token `remotecom`. Whole board in one GET. Parse the
-    standard Greenhouse fields. Strong match for globally distributed remote
-    product infrastructure, payroll, compliance, fintech-adjacent backend and
-    platform roles.
+    Greenhouse board API, token `remotecom`. Whole board in one GET. Parse the standard
+    Greenhouse fields. Strong match for globally distributed remote product infrastructure,
+    payroll, compliance, fintech-adjacent backend and platform roles.
 
-# -----------------------------------------------------------------------------
-# Ashby boards: public posting API with full descriptions and structured pay.
-# Shape: jobs[] with id/title/location/descriptionPlain/employmentType/jobUrl.
-# Prefer workplaceType over coarse isRemote. Use compensation.summaryComponents
-# for salary only when structured values are present.
-# -----------------------------------------------------------------------------
 - slug: linear
-  name: Linear
+  name: "Linear"
   url: https://api.ashbyhq.com/posting-api/job-board/linear?includeCompensation=true
   render: static
-  company: Linear
+  company: "Linear"
   hints: >-
-    Ashby job board API, token `linear`. jobs[] have stable `id`, `title`,
-    `location`, full `descriptionPlain`, `employmentType`, `jobUrl`, and often
-    compensation.summaryComponents. Prefer `workplaceType` over `isRemote`.
-    Strong match for product infrastructure, performance, TypeScript/Rust-adjacent
-    backend, platform and senior remote roles.
+    Ashby job board API, token `linear`. jobs[] have stable `id`, `title`, `location`, full
+    `descriptionPlain`, `employmentType`, `jobUrl`, and often
+    compensation.summaryComponents. Prefer `workplaceType` over `isRemote`. Strong match for
+    product infrastructure, performance, TypeScript/Rust-adjacent backend, platform and
+    senior remote roles.
 
 - slug: ramp
-  name: Ramp
+  name: "Ramp"
   url: https://api.ashbyhq.com/posting-api/job-board/ramp?includeCompensation=true
   render: static
-  company: Ramp
+  company: "Ramp"
   hints: >-
-    Ashby job board API, token `ramp`. Parse the standard Ashby fields. Strong
-    match for fintech backend, money movement, ledgering, spend management,
-    risk/fraud systems and staff-level infrastructure roles.
+    Ashby job board API, token `ramp`. Parse the standard Ashby fields. Strong match for
+    fintech backend, money movement, ledgering, spend management, risk/fraud systems and
+    staff-level infrastructure roles.
 
 - slug: replit
-  name: Replit
+  name: "Replit"
   url: https://api.ashbyhq.com/posting-api/job-board/replit?includeCompensation=true
   render: static
-  company: Replit
+  company: "Replit"
   hints: >-
-    Ashby job board API, token `replit`. Parse the standard Ashby fields. Strong
-    match for developer infrastructure, distributed execution, cloud runtime,
-    platform backend and AI tooling roles.
+    Ashby job board API, token `replit`. Parse the standard Ashby fields. Strong match for
+    developer infrastructure, distributed execution, cloud runtime, platform backend and AI
+    tooling roles.
 
 - slug: openai
-  name: OpenAI
+  name: "OpenAI"
   url: https://api.ashbyhq.com/posting-api/job-board/openai?includeCompensation=true
   render: static
-  company: OpenAI
+  company: "OpenAI"
   hints: >-
-    Ashby job board API, token `openai`. Parse the standard Ashby fields. Strong
-    match for retrieval/search, infrastructure, distributed systems, product
-    platform, payments/commercial systems, reliability and high-scale backend
-    roles.
+    Ashby job board API, token `openai`. Parse the standard Ashby fields. Strong match for
+    retrieval/search, infrastructure, distributed systems, product platform,
+    payments/commercial systems, reliability and high-scale backend roles.
 
 - slug: kraken
-  name: Kraken
+  name: "Kraken"
   url: https://api.ashbyhq.com/posting-api/job-board/kraken.com?includeCompensation=true
   render: static
-  company: Kraken
+  company: "Kraken"
   hints: >-
-    Ashby job board API, token `kraken.com`. Parse the standard Ashby fields.
-    Strong match for crypto exchange infrastructure, custody, payments, on-chain
-    integrations, settlement, backend platform and security roles.
+    Ashby job board API, token `kraken.com`. Parse the standard Ashby fields. Strong match
+    for crypto exchange infrastructure, custody, payments, on-chain integrations,
+    settlement, backend platform and security roles.
 
 - slug: plaid
-  name: Plaid
+  name: "Plaid"
   url: https://api.ashbyhq.com/posting-api/job-board/plaid?includeCompensation=true
   render: static
-  company: Plaid
+  company: "Plaid"
   hints: >-
-    Ashby job board API, token `plaid`. Parse the standard Ashby fields. Strong
-    match for financial data APIs, payments, risk, bank integrations, high-scale
-    backend services and platform reliability roles.
+    Ashby job board API, token `plaid`. Parse the standard Ashby fields. Strong match for
+    financial data APIs, payments, risk, bank integrations, high-scale backend services and
+    platform reliability roles.
 
 - slug: chainlink_labs
-  name: Chainlink Labs
+  name: "Chainlink Labs"
   url: https://api.ashbyhq.com/posting-api/job-board/chainlink-labs?includeCompensation=true
   render: static
-  company: Chainlink Labs
+  company: "Chainlink Labs"
   hints: >-
-    Ashby job board API, token `chainlink-labs`. Parse the standard Ashby fields.
-    Strong match for decentralized oracle infrastructure, blockchain protocols,
-    on-chain finance, cryptography-adjacent backend, distributed systems and
-    remote protocol engineering roles.
-
-- slug: supabase
-  name: Supabase
-  url: https://api.ashbyhq.com/posting-api/job-board/supabase?includeCompensation=true
-  render: static
-  company: Supabase
-  hints: >-
-    Ashby job board API, token `supabase`. Parse the standard Ashby fields.
-    Strong match for database infrastructure, Postgres, storage, developer
-    platform, edge/runtime systems, APIs and remote backend roles.
-
-- slug: sentry
-  name: Sentry
-  url: https://api.ashbyhq.com/posting-api/job-board/sentry?includeCompensation=true
-  render: static
-  company: Sentry
-  hints: >-
-    Ashby job board API, token `sentry`. Parse the standard Ashby fields. Strong
-    match for observability, event ingestion, distributed storage, performance
-    monitoring, reliability engineering and backend platform roles.
-
-- slug: pinecone
-  name: Pinecone
-  url: https://api.ashbyhq.com/posting-api/job-board/pinecone?includeCompensation=true
-  render: static
-  company: Pinecone
-  hints: >-
-    Ashby job board API, token `pinecone`. Parse the standard Ashby fields.
-    Strong match for vector search, retrieval infrastructure, indexing, database
-    systems, distributed storage and performance engineering roles.
-
-- slug: turbopuffer
-  name: Turbopuffer
-  url: https://api.ashbyhq.com/posting-api/job-board/turbopuffer?includeCompensation=true
-  render: static
-  company: Turbopuffer
-  hints: >-
-    Ashby job board API, token `turbopuffer`. Parse the standard Ashby fields.
-    Strong match for search primitives, vector search, full-text search,
-    reranking, distributed database infrastructure, Rust/Go systems and storage
-    engineering roles.
-
-- slug: modal
-  name: Modal
-  url: https://api.ashbyhq.com/posting-api/job-board/modal?includeCompensation=true
-  render: static
-  company: Modal
-  hints: >-
-    Ashby job board API, token `modal`. Parse the standard Ashby fields. Strong
-    match for distributed compute, container/runtime infrastructure, AI platform,
-    high-performance backend, scheduling and reliability engineering roles.
-
-- slug: weaviate
-  name: Weaviate
-  url: https://api.ashbyhq.com/posting-api/job-board/weaviate?includeCompensation=true
-  render: static
-  company: Weaviate
-  hints: >-
-    Ashby job board API, token `weaviate`. Parse the standard Ashby fields.
-    Strong match for vector databases, retrieval, indexing, distributed systems,
-    Go backend, cloud platform and remote-first infrastructure roles.
-
-- slug: mysten_labs
-  name: Mysten Labs
-  url: https://api.ashbyhq.com/posting-api/job-board/mystenlabs?includeCompensation=true
-  render: static
-  company: Mysten Labs
-  hints: >-
-    Ashby job board API, token `mystenlabs`. Parse the standard Ashby fields.
-    Strong match for blockchain platform, Move/Sui ecosystem infrastructure,
-    protocol security, wallets, distributed systems and backend roles.
-
-- slug: op_labs
-  name: OP Labs
-  url: https://api.ashbyhq.com/posting-api/job-board/oplabs?includeCompensation=true
-  render: static
-  company: OP Labs
-  hints: >-
-    Ashby job board API, token `oplabs`. Parse the standard Ashby fields. Strong
-    match for Ethereum L2 protocol infrastructure, Rust/Go backend, rollup
-    systems, on-chain data, protocol reliability and remote engineering roles.
-
-- slug: parity
-  name: Parity Technologies
-  url: https://api.ashbyhq.com/posting-api/job-board/parity?includeCompensation=true
-  render: static
-  company: Parity Technologies
-  hints: >-
-    Ashby job board API, token `parity`. Parse the standard Ashby fields. Strong
-    match for Rust systems engineering, blockchain protocols, Substrate/Polkadot,
-    security, distributed systems and globally remote engineering roles.
-
-# -----------------------------------------------------------------------------
-# Lever boards: public postings API returns a JSON list.
-# Reconstruct full text from description + lists[].content + additional.
-# -----------------------------------------------------------------------------
-- slug: spotify
-  name: Spotify
-  url: https://api.lever.co/v0/postings/spotify?mode=json
-  render: static
-  company: Spotify
-  hints: >-
-    Lever postings API. The url returns the whole board as a JSON list.
-    `description` is intro only; reconstruct full text from description + each
-    lists[].content + `additional`. `workplaceType` indicates remote/hybrid/site;
-    categories.location/team/commitment carry location, department and
-    employment_type; `createdAt` is epoch-ms posted_at; stable id in `id`; apply
-    link in `hostedUrl`.
-
-- slug: mistral
-  name: Mistral AI
-  url: https://api.lever.co/v0/postings/mistral?mode=json
-  render: static
-  company: Mistral AI
-  hints: >-
-    Lever postings API. Whole board as JSON list. Reconstruct full text from
-    description + lists[].content + `additional`. Parse workplaceType,
-    categories.location/team/commitment, `createdAt`, `id`, and `hostedUrl`.
-    Strong match for AI infrastructure, backend platforms, distributed systems,
-    Go services and remote Europe-timezone roles.
-
-- slug: offchain_labs
-  name: Offchain Labs
-  url: https://api.lever.co/v0/postings/offchainlabs?mode=json
-  render: static
-  company: Offchain Labs
-  hints: >-
-    Lever postings API. Whole board as JSON list. Reconstruct full text from
-    description + lists[].content + `additional`. Parse workplaceType,
-    categories.location/team/commitment, `createdAt`, `id`, and `hostedUrl`.
-    Strong match for Arbitrum, Ethereum L2, Rust backend, WASM, protocol
-    infrastructure and distributed systems roles.
-
-- slug: neon_pagamentos
-  name: Neon Pagamentos
-  url: https://api.lever.co/v0/postings/neon?mode=json
-  render: static
-  company: Neon Pagamentos
-  hints: >-
-    Lever postings API for Brazilian fintech Neon. Whole board as JSON list.
-    Reconstruct full text from description + lists[].content + `additional`.
-    Parse workplaceType, categories.location/team/commitment, `createdAt`, `id`,
-    and `hostedUrl`. Strong local match for Brazil remote CLT fintech backend,
-    payments, risk, platform and product engineering roles.
-
-# -----------------------------------------------------------------------------
-# Custom company boards. These are selected because their current openings are
-# highly aligned, but their public boards are not simple Greenhouse/Ashby/Lever
-# endpoints. Most are treated as windowed to avoid false close-missing diffs.
-# -----------------------------------------------------------------------------
-- slug: stripe
-  name: Stripe
-  url: https://stripe.com/jobs/search
-  render: static
-  company: Stripe
-  enumerates_all: false
-  hints: >-
-    Stripe jobs search is a custom server-rendered board. Windowed crawl: fetch
-    the jobs search page and filter detail links under /jobs/listing/. For each
-    detail page, extract title, location, team/category, full job-body text,
-    application link, and external_id from the trailing numeric id in the URL.
-    Treat as windowed because search filters/pagination can change. Strong match
-    for payments, payouts, crypto, risk, ledgering, APIs and backend platform
+    Ashby job board API, token `chainlink-labs`. Parse the standard Ashby fields. Strong
+    match for decentralized oracle infrastructure, blockchain protocols, on-chain finance,
+    cryptography-adjacent backend, distributed systems and remote protocol engineering
     roles.
 
+- slug: supabase
+  name: "Supabase"
+  url: https://api.ashbyhq.com/posting-api/job-board/supabase?includeCompensation=true
+  render: static
+  company: "Supabase"
+  hints: >-
+    Ashby job board API, token `supabase`. Parse the standard Ashby fields. Strong match for
+    database infrastructure, Postgres, storage, developer platform, edge/runtime systems,
+    APIs and remote backend roles.
+
+- slug: sentry
+  name: "Sentry"
+  url: https://api.ashbyhq.com/posting-api/job-board/sentry?includeCompensation=true
+  render: static
+  company: "Sentry"
+  hints: >-
+    Ashby job board API, token `sentry`. Parse the standard Ashby fields. Strong match for
+    observability, event ingestion, distributed storage, performance monitoring, reliability
+    engineering and backend platform roles.
+
+- slug: pinecone
+  name: "Pinecone"
+  url: https://api.ashbyhq.com/posting-api/job-board/pinecone?includeCompensation=true
+  render: static
+  company: "Pinecone"
+  hints: >-
+    Ashby job board API, token `pinecone`. Parse the standard Ashby fields. Strong match for
+    vector search, retrieval infrastructure, indexing, database systems, distributed storage
+    and performance engineering roles.
+
+- slug: turbopuffer
+  name: "Turbopuffer"
+  url: https://api.ashbyhq.com/posting-api/job-board/turbopuffer?includeCompensation=true
+  render: static
+  company: "Turbopuffer"
+  hints: >-
+    Ashby job board API, token `turbopuffer`. Parse the standard Ashby fields. Strong match
+    for search primitives, vector search, full-text search, reranking, distributed database
+    infrastructure, Rust/Go systems and storage engineering roles.
+
+- slug: modal
+  name: "Modal"
+  url: https://api.ashbyhq.com/posting-api/job-board/modal?includeCompensation=true
+  render: static
+  company: "Modal"
+  hints: >-
+    Ashby job board API, token `modal`. Parse the standard Ashby fields. Strong match for
+    distributed compute, container/runtime infrastructure, AI platform, high-performance
+    backend, scheduling and reliability engineering roles.
+
+- slug: weaviate
+  name: "Weaviate"
+  url: https://api.ashbyhq.com/posting-api/job-board/weaviate?includeCompensation=true
+  render: static
+  company: "Weaviate"
+  hints: >-
+    Ashby job board API, token `weaviate`. Parse the standard Ashby fields. Strong match for
+    vector databases, retrieval, indexing, distributed systems, Go backend, cloud platform
+    and remote-first infrastructure roles.
+
+- slug: mysten_labs
+  name: "Mysten Labs"
+  url: https://api.ashbyhq.com/posting-api/job-board/mystenlabs?includeCompensation=true
+  render: static
+  company: "Mysten Labs"
+  hints: >-
+    Ashby job board API, token `mystenlabs`. Parse the standard Ashby fields. Strong match
+    for blockchain platform, Move/Sui ecosystem infrastructure, protocol security, wallets,
+    distributed systems and backend roles.
+
+- slug: op_labs
+  name: "OP Labs"
+  url: https://api.ashbyhq.com/posting-api/job-board/oplabs?includeCompensation=true
+  render: static
+  company: "OP Labs"
+  hints: >-
+    Ashby job board API, token `oplabs`. Parse the standard Ashby fields. Strong match for
+    Ethereum L2 protocol infrastructure, Rust/Go backend, rollup systems, on-chain data,
+    protocol reliability and remote engineering roles.
+
+- slug: parity
+  name: "Parity Technologies"
+  url: https://api.ashbyhq.com/posting-api/job-board/parity?includeCompensation=true
+  render: static
+  company: "Parity Technologies"
+  hints: >-
+    Ashby job board API, token `parity`. Parse the standard Ashby fields. Strong match for
+    Rust systems engineering, blockchain protocols, Substrate/Polkadot, security,
+    distributed systems and globally remote engineering roles.
+
+- slug: spotify
+  name: "Spotify"
+  url: https://api.lever.co/v0/postings/spotify?mode=json
+  render: static
+  company: "Spotify"
+  hints: >-
+    Lever postings API. The url returns the whole board as a JSON list. `description` is
+    intro only; reconstruct full text from description + each lists[].content +
+    `additional`. `workplaceType` indicates remote/hybrid/site;
+    categories.location/team/commitment carry location, department and employment_type;
+    `createdAt` is epoch-ms posted_at; stable id in `id`; apply link in `hostedUrl`.
+
+- slug: mistral
+  name: "Mistral AI"
+  url: https://api.lever.co/v0/postings/mistral?mode=json
+  render: static
+  company: "Mistral AI"
+  hints: >-
+    Lever postings API. Whole board as JSON list. Reconstruct full text from description +
+    lists[].content + `additional`. Parse workplaceType,
+    categories.location/team/commitment, `createdAt`, `id`, and `hostedUrl`. Strong match
+    for AI infrastructure, backend platforms, distributed systems, Go services and remote
+    Europe-timezone roles.
+
+- slug: offchain_labs
+  name: "Offchain Labs"
+  url: https://api.lever.co/v0/postings/offchainlabs?mode=json
+  render: static
+  company: "Offchain Labs"
+  hints: >-
+    Lever postings API. Whole board as JSON list. Reconstruct full text from description +
+    lists[].content + `additional`. Parse workplaceType,
+    categories.location/team/commitment, `createdAt`, `id`, and `hostedUrl`. Strong match
+    for Arbitrum, Ethereum L2, Rust backend, WASM, protocol infrastructure and distributed
+    systems roles.
+
+- slug: neon_pagamentos
+  name: "Neon Pagamentos"
+  url: https://api.lever.co/v0/postings/neon?mode=json
+  render: static
+  company: "Neon Pagamentos"
+  hints: >-
+    Lever postings API for Brazilian fintech Neon. Whole board as JSON list. Reconstruct
+    full text from description + lists[].content + `additional`. Parse workplaceType,
+    categories.location/team/commitment, `createdAt`, `id`, and `hostedUrl`. Strong local
+    match for Brazil remote CLT fintech backend, payments, risk, platform and product
+    engineering roles.
+
+- slug: stripe
+  name: "Stripe"
+  url: https://stripe.com/jobs/search
+  render: static
+  company: "Stripe"
+  enumerates_all: false
+  hints: >-
+    Stripe jobs search is a custom server-rendered board. Windowed crawl: fetch the jobs
+    search page and filter detail links under /jobs/listing/. For each detail page, extract
+    title, location, team/category, full job-body text, application link, and external_id
+    from the trailing numeric id in the URL. Treat as windowed because search
+    filters/pagination can change. Strong match for payments, payouts, crypto, risk,
+    ledgering, APIs and backend platform roles.
+
 - slug: coinbase_company
-  name: Coinbase
+  name: "Coinbase"
   url: https://www.coinbase.com/careers/positions
   render: static
-  company: Coinbase
+  company: "Coinbase"
   enumerates_all: false
   hints: >-
-    Coinbase custom careers board. Windowed crawl: fetch /careers/positions,
-    collect current detail links under /careers/positions/<id>, and parse each
-    detail page for title, location/remote region, department, full description,
-    and apply link. external_id is the numeric path id when present. Treat as
-    windowed. Strong match for crypto exchange, payments platform, blockchain
-    infrastructure, AI platform, security and backend roles.
+    Coinbase custom careers board. Windowed crawl: fetch /careers/positions, collect current
+    detail links under /careers/positions/<id>, and parse each detail page for title,
+    location/remote region, department, full description, and apply link. external_id is the
+    numeric path id when present. Treat as windowed. Strong match for crypto exchange,
+    payments platform, blockchain infrastructure, AI platform, security and backend roles.
 
 - slug: block
-  name: Block
+  name: "Block"
   url: https://block.xyz/careers/jobs
   render: static
-  company: Block
+  company: "Block"
   enumerates_all: false
   hints: >-
-    Block custom careers board. Windowed crawl: fetch /careers/jobs and collect
-    current detail links under /careers/jobs/<id>. Parse each detail page for
-    title, location, team, full description, apply URL, and external_id from the
-    path. Treat as windowed. Strong match for open-economy product
-    infrastructure, payments, commerce, banking, platform and backend roles.
+    Block custom careers board. Windowed crawl: fetch /careers/jobs and collect current
+    detail links under /careers/jobs/<id>. Parse each detail page for title, location, team,
+    full description, apply URL, and external_id from the path. Treat as windowed. Strong
+    match for open-economy product infrastructure, payments, commerce, banking, platform and
+    backend roles.
 
 - slug: datadog
-  name: Datadog
+  name: "Datadog"
   url: https://careers.datadoghq.com/engineering/
   render: static
-  company: Datadog
+  company: "Datadog"
   enumerates_all: false
   hints: >-
-    Datadog custom engineering careers board. Windowed crawl: fetch the
-    engineering jobs page, collect detail links, and parse detail pages for
-    title, location, department, full description, and application link. Treat as
-    windowed because the public board is filter/pagination-driven. Strong match
-    for observability, distributed telemetry, backend platforms, infrastructure,
-    data pipelines, storage and reliability engineering roles.
+    Datadog custom engineering careers board. Windowed crawl: fetch the engineering jobs
+    page, collect detail links, and parse detail pages for title, location, department, full
+    description, and application link. Treat as windowed because the public board is
+    filter/pagination-driven. Strong match for observability, distributed telemetry, backend
+    platforms, infrastructure, data pipelines, storage and reliability engineering roles.
 
 - slug: posthog
-  name: PostHog
+  name: "PostHog"
   url: https://posthog.com/careers
   render: static
-  company: PostHog
+  company: "PostHog"
   hints: >-
-    PostHog careers page is server-rendered and links to individual role pages
-    under /careers/<slug>. Crawl the careers page for open role links, then parse
-    each detail page for title, location/timezone constraints, full description,
-    compensation text when present, and application link. Strong match for
-    product analytics, event ingestion, backend services, ClickHouse/data
-    pipelines, infra and remote engineering roles.
+    PostHog careers page is server-rendered and links to individual role pages under
+    /careers/<slug>. Crawl the careers page for open role links, then parse each detail page
+    for title, location/timezone constraints, full description, compensation text when
+    present, and application link. Strong match for product analytics, event ingestion,
+    backend services, ClickHouse/data pipelines, infra and remote engineering roles.
 
 - slug: quickwit
-  name: Quickwit
+  name: "Quickwit"
   url: https://quickwit.io/jobs/distributed-software-engineer
   render: static
-  company: Quickwit
+  company: "Quickwit"
   enumerates_all: false
   hints: >-
-    Quickwit has a small custom jobs area; this URL is a role/detail page rather
-    than a broad board. Parse the page directly for title, location/remote text,
-    full description, requirements, and apply link. Treat as windowed/single-role
-    to avoid close-missing assumptions. Excellent match for Rust distributed
-    search, indexing, storage and observability infrastructure.
+    Quickwit has a small custom jobs area; this URL is a role/detail page rather than a
+    broad board. Parse the page directly for title, location/remote text, full description,
+    requirements, and apply link. Treat as windowed/single-role to avoid close-missing
+    assumptions. Excellent match for Rust distributed search, indexing, storage and
+    observability infrastructure.
 
-# -----------------------------------------------------------------------------
-# Multi-company remote/general aggregators.
-# These usually show a recent window only, so enumerates_all:false.
-# -----------------------------------------------------------------------------
 - slug: remoteok
-  name: RemoteOK
+  name: "RemoteOK"
   url: https://remoteok.com/api
   render: static
   enumerates_all: false
   hints: >-
-    RemoteOK JSON returns only the latest ~100 posts, so enumerates_all:false.
-    SKIP element[0], a legal-notice object. Use a browser-like User-Agent.
-    `salary_min`/`salary_max` keys are always 0; ignore them and leave the salary
-    quartet None unless host-side salary parsing reads pay from description. Each
-    post names its own `company`; stable id in `id`, canonical link in `url`,
-    epoch `date` = posted_at. Useful for remote backend, Rust, Go, crypto,
-    fintech, DevOps and infra roles.
+    RemoteOK JSON returns only the latest ~100 posts, so enumerates_all:false. SKIP
+    element[0], a legal-notice object. Use a browser-like User-Agent.
+    `salary_min`/`salary_max` keys are always 0; ignore them and leave the salary quartet
+    None unless host-side salary parsing reads pay from description. Each post names its own
+    `company`; stable id in `id`, canonical link in `url`, epoch `date` = posted_at. Useful
+    for remote backend, Rust, Go, crypto, fintech, DevOps and infra roles.
 
 - slug: wwr_backend
-  name: We Work Remotely — Back-End
+  name: "We Work Remotely — Back-End"
   url: https://weworkremotely.com/categories/remote-back-end-programming-jobs.rss
   render: static
   enumerates_all: false
   hints: >-
-    We Work Remotely per-category RSS. Recent window, so enumerates_all:false.
-    Each <item> title is "Company: Role" — split the company from the prefix.
-    <link> is url/apply_url; <description> is full HTML body; pubDate is
-    posted_at; expiry may be present. Strong source for remote backend/API jobs.
+    We Work Remotely per-category RSS. Recent window, so enumerates_all:false. Each <item>
+    title is "Company: Role" — split the company from the prefix. <link> is url/apply_url;
+    <description> is full HTML body; pubDate is posted_at; expiry may be present. Strong
+    source for remote backend/API jobs.
 
 - slug: wwr_fullstack
-  name: We Work Remotely — Full-Stack
+  name: "We Work Remotely — Full-Stack"
   url: https://weworkremotely.com/categories/remote-full-stack-programming-jobs.rss
   render: static
   enumerates_all: false
   hints: >-
-    We Work Remotely Full-Stack category RSS. Same shape as wwr_backend. Recent
-    window, so enumerates_all:false. Include because many senior backend/platform
-    roles are posted under full-stack even when the backend component dominates.
+    We Work Remotely Full-Stack category RSS. Same shape as wwr_backend. Recent window, so
+    enumerates_all:false. Include because many senior backend/platform roles are posted
+    under full-stack even when the backend component dominates.
 
 - slug: wwr_devops
-  name: We Work Remotely — DevOps & Sysadmin
+  name: "We Work Remotely — DevOps & Sysadmin"
   url: https://weworkremotely.com/categories/remote-devops-sysadmin-jobs.rss
   render: static
   enumerates_all: false
   hints: >-
-    We Work Remotely DevOps/Sysadmin category RSS. Same shape as wwr_backend.
-    Recent window, so enumerates_all:false. Useful for Kubernetes,
-    observability, reliability, infrastructure and platform engineering roles.
+    We Work Remotely DevOps/Sysadmin category RSS. Same shape as wwr_backend. Recent window,
+    so enumerates_all:false. Useful for Kubernetes, observability, reliability,
+    infrastructure and platform engineering roles.
 
 - slug: wwr_frontend
-  name: We Work Remotely — Front-End
+  name: "We Work Remotely — Front-End"
   url: https://weworkremotely.com/categories/remote-front-end-programming-jobs.rss
   render: static
   enumerates_all: false
   hints: >-
-    We Work Remotely Front-End category RSS. Same shape as wwr_backend. Recent
-    window, so enumerates_all:false. Lower priority for this CV, but retained
-    because senior TypeScript/platform-product roles sometimes land here.
+    We Work Remotely Front-End category RSS. Same shape as wwr_backend. Recent window, so
+    enumerates_all:false. Lower priority for this CV, but retained because senior
+    TypeScript/platform-product roles sometimes land here.
 
 - slug: levelsfyi
-  name: Levels.fyi Jobs
+  name: "Levels.fyi Jobs"
   url: https://www.levels.fyi/jobs
   render: static
   enumerates_all: false
   hints: >-
-    Levels.fyi jobs is a Next.js SSR board. Windowed crawl: GET /jobs and parse
-    <script id="__NEXT_DATA__"> → props.pageProps.initialJobsData.results[].jobs[].id;
-    the SSR page exposes only a small freshest slice. For each id, GET
-    /jobs?jobId=<id> and parse initialJobDetails for title, companyInfo.name,
-    locations[], full HTML description, postingDate, expiryDate, employmentTypes,
-    workArrangement, applicationUrl, and structured base salary fields. Useful for
-    senior/staff compensation-aware backend, infra, AI and fintech roles.
+    Levels.fyi jobs is a Next.js SSR board. Windowed crawl: GET /jobs and parse <script
+    id="__NEXT_DATA__"> → props.pageProps.initialJobsData.results[].jobs[].id; the SSR page
+    exposes only a small freshest slice. For each id, GET /jobs?jobId=<id> and parse
+    initialJobDetails for title, companyInfo.name, locations[], full HTML description,
+    postingDate, expiryDate, employmentTypes, workArrangement, applicationUrl, and
+    structured base salary fields. Useful for senior/staff compensation-aware backend,
+    infra, AI and fintech roles.
 
 - slug: aijobs
-  name: AIJobs.net
+  name: "AIJobs.net"
   url: https://aijobs.net/
   render: static
   enumerates_all: false
   hints: >-
-    AI/ML job aggregator, server-rendered HTML. Windowed crawl: GET ?page=1 and
-    optionally page 2, newest-first. Listing gives /job/<slug>-<id>/ links plus
-    inline company, salary/workplace/employment-type hints. Description is only
-    on detail pages, so fetch each detail and extract the job-body HTML. url is
-    /job/<slug>-<id>/; external_id = trailing numeric id. No reliable expiry;
-    close by recheck. Useful for AI infrastructure, retrieval, platform and
-    backend roles.
+    AI/ML job aggregator, server-rendered HTML. Windowed crawl: GET ?page=1 and optionally
+    page 2, newest-first. Listing gives /job/<slug>-<id>/ links plus inline company,
+    salary/workplace/employment-type hints. Description is only on detail pages, so fetch
+    each detail and extract the job-body HTML. url is /job/<slug>-<id>/; external_id =
+    trailing numeric id. No reliable expiry; close by recheck. Useful for AI infrastructure,
+    retrieval, platform and backend roles.
 
 - slug: rustjobs_dev
-  name: RustJobs.dev
+  name: "RustJobs.dev"
   url: https://rustjobs.dev/
   render: static
   enumerates_all: false
   hints: >-
-    Rust-only job board. Windowed crawl: fetch the newest listing page, collect
-    job detail links under /jobs/, and parse each detail page for title, company,
-    remote/location text, salary text, posted age/date, full description and
-    apply email/link. Treat as windowed because the homepage exposes a freshest
-    slice with load-more behavior. Excellent match for Rust backend,
-    distributed systems, infrastructure, search, fintech and blockchain roles.
+    Rust-only job board. Windowed crawl: fetch the newest listing page, collect job detail
+    links under /jobs/, and parse each detail page for title, company, remote/location text,
+    salary text, posted age/date, full description and apply email/link. Treat as windowed
+    because the homepage exposes a freshest slice with load-more behavior. Excellent match
+    for Rust backend, distributed systems, infrastructure, search, fintech and blockchain
+    roles.
 
 - slug: letsgetrusty
-  name: LetsGetRusty Jobs
+  name: "LetsGetRusty Jobs"
   url: https://jobs.letsgetrusty.com/
   render: static
   enumerates_all: false
   hints: >-
-    Rust job board, Astro SSR. Windowed crawl: fetch newest-first listing ?page=1
-    and optionally page 2. List-page JobPosting ld+json descriptions are
-    truncated, so fetch each detail page (?job=<recID>) and read standalone
-    JobPosting ld+json: title, hiringOrganization.name, jobLocation,
-    applicantLocationRequirements, full markdown description, datePosted,
-    validThrough, employmentType, jobLocationType and occasional baseSalary.
-    external_id = Airtable recID. Apply URL is inside the card onclick
+    Rust job board, Astro SSR. Windowed crawl: fetch newest-first listing ?page=1 and
+    optionally page 2. List-page JobPosting ld+json descriptions are truncated, so fetch
+    each detail page (?job=<recID>) and read standalone JobPosting ld+json: title,
+    hiringOrganization.name, jobLocation, applicantLocationRequirements, full markdown
+    description, datePosted, validThrough, employmentType, jobLocationType and occasional
+    baseSalary. external_id = Airtable recID. Apply URL is inside the card onclick
     window.open(...), not in ld+json.
 
-# -----------------------------------------------------------------------------
-# Crypto/Web3 aggregators and ecosystem boards.
-# -----------------------------------------------------------------------------
 - slug: myweb3jobs
-  name: MyWeb3Jobs
+  name: "MyWeb3Jobs"
   url: https://myweb3jobs.com/wp-json/wp/v2/job
   render: static
   hints: >-
-    WordPress REST API. Page with ?per_page=100&page=N until page exceeds
-    X-WP-TotalPages; this bounded walk enumerates the whole board. Trim payload
-    with &_fields=id,link,date_gmt,title,content,acf. content.rendered is full
-    HTML description; title.rendered is HTML-entity-escaped; link is url; id is
-    external_id; date_gmt is posted_at UTC. acf.company_name, acf.location,
-    acf.remote, acf.employment_type, salary fields and acf.apply_url_or_email
-    enrich when non-empty. Useful for crypto/backend/protocol roles.
+    WordPress REST API. Page with ?per_page=100&page=N until page exceeds X-WP-TotalPages;
+    this bounded walk enumerates the whole board. Trim payload with
+    &_fields=id,link,date_gmt,title,content,acf. content.rendered is full HTML description;
+    title.rendered is HTML-entity-escaped; link is url; id is external_id; date_gmt is
+    posted_at UTC. acf.company_name, acf.location, acf.remote, acf.employment_type, salary
+    fields and acf.apply_url_or_email enrich when non-empty. Useful for
+    crypto/backend/protocol roles.
 
 - slug: web3career
-  name: Web3.career
+  name: "Web3.career"
   url: https://web3.career/
   render: static
   enumerates_all: false
   hints: >-
-    Crypto job aggregator. Windowed crawl: fetch newest-first listing ?page=1
-    and optionally ?page=2; do not walk the huge historical sitemap. Each listing
-    links to /<slug>/<id>; fetch details and parse schema.org JobPosting ld+json
-    for title, hiringOrganization.name, jobLocation, full HTML description,
-    datePosted, validThrough, baseSalary, employmentType and jobLocationType.
-    external_id = trailing integer in the detail path. Use browser User-Agent.
+    Crypto job aggregator. Windowed crawl: fetch newest-first listing ?page=1 and optionally
+    ?page=2; do not walk the huge historical sitemap. Each listing links to /<slug>/<id>;
+    fetch details and parse schema.org JobPosting ld+json for title,
+    hiringOrganization.name, jobLocation, full HTML description, datePosted, validThrough,
+    baseSalary, employmentType and jobLocationType. external_id = trailing integer in the
+    detail path. Use browser User-Agent.
 
 - slug: cryptojobslist
-  name: CryptoJobsList
+  name: "CryptoJobsList"
   url: https://cryptojobslist.com/sitemap-jobs.xml
   render: static
   enumerates_all: false
   hints: >-
-    Crypto job aggregator, Next.js. Windowed crawl: GET sitemap-jobs.xml, sort
-    /jobs/<slug> URLs by <lastmod> descending and fetch only the freshest slice.
-    Detail pages carry schema.org JobPosting in the ld+json @graph array: title,
-    hiringOrganization.name, location, full HTML description, url, datePosted,
-    validThrough, baseSalary, employmentType[] and jobLocationType. external_id =
-    /jobs/ slug. Use browser User-Agent.
+    Crypto job aggregator, Next.js. Windowed crawl: GET sitemap-jobs.xml, sort /jobs/<slug>
+    URLs by <lastmod> descending and fetch only the freshest slice. Detail pages carry
+    schema.org JobPosting in the ld+json @graph array: title, hiringOrganization.name,
+    location, full HTML description, url, datePosted, validThrough, baseSalary,
+    employmentType[] and jobLocationType. external_id = /jobs/ slug. Use browser User-Agent.
 
 - slug: sailonchain
-  name: SailOnchain
+  name: "SailOnchain"
   url: https://sailonchain.com/
   render: static
   enumerates_all: false
   hints: >-
-    Crypto job aggregator, Next.js App Router. Windowed crawl: homepage embeds a
-    Latest Crypto Jobs ItemList; take those /jobs/<slug> links or the freshest
-    slice from /sitemaps/jobs.xml, then fetch details. Detail JobPosting ld+json
-    is HTML-ENTITY-ESCAPED; html.unescape before json.loads. Parse title,
-    hiringOrganization.name, jobLocation/applicantLocationRequirements,
-    description, url, identifier.value, datePosted, validThrough, baseSalary,
-    employmentType and jobLocationType. Do not fetch robots-disallowed ?_rsc URLs.
+    Crypto job aggregator, Next.js App Router. Windowed crawl: homepage embeds a Latest
+    Crypto Jobs ItemList; take those /jobs/<slug> links or the freshest slice from
+    /sitemaps/jobs.xml, then fetch details. Detail JobPosting ld+json is
+    HTML-ENTITY-ESCAPED; html.unescape before json.loads. Parse title,
+    hiringOrganization.name, jobLocation/applicantLocationRequirements, description, url,
+    identifier.value, datePosted, validThrough, baseSalary, employmentType and
+    jobLocationType. Do not fetch robots-disallowed ?_rsc URLs.
 
 - slug: solana
-  name: Solana Ecosystem Jobs
+  name: "Solana Ecosystem Jobs"
   url: https://jobs.solana.com/
   render: static
   enumerates_all: false
   hints: >-
-    Getro-platform board for Solana ecosystem companies. Windowed crawl: GET
-    /sitemap.xml, sort /companies/<org>/jobs/<id>-<slug> URLs by <lastmod>
-    descending, fetch only the freshest slice, and read each posting from
-    __NEXT_DATA__ → props.pageProps.initialState.jobs.currentJob. Fields: title,
-    full HTML description, organization.name, locations[].name, postedAt,
-    expiresAt, employmentTypes[], compensation*Cents/currency/period when
-    present. Job.url = board detail URL; currentJob.url = apply_url;
-    external_id = numeric id prefix; skip status != active. Never fetch
-    api.getro.com.
+    Getro-platform board for Solana ecosystem companies. Windowed crawl: GET /sitemap.xml,
+    sort /companies/<org>/jobs/<id>-<slug> URLs by <lastmod> descending, fetch only the
+    freshest slice, and read each posting from __NEXT_DATA__ →
+    props.pageProps.initialState.jobs.currentJob. Fields: title, full HTML description,
+    organization.name, locations[].name, postedAt, expiresAt, employmentTypes[],
+    compensation*Cents/currency/period when present. Job.url = board detail URL;
+    currentJob.url = apply_url; external_id = numeric id prefix; skip status != active.
+    Never fetch api.getro.com.
 
 - slug: arbitrum
-  name: Arbitrum Ecosystem Jobs
+  name: "Arbitrum Ecosystem Jobs"
   url: https://jobs.arbitrum.io/
   render: static
   enumerates_all: false
   hints: >-
-    Getro-platform board for Arbitrum ecosystem companies. Windowed crawl: GET
-    /sitemap.xml, sort /companies/<org>/jobs/<id>-<slug> URLs by <lastmod>
-    descending, fetch only the freshest slice, and parse detail pages from
-    __NEXT_DATA__ → props.pageProps.initialState.jobs.currentJob. Fields follow
-    the Solana Getro pattern: title, full HTML description, organization.name,
-    locations[].name, postedAt/expiresAt, employmentTypes[], compensation cents
-    when present, status, and external ATS URL. Skip inactive jobs. Never fetch
-    api.getro.com.
+    Getro-platform board for Arbitrum ecosystem companies. Windowed crawl: GET /sitemap.xml,
+    sort /companies/<org>/jobs/<id>-<slug> URLs by <lastmod> descending, fetch only the
+    freshest slice, and parse detail pages from __NEXT_DATA__ →
+    props.pageProps.initialState.jobs.currentJob. Fields follow the Solana Getro pattern:
+    title, full HTML description, organization.name, locations[].name, postedAt/expiresAt,
+    employmentTypes[], compensation cents when present, status, and external ATS URL. Skip
+    inactive jobs. Never fetch api.getro.com.
 
 - slug: coinbase_portfolio
-  name: Coinbase Ventures Portfolio Jobs
+  name: "Coinbase Ventures Portfolio Jobs"
   url: https://coinbase.getro.com/
   render: static
   enumerates_all: false
   hints: >-
-    Getro-platform board for Coinbase Ventures portfolio companies. Windowed
-    crawl: GET /sitemap.xml, sort job URLs by <lastmod> descending and fetch only
-    the freshest slice. Detail pages embed currentJob in __NEXT_DATA__ using the
-    standard Getro shape: title, full description, organization.name,
-    locations[].name, postedAt/expiresAt, employmentTypes[], compensation cents
-    when present, status, and external apply URL. Skip inactive jobs. Never fetch
-    api.getro.com. Strong source for crypto, payments, infra and protocol roles.
+    Getro-platform board for Coinbase Ventures portfolio companies. Windowed crawl: GET
+    /sitemap.xml, sort job URLs by <lastmod> descending and fetch only the freshest slice.
+    Detail pages embed currentJob in __NEXT_DATA__ using the standard Getro shape: title,
+    full description, organization.name, locations[].name, postedAt/expiresAt,
+    employmentTypes[], compensation cents when present, status, and external apply URL. Skip
+    inactive jobs. Never fetch api.getro.com. Strong source for crypto, payments, infra and
+    protocol roles.
+
+- slug: airwallex
+  name: "Airwallex"
+  url: https://api.ashbyhq.com/posting-api/job-board/airwallex?includeCompensation=true
+  render: static
+  company: "Airwallex"
+  hints: >-
+    Ashby job board API, token `airwallex`. jobs[] carry stable `id`, `title`, `location`,
+    full `descriptionPlain` (or descriptionHtml), usually `employmentType`, `jobUrl` /
+    `applyUrl`, `workplaceType` / `isRemote`, and structured compensation.summaryComponents
+    when present. Set salary fields only from structured compensation. Added because the
+    board is a strong match for global payments, financial platform, settlement and backend
+    infrastructure roles.
+
+- slug: modern_treasury
+  name: "Modern Treasury"
+  url: https://api.ashbyhq.com/posting-api/job-board/moderntreasury?includeCompensation=true
+  render: static
+  company: "Modern Treasury"
+  hints: >-
+    Ashby job board API, token `moderntreasury`. jobs[] carry stable `id`, `title`,
+    `location`, full `descriptionPlain` (or descriptionHtml), usually `employmentType`,
+    `jobUrl` / `applyUrl`, `workplaceType` / `isRemote`, and structured
+    compensation.summaryComponents when present. Set salary fields only from structured
+    compensation. Added because the board is a strong match for payments operations, bank
+    rails, ledgers, reconciliation and infrastructure engineering roles.
+
+- slug: lithic
+  name: "Lithic"
+  url: https://boards-api.greenhouse.io/v1/boards/lithic/jobs?content=true
+  render: static
+  company: "Lithic"
+  hints: >-
+    Greenhouse board API, token `lithic`. Whole board in one GET. Each job has stable `id`,
+    `title`, flattened `location.name`, `absolute_url`, `updated_at`, and `content` = full
+    HTML-ENTITY-ESCAPED description. Use html.unescape, then strip tags. No salary or
+    employment_type fields. Added because the board is a strong match for card issuing,
+    processing, payments, treasury, data platform and backend infrastructure roles.
+
+- slug: column
+  name: "Column"
+  url: https://api.ashbyhq.com/posting-api/job-board/column?includeCompensation=true
+  render: static
+  company: "Column"
+  hints: >-
+    Ashby job board API, token `column`. jobs[] carry stable `id`, `title`, `location`, full
+    `descriptionPlain` (or descriptionHtml), usually `employmentType`, `jobUrl` /
+    `applyUrl`, `workplaceType` / `isRemote`, and structured compensation.summaryComponents
+    when present. Set salary fields only from structured compensation. Added because the
+    board is a strong match for banking infrastructure, payments, developer APIs, financial
+    ledgers and backend platform roles.
+
+- slug: cloudwalk
+  name: "CloudWalk"
+  url: https://api.lever.co/v0/postings/cloudwalk?mode=json
+  render: static
+  company: "CloudWalk"
+  hints: >-
+    Lever postings API for `cloudwalk`. The url returns the whole board as a JSON list.
+    Reconstruct full text from `description` + each lists[].content + `additional`;
+    categories.location / .team / .commitment carry location, department and
+    employment_type; createdAt is epoch-ms; stable id in `id`; apply link in `hostedUrl`.
+    Company fixed. Added because the board is a strong match for Brazilian payments, card
+    issuing, ledgers, authentication, platform, Rust and backend roles.
+
+- slug: ebanx
+  name: "EBANX"
+  url: https://boards-api.greenhouse.io/v1/boards/ebanx/jobs?content=true
+  render: static
+  company: "EBANX"
+  hints: >-
+    Greenhouse board API, token `ebanx`. Whole board in one GET. Each job has stable `id`,
+    `title`, flattened `location.name`, `absolute_url`, `updated_at`, and `content` = full
+    HTML-ENTITY-ESCAPED description. Use html.unescape, then strip tags. No salary or
+    employment_type fields. Added because the board is a strong match for Brazil/LATAM
+    payments, banking, settlement and backend platform roles.
+
+- slug: c6bank
+  name: "C6 Bank"
+  url: https://boards-api.greenhouse.io/v1/boards/c6bank/jobs?content=true
+  render: static
+  company: "C6 Bank"
+  hints: >-
+    Greenhouse board API, token `c6bank`. Whole board in one GET. Each job has stable `id`,
+    `title`, flattened `location.name`, `absolute_url`, `updated_at`, and `content` = full
+    HTML-ENTITY-ESCAPED description. Use html.unescape, then strip tags. No salary or
+    employment_type fields. Added because the board is a strong match for Brazilian banking,
+    payments, authentication, risk, data and backend engineering roles.
+
+- slug: affirm
+  name: "Affirm"
+  url: https://boards-api.greenhouse.io/v1/boards/affirm/jobs?content=true
+  render: static
+  company: "Affirm"
+  hints: >-
+    Greenhouse board API, token `affirm`. One GET to the url returns the whole public board.
+    Each job has stable `id`, `title`, flattened `location.name`, `absolute_url`,
+    `updated_at`, and `content` = the full HTML-ENTITY-ESCAPED description; html.unescape
+    it, then strip tags. Greenhouse does not expose salary or employment_type in this board
+    API. Strong match for financial systems, payments, risk, reliability, distributed
+    backend and staff-level platform roles.
+
+- slug: brex
+  name: "Brex"
+  url: https://www.brex.com/careers
+  render: browser
+  company: "Brex"
+  enumerates_all: false
+  hints: >-
+    Brex custom careers board. Browser-render if needed, collect open engineering role links
+    and detail pages from the careers host. Parse title, team, location/workplace, full
+    description, and external apply URL. Treat as windowed because the board is
+    filter-driven. Strong match for corporate cards, spend management, financial platform,
+    release infrastructure and backend systems roles.
+
+- slug: wise
+  name: "Wise"
+  url: https://wise.jobs/engineering
+  render: browser
+  company: "Wise"
+  enumerates_all: false
+  hints: >-
+    Wise engineering careers board. Browser-render engineering search/listing pages, collect
+    backend/platform/payments role links, and parse details for title, location, job family,
+    full description and apply URL. Treat as windowed because search results and filters are
+    dynamic. Strong match for cross-border payments, bank integrations, platform reliability
+    and São Paulo/LATAM engineering roles.
+
+- slug: rippling
+  name: "Rippling"
+  url: https://www.rippling.com/careers
+  render: static
+  company: "Rippling"
+  enumerates_all: false
+  hints: >-
+    Custom careers board. Treat as a windowed crawl unless the generated crawler proves that
+    a same-host API or sitemap enumerates every active posting. Fetch the listing, collect
+    active job detail URLs, then parse each detail page for title, description, location,
+    apply_url, employment_type, posted_at and expires_at when present. Strong match for
+    API/platform backend, identity, payroll/payments adjacent systems, distributed
+    application infrastructure and senior/staff roles.
+
+- slug: deel
+  name: "Deel"
+  url: https://www.deel.com/careers/
+  render: static
+  company: "Deel"
+  enumerates_all: false
+  hints: >-
+    Custom careers board. Treat as a windowed crawl unless the generated crawler proves that
+    a same-host API or sitemap enumerates every active posting. Fetch the listing, collect
+    active job detail URLs, then parse each detail page for title, description, location,
+    apply_url, employment_type, posted_at and expires_at when present. Strong match for
+    global payroll, payments, compliance infrastructure, backend platform and remote-first
+    engineering roles.
+
+- slug: dock
+  name: "Dock"
+  url: https://dock.inhire.app/vagas
+  render: static
+  company: "Dock"
+  enumerates_all: false
+  hints: >-
+    Custom careers board. Treat as a windowed crawl unless the generated crawler proves that
+    a same-host API or sitemap enumerates every active posting. Fetch the listing, collect
+    active job detail URLs, then parse each detail page for title, description, location,
+    apply_url, employment_type, posted_at and expires_at when present. Strong match for
+    Brazilian payments, banking-as-a-service, card issuing, processing and backend platform
+    roles.
+
+- slug: stone
+  name: "Stone"
+  url: https://boards-api.greenhouse.io/v1/boards/stone/jobs?content=true
+  render: static
+  company: "Stone"
+  hints: >-
+    Greenhouse board API, token `stone`. Whole board in one GET. Each job has stable `id`,
+    `title`, flattened `location.name`, `absolute_url`, `updated_at`, and `content` = full
+    HTML-ENTITY-ESCAPED description. Use html.unescape, then strip tags. No salary or
+    employment_type fields. Added because the board is a strong match for Brazilian
+    payments, acquiring, risk, identity, financial platform and backend roles.
+
+- slug: anchorage_digital
+  name: "Anchorage Digital"
+  url: https://api.lever.co/v0/postings/anchorage?mode=json
+  render: static
+  company: "Anchorage Digital"
+  hints: >-
+    Lever postings API, token `anchorage`. The url returns the whole board as a JSON list.
+    Reconstruct full text from `description` + each `lists[].content` + `additional`;
+    `description` alone is only the intro. Use stable `id`, `hostedUrl` for url/apply_url,
+    `createdAt` epoch-ms for posted_at, `workplaceType`, and
+    `categories.location/team/commitment` for location, department and employment_type.
+    Company is fixed for every posting. Strong match for crypto custody, wallet
+    infrastructure, transaction safety, settlement and protocol/backend engineering.
+
+- slug: falconx
+  name: "FalconX"
+  url: https://boards-api.greenhouse.io/v1/boards/falconx/jobs?content=true
+  render: static
+  company: "FalconX"
+  hints: >-
+    Greenhouse board API, token `falconx`. One GET to the url returns the whole public
+    board. Each job has stable `id`, `title`, flattened `location.name`, `absolute_url`,
+    `updated_at`, and `content` = the full HTML-ENTITY-ESCAPED description; html.unescape
+    it, then strip tags. Greenhouse does not expose salary or employment_type in this board
+    API. Strong match for crypto trading, exchange infrastructure, settlement, risk, custody
+    and backend distributed systems.
+
+- slug: bitgo
+  name: "BitGo"
+  url: https://boards-api.greenhouse.io/v1/boards/bitgo/jobs?content=true
+  render: static
+  company: "BitGo"
+  hints: >-
+    Greenhouse board API, token `bitgo`. One GET to the url returns the whole public board.
+    Each job has stable `id`, `title`, flattened `location.name`, `absolute_url`,
+    `updated_at`, and `content` = the full HTML-ENTITY-ESCAPED description; html.unescape
+    it, then strip tags. Greenhouse does not expose salary or employment_type in this board
+    API. Strong match for wallet/custody infrastructure, transaction signing, blockchain
+    security, settlement and backend systems.
+
+- slug: circle_internet
+  name: "Circle"
+  url: https://careers.circle.com/us/en/search-results
+  render: static
+  company: "Circle"
+  enumerates_all: false
+  hints: >-
+    Custom careers board. Treat as a windowed crawl unless the generated crawler proves that
+    a same-host API or sitemap enumerates every active posting. Fetch the listing, collect
+    active job detail URLs, then parse each detail page for title, description, location,
+    apply_url, employment_type, posted_at and expires_at when present. Strong match for
+    stablecoins, payments, settlement, compliance/risk infrastructure, wallets and backend
+    platform roles.
+
+- slug: uniswap_labs
+  name: "Uniswap Labs"
+  url: https://careers.uniswap.org/
+  render: browser
+  company: "Uniswap Labs"
+  enumerates_all: false
+  hints: >-
+    Uniswap Labs careers board. Browser-render open roles, collect engineering/protocol role
+    detail pages, and parse title, location/workplace, full description and apply URL. Treat
+    as windowed. Strong match for DeFi, protocol infrastructure, exchange systems, smart
+    contracts and backend infrastructure roles.
+
+- slug: dydx
+  name: "dYdX"
+  url: https://dydx.exchange/careers
+  render: static
+  company: "dYdX"
+  enumerates_all: false
+  hints: >-
+    Custom careers board. Treat as a windowed crawl unless the generated crawler proves that
+    a same-host API or sitemap enumerates every active posting. Fetch the listing, collect
+    active job detail URLs, then parse each detail page for title, description, location,
+    apply_url, employment_type, posted_at and expires_at when present. Strong match for
+    exchange infrastructure, protocol/backend engineering, trading systems, wallets and
+    distributed financial systems.
+
+- slug: polygon_labs
+  name: "Polygon Labs"
+  url: https://api.ashbyhq.com/posting-api/job-board/polygon-labs?includeCompensation=true
+  render: static
+  company: "Polygon Labs"
+  hints: >-
+    Ashby job board API, token `polygon-labs`. jobs[] each have stable `id`, `title`,
+    `location`, full `descriptionPlain` (or `descriptionHtml`), always-present
+    `employmentType`, `jobUrl`, and often `compensation.summaryComponents` with
+    minValue/maxValue/currencyCode/interval for the salary quartet. Prefer `workplaceType`
+    over the coarse `isRemote`. Company is fixed for every posting. Strong match for
+    EVM/protocol infrastructure, scaling systems, distributed systems and Rust/Go/backend
+    roles.
+
+- slug: gauntlet
+  name: "Gauntlet"
+  url: https://api.lever.co/v0/postings/gauntlet?mode=json
+  render: static
+  company: "Gauntlet"
+  hints: >-
+    Lever postings API for `gauntlet`. The url returns the whole board as a JSON list.
+    Reconstruct full text from `description` + each lists[].content + `additional`;
+    categories.location / .team / .commitment carry location, department and
+    employment_type; createdAt is epoch-ms; stable id in `id`; apply link in `hostedUrl`.
+    Company fixed. Added because the board is a strong match for DeFi risk, infrastructure,
+    protocol data, backend systems and security engineering roles.
+
+- slug: flashbots
+  name: "Flashbots"
+  url: https://api.ashbyhq.com/posting-api/job-board/flashbots.net?includeCompensation=true
+  render: static
+  company: "Flashbots"
+  hints: >-
+    Ashby job board API, token `flashbots.net`. jobs[] carry stable `id`, `title`,
+    `location`, full `descriptionPlain` (or descriptionHtml), usually `employmentType`,
+    `jobUrl` / `applyUrl`, `workplaceType` / `isRemote`, and structured
+    compensation.summaryComponents when present. Set salary fields only from structured
+    compensation. Added because the board is a strong match for Ethereum infrastructure,
+    MEV, searchers/builders, distributed systems and protocol engineering roles.
+
+- slug: eigen_labs
+  name: "Eigen Labs"
+  url: https://api.ashbyhq.com/posting-api/job-board/eigen-labs?includeCompensation=true
+  render: static
+  company: "Eigen Labs"
+  hints: >-
+    Ashby job board API, token `eigen-labs`. jobs[] carry stable `id`, `title`, `location`,
+    full `descriptionPlain` (or descriptionHtml), usually `employmentType`, `jobUrl` /
+    `applyUrl`, `workplaceType` / `isRemote`, and structured compensation.summaryComponents
+    when present. Set salary fields only from structured compensation. Added because the
+    board is a strong match for Ethereum restaking, protocol infrastructure, distributed
+    systems and backend roles.
+
+- slug: nethermind
+  name: "Nethermind"
+  url: https://www.nethermind.io/open-roles
+  render: static
+  company: "Nethermind"
+  enumerates_all: false
+  hints: >-
+    Custom careers board. Treat as a windowed crawl unless the generated crawler proves that
+    a same-host API or sitemap enumerates every active posting. Fetch the listing, collect
+    active job detail URLs, then parse each detail page for title, description, location,
+    apply_url, employment_type, posted_at and expires_at when present. Strong match for
+    blockchain client engineering, EVM, protocol infrastructure, cryptography, Rust/Go/C#
+    systems and remote roles.
+
+- slug: qdrant
+  name: "Qdrant"
+  url: https://api.ashbyhq.com/posting-api/job-board/qdrant.tech?includeCompensation=true
+  render: static
+  company: "Qdrant"
+  hints: >-
+    Ashby job board API, token `qdrant.tech`. jobs[] carry stable `id`, `title`, `location`,
+    full `descriptionPlain` (or descriptionHtml), usually `employmentType`, `jobUrl` /
+    `applyUrl`, `workplaceType` / `isRemote`, and structured compensation.summaryComponents
+    when present. Set salary fields only from structured compensation. Added because the
+    board is a strong match for vector databases, search/retrieval infrastructure, Rust,
+    cloud platform and distributed storage roles.
+
+- slug: lancedb
+  name: "LanceDB"
+  url: https://api.ashbyhq.com/posting-api/job-board/lancedb?includeCompensation=true
+  render: static
+  company: "LanceDB"
+  hints: >-
+    Ashby job board API, token `lancedb`. jobs[] each have stable `id`, `title`, `location`,
+    full `descriptionPlain` (or `descriptionHtml`), always-present `employmentType`,
+    `jobUrl`, and often `compensation.summaryComponents` with
+    minValue/maxValue/currencyCode/interval for the salary quartet. Prefer `workplaceType`
+    over the coarse `isRemote`. Company is fixed for every posting. Strong match for vector
+    databases, retrieval infrastructure, data systems, embeddings and backend systems
+    engineering.
+
+- slug: langchain
+  name: "LangChain"
+  url: https://api.ashbyhq.com/posting-api/job-board/langchain?includeCompensation=true
+  render: static
+  company: "LangChain"
+  hints: >-
+    Ashby job board API, token `langchain`. jobs[] each have stable `id`, `title`,
+    `location`, full `descriptionPlain` (or `descriptionHtml`), always-present
+    `employmentType`, `jobUrl`, and often `compensation.summaryComponents` with
+    minValue/maxValue/currencyCode/interval for the salary quartet. Prefer `workplaceType`
+    over the coarse `isRemote`. Company is fixed for every posting. Strong match for RAG,
+    retrieval infrastructure, agents, MCP-style integrations, backend platform and developer
+    infrastructure.
+
+- slug: clickhouse
+  name: "ClickHouse"
+  url: https://boards-api.greenhouse.io/v1/boards/clickhouse/jobs?content=true
+  render: static
+  company: "ClickHouse"
+  hints: >-
+    Greenhouse board API, token `clickhouse`. Whole board in one GET. Each job has stable
+    `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and `content` =
+    full HTML-ENTITY-ESCAPED description. Use html.unescape, then strip tags. No salary or
+    employment_type fields. Added because the board is a strong match for distributed OLAP
+    databases, storage, observability data, cloud infrastructure and backend systems roles.
+
+- slug: planetscale
+  name: "PlanetScale"
+  url: https://boards-api.greenhouse.io/v1/boards/planetscale/jobs?content=true
+  render: static
+  company: "PlanetScale"
+  hints: >-
+    Greenhouse board API, token `planetscale`. One GET to the url returns the whole public
+    board. Each job has stable `id`, `title`, flattened `location.name`, `absolute_url`,
+    `updated_at`, and `content` = the full HTML-ENTITY-ESCAPED description; html.unescape
+    it, then strip tags. Greenhouse does not expose salary or employment_type in this board
+    API. Strong match for distributed databases, MySQL/Vitess, reliability, cloud database
+    platforms and backend systems roles.
+
+- slug: tigerdata
+  name: "TigerData / Timescale"
+  url: https://boards-api.greenhouse.io/v1/boards/timescale/jobs?content=true
+  render: static
+  company: "TigerData / Timescale"
+  hints: >-
+    Greenhouse board API, token `timescale`. One GET to the url returns the whole public
+    board. Each job has stable `id`, `title`, flattened `location.name`, `absolute_url`,
+    `updated_at`, and `content` = the full HTML-ENTITY-ESCAPED description; html.unescape
+    it, then strip tags. Greenhouse does not expose salary or employment_type in this board
+    API. Strong match for PostgreSQL, time-series databases, storage/query systems,
+    observability data and backend infrastructure.
+
+- slug: cockroach_labs
+  name: "Cockroach Labs"
+  url: https://boards-api.greenhouse.io/v1/boards/cockroachlabs/jobs?content=true
+  render: static
+  company: "Cockroach Labs"
+  hints: >-
+    Greenhouse board API, token `cockroachlabs`. Whole board in one GET. Each job has stable
+    `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and `content` =
+    full HTML-ENTITY-ESCAPED description. Use html.unescape, then strip tags. No salary or
+    employment_type fields. Added because the board is a strong match for distributed
+    databases, storage, consistency, SQL, reliability and backend systems roles.
+
+- slug: hugging_face
+  name: "Hugging Face"
+  url: https://apply.workable.com/huggingface/?lng=en
+  render: static
+  company: "Hugging Face"
+  enumerates_all: false
+  hints: >-
+    Custom careers board. Treat as a windowed crawl unless the generated crawler proves that
+    a same-host API or sitemap enumerates every active posting. Fetch the listing, collect
+    active job detail URLs, then parse each detail page for title, description, location,
+    apply_url, employment_type, posted_at and expires_at when present. Strong match for AI
+    infrastructure, model serving, open-source platform, search/retrieval/data tooling and
+    remote-friendly backend roles.
+
+- slug: cohere
+  name: "Cohere"
+  url: https://api.ashbyhq.com/posting-api/job-board/cohere?includeCompensation=true
+  render: static
+  company: "Cohere"
+  hints: >-
+    Ashby job board API, token `cohere`. jobs[] each have stable `id`, `title`, `location`,
+    full `descriptionPlain` (or `descriptionHtml`), always-present `employmentType`,
+    `jobUrl`, and often `compensation.summaryComponents` with
+    minValue/maxValue/currencyCode/interval for the salary quartet. Prefer `workplaceType`
+    over the coarse `isRemote`. Company is fixed for every posting. Strong match for AI
+    infrastructure, retrieval-augmented generation, model serving, search, data systems and
+    backend platform roles.
+
+- slug: together_ai
+  name: "Together AI"
+  url: https://boards-api.greenhouse.io/v1/boards/togetherai/jobs?content=true
+  render: static
+  company: "Together AI"
+  hints: >-
+    Greenhouse board API, token `togetherai`. One GET to the url returns the whole public
+    board. Each job has stable `id`, `title`, flattened `location.name`, `absolute_url`,
+    `updated_at`, and `content` = the full HTML-ENTITY-ESCAPED description; html.unescape
+    it, then strip tags. Greenhouse does not expose salary or employment_type in this board
+    API. Strong match for inference platforms, distributed systems, model serving,
+    performance engineering and backend infrastructure.
+
+- slug: fireworks_ai
+  name: "Fireworks AI"
+  url: https://boards-api.greenhouse.io/v1/boards/fireworksai/jobs?content=true
+  render: static
+  company: "Fireworks AI"
+  hints: >-
+    Greenhouse board API, token `fireworksai`. One GET to the url returns the whole public
+    board. Each job has stable `id`, `title`, flattened `location.name`, `absolute_url`,
+    `updated_at`, and `content` = the full HTML-ENTITY-ESCAPED description; html.unescape
+    it, then strip tags. Greenhouse does not expose salary or employment_type in this board
+    API. Strong match for inference serving, distributed systems, AI infrastructure,
+    performance and backend platform roles.
+
+- slug: perplexity
+  name: "Perplexity AI"
+  url: https://api.ashbyhq.com/posting-api/job-board/perplexity?includeCompensation=true
+  render: static
+  company: "Perplexity AI"
+  hints: >-
+    Ashby job board API, token `perplexity`. jobs[] each have stable `id`, `title`,
+    `location`, full `descriptionPlain` (or `descriptionHtml`), always-present
+    `employmentType`, `jobUrl`, and often `compensation.summaryComponents` with
+    minValue/maxValue/currencyCode/interval for the salary quartet. Prefer `workplaceType`
+    over the coarse `isRemote`. Company is fixed for every posting. Strong match for search,
+    retrieval, ranking, RAG, backend systems, high-scale product infrastructure and
+    Go/Rust-adjacent roles.
+
+- slug: anyscale
+  name: "Anyscale"
+  url: https://api.ashbyhq.com/posting-api/job-board/anyscale?includeCompensation=true
+  render: static
+  company: "Anyscale"
+  hints: >-
+    Ashby job board API, token `anyscale`. jobs[] each have stable `id`, `title`,
+    `location`, full `descriptionPlain` (or `descriptionHtml`), always-present
+    `employmentType`, `jobUrl`, and often `compensation.summaryComponents` with
+    minValue/maxValue/currencyCode/interval for the salary quartet. Prefer `workplaceType`
+    over the coarse `isRemote`. Company is fixed for every posting. Strong match for
+    distributed compute, Ray, ML infrastructure, cluster scheduling, reliability and backend
+    platform engineering.
+
+- slug: runpod
+  name: "Runpod"
+  url: https://api.ashbyhq.com/posting-api/job-board/runpod?includeCompensation=true
+  render: static
+  company: "Runpod"
+  hints: >-
+    Ashby job board API, token `runpod`. jobs[] carry stable `id`, `title`, `location`, full
+    `descriptionPlain` (or descriptionHtml), usually `employmentType`, `jobUrl` /
+    `applyUrl`, `workplaceType` / `isRemote`, and structured compensation.summaryComponents
+    when present. Set salary fields only from structured compensation. Added because the
+    board is a strong match for AI developer cloud, GPU infrastructure, backend platform and
+    distributed compute roles.
+
+- slug: scale_ai
+  name: "Scale AI"
+  url: https://boards-api.greenhouse.io/v1/boards/scaleai/jobs?content=true
+  render: static
+  company: "Scale AI"
+  hints: >-
+    Greenhouse board API, token `scaleai`. One GET to the url returns the whole public
+    board. Each job has stable `id`, `title`, flattened `location.name`, `absolute_url`,
+    `updated_at`, and `content` = the full HTML-ENTITY-ESCAPED description; html.unescape
+    it, then strip tags. Greenhouse does not expose salary or employment_type in this board
+    API. Strong match for data/AI infrastructure, evaluation platforms, backend systems,
+    workflow infrastructure and senior/staff roles.
+
+- slug: allen_institute_ai
+  name: "Allen Institute for AI"
+  url: https://boards-api.greenhouse.io/v1/boards/thealleninstitute/jobs?content=true
+  render: static
+  company: "Allen Institute for AI"
+  hints: >-
+    Greenhouse board API, token `thealleninstitute`. One GET to the url returns the whole
+    public board. Each job has stable `id`, `title`, flattened `location.name`,
+    `absolute_url`, `updated_at`, and `content` = the full HTML-ENTITY-ESCAPED description;
+    html.unescape it, then strip tags. Greenhouse does not expose salary or employment_type
+    in this board API. Strong match for Semantic Scholar/search, AI systems, retrieval,
+    research infrastructure and backend/data platform roles.
+
+- slug: honeycomb
+  name: "Honeycomb"
+  url: https://boards-api.greenhouse.io/v1/boards/honeycomb/jobs?content=true
+  render: static
+  company: "Honeycomb"
+  hints: >-
+    Greenhouse board API, token `honeycomb`. One GET to the url returns the whole public
+    board. Each job has stable `id`, `title`, flattened `location.name`, `absolute_url`,
+    `updated_at`, and `content` = the full HTML-ENTITY-ESCAPED description; html.unescape
+    it, then strip tags. Greenhouse does not expose salary or employment_type in this board
+    API. Strong match for observability, high-cardinality telemetry, distributed tracing, Go
+    backend and reliability/platform roles.
+
+- slug: chainguard
+  name: "Chainguard"
+  url: https://boards-api.greenhouse.io/v1/boards/chainguard/jobs?content=true
+  render: static
+  company: "Chainguard"
+  hints: >-
+    Greenhouse board API, token `chainguard`. One GET to the url returns the whole public
+    board. Each job has stable `id`, `title`, flattened `location.name`, `absolute_url`,
+    `updated_at`, and `content` = the full HTML-ENTITY-ESCAPED description; html.unescape
+    it, then strip tags. Greenhouse does not expose salary or employment_type in this board
+    API. Strong match for supply-chain security, containers, Kubernetes, cloud
+    infrastructure, Go backend and security platform roles.
+
+- slug: pulumi
+  name: "Pulumi"
+  url: https://boards-api.greenhouse.io/v1/boards/pulumicorporation/jobs?content=true
+  render: static
+  company: "Pulumi"
+  hints: >-
+    Greenhouse board API, token `pulumicorporation`. One GET to the url returns the whole
+    public board. Each job has stable `id`, `title`, flattened `location.name`,
+    `absolute_url`, `updated_at`, and `content` = the full HTML-ENTITY-ESCAPED description;
+    html.unescape it, then strip tags. Greenhouse does not expose salary or employment_type
+    in this board API. Strong match for cloud infrastructure, developer tools, Kubernetes,
+    platform engineering, Go/TypeScript and remote roles.
+
+- slug: teleport
+  name: "Teleport"
+  url: https://goteleport.com/careers/
+  render: static
+  company: "Teleport"
+  enumerates_all: false
+  hints: >-
+    Custom careers board. Treat as a windowed crawl unless the generated crawler proves that
+    a same-host API or sitemap enumerates every active posting. Fetch the listing, collect
+    active job detail URLs, then parse each detail page for title, description, location,
+    apply_url, employment_type, posted_at and expires_at when present. Strong match for
+    identity/security infrastructure, zero-trust access, Kubernetes, Go backend and
+    distributed systems roles.
+
+- slug: docker
+  name: "Docker"
+  url: https://api.ashbyhq.com/posting-api/job-board/docker?includeCompensation=true
+  render: static
+  company: "Docker"
+  hints: >-
+    Ashby job board API, token `docker`. jobs[] carry stable `id`, `title`, `location`, full
+    `descriptionPlain` (or descriptionHtml), usually `employmentType`, `jobUrl` /
+    `applyUrl`, `workplaceType` / `isRemote`, and structured compensation.summaryComponents
+    when present. Set salary fields only from structured compensation. Added because the
+    board is a strong match for developer infrastructure, containers, identity, cloud
+    platform, Go and backend systems roles.
+
+- slug: vercel
+  name: "Vercel"
+  url: https://boards-api.greenhouse.io/v1/boards/vercel/jobs?content=true
+  render: static
+  company: "Vercel"
+  hints: >-
+    Greenhouse board API, token `vercel`. Whole board in one GET. Each job has stable `id`,
+    `title`, flattened `location.name`, `absolute_url`, `updated_at`, and `content` = full
+    HTML-ENTITY-ESCAPED description. Use html.unescape, then strip tags. No salary or
+    employment_type fields. Added because the board is a strong match for compute platform,
+    developer infrastructure, distributed systems, edge/runtime and backend roles.
+
+- slug: render
+  name: "Render"
+  url: https://api.ashbyhq.com/posting-api/job-board/render?includeCompensation=true
+  render: static
+  company: "Render"
+  hints: >-
+    Ashby job board API, token `render`. jobs[] carry stable `id`, `title`, `location`, full
+    `descriptionPlain` (or descriptionHtml), usually `employmentType`, `jobUrl` /
+    `applyUrl`, `workplaceType` / `isRemote`, and structured compensation.summaryComponents
+    when present. Set salary fields only from structured compensation. Added because the
+    board is a strong match for cloud platform, infrastructure, billing systems, developer
+    experience and backend systems roles.
+
+- slug: fly_io
+  name: "Fly.io"
+  url: https://fly.io/jobs/
+  render: static
+  company: "Fly.io"
+  enumerates_all: false
+  hints: >-
+    Fly.io jobs page is server-rendered. Crawl open role cards and same-host detail links.
+    Parse title, location/workplace, full description, and apply URL. Treat as windowed.
+    Strong match for Rust/Go/Ruby backend, Linux, global networking, compute orchestration
+    and distributed systems roles.
+
+- slug: railway
+  name: "Railway"
+  url: https://api.ashbyhq.com/posting-api/job-board/railway?includeCompensation=true
+  render: static
+  company: "Railway"
+  hints: >-
+    Ashby job board API, token `railway`. jobs[] carry stable `id`, `title`, `location`,
+    full `descriptionPlain` (or descriptionHtml), usually `employmentType`, `jobUrl` /
+    `applyUrl`, `workplaceType` / `isRemote`, and structured compensation.summaryComponents
+    when present. Set salary fields only from structured compensation. Added because the
+    board is a strong match for developer cloud, infrastructure, storage, platform
+    reliability and backend systems roles.
+
+- slug: remotive_software_dev
+  name: "Remotive — Software Development"
+  url: https://remotive.com/api/remote-jobs?category=software-dev
+  render: static
+  enumerates_all: true
+  hints: >-
+    Remotive public JSON API filtered to software-dev. Response has `job-count` and jobs[];
+    each job includes id, url, title, company_name, category, job_type, publication_date,
+    candidate_required_location, salary and full HTML description. API terms require
+    attribution/linking back to Remotive. This endpoint returns active matching listings,
+    sorted by publication date.
+
+- slug: jobicy_developer
+  name: "Jobicy — Developer Remote Jobs"
+  url: https://jobicy.com/api/v2/remote-jobs?count=100&industry=dev
+  render: static
+  enumerates_all: false
+  hints: >-
+    Jobicy public remote-jobs API filtered to developer roles. Response carries recent
+    remote postings with company/title/location/category/url/description-like fields;
+    generated crawler should tolerate small field-name changes and skip thin postings
+    without a full description. Windowed feed, so enumerates_all:false. Strong source for
+    remote backend and platform roles.
+
+- slug: working_nomads_development
+  name: "Working Nomads — Development"
+  url: https://www.workingnomads.com/jobs?category=development
+  render: static
+  enumerates_all: false
+  hints: >-
+    Working Nomads development category. Server-rendered listing/detail crawl: collect
+    newest development job URLs, fetch same-host detail pages, and extract title, company,
+    location/remote requirement, full description, posted_at and apply_url when exposed.
+    Windowed board; close only via recheck. Strong source for remote backend, full-stack,
+    DevOps and platform roles.
+
+- slug: nodesk_development
+  name: "NoDesk — Development Jobs"
+  url: https://nodesk.co/remote-jobs/development/
+  render: static
+  enumerates_all: false
+  hints: >-
+    NoDesk remote development category. Windowed HTML crawl: collect newest job detail
+    links, fetch detail pages for full description, company, location restrictions,
+    employment type and apply_url. Remote-first aggregator; enumerates_all:false because
+    listings are a recent slice. Strong source for remote backend/platform roles.
+
+- slug: hn_whos_hiring
+  name: "Hacker News — Who is Hiring"
+  url: https://hn.algolia.com/api/v1/search_by_date?query=Ask%20HN%3A%20Who%20is%20hiring%3F&tags=story
+  render: static
+  enumerates_all: false
+  hints: >-
+    Use the public HN Algolia API to locate the newest monthly `Ask HN: Who is hiring?`
+    thread, then fetch its comments from the same API and parse
+    company/role/location/remote/salary/application snippets from comments. This source is
+    unstructured and windowed; keep enumerates_all:false and require dedupe against company
+    boards. High signal for startup backend, infra, Rust, Go and remote roles that may never
+    reach major ATS boards.
+
+- slug: hacker_jobs
+  name: "Hacker Jobs"
+  url: https://www.hacker-jobs.com/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Hacker Jobs restructures the monthly Hacker News Who-is-hiring thread into searchable
+    postings. Windowed HTML/API crawl: collect newest structured postings, parse
+    company/title/location/remote/salary/url/description, and dedupe against hn_whos_hiring.
+    Good supplemental source for startup backend, distributed-systems, Rust, Go and infra
+    roles.
+
+- slug: golangprojects
+  name: "Golang Projects"
+  url: https://www.golangprojects.com/golang-remote-jobs.html
+  render: static
+  enumerates_all: false
+  hints: >-
+    GolangProjects remote Go jobs listing. Windowed crawl: parse job cards for title,
+    company, location, salary, posted month/date and detail link; fetch details for full
+    description and apply URL. Treat as windowed. Strong match for Go backend, cloud,
+    Kubernetes, infrastructure and distributed systems roles.
+
+- slug: golang_cafe
+  name: "Golang Cafe"
+  url: https://golang.cafe/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Go-specific job board with remote and salary-forward postings. Crawl newest jobs and
+    fetch detail pages for company, title, full description, location/remote requirement,
+    salary when explicit, posted_at and apply_url. Windowed source; enumerates_all:false.
+    Strong match for Go backend, API platform, cloud and infrastructure roles.
+
+- slug: kube_careers
+  name: "Kube Careers"
+  url: https://kube.careers/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Kubernetes/cloud-native job board. Crawl newest listings and fetch job detail pages;
+    parse company, title, full description, location/remote, salary when explicit,
+    employment_type, posted_at and apply_url. Windowed source; enumerates_all:false. Strong
+    match for Kubernetes, observability, platform engineering, SRE and backend
+    infrastructure roles.
+
+- slug: gitjobs_dev
+  name: "GitJobs.dev"
+  url: https://www.gitjobs.dev/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Open-source and developer-tooling job board. Windowed listing/detail crawl; parse
+    company/title/location/remote/salary/description/apply_url from newest postings. Useful
+    for open-source infrastructure, Rust, Go, databases, observability and developer tools
+    roles.
+
+- slug: rails_jobs
+  name: "Rails Job Board"
+  url: https://jobs.rubyonrails.org/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Official Rails job board. Lower priority than Rust/Go sources but relevant because the
+    CV includes substantial earlier Ruby/Rails backend work. Crawl newest listings and
+    detail pages for company, title, full description, location/remote, posted_at and
+    apply_url. Windowed source; enumerates_all:false.
+
+- slug: ruby_on_remote
+  name: "RubyOnRemote"
+  url: https://rubyonremote.com/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Remote Ruby/Rails job board. Supplemental source for backend/platform roles that can
+    leverage the candidate's earlier Rails and scaling experience. Crawl newest
+    postings/detail pages for company, title, description, location constraints, salary,
+    posted_at and apply_url. Windowed source; enumerates_all:false.
+
+- slug: a16z_portfolio_jobs
+  name: "a16z Portfolio Jobs"
+  url: https://jobs.a16z.com/
+  render: static
+  enumerates_all: false
+  hints: >-
+    VC portfolio job board. Windowed crawl: use sitemap or listing filters for
+    Engineering/Infrastructure/Backend/Software roles, fetch detail pages, and parse title,
+    company, location, description, posted_at/expires_at, employment_type and apply_url.
+    Strong source for crypto, AI, fintech, infrastructure and devtools startups.
+
+- slug: sequoia_portfolio_jobs
+  name: "Sequoia Capital Portfolio Jobs"
+  url: https://jobs.sequoiacap.com/jobs
+  render: static
+  enumerates_all: false
+  hints: >-
+    VC portfolio job board. Windowed crawl over newest engineering/backend/platform roles;
+    fetch detail pages for full description, company, location, employment_type,
+    posted_at/expires_at and apply_url. Strong source for AI infrastructure, fintech,
+    security, database and developer-tooling startups.
+
+- slug: index_ventures_jobs
+  name: "Index Ventures Portfolio Jobs"
+  url: https://jobs.indexventures.com/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Getro-style VC portfolio board. Windowed crawl from sitemap/listing, restricted to
+    recent engineering/backend/infrastructure postings; fetch detail pages for full
+    description and structured job fields. Strong source for infrastructure, fintech, data,
+    AI and devtools startups.
+
+- slug: greylock_jobs
+  name: "Greylock Portfolio Jobs"
+  url: https://jobs.greylock.com/
+  render: static
+  enumerates_all: false
+  hints: >-
+    VC portfolio job board. Windowed listing/detail crawl for recent engineering, backend,
+    infra, security, data and AI systems roles. Parse company from portfolio organization,
+    title, locations, description, posted_at/expires_at and apply_url. Good source for
+    senior/staff startup roles.
+
+- slug: btv_jobs
+  name: "Better Tomorrow Ventures Portfolio Jobs"
+  url: https://jobs.btv.vc/jobs
+  render: static
+  enumerates_all: false
+  hints: >-
+    Fintech-focused VC portfolio job board. Windowed crawl for recent
+    engineering/backend/platform postings; fetch details for company, title, description,
+    location, employment_type, posted_at/expires_at and apply_url. Strong match for
+    payments, banking infrastructure, compliance and ledger-adjacent startups.
+
+- slug: canapi_jobs
+  name: "Canapi Ventures Portfolio Jobs"
+  url: https://jobs.canapi.com/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Fintech and financial-infrastructure portfolio job board. Windowed listing/detail crawl.
+    Strong source for banking, payments, risk, compliance, APIs and backend/platform
+    engineering roles. Keep enumerates_all:false unless a same-host API proves whole-board
+    enumeration.
+
+- slug: framework_ventures_jobs
+  name: "Framework Ventures Portfolio Jobs"
+  url: https://jobs.framework.ventures/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Crypto/web3 portfolio job board. Windowed crawl over recent engineering/protocol/backend
+    postings; fetch detail pages for company, title, description, locations,
+    employment_type, posted_at/expires_at and apply_url. Strong source for protocol,
+    wallets, DeFi and crypto infrastructure roles.
+
+- slug: paradigm_portfolio_jobs
+  name: "Paradigm Portfolio Jobs"
+  url: https://jobs.paradigm.xyz/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Crypto-focused portfolio job board. Windowed crawl over recent
+    protocol/backend/infrastructure jobs; fetch detail pages for company, title, full
+    description, location, employment_type, posted_at/expires_at and apply_url. Strong
+    source for EVM/Solana, exchange, wallet, DeFi and low-level systems roles.
+
+- slug: monzo
+  name: "Monzo"
+  url: https://boards-api.greenhouse.io/v1/boards/monzo/jobs?content=true
+  render: static
+  company: "Monzo"
+  hints: >-
+    Greenhouse board API, token `monzo`. One GET returns the whole public board. Each job
+    has stable `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and
+    `content` = full HTML-ENTITY-ESCAPED description. Use html.unescape, then strip tags. No
+    salary or employment_type fields in this API. Strong match for senior backend/platform
+    roles in banking, payments, ledgering, reliability and distributed systems.
+
+- slug: marqeta
+  name: "Marqeta"
+  url: https://boards-api.greenhouse.io/v1/boards/marqeta/jobs?content=true
+  render: static
+  company: "Marqeta"
+  hints: >-
+    Greenhouse board API, token `marqeta`. One GET returns the whole public board. Each job
+    has stable `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and
+    `content` = full HTML-ENTITY-ESCAPED description. Use html.unescape, then strip tags. No
+    salary or employment_type fields in this API. Strong match for card issuing,
+    authorization, payment processing, settlement and ledger infrastructure.
+
+- slug: gemini
+  name: "Gemini"
+  url: https://boards-api.greenhouse.io/v1/boards/gemini/jobs?content=true
+  render: static
+  company: "Gemini"
+  hints: >-
+    Greenhouse board API, token `gemini`. One GET returns the whole public board. Each job
+    has stable `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and
+    `content` = full HTML-ENTITY-ESCAPED description. Use html.unescape, then strip tags. No
+    salary or employment_type fields in this API. Strong match for crypto exchange, custody,
+    wallet security, blockchain infrastructure and high-reliability backend roles.
+
+- slug: materialize
+  name: "Materialize"
+  url: https://boards-api.greenhouse.io/v1/boards/materialize/jobs?content=true
+  render: static
+  company: "Materialize"
+  hints: >-
+    Greenhouse board API, token `materialize`. One GET returns the whole public board. Each
+    job has stable `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`,
+    and `content` = full HTML-ENTITY-ESCAPED description. Use html.unescape, then strip
+    tags. No salary or employment_type fields in this API. Strong match for streaming data
+    systems, distributed databases, Rust-heavy infrastructure and event-driven backends.
+
+- slug: elastic
+  name: "Elastic"
+  url: https://boards-api.greenhouse.io/v1/boards/elastic/jobs?content=true
+  render: static
+  company: "Elastic"
+  hints: >-
+    Greenhouse board API, token `elastic`. One GET returns the whole public board. Each job
+    has stable `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and
+    `content` = full HTML-ENTITY-ESCAPED description. Use html.unescape, then strip tags. No
+    salary or employment_type fields in this API. Strong match for search, retrieval,
+    observability, distributed systems, indexing and infrastructure roles.
+
+- slug: netlify
+  name: "Netlify"
+  url: https://boards-api.greenhouse.io/v1/boards/netlify/jobs?content=true
+  render: static
+  company: "Netlify"
+  hints: >-
+    Greenhouse board API, token `netlify`. One GET returns the whole public board. Each job
+    has stable `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and
+    `content` = full HTML-ENTITY-ESCAPED description. Use html.unescape, then strip tags. No
+    salary or employment_type fields in this API. Strong match for developer platform,
+    build/deploy infrastructure, distributed systems and backend services.
+
+- slug: neon_db
+  name: "Neon"
+  url: https://api.ashbyhq.com/posting-api/job-board/Neon?includeCompensation=true
+  render: static
+  company: "Neon"
+  hints: >-
+    Ashby job board API, token `Neon`. jobs[] have stable `id`, `title`, `location`, full
+    `descriptionPlain` (or `descriptionHtml`), `employmentType`, `jobUrl`, and
+    compensation.summaryComponents when the posting includes structured pay
+    (minValue/maxValue/currencyCode/interval). Prefer `workplaceType` over the coarse
+    `isRemote`. Company is fixed. Strong match for Postgres, storage, cloud database,
+    control-plane and distributed infrastructure roles.
+
+- slug: chroma
+  name: "Chroma"
+  url: https://api.ashbyhq.com/posting-api/job-board/trychroma?includeCompensation=true
+  render: static
+  company: "Chroma"
+  hints: >-
+    Ashby job board API, token `trychroma`. jobs[] have stable `id`, `title`, `location`,
+    full `descriptionPlain` (or `descriptionHtml`), `employmentType`, `jobUrl`, and
+    compensation.summaryComponents when the posting includes structured pay
+    (minValue/maxValue/currencyCode/interval). Prefer `workplaceType` over the coarse
+    `isRemote`. Company is fixed. Strong match for vector search, retrieval infrastructure,
+    embeddings, RAG and backend platform roles.
+
+- slug: baseten
+  name: "Baseten"
+  url: https://api.ashbyhq.com/posting-api/job-board/baseten?includeCompensation=true
+  render: static
+  company: "Baseten"
+  hints: >-
+    Ashby job board API, token `baseten`. jobs[] have stable `id`, `title`, `location`, full
+    `descriptionPlain` (or `descriptionHtml`), `employmentType`, `jobUrl`, and
+    compensation.summaryComponents when the posting includes structured pay
+    (minValue/maxValue/currencyCode/interval). Prefer `workplaceType` over the coarse
+    `isRemote`. Company is fixed. Strong match for AI infrastructure, model serving,
+    performance, backend platform and distributed systems roles.
+
+- slug: wormhole_labs
+  name: "Wormhole Labs"
+  url: https://api.ashbyhq.com/posting-api/job-board/wormholelabs?includeCompensation=true
+  render: static
+  company: "Wormhole Labs"
+  hints: >-
+    Ashby job board API, token `wormholelabs`. jobs[] have stable `id`, `title`, `location`,
+    full `descriptionPlain` (or `descriptionHtml`), `employmentType`, `jobUrl`, and
+    compensation.summaryComponents when the posting includes structured pay
+    (minValue/maxValue/currencyCode/interval). Prefer `workplaceType` over the coarse
+    `isRemote`. Company is fixed. Strong match for cross-chain protocol, blockchain
+    infrastructure, security and Rust/Go backend roles.
+
+- slug: monad_foundation
+  name: "Monad Foundation"
+  url: https://api.ashbyhq.com/posting-api/job-board/monad.foundation?includeCompensation=true
+  render: static
+  company: "Monad Foundation"
+  hints: >-
+    Ashby job board API, token `monad.foundation`. jobs[] have stable `id`, `title`,
+    `location`, full `descriptionPlain` (or `descriptionHtml`), `employmentType`, `jobUrl`,
+    and compensation.summaryComponents when the posting includes structured pay
+    (minValue/maxValue/currencyCode/interval). Prefer `workplaceType` over the coarse
+    `isRemote`. Company is fixed. Strong match for L1 protocol infrastructure, performance
+    engineering, distributed systems and low-level backend roles.
+
+- slug: celestia_labs
+  name: "Celestia Labs"
+  url: https://api.lever.co/v0/postings/celestia?mode=json
+  render: static
+  company: "Celestia Labs"
+  hints: >-
+    Lever postings API, token `celestia`. The url returns the whole board as a JSON list.
+    Reconstruct full text from `description` + each `lists[].content` + `additional`;
+    `description` alone is only the intro. Use `workplaceType` plus
+    categories.location/team/commitment for workplace, location, department and
+    employment_type; `createdAt` is epoch-ms posted_at. Stable id in `id`; apply link in
+    `hostedUrl`. Company is fixed. Strong match for modular blockchain, consensus/data
+    availability, distributed systems and protocol engineering roles.
+
+- slug: espresso_systems
+  name: "Espresso Systems"
+  url: https://api.lever.co/v0/postings/Espresso?mode=json
+  render: static
+  company: "Espresso Systems"
+  hints: >-
+    Lever postings API, token `Espresso`. The url returns the whole board as a JSON list.
+    Reconstruct full text from `description` + each `lists[].content` + `additional`;
+    `description` alone is only the intro. Use `workplaceType` plus
+    categories.location/team/commitment for workplace, location, department and
+    employment_type; `createdAt` is epoch-ms posted_at. Stable id in `id`; apply link in
+    `hostedUrl`. Company is fixed. Strong match for sequencing, rollup/protocol
+    infrastructure, distributed systems and Rust/Go backend roles.
+
+- slug: input_output_global
+  name: "IO Global"
+  url: https://apply.workable.com/api/v1/widget/accounts/io-global
+  render: static
+  company: "IO Global"
+  hints: >-
+    Workable widget API, account `io-global`. Start at the account endpoint on
+    apply.workable.com and follow the same-host job identifiers/detail URLs exposed by the
+    widget API. Parse active postings with id/shortcode, title, locations,
+    department/function, employment type, remote flag when present, published date when
+    present, and full description/details from the job detail payload. Company is fixed.
+    Strong match for Cardano, protocol infrastructure, distributed systems, wallets and
+    payment/ledger engineering.
+
+- slug: trail_of_bits
+  name: "Trail of Bits"
+  url: https://apply.workable.com/api/v1/widget/accounts/trailofbits
+  render: static
+  company: "Trail of Bits"
+  hints: >-
+    Workable widget API, account `trailofbits`. Start at the account endpoint on
+    apply.workable.com and follow the same-host job identifiers/detail URLs exposed by the
+    widget API. Parse active postings with id/shortcode, title, locations,
+    department/function, employment type, remote flag when present, published date when
+    present, and full description/details from the job detail payload. Company is fixed.
+    Strong match for security engineering, blockchain audits, protocol security, systems
+    programming and Rust tooling.
+
+- slug: constructor
+  name: "Constructor"
+  url: https://apply.workable.com/api/v1/widget/accounts/constructor-1
+  render: static
+  company: "Constructor"
+  hints: >-
+    Workable widget API, account `constructor-1`. Start at the account endpoint on
+    apply.workable.com and follow the same-host job identifiers/detail URLs exposed by the
+    widget API. Parse active postings with id/shortcode, title, locations,
+    department/function, employment type, remote flag when present, published date when
+    present, and full description/details from the job detail payload. Company is fixed.
+    Strong match for search, ranking, retrieval, ecommerce infrastructure, Go/Rust/Python
+    backend and distributed systems roles.
+
+- slug: holepunch
+  name: "Holepunch"
+  url: https://holepunch.recruitee.com/api/offers/
+  render: static
+  company: "Holepunch"
+  hints: >-
+    Recruitee Careers Site API for `holepunch`. The offers endpoint returns public open
+    roles; page if the API returns pagination. Parse id, title, career site URL/apply URL,
+    location, department, employment type, remote/hybrid flags when present, published
+    timestamp and the full description/body fields. Company is fixed. Strong match for
+    peer-to-peer networking, distributed systems, cryptography and low-level backend roles.
+
+- slug: arbeitnow_remote
+  name: "Arbeitnow — Remote Tech Jobs"
+  url: https://www.arbeitnow.com/api/job-board-api?remote=true
+  render: static
+  enumerates_all: false
+  hints: >-
+    Arbeitnow public job board API. Windowed/paginated remote feed; page through pagination
+    or next links if present, but treat as enumerates_all:false unless a full run proves
+    complete active-board coverage. Each job exposes slug, company_name, title, location,
+    remote boolean, tags, job_types, created_at, url and full description. Filter downstream
+    for backend, Rust, Go, distributed systems, platform, fintech, crypto and
+    search/retrieval terms.
+
+- slug: himalayas_backend
+  name: "Himalayas — Backend Remote Jobs"
+  url: https://himalayas.app/jobs/api/search?q=backend&sort=recent
+  render: static
+  enumerates_all: false
+  hints: >-
+    Himalayas public JSON search API. Windowed remote-search crawl; paginate with the
+    documented page parameter and keep enumerates_all:false. Response includes totalCount
+    and jobs[] with guid, title, companyName, employmentType, location/timezone
+    restrictions, salary when present, full description, pubDate, expiryDate and
+    applicationLink. Query is seeded with backend to match senior
+    backend/distributed-systems roles.
+
+- slug: himalayas_rust
+  name: "Himalayas — Rust Remote Jobs"
+  url: https://himalayas.app/jobs/api/search?q=rust&sort=recent
+  render: static
+  enumerates_all: false
+  hints: >-
+    Himalayas public JSON search API, Rust-seeded. Same shape as himalayas_backend: jobs[]
+    carry guid, title, companyName, employmentType, location/timezone restrictions, salary
+    when present, full description, pubDate, expiryDate and applicationLink. Treat as a
+    recent search window; closure through detail/expiry recheck.
+
+- slug: hnhiring
+  name: "HNHiring"
+  url: https://hnhiring.com/
+  render: static
+  enumerates_all: false
+  hints: >-
+    HN Who-is-Hiring index optimized for current monthly posts. Windowed source: parse the
+    latest month pages and job detail/comment cards, preserving company, title,
+    location/remote markers, body text and source URL. Good supplemental source for senior
+    backend, Rust/Go, infrastructure and remote startup roles; do not close jobs solely
+    because they rotate out of the monthly window.
+
+- slug: electric_capital_portfolio_jobs
+  name: "Electric Capital Portfolio Jobs"
+  url: https://jobs.electriccapital.com/jobs
+  render: static
+  enumerates_all: false
+  hints: >-
+    Getro-powered Electric Capital portfolio board. Windowed portfolio crawl: fetch the jobs
+    listing and freshest company/job detail pages; parse server-rendered payload or embedded
+    data for title, company, locations, employment types, posted/expiry markers, full
+    description and external ATS apply URL. Strong Web3/protocol-infrastructure source; keep
+    enumerates_all:false unless a same-host sitemap/API proves complete.
+
+- slug: cryptocurrencyjobs_engineering
+  name: "CryptocurrencyJobs — Engineering"
+  url: https://cryptocurrencyjobs.co/engineering/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Crypto/blockchain engineering job board. Windowed crawl over newest engineering
+    listings; fetch detail pages for full descriptions, company, location/remote markers,
+    tags, posted date, expiry/dead markers and apply URL. Strong supplemental source for
+    Rust, Go, protocol infrastructure, wallets, exchanges and stablecoin/payments roles.
+
+- slug: remoterocketship_backend_latam
+  name: "Remote Rocketship — Backend Latin America"
+  url: https://www.remoterocketship.com/country/latin-america/jobs/backend-developer/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Remote Rocketship backend search scoped to Latin America. Windowed source; fetch listing
+    pages and job details for title, company, location/country constraints, remote markers,
+    tags, full description and apply URL. Useful for Brazil/UTC-3 friendly backend roles;
+    use detail recheck rather than close-missing on the listing window.
+
+- slug: chime
+  name: "Chime"
+  url: https://boards-api.greenhouse.io/v1/boards/chime/jobs?content=true
+  render: static
+  company: "Chime"
+  hints: >-
+    Greenhouse board API, token `chime`. Whole public board in one GET. Each job has stable
+    `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and `content` =
+    full HTML-ENTITY-ESCAPED description; use html.unescape, then strip tags. Greenhouse has
+    no salary or employment_type fields in this API. Fit: consumer fintech backend,
+    risk/trust/safety, banking platform, product infrastructure and distributed financial
+    systems.
+
+- slug: robinhood
+  name: "Robinhood"
+  url: https://boards-api.greenhouse.io/v1/boards/robinhood/jobs?content=true
+  render: static
+  company: "Robinhood"
+  hints: >-
+    Greenhouse board API, token `robinhood`. Whole public board in one GET. Each job has
+    stable `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and
+    `content` = full HTML-ENTITY-ESCAPED description; use html.unescape, then strip tags.
+    Greenhouse has no salary or employment_type fields in this API. Fit:
+    brokerage/crypto/fintech backend, trading systems, money movement, risk, reliability and
+    platform infrastructure.
+
+- slug: toast
+  name: "Toast"
+  url: https://boards-api.greenhouse.io/v1/boards/toast/jobs?content=true
+  render: static
+  company: "Toast"
+  hints: >-
+    Greenhouse board API, token `toast`. Whole public board in one GET. Each job has stable
+    `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and `content` =
+    full HTML-ENTITY-ESCAPED description; use html.unescape, then strip tags. Greenhouse has
+    no salary or employment_type fields in this API. Fit: payments, POS platform, merchant
+    systems, backend infrastructure, distributed transaction and settlement workflows.
+
+- slug: gusto
+  name: "Gusto"
+  url: https://boards-api.greenhouse.io/v1/boards/gusto/jobs?content=true
+  render: static
+  company: "Gusto"
+  hints: >-
+    Greenhouse board API, token `gusto`. Whole public board in one GET. Each job has stable
+    `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and `content` =
+    full HTML-ENTITY-ESCAPED description; use html.unescape, then strip tags. Greenhouse has
+    no salary or employment_type fields in this API. Fit: payroll, benefits,
+    compliance-heavy fintech/product backend, distributed data and platform roles.
+
+- slug: carta
+  name: "Carta"
+  url: https://boards-api.greenhouse.io/v1/boards/carta/jobs?content=true
+  render: static
+  company: "Carta"
+  hints: >-
+    Greenhouse board API, token `carta`. Whole public board in one GET. Each job has stable
+    `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and `content` =
+    full HTML-ENTITY-ESCAPED description; use html.unescape, then strip tags. Greenhouse has
+    no salary or employment_type fields in this API. Fit: equity/cap-table financial
+    infrastructure, ledger-like data models, compliance, platform and backend product
+    engineering.
+
+- slug: checkout_com
+  name: "Checkout.com"
+  url: https://api.ashbyhq.com/posting-api/job-board/checkout.com?includeCompensation=true
+  render: static
+  company: "Checkout.com"
+  hints: >-
+    Ashby public posting API, board token `checkout.com`. `jobs[]` contains stable `id`,
+    `title`, `location`, full `descriptionPlain` / `descriptionHtml`, `employmentType`,
+    `jobUrl`, and optional `compensation.summaryComponents` when `includeCompensation=true`.
+    Prefer `workplaceType` over coarse `isRemote`; use `departmentName` / `team` if present.
+    Fit: global acquiring/payment processing, payments engineering operations,
+    ledger/platform and backend roles.
+
+- slug: dlocal
+  name: "dLocal"
+  url: https://api.lever.co/v0/postings/dlocal?mode=json
+  render: static
+  company: "dLocal"
+  hints: >-
+    Lever postings API, account `dlocal`. The url returns the public board as a JSON list.
+    Stable id in `id`; apply link in `hostedUrl`; posted_at from epoch-ms `createdAt`;
+    location / team / commitment from `categories`; workplace from `workplaceType`. The
+    short `description` is not enough by itself: concatenate `description`, each
+    `lists[].content`, and `additional` before stripping tags. No reliable salary fields.
+    Fit: LatAm/global payments, pay-ins/pay-outs, settlement, staff Java/backend engineering
+    and São Paulo/remote relevance.
+
+- slug: revolut
+  name: "Revolut"
+  url: https://www.revolut.com/en-BR/careers/
+  render: browser
+  company: "Revolut"
+  enumerates_all: false
+  hints: >-
+    Official Revolut careers site. Prefer same-host structured data when present: schema.org
+    JobPosting ld+json, Next.js/Remix/Astro embedded JSON, or server-rendered job cards.
+    Fetch detail pages on the same host for full descriptions; do not mark missing jobs
+    closed unless the source enumerates the whole open board. Set `enumerates_all:false`
+    when crawling only a search/listing window. Fit: fintech super-app, payments, cards,
+    banking, crypto, risk systems and backend/platform engineering.
+
+- slug: sumup
+  name: "SumUp"
+  url: https://www.sumup.com/careers/
+  render: browser
+  company: "SumUp"
+  enumerates_all: false
+  hints: >-
+    Official SumUp careers site. Prefer same-host structured data when present: schema.org
+    JobPosting ld+json, Next.js/Remix/Astro embedded JSON, or server-rendered job cards.
+    Fetch detail pages on the same host for full descriptions; do not mark missing jobs
+    closed unless the source enumerates the whole open board. Set `enumerates_all:false`
+    when crawling only a search/listing window. Fit: merchant payments, card acquiring, POS
+    infrastructure, Brazil/EU fintech backend and platform engineering.
+
+- slug: figma
+  name: "Figma"
+  url: https://boards-api.greenhouse.io/v1/boards/figma/jobs?content=true
+  render: static
+  company: "Figma"
+  hints: >-
+    Greenhouse board API, token `figma`. Whole public board in one GET. Each job has stable
+    `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and `content` =
+    full HTML-ENTITY-ESCAPED description; use html.unescape, then strip tags. Greenhouse has
+    no salary or employment_type fields in this API. Fit: collaborative systems, low-latency
+    backend, infrastructure, product engineering and data/platform roles.
+
+- slug: algolia
+  name: "Algolia"
+  url: https://boards-api.greenhouse.io/v1/boards/algolia/jobs?content=true
+  render: static
+  company: "Algolia"
+  hints: >-
+    Greenhouse board API, token `algolia`. Whole public board in one GET. Each job has
+    stable `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and
+    `content` = full HTML-ENTITY-ESCAPED description; use html.unescape, then strip tags.
+    Greenhouse has no salary or employment_type fields in this API. Fit: search/discovery
+    infrastructure, ranking/relevance, APIs, data pipelines and backend/search platform
+    roles.
+
+- slug: aiven
+  name: "Aiven"
+  url: https://boards-api.greenhouse.io/v1/boards/aiven36/jobs?content=true
+  render: static
+  company: "Aiven"
+  hints: >-
+    Greenhouse board API, token `aiven36`. Whole public board in one GET. Each job has
+    stable `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and
+    `content` = full HTML-ENTITY-ESCAPED description; use html.unescape, then strip tags.
+    Greenhouse has no salary or employment_type fields in this API. Fit: managed open-source
+    databases, streaming, search, observability, Kubernetes/cloud operations and
+    backend/data infrastructure.
+
+- slug: mongodb
+  name: "MongoDB"
+  url: https://boards-api.greenhouse.io/v1/boards/mongodb/jobs?content=true
+  render: static
+  company: "MongoDB"
+  hints: >-
+    Greenhouse board API, token `mongodb`. Whole public board in one GET. Each job has
+    stable `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and
+    `content` = full HTML-ENTITY-ESCAPED description; use html.unescape, then strip tags.
+    Greenhouse has no salary or employment_type fields in this API. Fit:
+    database/server/cloud engineering, distributed storage, query systems, reliability and
+    backend platform work.
+
+- slug: fastly
+  name: "Fastly"
+  url: https://boards-api.greenhouse.io/v1/boards/fastly/jobs?content=true
+  render: static
+  company: "Fastly"
+  hints: >-
+    Greenhouse board API, token `fastly`. Whole public board in one GET. Each job has stable
+    `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and `content` =
+    full HTML-ENTITY-ESCAPED description; use html.unescape, then strip tags. Greenhouse has
+    no salary or employment_type fields in this API. Fit: edge infrastructure, networking,
+    observability, security, Rust/Go-adjacent systems and distributed platform roles.
+
+- slug: notion
+  name: "Notion"
+  url: https://api.ashbyhq.com/posting-api/job-board/notion?includeCompensation=true
+  render: static
+  company: "Notion"
+  hints: >-
+    Ashby public posting API, board token `notion`. `jobs[]` contains stable `id`, `title`,
+    `location`, full `descriptionPlain` / `descriptionHtml`, `employmentType`, `jobUrl`, and
+    optional `compensation.summaryComponents` when `includeCompensation=true`. Prefer
+    `workplaceType` over coarse `isRemote`; use `departmentName` / `team` if present. Fit:
+    collaborative product backend, search/AI features, data infrastructure, platform
+    reliability and staff engineering.
+
+- slug: vanta
+  name: "Vanta"
+  url: https://api.ashbyhq.com/posting-api/job-board/vanta?includeCompensation=true
+  render: static
+  company: "Vanta"
+  hints: >-
+    Ashby public posting API, board token `vanta`. `jobs[]` contains stable `id`, `title`,
+    `location`, full `descriptionPlain` / `descriptionHtml`, `employmentType`, `jobUrl`, and
+    optional `compensation.summaryComponents` when `includeCompensation=true`. Prefer
+    `workplaceType` over coarse `isRemote`; use `departmentName` / `team` if present. Fit:
+    security/compliance automation, integrations, backend platform, reliability and
+    TypeScript/Go/Python service work.
+
+- slug: revenuecat
+  name: "RevenueCat"
+  url: https://api.ashbyhq.com/posting-api/job-board/revenuecat?includeCompensation=true
+  render: static
+  company: "RevenueCat"
+  hints: >-
+    Ashby public posting API, board token `revenuecat`. `jobs[]` contains stable `id`,
+    `title`, `location`, full `descriptionPlain` / `descriptionHtml`, `employmentType`,
+    `jobUrl`, and optional `compensation.summaryComponents` when `includeCompensation=true`.
+    Prefer `workplaceType` over coarse `isRemote`; use `departmentName` / `team` if present.
+    Fit: payments/subscriptions platform, distributed backend, mobile monetization APIs and
+    remote senior roles.
+
+- slug: redpanda
+  name: "Redpanda"
+  url: https://www.redpanda.com/jobs
+  render: browser
+  company: "Redpanda"
+  enumerates_all: false
+  hints: >-
+    Official Redpanda careers page. Prefer same-host structured data when present:
+    schema.org JobPosting ld+json, Next.js/Remix/Astro embedded JSON, or server-rendered job
+    cards. Fetch detail pages on the same host for full descriptions; do not mark missing
+    jobs closed unless the source enumerates the whole open board. Set
+    `enumerates_all:false` when crawling only a search/listing window. Fit: streaming data
+    platform, Kafka-compatible systems, storage, cloud infrastructure and distributed
+    systems engineering.
+
+- slug: zero_x
+  name: "0x"
+  url: https://api.ashbyhq.com/posting-api/job-board/0x?includeCompensation=true
+  render: static
+  company: "0x"
+  hints: >-
+    Ashby public posting API, board token `0x`. `jobs[]` contains stable `id`, `title`,
+    `location`, full `descriptionPlain` / `descriptionHtml`, `employmentType`, `jobUrl`, and
+    optional `compensation.summaryComponents` when `includeCompensation=true`. Prefer
+    `workplaceType` over coarse `isRemote`; use `departmentName` / `team` if present. Fit:
+    DEX/exchange APIs, protocol infrastructure, settlement, smart-contract/backend systems
+    and crypto trading rails.
+
+- slug: figment
+  name: "Figment"
+  url: https://boards-api.greenhouse.io/v1/boards/figment/jobs?content=true
+  render: static
+  company: "Figment"
+  hints: >-
+    Greenhouse board API, token `figment`. Whole public board in one GET. Each job has
+    stable `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and
+    `content` = full HTML-ENTITY-ESCAPED description; use html.unescape, then strip tags.
+    Greenhouse has no salary or employment_type fields in this API. Fit: staking
+    infrastructure, blockchain nodes, protocol operations, backend/platform and distributed
+    ledger engineering.
+
+- slug: consensys
+  name: "Consensys"
+  url: https://consensys.io/careers
+  render: browser
+  company: "Consensys"
+  enumerates_all: false
+  hints: >-
+    Official Consensys careers page. Prefer same-host structured data when present:
+    schema.org JobPosting ld+json, Next.js/Remix/Astro embedded JSON, or server-rendered job
+    cards. Fetch detail pages on the same host for full descriptions; do not mark missing
+    jobs closed unless the source enumerates the whole open board. Set
+    `enumerates_all:false` when crawling only a search/listing window. Fit: Ethereum
+    infrastructure, wallets, protocol tooling, APIs, security and distributed systems
+    engineering.
+
+- slug: ava_labs
+  name: "Ava Labs"
+  url: https://www.avalabs.org/careers
+  render: browser
+  company: "Ava Labs"
+  enumerates_all: false
+  hints: >-
+    Official Ava Labs careers page. Prefer same-host structured data when present:
+    schema.org JobPosting ld+json, Next.js/Remix/Astro embedded JSON, or server-rendered job
+    cards. Fetch detail pages on the same host for full descriptions; do not mark missing
+    jobs closed unless the source enumerates the whole open board. Set
+    `enumerates_all:false` when crawling only a search/listing window. Fit: Avalanche
+    ecosystem/protocol infrastructure, distributed systems, wallet/backend, platform and
+    blockchain engineering.
+
+- slug: twilio
+  name: "Twilio"
+  url: https://boards-api.greenhouse.io/v1/boards/twilio/jobs?content=true
+  render: static
+  company: "Twilio"
+  hints: >-
+    Greenhouse board API, token `twilio`. Whole public board in one GET. Each job has stable
+    `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and `content` =
+    full HTML-ENTITY-ESCAPED description; use html.unescape, then strip tags. Greenhouse has
+    no salary or employment_type fields in this API. Fit: API platform,
+    messaging/communications infrastructure, distributed backend services, reliability and
+    platform engineering.
+
+- slug: pagerduty
+  name: "PagerDuty"
+  url: https://boards-api.greenhouse.io/v1/boards/pagerduty/jobs?content=true
+  render: static
+  company: "PagerDuty"
+  hints: >-
+    Greenhouse board API, token `pagerduty`. Whole public board in one GET. Each job has
+    stable `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and
+    `content` = full HTML-ENTITY-ESCAPED description; use html.unescape, then strip tags.
+    Greenhouse has no salary or employment_type fields in this API. Fit: incident
+    response/observability platform, reliability engineering, distributed services and
+    platform backend roles.
+
+- slug: okta
+  name: "Okta"
+  url: https://boards-api.greenhouse.io/v1/boards/okta/jobs?content=true
+  render: static
+  company: "Okta"
+  hints: >-
+    Greenhouse board API, token `okta`. Whole public board in one GET. Each job has stable
+    `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and `content` =
+    full HTML-ENTITY-ESCAPED description; use html.unescape, then strip tags. Greenhouse has
+    no salary or employment_type fields in this API. Fit: identity/authentication
+    infrastructure, security systems, authorization, API platform and backend reliability
+    roles.
+
+- slug: postman
+  name: "Postman"
+  url: https://boards-api.greenhouse.io/v1/boards/postman/jobs?content=true
+  render: static
+  company: "Postman"
+  hints: >-
+    Greenhouse board API, token `postman`. Whole public board in one GET. Each job has
+    stable `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and
+    `content` = full HTML-ENTITY-ESCAPED description; use html.unescape, then strip tags.
+    Greenhouse has no salary or employment_type fields in this API. Fit: API platform,
+    developer tooling, collaboration backend, runtime infrastructure and distributed product
+    systems.
+
+- slug: launchdarkly
+  name: "LaunchDarkly"
+  url: https://boards-api.greenhouse.io/v1/boards/launchdarkly/jobs?content=true
+  render: static
+  company: "LaunchDarkly"
+  hints: >-
+    Greenhouse board API, token `launchdarkly`. Whole public board in one GET. Each job has
+    stable `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and
+    `content` = full HTML-ENTITY-ESCAPED description; use html.unescape, then strip tags.
+    Greenhouse has no salary or employment_type fields in this API. Fit: feature-management
+    platform, low-latency distributed systems, SDK/API backend and reliability roles.
+
+- slug: circleci
+  name: "CircleCI"
+  url: https://boards-api.greenhouse.io/v1/boards/circleci/jobs?content=true
+  render: static
+  company: "CircleCI"
+  hints: >-
+    Greenhouse board API, token `circleci`. Whole public board in one GET. Each job has
+    stable `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and
+    `content` = full HTML-ENTITY-ESCAPED description; use html.unescape, then strip tags.
+    Greenhouse has no salary or employment_type fields in this API. Fit: CI/CD platform,
+    build orchestration, distributed execution, reliability and developer infrastructure
+    roles.
+
+- slug: fivetran
+  name: "Fivetran"
+  url: https://boards-api.greenhouse.io/v1/boards/fivetran/jobs?content=true
+  render: static
+  company: "Fivetran"
+  hints: >-
+    Greenhouse board API, token `fivetran`. Whole public board in one GET. Each job has
+    stable `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and
+    `content` = full HTML-ENTITY-ESCAPED description; use html.unescape, then strip tags.
+    Greenhouse has no salary or employment_type fields in this API. Fit: data
+    movement/connectors, pipeline reliability, cloud infrastructure and backend/data systems
+    roles.
+
+- slug: hightouch
+  name: "Hightouch"
+  url: https://boards-api.greenhouse.io/v1/boards/hightouch/jobs?content=true
+  render: static
+  company: "Hightouch"
+  hints: >-
+    Greenhouse board API, token `hightouch`. Whole public board in one GET. Each job has
+    stable `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and
+    `content` = full HTML-ENTITY-ESCAPED description; use html.unescape, then strip tags.
+    Greenhouse has no salary or employment_type fields in this API. Fit: reverse ETL/data
+    activation, integrations, data pipelines, backend product infrastructure and platform
+    roles.
+
+- slug: reddit
+  name: "Reddit"
+  url: https://boards-api.greenhouse.io/v1/boards/reddit/jobs?content=true
+  render: static
+  company: "Reddit"
+  hints: >-
+    Greenhouse board API, token `reddit`. Whole public board in one GET. Each job has stable
+    `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and `content` =
+    full HTML-ENTITY-ESCAPED description; use html.unescape, then strip tags. Greenhouse has
+    no salary or employment_type fields in this API. Fit: large-scale backend,
+    ranking/search/retrieval, data infrastructure, communities platform and reliability
+    engineering.
+
+- slug: retool
+  name: "Retool"
+  url: https://boards-api.greenhouse.io/v1/boards/retool/jobs?content=true
+  render: static
+  company: "Retool"
+  hints: >-
+    Greenhouse board API, token `retool`. Whole public board in one GET. Each job has stable
+    `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and `content` =
+    full HTML-ENTITY-ESCAPED description; use html.unescape, then strip tags. Greenhouse has
+    no salary or employment_type fields in this API. Fit: developer tools, database/API
+    integrations, internal-app platform and backend/product infrastructure roles.
+
+- slug: jobicy_remote_dev
+  name: "Jobicy — Remote Developer Jobs"
+  url: https://jobicy.com/api/v2/remote-jobs?industry=dev
+  render: static
+  enumerates_all: false
+  hints: >-
+    Jobicy public API/RSS feed for remote jobs. Multi-company source; do not stamp a fixed
+    `company`. Parse company from each posting/card/detail page. Treat as a windowed source
+    unless the API explicitly returns all active matching jobs; use detail 404/expired
+    markers for closure. Fetch detail pages on the same host for the full description. Fit:
+    remote developer/API feed; useful broad supplement for backend/platform roles.
+
+- slug: workingnomads_golang
+  name: "Working Nomads — Go"
+  url: https://www.workingnomads.com/remote-golang-jobs
+  render: static
+  enumerates_all: false
+  hints: >-
+    Job-board listing/search source. Multi-company source; do not stamp a fixed `company`.
+    Parse company from each posting/card/detail page. Treat as a windowed source unless the
+    API explicitly returns all active matching jobs; use detail 404/expired markers for
+    closure. Fetch detail pages on the same host for the full description. Fit: remote Go
+    backend/devops roles across companies.
+
+- slug: workingnomads_rust
+  name: "Working Nomads — Rust"
+  url: https://www.workingnomads.com/remote-rust-jobs
+  render: static
+  enumerates_all: false
+  hints: >-
+    Job-board listing/search source. Multi-company source; do not stamp a fixed `company`.
+    Parse company from each posting/card/detail page. Treat as a windowed source unless the
+    API explicitly returns all active matching jobs; use detail 404/expired markers for
+    closure. Fetch detail pages on the same host for the full description. Fit: remote Rust
+    backend/systems roles across companies.
+
+- slug: workingnomads_blockchain
+  name: "Working Nomads — Blockchain"
+  url: https://www.workingnomads.com/remote-blockchain-jobs
+  render: static
+  enumerates_all: false
+  hints: >-
+    Job-board listing/search source. Multi-company source; do not stamp a fixed `company`.
+    Parse company from each posting/card/detail page. Treat as a windowed source unless the
+    API explicitly returns all active matching jobs; use detail 404/expired markers for
+    closure. Fetch detail pages on the same host for the full description. Fit: remote
+    blockchain/protocol/backend roles across companies.
+
+- slug: arc_rust
+  name: "Arc — Remote Rust Jobs"
+  url: https://arc.dev/remote-jobs/rust
+  render: static
+  enumerates_all: false
+  hints: >-
+    Job-board listing/search source. Multi-company source; do not stamp a fixed `company`.
+    Parse company from each posting/card/detail page. Treat as a windowed source unless the
+    API explicitly returns all active matching jobs; use detail 404/expired markers for
+    closure. Fetch detail pages on the same host for the full description. Fit: remote Rust
+    engineer roles; broad supplement for systems/backend searches.
+
+- slug: arc_golang
+  name: "Arc — Remote Golang Jobs"
+  url: https://arc.dev/remote-jobs/golang
+  render: static
+  enumerates_all: false
+  hints: >-
+    Job-board listing/search source. Multi-company source; do not stamp a fixed `company`.
+    Parse company from each posting/card/detail page. Treat as a windowed source unless the
+    API explicitly returns all active matching jobs; use detail 404/expired markers for
+    closure. Fetch detail pages on the same host for the full description. Fit: remote
+    Go/Golang engineer roles; broad supplement for backend/platform searches.
+
+- slug: arc_web3
+  name: "Arc — Remote Web3 Jobs"
+  url: https://arc.dev/remote-jobs/blockchain
+  render: static
+  enumerates_all: false
+  hints: >-
+    Job-board listing/search source. Multi-company source; do not stamp a fixed `company`.
+    Parse company from each posting/card/detail page. Treat as a windowed source unless the
+    API explicitly returns all active matching jobs; use detail 404/expired markers for
+    closure. Fetch detail pages on the same host for the full description. Fit: remote
+    blockchain/Web3 developer roles that overlap protocol, wallet and backend
+    infrastructure.
+
+- slug: remote_rocketship_latam_software
+  name: "Remote Rocketship — LatAm Software Engineering"
+  url: https://www.remoterocketship.com/country/latin-america/jobs/software-engineer/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Job-board listing/search source. Multi-company source; do not stamp a fixed `company`.
+    Parse company from each posting/card/detail page. Treat as a windowed source unless the
+    API explicitly returns all active matching jobs; use detail 404/expired markers for
+    closure. Fetch detail pages on the same host for the full description. Fit: US/EU remote
+    software engineering jobs hiring in Latin America, including backend and senior roles.
+
+- slug: remote_rocketship_brazil_backend
+  name: "Remote Rocketship — Brazil Backend"
+  url: https://www.remoterocketship.com/?locations=Brazil&page=1&sort=DateAdded
+  render: static
+  enumerates_all: false
+  hints: >-
+    Job-board listing/search source. Multi-company source; do not stamp a fixed `company`.
+    Parse company from each posting/card/detail page. Treat as a windowed source unless the
+    API explicitly returns all active matching jobs; use detail 404/expired markers for
+    closure. Fetch detail pages on the same host for the full description. Fit: remote jobs
+    hiring in Brazil; useful for UTC-3 and Brazil-eligible backend roles.
+
+- slug: himalayas_brazil_software
+  name: "Himalayas — Brazil Software Engineering"
+  url: https://himalayas.app/jobs/countries/brazil/software-engineer
+  render: static
+  enumerates_all: false
+  hints: >-
+    Job-board listing/search source. Multi-company source; do not stamp a fixed `company`.
+    Parse company from each posting/card/detail page. Treat as a windowed source unless the
+    API explicitly returns all active matching jobs; use detail 404/expired markers for
+    closure. Fetch detail pages on the same host for the full description. Fit: remote
+    software engineering jobs available to candidates in Brazil.
+
+- slug: getonboard_programming
+  name: "Get on Board — Programming"
+  url: https://www.getonbrd.com/jobs/programming
+  render: static
+  enumerates_all: false
+  hints: >-
+    Job-board listing/search source. Multi-company source; do not stamp a fixed `company`.
+    Parse company from each posting/card/detail page. Treat as a windowed source unless the
+    API explicitly returns all active matching jobs; use detail 404/expired markers for
+    closure. Fetch detail pages on the same host for the full description. Fit:
+    LatAm-focused curated programming jobs; useful for remote backend, Go, TypeScript,
+    DevOps and platform roles.
+
+- slug: getonboard_world
+  name: "Get on Board Remote"
+  url: https://www.getonbrd.world/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Job-board listing/search source. Multi-company source; do not stamp a fixed `company`.
+    Parse company from each posting/card/detail page. Treat as a windowed source unless the
+    API explicitly returns all active matching jobs; use detail 404/expired markers for
+    closure. Fetch detail pages on the same host for the full description. Fit: remote tech
+    jobs with strong Latin America reach, including programming, data and DevOps roles.
+
+- slug: programathor_go
+  name: "ProgramaThor — Go"
+  url: https://programathor.com.br/jobs-go
+  render: static
+  enumerates_all: false
+  hints: >-
+    Job-board listing/search source. Multi-company source; do not stamp a fixed `company`.
+    Parse company from each posting/card/detail page. Treat as a windowed source unless the
+    API explicitly returns all active matching jobs; use detail 404/expired markers for
+    closure. Fetch detail pages on the same host for the full description. Fit: Brazilian Go
+    developer job board; useful for Portuguese-language remote/PJ/CLT roles.
+
+- slug: programathor_rust
+  name: "ProgramaThor — Rust"
+  url: https://programathor.com.br/jobs-rust
+  render: static
+  enumerates_all: false
+  hints: >-
+    Job-board listing/search source. Multi-company source; do not stamp a fixed `company`.
+    Parse company from each posting/card/detail page. Treat as a windowed source unless the
+    API explicitly returns all active matching jobs; use detail 404/expired markers for
+    closure. Fetch detail pages on the same host for the full description. Fit: Brazilian
+    Rust developer job board; useful for Portuguese-language remote/PJ/CLT roles.
+
+- slug: python_jobs
+  name: "Python.org Jobs"
+  url: https://www.python.org/jobs/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Job-board listing/search source. Multi-company source; do not stamp a fixed `company`.
+    Parse company from each posting/card/detail page. Treat as a windowed source unless the
+    API explicitly returns all active matching jobs; use detail 404/expired markers for
+    closure. Fetch detail pages on the same host for the full description. Fit: Python
+    backend/platform roles; good secondary board for infrastructure and
+    data/retrieval-adjacent backend work.
+
+- slug: django_jobs
+  name: "Django Jobs"
+  url: https://djangojobs.net/jobs/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Job-board listing/search source. Multi-company source; do not stamp a fixed `company`.
+    Parse company from each posting/card/detail page. Treat as a windowed source unless the
+    API explicitly returns all active matching jobs; use detail 404/expired markers for
+    closure. Fetch detail pages on the same host for the full description. Fit:
+    Python/Django backend roles; useful secondary board for senior backend opportunities.
+
+- slug: crypto_jobs
+  name: "Crypto.jobs"
+  url: https://crypto.jobs/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Job-board listing/search source. Multi-company source; do not stamp a fixed `company`.
+    Parse company from each posting/card/detail page. Treat as a windowed source unless the
+    API explicitly returns all active matching jobs; use detail 404/expired markers for
+    closure. Fetch detail pages on the same host for the full description. Fit: crypto/Web3
+    job board; supplement for protocol, backend and wallet/security roles.
+
+- slug: remote3
+  name: "Remote3"
+  url: https://www.remote3.co/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Job-board listing/search source. Multi-company source; do not stamp a fixed `company`.
+    Parse company from each posting/card/detail page. Treat as a windowed source unless the
+    API explicitly returns all active matching jobs; use detail 404/expired markers for
+    closure. Fetch detail pages on the same host for the full description. Fit: remote Web3,
+    crypto, blockchain and DeFi roles, including developer/backend positions.
+
+- slug: findweb3_engineering
+  name: "FindWeb3 — Engineering"
+  url: https://findweb3.com/jobs/engineering
+  render: static
+  enumerates_all: false
+  hints: >-
+    Job-board listing/search source. Multi-company source; do not stamp a fixed `company`.
+    Parse company from each posting/card/detail page. Treat as a windowed source unless the
+    API explicitly returns all active matching jobs; use detail 404/expired markers for
+    closure. Fetch detail pages on the same host for the full description. Fit: Web3
+    engineering job board for crypto/protocol/backend roles.
+
+- slug: blockchainjobsboard
+  name: "Blockchain Jobs Board"
+  url: https://www.blockchainjobsboard.com/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Job-board listing/search source. Multi-company source; do not stamp a fixed `company`.
+    Parse company from each posting/card/detail page. Treat as a windowed source unless the
+    API explicitly returns all active matching jobs; use detail 404/expired markers for
+    closure. Fetch detail pages on the same host for the full description. Fit:
+    blockchain/Web3/DeFi career board with technical and remote roles.
+
+- slug: electric_capital
+  name: "Electric Capital Portfolio Jobs"
+  url: https://jobs.electriccapital.com/jobs
+  render: static
+  enumerates_all: false
+  hints: >-
+    Getro/portfolio job board for Electric Capital. Multi-company source. Windowed crawl:
+    prefer same-host /jobs and /sitemap.xml, sort job URLs by lastmod or visible recency,
+    and fetch only the freshest slice. Detail pages usually embed the posting in
+    `__NEXT_DATA__` or another same-host JSON payload with title, organization/company,
+    locations, posted/expires dates, compensation and external apply URL. Do not call
+    api.getro.com unless separately admitted by robots/host evidence. Fit: crypto/web3
+    infrastructure and protocol-company roles, including backend, infra and engineering
+    postings.
+
+- slug: framework_ventures
+  name: "Framework Ventures Portfolio Jobs"
+  url: https://jobs.framework.ventures/jobs
+  render: static
+  enumerates_all: false
+  hints: >-
+    Getro/portfolio job board for Framework Ventures. Multi-company source. Windowed crawl:
+    prefer same-host /jobs and /sitemap.xml, sort job URLs by lastmod or visible recency,
+    and fetch only the freshest slice. Detail pages usually embed the posting in
+    `__NEXT_DATA__` or another same-host JSON payload with title, organization/company,
+    locations, posted/expires dates, compensation and external apply URL. Do not call
+    api.getro.com unless separately admitted by robots/host evidence. Fit: DeFi, crypto
+    infrastructure and protocol-company engineering roles.
+
+- slug: blockchain_capital
+  name: "Blockchain Capital Portfolio Jobs"
+  url: https://jobs.blockchaincapital.com/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Getro/portfolio job board for Blockchain Capital. Multi-company source. Windowed crawl:
+    prefer same-host /jobs and /sitemap.xml, sort job URLs by lastmod or visible recency,
+    and fetch only the freshest slice. Detail pages usually embed the posting in
+    `__NEXT_DATA__` or another same-host JSON payload with title, organization/company,
+    locations, posted/expires dates, compensation and external apply URL. Do not call
+    api.getro.com unless separately admitted by robots/host evidence. Fit: crypto venture
+    portfolio roles; useful for protocol, wallet, exchange and infrastructure companies.
+
+- slug: polychain_capital
+  name: "Polychain Capital Portfolio Jobs"
+  url: https://jobs.polychain.capital/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Getro/portfolio job board for Polychain Capital. Multi-company source. Windowed crawl:
+    prefer same-host /jobs and /sitemap.xml, sort job URLs by lastmod or visible recency,
+    and fetch only the freshest slice. Detail pages usually embed the posting in
+    `__NEXT_DATA__` or another same-host JSON payload with title, organization/company,
+    locations, posted/expires dates, compensation and external apply URL. Do not call
+    api.getro.com unless separately admitted by robots/host evidence. Fit: crypto/protocol
+    portfolio roles, including DeFi, infrastructure, backend and engineering opportunities.
+
+- slug: hv_capital
+  name: "HV Capital Portfolio Jobs"
+  url: https://jobs.hvcapital.com/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Getro/portfolio job board for HV Capital. Multi-company source. Windowed crawl: prefer
+    same-host /jobs and /sitemap.xml, sort job URLs by lastmod or visible recency, and fetch
+    only the freshest slice. Detail pages usually embed the posting in `__NEXT_DATA__` or
+    another same-host JSON payload with title, organization/company, locations,
+    posted/expires dates, compensation and external apply URL. Do not call api.getro.com
+    unless separately admitted by robots/host evidence. Fit: large European startup
+    portfolio; useful for remote/EU-friendly backend, infrastructure, data and fintech
+    roles.
+
+- slug: valor_capital
+  name: "Valor Capital Group Portfolio Jobs"
+  url: https://jobs.valorcapitalgroup.com/jobs
+  render: static
+  enumerates_all: false
+  hints: >-
+    Getro/portfolio job board for Valor Capital Group. Multi-company source. Windowed crawl:
+    prefer same-host /jobs and /sitemap.xml, sort job URLs by lastmod or visible recency,
+    and fetch only the freshest slice. Detail pages usually embed the posting in
+    `__NEXT_DATA__` or another same-host JSON payload with title, organization/company,
+    locations, posted/expires dates, compensation and external apply URL. Do not call
+    api.getro.com unless separately admitted by robots/host evidence. Fit:
+    Brazil/LatAm-heavy portfolio roles, including fintech, backend and platform engineering.
+
+- slug: better_tomorrow_ventures
+  name: "Better Tomorrow Ventures Portfolio Jobs"
+  url: https://jobs.btv.vc/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Getro/portfolio job board for Better Tomorrow Ventures. Multi-company source. Windowed
+    crawl: prefer same-host /jobs and /sitemap.xml, sort job URLs by lastmod or visible
+    recency, and fetch only the freshest slice. Detail pages usually embed the posting in
+    `__NEXT_DATA__` or another same-host JSON payload with title, organization/company,
+    locations, posted/expires dates, compensation and external apply URL. Do not call
+    api.getro.com unless separately admitted by robots/host evidence. Fit: fintech portfolio
+    roles, often payments/banking infrastructure and backend/product engineering.
+
+- slug: a16z_jobs
+  name: "a16z Portfolio Jobs"
+  url: https://jobs.a16z.com/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Consider-powered portfolio job board; parse same-host rendered listings and details.
+    Multi-company source; do not stamp a fixed `company`. Parse company from each
+    posting/card/detail page. Treat as a windowed source unless the API explicitly returns
+    all active matching jobs; use detail 404/expired markers for closure. Fetch detail pages
+    on the same host for the full description. Fit: large venture portfolio board with many
+    AI, infrastructure, fintech and crypto companies; useful for senior backend/platform
+    searches.
+
+- slug: a16z_crypto
+  name: "a16z Crypto Portfolio Jobs"
+  url: https://a16zcrypto.com/jobs/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Portfolio job board/search page. Multi-company source; do not stamp a fixed `company`.
+    Parse company from each posting/card/detail page. Treat as a windowed source unless the
+    API explicitly returns all active matching jobs; use detail 404/expired markers for
+    closure. Fetch detail pages on the same host for the full description. Fit: a16z
+    crypto-specific portfolio board; keep despite possible current low volume because it is
+    highly aligned with protocol/backend roles.
