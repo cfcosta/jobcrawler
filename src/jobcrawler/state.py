@@ -178,6 +178,7 @@ class PositionRecord:
     match_score: int | None
     match_verdict: str | None
     match_reasons: str | None
+    match_concerns: str | None
     matched_at: datetime | None
     match_pending: bool
     track_status: str
@@ -255,6 +256,7 @@ CREATE TABLE IF NOT EXISTS positions (
     match_score     INTEGER,
     match_verdict   TEXT,
     match_reasons   TEXT,
+    match_concerns  TEXT,
     matched_at      TEXT,
     match_pending   INTEGER NOT NULL DEFAULT 0,
     track_status     TEXT NOT NULL DEFAULT 'new',
@@ -342,6 +344,7 @@ _POSITION_ADD_COLUMNS: tuple[tuple[str, str], ...] = (
     ("match_score", "INTEGER"),
     ("match_verdict", "TEXT"),
     ("match_reasons", "TEXT"),
+    ("match_concerns", "TEXT"),
     ("matched_at", "TEXT"),
     ("match_pending", "INTEGER NOT NULL DEFAULT 0"),
     # The §16 operator tracking axis, landed on top of the match layer. Like ``match_*``
@@ -889,22 +892,30 @@ class StateStore:
         return [_to_position(r) for r in rows]
 
     def set_match(
-        self, site: str, url: str, *, score: int, verdict: str, reasons: str
+        self,
+        site: str,
+        url: str,
+        *,
+        score: int,
+        verdict: str,
+        reasons: str,
+        concerns: str = "[]",
     ) -> None:
         """Record a match verdict on a position and clear its pending flag (§6).
 
         ``matched_at`` is stamped from the clock. Applied both for a fresh LLM verdict and
         for a free cache hit — either way the row now carries the score and is no longer
-        pending. ``reasons`` is opaque text to the store (the matcher serializes its
-        rationale/concerns into it).
+        pending. ``reasons``/``concerns`` are opaque text to the store (the matcher
+        serializes its rationale/concerns lists into them); persisting both keeps the full
+        verdict on the durable row so a match trainset can be projected from it (§8).
         """
         now = self._clock().isoformat()
         with self._lock:
             self._conn.execute(
                 "UPDATE positions SET match_score = ?, match_verdict = ?, "
-                "match_reasons = ?, matched_at = ?, match_pending = 0 "
+                "match_reasons = ?, match_concerns = ?, matched_at = ?, match_pending = 0 "
                 "WHERE site = ? AND url = ?",
-                (score, verdict, reasons, now, site, url),
+                (score, verdict, reasons, concerns, now, site, url),
             )
             self._conn.commit()
 
@@ -1397,6 +1408,7 @@ def _to_position(row: sqlite3.Row) -> PositionRecord:
         match_score=row["match_score"],
         match_verdict=row["match_verdict"],
         match_reasons=row["match_reasons"],
+        match_concerns=row["match_concerns"],
         matched_at=_dt("matched_at"),
         match_pending=bool(row["match_pending"]),
         track_status=row["track_status"],

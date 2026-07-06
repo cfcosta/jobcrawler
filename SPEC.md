@@ -1085,18 +1085,22 @@ The central risk is **executing model-written code against the live web**. Mitig
   `match_rate` (governor) + the content/profile cache (score-at-most-once). The **profile content is
   sent only to the configured match LM** (`require_match_model` resolves `JOBCRAWLER_MATCH_MODEL` else
   the cheap `sub_lm`, **never** the root planner — a per-token safety *and* a privacy boundary) and is
-  never exposed to the generator/RLM or fed back into the optimizer loop. The match verdict's
-  reasons/concerns are **operator-facing only**; they are never read back by the generator (they can't
-  breach the §8 hidden-scorer invariant). No LLM scores its own output; every signal the §6 scorer
-  reads is host code the optimized loop can't touch.
+  never exposed to the crawler generator/RLM or fed back into its optimizer loop. The match verdict's
+  reasons/concerns are **operator-facing**; a separate offline, operator-invoked builder
+  (`jobcrawl match-trainset`) may project them — with the operator's own accept/reject feedback
+  overruling the stored score — into a trainset for distilling a cheaper **matcher**, but they are never
+  read back by the **crawler generator/RLM** (that would breach the §8 hidden-scorer invariant). No LLM
+  scores its own output in the §6 gate; every signal the §6 scorer reads is host code the optimized loop
+  can't touch.
 - **The web tracker is a loopback-bound read/write store client, not a new trust boundary (§16).** `jobcrawl
   serve` runs no scheduler and no LLM: it reads the store and flags work (`request_crawl` / requeue) for the
   daemon to drain — it never imports a crawler, executes generated code, or calls a model, so it can't widen
   the §4.4 sandbox surface. It holds **personal application data** (which roles you applied to, private notes),
   so it binds `127.0.0.1` by default (`JOBCRAWLER_SERVE_HOST`); `0.0.0.0` is opt-in and only sound behind a
   trusted reverse proxy with auth. The operator tracking axis (`track_status`/`notes`/`dismissed`) is, like the
-  match reasons above, **operator-facing only** — no generator/optimizer code path reads these columns, so the
-  UI can't become a channel into the §8 hidden-scorer invariant.
+  match reasons above, **operator-facing** — no *crawler* generator/optimizer code path reads these columns, so the
+  UI can't become a channel into the §8 hidden-scorer invariant; only the offline `match-trainset` projector reads
+  them, and solely to correct **matcher** training labels.
 
 ## 9. DSPy / runtime notes
 - `dspy.RLM` is `@experimental` — pin DSPy `3.2.x`.
@@ -1159,6 +1163,7 @@ The central risk is **executing model-written code against the live web**. Mitig
 | `jobcrawl list` | show boards, script presence, last position count, health/staleness, learned cadence |
 | `jobcrawl status` | per-board run aggregates, fleet health distribution, drift-recovery MTTR, active generator + held-out score + autonomy brake (§4.9/§4.11) |
 | `jobcrawl optimize [--adopt]` | the offline §4.11 job: build trainset → optimize → held-out promote (`--adopt` flips the active-generator pointer) |
+| `jobcrawl match-trainset [--out PATH]` | project persisted match verdicts + operator feedback into a JSONL **matcher** trainset for distilling a cheaper matcher (§8) |
 | `jobcrawl rollback-generator` | revert the active generator to the previously-adopted version (§4.11) |
 | `jobcrawl login` | import the ChatGPT-subscription (Codex) OAuth token from `codex login` into the store a `chatgpt/*` model slug bills against (§9) — one-shot, not a daemon |
 
@@ -1392,8 +1397,9 @@ policy"):
 - **`dismissed`** (hide noise without closing — a dismiss is *not* a §4.7 close) and free-text **`notes`**.
 
 These columns sit **outside** the crawler-supplied `fields` set, so a re-crawl, content change, or reopen
-never clobbers them (§4.7). Per §8 this axis is **operator-facing only** — no generator/optimizer path reads
-it, exactly like the match `reasons`.
+never clobbers them (§4.7). Per §8 this axis is **operator-facing** — no *crawler* generator/optimizer path reads
+it, exactly like the match `reasons`; only the offline `jobcrawl match-trainset` projector may (to correct
+**matcher** training labels).
 
 **Surfaces.**
 

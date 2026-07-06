@@ -439,13 +439,19 @@ class Matcher:
         return applied
 
     def _apply(self, site: str, url: str, verdict: MatchVerdict) -> None:
-        """Persist a verdict to the position row (clears its pending flag)."""
+        """Persist a verdict to the position row (clears its pending flag).
+
+        Both ``reasons`` and ``concerns`` are stored so the durable row carries the whole
+        verdict — the match trainset (§8) is projected from these rows, not the memoization
+        cache, which is keyed by hashes and may be absent.
+        """
         self._store.set_match(
             site,
             url,
             score=verdict.score,
             verdict=verdict.verdict,
             reasons=json.dumps(list(verdict.reasons)),
+            concerns=json.dumps(list(verdict.concerns)),
         )
 
 

@@ -810,12 +810,14 @@ def cmd_matches(args: argparse.Namespace) -> int:
     return 0
 
 
-def _parse_cached_verdict(cached: str | None) -> tuple[int, str, str] | None:
-    """Decode a cached verdict JSON into ``(score, verdict, reasons_json)``, or None.
+def _parse_cached_verdict(cached: str | None) -> tuple[int, str, str, str] | None:
+    """Decode a cached verdict JSON into ``(score, verdict, reasons_json, concerns_json)``.
 
     Mirrors the match cache's stored shape (``{score, verdict, reasons, concerns}``) so
-    a cache-drain can apply a verdict without re-billing the LLM. A corrupt/absent entry
-    is a miss (``None``) — the cache is an optimization, never a correctness dependency.
+    a cache-drain can apply a verdict without re-billing the LLM. Concerns ride along so a
+    cache-replayed row is as trainset-complete as a freshly-scored one (§8). A corrupt or
+    absent entry is a miss (``None``) — the cache is an optimization, never a correctness
+    dependency.
     """
     if not cached:
         return None
@@ -826,7 +828,8 @@ def _parse_cached_verdict(cached: str | None) -> tuple[int, str, str] | None:
         return None
     verdict = str(data.get("verdict") or "")
     reasons = json.dumps(list(data.get("reasons") or []))
-    return score, verdict, reasons
+    concerns = json.dumps(list(data.get("concerns") or []))
+    return score, verdict, reasons, concerns
 
 
 def cmd_rematch(args: argparse.Namespace) -> int:
@@ -878,9 +881,14 @@ def _run_rematch(store: StateStore) -> int:
         if parsed is None:
             still_pending += 1
             continue
-        score, verdict, reasons = parsed
+        score, verdict, reasons, concerns = parsed
         store.set_match(
-            rec.site, rec.url, score=score, verdict=verdict, reasons=reasons
+            rec.site,
+            rec.url,
+            score=score,
+            verdict=verdict,
+            reasons=reasons,
+            concerns=concerns,
         )
         scored += 1
         cache_hits += 1
@@ -898,10 +906,15 @@ def _run_rematch(store: StateStore) -> int:
             store.set_match_pending(rec.site, rec.url)
             invalidated += 1
             continue
-        score, verdict, reasons = parsed
+        score, verdict, reasons, concerns = parsed
         if score != rec.match_score or verdict != (rec.match_verdict or ""):
             store.set_match(
-                rec.site, rec.url, score=score, verdict=verdict, reasons=reasons
+                rec.site,
+                rec.url,
+                score=score,
+                verdict=verdict,
+                reasons=reasons,
+                concerns=concerns,
             )
             rescored += 1
             cache_hits += 1
@@ -1212,6 +1225,33 @@ def cmd_optimize(args: argparse.Namespace) -> int:
     return optimize_command(args)
 
 
+def cmd_match_trainset(args: argparse.Namespace) -> int:
+    # Project persisted match verdicts + operator feedback into a DSPy matcher trainset
+    # (§8) — the labelled data for later optimising a cheaper matcher. dspy is heavy, so
+    # the projector is imported lazily.
+    from jobcrawler import match_trainset
+
+    out_path = args.out or "match-trainset.jsonl"
+    try:
+        profile = load_profile(config.profile_path())
+    except ProfileNotFound:
+        print(f"no profile at {config.profile_path()} — nothing to label against")
+        return 1
+    store = StateStore(_db_path())
+    try:
+        # Every scored row across the whole lifecycle, dismissed included — a dismissed or
+        # closed-but-applied posting is exactly the operator-corrected label we want.
+        rows = store.search_positions(
+            min_score=0, status=None, dismissed=None, sort="score", limit=1_000_000
+        )
+        examples = match_trainset.build_examples(rows, profile.body)
+        match_trainset.save_trainset(examples, out_path)
+    finally:
+        store.close()
+    print(f"wrote {len(examples)} matcher example(s) to {out_path}")
+    return 0
+
+
 def cmd_rollback_generator(args: argparse.Namespace) -> int:
     # Undo the last generator adoption (the §4.11 versioned rollback). Flips the
     # active-generator pointer back to the prior version (or baseline); cheap, no LM.
@@ -1364,6 +1404,16 @@ def build_parser() -> argparse.ArgumentParser:
         "(§4.11 auto-adopt; reversible via rollback-generator)",
     )
     opt.set_defaults(func=cmd_optimize)
+
+    mt = sub.add_parser(
+        "match-trainset",
+        help="project persisted match verdicts + feedback into a DSPy matcher trainset (§8)",
+    )
+    mt.add_argument(
+        "--out",
+        help="output JSONL path (default: match-trainset.jsonl)",
+    )
+    mt.set_defaults(func=cmd_match_trainset)
 
     sub.add_parser(
         "rollback-generator",

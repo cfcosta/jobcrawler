@@ -14,9 +14,11 @@ Boundaries it must respect:
   single-owner: the UI must not overlap a board's own run); "rescore" parks open rows via
   :meth:`StateStore.requeue_open_matches` for the daemon's match-drain to flush (§4.7 —
   no crawl needed, the description is persisted on the row).
-* Per §8 the match verdict's ``reasons``/``concerns`` are *operator-facing only* — shown
-  to you here, never fed back into any generator/optimizer. The status/notes/dismissed
-  axis is likewise a pure operator surface: no optimizer code path reads these columns.
+* Per §8 the match verdict's ``reasons``/``concerns`` and the status/notes/dismissed axis
+  are *operator-facing* in this UI — it never itself feeds them to a model. They are
+  persisted on the durable row, and the offline, operator-invoked ``jobcrawl match-trainset``
+  builder may project them (feedback overruling the stored verdict) into a matcher trainset
+  for distilling a cheaper matcher. The crawler generator/optimizer still never reads them.
 * Status *values* are validated host-side (`tracking.parse`) before the store persists the
   string; the store never adjudicates the value or the transition.
 

@@ -112,8 +112,8 @@ class FakeStore:
             (content_hash, profile_hash, model, prompt_version, verdict_json)
         )
 
-    def set_match(self, site, url, *, score, verdict, reasons):
-        self.set_match_calls.append((site, url, score, verdict, reasons))
+    def set_match(self, site, url, *, score, verdict, reasons, concerns="[]"):
+        self.set_match_calls.append((site, url, score, verdict, reasons, concerns))
 
     def set_match_pending(self, site, url):
         self.pending_calls.append((site, url))
