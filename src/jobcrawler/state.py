@@ -1156,6 +1156,7 @@ class StateStore:
         min_score: int | None = None,
         min_salary: float | None = None,
         dismissed: bool | None = None,
+        exclude_company_applied: bool = False,
         sort: str = "recent",
         limit: int = 100,
         offset: int = 0,
@@ -1174,6 +1175,8 @@ class StateStore:
         - ``min_score``  only rows scored at/above it (drops unscored).
         - ``min_salary``  ``COALESCE(salary_max, salary_min) >= min_salary`` (drops unstated).
         - ``dismissed``  ``None`` = both, ``False`` = hide dismissed, ``True`` = only dismissed.
+        - ``exclude_company_applied``  drop rows whose hiring company already has an applied-to
+          posting (grouped on ``company_canonical``, §16) — the browse twin of :meth:`matches`.
 
         ``sort`` ∈ {recent, score, updated, salary, title}; NULL scores/salaries sink last
         under a DESC sort. ``limit``/``offset`` paginate. Returns ``list[PositionRecord]``.
@@ -1215,6 +1218,17 @@ class StateStore:
         if dismissed is not None:
             clauses.append("dismissed = ?")
             params.append(1 if dismissed else 0)
+        if exclude_company_applied:
+            # Browse-side twin of matches()' flag: hide every row whose hiring company
+            # already has an applied-to posting, grouped on the derived company_canonical
+            # key (COALESCE'd to lower(company)); an empty key groups with nothing (§16).
+            clauses.append(
+                "NOT EXISTS (SELECT 1 FROM positions p2 "
+                "WHERE COALESCE(NULLIF(p2.company_canonical, ''), lower(p2.company)) "
+                "= COALESCE(NULLIF(positions.company_canonical, ''), lower(positions.company)) "
+                "AND COALESCE(NULLIF(p2.company_canonical, ''), lower(p2.company)) != '' "
+                "AND p2.applied_at IS NOT NULL)"
+            )
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         order = {
             "recent": "first_seen DESC, site, url",

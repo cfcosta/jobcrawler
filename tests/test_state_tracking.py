@@ -269,6 +269,21 @@ def test_search_dismissed_filter(store: StateStore) -> None:
     assert len(store.search_positions(dismissed=None)) == 2  # both
 
 
+def test_search_exclude_company_applied(store: StateStore) -> None:
+    # Applying to any role at a company hides that company's *other* openings from browse,
+    # grouped on the canonical company key (§16) — the browse-side twin of matches()' flag.
+    _seed(store, url="https://acme.test/a", company="Acme")
+    _seed(store, url="https://acme.test/b", company="Acme")
+    _seed(store, site="globex", url="https://globex.test/c", company="Globex")
+    store.set_track_status("acme", "https://acme.test/a", "applied", stamp_applied=True)
+
+    assert len(store.search_positions()) == 3  # off by default: full corpus
+    # one applied Acme role hides the whole company; the other company's lead survives
+    assert [p.url for p in store.search_positions(exclude_company_applied=True)] == [
+        "https://globex.test/c"
+    ]
+
+
 def test_search_sort_and_pagination(store: StateStore) -> None:
     for i, score in enumerate([50, 90, 70]):
         url = f"https://acme.test/{i}"

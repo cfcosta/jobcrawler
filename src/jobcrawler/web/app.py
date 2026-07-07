@@ -202,7 +202,11 @@ def _read_filters(params: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         v = v.strip() if isinstance(v, str) else v
         return v or None
 
-    show_dismissed = (params.get("show_dismissed") or "") in {"1", "true", "on", "yes"}
+    def _flag(name: str) -> bool:
+        return (params.get(name) or "") in {"1", "true", "on", "yes"}
+
+    show_dismissed = _flag("show_dismissed")
+    hide_applied_companies = _flag("hide_applied_companies")
     status = _s("status")  # None/'all' => both open and closed
     track_status = _s("track_status")
     sort = _s("sort") or "score"
@@ -217,6 +221,7 @@ def _read_filters(params: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         "min_score": _int_param(params, "min_score"),
         "min_salary": _float_param(params, "min_salary"),
         "dismissed": None if show_dismissed else False,
+        "exclude_company_applied": hide_applied_companies,
         "sort": sort,
     }
     raw = {
@@ -231,6 +236,7 @@ def _read_filters(params: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         "min_salary": params.get("min_salary") or "",
         "sort": sort,
         "show_dismissed": show_dismissed,
+        "hide_applied_companies": hide_applied_companies,
     }
     return kwargs, raw
 

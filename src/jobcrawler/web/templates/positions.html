@@ -32,6 +32,7 @@
     {% endfor %}
   </select>
   <label class="chk"><input type="checkbox" name="show_dismissed" value="1"{{ ' checked' if filters.show_dismissed else '' }}> Show dismissed</label>
+  <label class="chk"><input type="checkbox" name="hide_applied_companies" value="1"{{ ' checked' if filters.hide_applied_companies else '' }}> Hide applied companies</label>
   <button type="submit">Apply</button>
   <a class="clear" href="/positions">Clear</a>
 </form>
