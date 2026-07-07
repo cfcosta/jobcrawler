@@ -2711,3 +2711,85 @@
     closure. Fetch detail pages on the same host for the full description. Fit: a16z
     crypto-specific portfolio board; keep despite possible current low volume because it is
     highly aligned with protocol/backend roles.
+
+- slug: equinix
+  name: "Equinix"
+  url: https://careers.equinix.com/jobs/search
+  render: browser
+  company: "Equinix"
+  hints: >-
+    Clinch/PageUp career site served entirely from careers.equinix.com behind an AWS WAF
+    silent JS challenge — render in a browser so the challenge is solved (plain non-JS GETs
+    return HTTP 202 empty bodies). Walk `?page=N` (30 rows/page, follow rel="next") until a
+    page has no rows; each row is `<tr data-job-url="/jobs/<slug>">` with
+    td.job-search-results-title > a (title + canonical detail/apply URL), a requisition
+    external_id (JR-#####), category, location(s) and a Remote/Hybrid/On Site workplace type.
+    The same-host sitemap.xml is a static enumerator/verifier listing every open /jobs/<slug>
+    URL with <lastmod>. Fetch each /jobs/<slug> detail page for the full JobPosting
+    description/posted-at/apply. robots disallows /api/ (WAF-gated) — never fetch it; stay on
+    careers.equinix.com. Fit: global data-center/interconnection infrastructure — backend/API,
+    platform-automation, SRE, data-center operations/controls software and
+    network/interconnection engineering.
+
+- slug: scala_data_centers
+  name: "Scala Data Centers"
+  url: https://scaladatacenters.gupy.io/
+  render: static
+  company: "Scala Data Centers"
+  hints: >-
+    Gupy public career page (Next.js SSR). A single static GET of the board root embeds the
+    WHOLE board in `<script id="__NEXT_DATA__">` -> props.pageProps.jobs[] (no server
+    pagination). Each item: numeric `id` (stable external_id), `title`, `department`, `type`
+    (vacancy_type_effective vs vacancy_type_talent_pool/apprentice — skip the non-effective
+    ones), `workplace.address` {country,state,stateShortName,city,district} and
+    `workplace.workplaceType`. For the body GET same-host `/jobs/<id>` and read
+    props.pageProps.job: concat HTML `description`+`responsibilities`+`prerequisites`+
+    `relevantExperiences` (html.unescape then strip tags); `publishedAt`=posted_at,
+    `expiresAt`=expiry, keep `status`==published. No same-host JSON API exists (/api/* 404) —
+    __NEXT_DATA__ is the machine-readable source. apply_url = the /jobs/<id> page; Gupy exposes
+    no salary. Stay on scaladatacenters.gupy.io. Fit: LATAM hyperscale/sustainable data-center
+    operator — data-center operations, critical-facilities (mechanical/electrical/commissioning)
+    and corporate IT-architecture; mostly Portuguese, on-site (Barueri-SP plus Chile).
+
+- slug: omnia_dc
+  name: "Omnia DC"
+  url: https://omnia.gupy.io/
+  render: static
+  company: "Omnia DC"
+  hints: >-
+    Gupy public career page (Next.js SSR); the marketing site omniadc.com has no careers link —
+    the board is the independent Gupy portal omnia.gupy.io. A plain GET of the root embeds the
+    complete jobs array in `<script id="__NEXT_DATA__">` -> props.pageProps.jobs[] (cards
+    paginate 10/page client-side only). Each item: numeric `id` (external_id), `title`, `type`
+    (employment), `department`, `workplace.workplaceType` and `workplace.address`
+    {city,state,stateShortName,country,district}. For each id GET same-host `/jobs/<id>` and
+    read props.pageProps.job: body = `description`+`responsibilities`+`prerequisites`+
+    `relevantExperiences` (concat, strip tags); `publishedAt`=posted_at, `jobType`=employment,
+    skip status != published. apply_url = /jobs/<id>. No anonymous JSON API (portal.api and the
+    /api/v2 route 404); never follow the ddforward proxy or attachments.gupy.io. Gupy exposes no
+    salary. Stay on omnia.gupy.io. Fit: young LATAM data-center operator (Caucaia/CE build) —
+    data-center O&M, NOC/reliability, infra-automation, network and electrical/mechanical;
+    mostly on-site Ceará, Portuguese/CLT — a selective fit for a remote backend profile.
+
+- slug: casa_dos_ventos
+  name: "Casa dos Ventos"
+  url: https://casadosventos.gupy.io/
+  render: static
+  company: "Casa dos Ventos"
+  hints: >-
+    Gupy career page (Next.js SSR), the board the marketing site's /a-casa-dos-ventos/carreiras
+    links to. A plain GET of the root embeds the whole active board in
+    `<script id="__NEXT_DATA__">` -> props.pageProps.jobs[] (no pagination — ?page/?limit are
+    ignored). Each item: `id` (external_id), `title`, `type` (vacancy_type_effective |
+    internship | talent_pool), `department`, `workplace.address`
+    {city,state,stateShortName,country,district} and `workplace.workplaceType`. For detail GET
+    same-host `/jobs/<id>` and read props.pageProps.job: name=title; body = concat HTML
+    description+responsibilities+prerequisites (strip tags); addressCity/State/Country=location;
+    jobType=employment_type; publishedAt=posted_at; expiresAt=deadline. Some cards are
+    past-dated yet still listed — read status/expiresAt rather than assuming every listed role
+    is open. No same-host JSON API (/api/* 404) — __NEXT_DATA__ is the source; apply_url =
+    /jobs/<id>. Gupy exposes no salary. Stay on casadosventos.gupy.io. Fit: Brazilian
+    wind/renewable IPP — skews legal, commercial, environmental, controllership and field O&M
+    (electrical/maintenance) with occasional software (HR-systems/data-engineering,
+    digital-assets); intermittent fit via energy-operations/data-platform work; Portuguese,
+    São Paulo/Fortaleza, on-site.
