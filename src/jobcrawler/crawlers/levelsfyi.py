@@ -7,17 +7,13 @@ EXTRA_HOSTS = []
 
 MAX_JOBS = 6
 
-# The Next.js origin fingerprints non-browser clients (empty 200), and the CDN
-# returns a blank body for a plain gzip Accept-Encoding (no brotli variant).
-# Present a browser and ask for the uncompressed representation.
+# The Next.js origin returns 403 to clients that omit a User-Agent.
 _HEADERS = {
     "user-agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     ),
-    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "accept-language": "en-US,en;q=0.9",
-    "accept-encoding": "identity",
 }
 
 _NEXT_DATA = re.compile(
@@ -130,18 +126,11 @@ def _clean_dict(data):
     return {k: v for k, v in data.items() if v is not None and v != ""}
 
 
-def _fetch(ctx, url):
-    # The CDN caches a blank 200 under no-store, so a shared entry poisoned by any
-    # gzip client stays blank; a private query key keeps us on a healthy variant.
-    sep = "&" if "?" in url else "?"
-    return ctx.fetch(f"{url}{sep}ref=jobcrawler", headers=_HEADERS)
-
-
 def crawl(ctx):
-    listing = _fetch(ctx, SITE)
+    listing = ctx.fetch(SITE, headers=_HEADERS)
     for jid in _job_ids(_page_props(listing))[:MAX_JOBS]:
         try:
-            page = _fetch(ctx, f"{SITE}?jobId={jid}")
+            page = ctx.fetch(f"{SITE}?jobId={jid}", headers=_HEADERS)
         except Exception:
             continue
         det = _page_props(page).get("initialJobDetails")

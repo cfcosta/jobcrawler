@@ -1,148 +1,155 @@
 import html
 import re
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
 SITE = "https://aijobs.net/"
 EXTRA_HOSTS = []
 
-MAX_POSTINGS = 6
+MAX_DETAILS = 4
 
-_HEADERS = {
+HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-_JOB_LINK_RE = re.compile(r'href="(/job/[a-z0-9-]+-\d+/)"')
-_H1_RE = re.compile(r"<h1[^>]*>(.*?)</h1>", re.S)
-_LOC_RE = re.compile(r'<div class="col">\s*<strong>(.*?)</strong>', re.S)
-_COMPANY_RE = re.compile(
-    r'<a class="text-decoration-none d-block text-break" href="/company/([a-z0-9-]+)/"'
-)
-_COMPANY_ID_RE = re.compile(r"-\d+$")
-_CANON_RE = re.compile(r'<link rel="canonical" href="([^"]+)"')
-_BADGE_BLOCK_RE = re.compile(r'<p class="py-4">(.*?)</p>', re.S)
-_BADGE_RE = re.compile(
-    r'<span class="text-bg-(secondary|warning)[^"]*">(.*?)</span>', re.S
-)
-_MAIN_RE = re.compile(r"<main[^>]*>(.*?)</main>", re.S)
-_ID_TAIL_RE = re.compile(r"-(\d+)/?$")
-_DIGIT_RE = re.compile(r"\d")
+RE_JOB_LINK = re.compile(r'href="(/job/[a-z0-9-]+-\d+/)"', re.I)
+RE_H1 = re.compile(r"<h1[^>]*>(.*?)</h1>", re.I | re.S)
+RE_H5 = re.compile(r"<h5\b", re.I)
+RE_STRONG = re.compile(r"<strong[^>]*>(.*?)</strong>", re.I | re.S)
+RE_COMPANY = re.compile(r'href="/company/[^"]*"[^>]*>(.*?)</a>', re.I | re.S)
+RE_PAY = re.compile(r'<p class="py-4">(.*?)</p>', re.I | re.S)
+RE_SUCCESS = re.compile(r"text-bg-success[^>]*>(.*?)</span>", re.I | re.S)
+RE_SECONDARY = re.compile(r"text-bg-secondary[^>]*>(.*?)</span>", re.I | re.S)
+RE_ID = re.compile(r"-(\d+)/?$")
+RE_END = re.compile(r'<div[^>]*class="row g-2"', re.I)
+RE_RELATED = re.compile(r"Related jobs", re.I)
+RE_MAIN_END = re.compile(r"</main>", re.I)
+RE_AT = re.compile(r"^@\s*")
+RE_REMOTE = re.compile(r"remote", re.I)
 
-_SCRIPT_RE = re.compile(r"(?is)<(script|style)[^>]*>.*?</\1>")
-_BR_RE = re.compile(r"(?i)<br\s*/?>")
-_BLOCK_CLOSE_RE = re.compile(r"(?i)</(?:p|div|li|ul|ol|h[1-6]|tr|section)>")
-_TAG_RE = re.compile(r"<[^>]+>")
-_WS_INLINE_RE = re.compile(r"[ \t\r\f\v]+")
-_WS_NL_RE = re.compile(r" *\n[ \n]*")
+RE_TAG = re.compile(r"<[^>]+>")
+RE_BR = re.compile(r"(?i)<br\s*/?>")
+RE_BLOCK = re.compile(r"(?i)</(?:p|div|li|ul|ol|h[1-6]|tr|section)>")
+RE_LI = re.compile(r"(?i)<li[^>]*>")
+RE_PARTIAL = re.compile(r"<[^>]*$")
+RE_WS = re.compile(r"[ \t\r\f\v]+")
+RE_NL = re.compile(r" *\n *")
+RE_NL3 = re.compile(r"\n{3,}")
 
 
-def _text(value):
+def _inline(value):
     if not value:
         return None
-    value = _SCRIPT_RE.sub(" ", value)
-    value = _BR_RE.sub("\n", value)
-    value = _BLOCK_CLOSE_RE.sub("\n", value)
-    value = _TAG_RE.sub(" ", value)
-    value = html.unescape(value)
-    value = _WS_INLINE_RE.sub(" ", value)
-    value = _WS_NL_RE.sub("\n", value)
-    return value.strip() or None
+    return RE_TAG.sub("", html.unescape(value)).strip() or None
 
 
-def _company(page):
-    m = _COMPANY_RE.search(page)
-    if not m:
+def _body_text(fragment):
+    text = RE_BR.sub("\n", fragment)
+    text = RE_BLOCK.sub("\n", text)
+    text = RE_LI.sub("- ", text)
+    text = RE_TAG.sub(" ", text)
+    text = html.unescape(text)
+    text = RE_WS.sub(" ", text)
+    text = RE_NL.sub("\n", text)
+    text = RE_NL3.sub("\n\n", text)
+    return text.strip() or None
+
+
+def _clean(data):
+    return {k: v for k, v in data.items() if v not in (None, "")}
+
+
+def _parse(page, url):
+    title_match = RE_H1.search(page)
+    if not title_match:
         return None
-    slug = _COMPANY_ID_RE.sub("", m.group(1)).replace("-", " ").strip()
-    return slug.title() or None
+    title = _inline(title_match.group(1))
+    tail = page[title_match.start() :]
+    h5_match = RE_H5.search(tail)
+    head = tail[: h5_match.start()] if h5_match else tail
 
+    loc_match = RE_STRONG.search(head)
+    location = _inline(loc_match.group(1)) if loc_match else None
 
-def _badges(page):
-    block = _BADGE_BLOCK_RE.search(page)
+    company = None
+    comp_match = RE_COMPANY.search(head)
+    if comp_match:
+        company = _inline(comp_match.group(1))
+        if company:
+            company = RE_AT.sub("", company).strip() or None
+
     salary = None
     employment = None
-    if block:
-        for m in _BADGE_RE.finditer(block.group(1)):
-            if m.group(1) != "secondary":
-                continue
-            val = _text(m.group(2))
-            if not val:
-                continue
-            if _DIGIT_RE.search(val):
-                salary = val
-            else:
-                employment = val
-    return salary, employment
+    pay_match = RE_PAY.search(head)
+    if pay_match:
+        for value in RE_SUCCESS.findall(pay_match.group(1)):
+            value = _inline(value)
+            if value and value != "R":
+                salary = value
+                break
+        emp_match = RE_SECONDARY.search(pay_match.group(1))
+        if emp_match:
+            employment = _inline(emp_match.group(1))
 
+    description = None
+    if h5_match:
+        rest = tail[h5_match.start() :]
+        end = RE_END.search(rest) or RE_RELATED.search(rest) or RE_MAIN_END.search(rest)
+        body = rest[: end.start()] if end else rest
+        body = RE_PARTIAL.sub("", body)
+        description = _body_text(body)
 
-def _description(page):
-    m = _MAIN_RE.search(page)
-    if not m:
+    if not (title and company and location and description):
         return None
-    body = m.group(1)
-    start = body.find("<h5")
-    if start == -1:
-        return None
-    end = body.find('<div class="row g-2">', start)
-    if end == -1:
-        end = body.find("Related jobs", start)
-    if end == -1:
-        end = len(body)
-    return _text(body[start:end])
 
-
-def _detail(ctx, url):
-    page = ctx.fetch(url, headers=_HEADERS)
-    h1 = _H1_RE.search(page)
-    if not h1:
-        return None
-    title = _text(h1.group(1))
-    loc = _LOC_RE.search(page, h1.end())
-    location = _text(loc.group(1)) if loc else None
-    company = _company(page)
-    description = _description(page)
-    if not (title and location and company and description):
-        return None
-    canon = _CANON_RE.search(page)
-    canonical = canon.group(1) if canon else url
-    salary, employment = _badges(page)
     out = {
-        "url": canonical,
+        "source": "aijobs",
+        "url": url,
         "title": title,
         "company": company,
         "location": location,
         "description": description,
-        "source": "aijobs",
+        "salary": salary,
+        "employment_type": employment,
     }
-    ext = _ID_TAIL_RE.search(urlparse(canonical).path)
-    if ext:
-        out["external_id"] = ext.group(1)
-    if salary:
-        out["salary"] = salary
-    if employment:
-        out["employment_type"] = employment
-    if location.lower() == "remote":
+    if RE_REMOTE.search(location):
         out["workplace_type"] = "Remote"
-    return out
+    id_match = RE_ID.search(url)
+    if id_match:
+        out["external_id"] = id_match.group(1)
+    return _clean(out)
+
+
+def _fetch(ctx, url):
+    last = None
+    for _ in range(2):
+        try:
+            return ctx.fetch(url, headers=HEADERS)
+        except Exception as exc:
+            last = exc
+    raise last
 
 
 def crawl(ctx):
-    page = ctx.fetch(SITE, headers=_HEADERS)
+    listing = _fetch(ctx, SITE + "?page=1")
     seen = set()
     urls = []
-    for m in _JOB_LINK_RE.finditer(page):
-        url = urljoin(SITE, m.group(1))
+    for match in RE_JOB_LINK.finditer(listing):
+        url = urljoin(SITE, match.group(1))
         if url in seen:
             continue
         seen.add(url)
         urls.append(url)
-    for url in urls[:MAX_POSTINGS]:
+
+    for url in urls[:MAX_DETAILS]:
         try:
-            row = _detail(ctx, url)
+            page = _fetch(ctx, url)
         except Exception:
             continue
-        if row:
-            yield row
+        job = _parse(page, url)
+        if job:
+            yield job

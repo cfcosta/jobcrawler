@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import html
 import json
 import re
@@ -6,79 +8,108 @@ from urllib.parse import urljoin
 SITE = "https://web3.career/"
 EXTRA_HOSTS = []
 
-_LISTINGS = (SITE, SITE + "?page=2")
+SOURCE = "web3career"
+LISTINGS = (SITE, urljoin(SITE, "?page=2"))
+
+_ROW_RE = re.compile(r"tableTurboRowClick\(event,\s*'(/([^'/]+)/(\d+))'")
 _LDJSON_RE = re.compile(
     r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
     re.I | re.S,
 )
-_DETAIL_RE = re.compile(r'href="(/[a-z0-9]+(?:-[a-z0-9]+)+/([0-9]+))"')
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
+_BR_RE = re.compile(r"<\s*br\s*/?\s*>", re.I)
+_BLOCK_RE = re.compile(r"</\s*(?:p|div|li|h[1-6]|tr|ul|ol|section)\s*>", re.I)
+_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"[ \t\r\f\v]+")
+_MULTINL_RE = re.compile(r"\n\s*\n\s*")
+_TRIMNL_RE = re.compile(r"[ \t]*\n[ \t]*")
+
 _DATE_RE = re.compile(
-    r"(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})\s*([+-]\d{2}:?\d{2}|Z)?"
+    r"(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\.\d+)?\s*([+-]\d{2}:?\d{2}|Z)?"
 )
+_DATEONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_PLACEHOLDER_LOC = {"anywhere", "n/a", "worldwide", "global"}
+_PERIOD_MAP = {
+    "YEAR": "year",
+    "YEARLY": "year",
+    "ANNUAL": "year",
+    "MONTH": "month",
+    "MONTHLY": "month",
+    "HOUR": "hour",
+    "HOURLY": "hour",
+}
 
 
 def _text(value):
-    if not isinstance(value, str):
+    if value is None:
         return None
+    if not isinstance(value, str):
+        value = str(value)
     value = html.unescape(value)
-    value = re.sub(r"<\s*br\s*/?\s*>", "\n", value, flags=re.I)
-    value = re.sub(r"</\s*(p|div|li|h[1-6]|tr|ul|ol)\s*>", "\n", value, flags=re.I)
-    value = re.sub(r"<[^>]+>", " ", value)
+    value = _BR_RE.sub("\n", value)
+    value = _BLOCK_RE.sub("\n", value)
+    value = _TAG_RE.sub(" ", value)
     value = html.unescape(value)
-    value = re.sub(r"[ \t\r\f\v]+", " ", value)
-    value = re.sub(r"\n\s*", "\n", value)
-    value = re.sub(r"\n{3,}", "\n\n", value)
+    value = _WS_RE.sub(" ", value)
+    value = _MULTINL_RE.sub("\n\n", value)
+    value = _TRIMNL_RE.sub("\n", value)
     return value.strip() or None
 
 
 def _slugify(value):
-    return _SLUG_RE.sub("-", html.unescape(str(value)).lower()).strip("-")
+    return _SLUG_RE.sub("-", html.unescape(str(value or "")).lower()).strip("-")
 
 
 def _iso(value):
-    if not isinstance(value, str):
+    if not value or not isinstance(value, str):
         return None
-    match = _DATE_RE.search(value.strip())
+    text = value.strip()
+    if _DATEONLY_RE.match(text):
+        return text + "T00:00:00"
+    match = _DATE_RE.search(text)
     if not match:
         return None
-    date, time, tz = match.group(1), match.group(2), match.group(3)
-    stamp = f"{date}T{time}"
+    stamp = f"{match.group(1)}T{match.group(2)}"
+    tz = match.group(3)
+    if not tz:
+        return stamp
     if tz == "Z":
         return stamp + "+00:00"
-    if tz:
-        if ":" not in tz:
-            tz = tz[:3] + ":" + tz[3:]
-        return stamp + tz
-    return stamp
+    if ":" not in tz:
+        tz = tz[:3] + ":" + tz[3:]
+    return stamp + tz
 
 
-def _links(page):
-    out = []
-    seen = set()
-    for path, ident in _DETAIL_RE.findall(page):
-        if path in seen:
-            continue
-        seen.add(path)
-        slug = path[1:].rsplit("/", 1)[0]
-        out.append((slug, ident, urljoin(SITE, path)))
-    return out
+def _num(value):
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        cleaned = value.replace(",", "").strip()
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
+    return None
 
 
 def _find_jobposting(obj):
-    if isinstance(obj, dict):
-        typ = obj.get("@type")
-        if typ == "JobPosting" or (isinstance(typ, list) and "JobPosting" in typ):
-            return obj
-        for value in obj.values():
-            found = _find_jobposting(value)
-            if found:
-                return found
-    elif isinstance(obj, list):
-        for value in obj:
-            found = _find_jobposting(value)
-            if found:
-                return found
+    stack = [obj]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            typ = item.get("@type")
+            if typ == "JobPosting" or (isinstance(typ, list) and "JobPosting" in typ):
+                return item
+            graph = item.get("@graph")
+            if isinstance(graph, list):
+                stack.extend(graph)
+            for val in item.values():
+                if isinstance(val, (dict, list)):
+                    stack.append(val)
+        elif isinstance(item, list):
+            stack.extend(item)
     return None
 
 
@@ -86,13 +117,59 @@ def _jobpostings(page):
     out = []
     for raw in _LDJSON_RE.findall(page):
         try:
-            data = json.loads(raw.strip())
-        except Exception:
+            data = json.loads(html.unescape(raw.strip()))
+        except ValueError:
             continue
         job = _find_jobposting(data)
-        if job:
-            out.append(job)
+        if not isinstance(job, dict):
+            continue
+        title_slug = _slugify(job.get("title"))
+        if not title_slug:
+            continue
+        out.append((title_slug, _org_name(job), job))
     return out
+
+
+def _rows(page):
+    seen = set()
+    out = []
+    for match in _ROW_RE.finditer(page):
+        path, slug, ident = match.group(1), match.group(2), match.group(3)
+        if path in seen:
+            continue
+        seen.add(path)
+        out.append((path, slug, ident))
+    return out
+
+
+def _company_tokens(company):
+    slug = _slugify(company)
+    tokens = set()
+    if slug:
+        tokens.add(slug)
+        tokens.add(slug.replace("-", ""))
+    return {t for t in tokens if t}
+
+
+def _match_block(row_slug, blocks):
+    candidates = [
+        block
+        for block in blocks
+        if row_slug == block[0] or row_slug.startswith(block[0] + "-")
+    ]
+    if not candidates:
+        return None
+    longest = max(len(block[0]) for block in candidates)
+    best = [block for block in candidates if len(block[0]) == longest]
+    if len(best) == 1:
+        return best[0][2]
+    suffix = row_slug[longest + 1 :]
+    condensed = suffix.replace("-", "")
+    for _slug, company, job in best:
+        for token in _company_tokens(company):
+            if token in suffix or token in condensed or condensed in token:
+                return job
+    return None
 
 
 def _org_name(job):
@@ -102,146 +179,145 @@ def _org_name(job):
     return _text(org)
 
 
-def _match_link(job, links, used):
-    title_slug = _slugify(job.get("title") or "")
-    if not title_slug:
-        return None
-    cands = [
-        row
-        for row in links
-        if row[2] not in used
-        and (row[0] == title_slug or row[0].startswith(title_slug + "-"))
+def _address_parts(addr):
+    if isinstance(addr, str):
+        piece = addr.strip()
+        return [piece] if piece else []
+    if not isinstance(addr, dict):
+        return []
+    bits = [
+        addr.get("addressLocality"),
+        addr.get("addressRegion"),
+        addr.get("addressCountry"),
     ]
-    if len(cands) > 1:
-        org = _org_name(job) or ""
-        tokens = [t for t in _slugify(org).split("-") if len(t) > 2]
-        narrowed = [row for row in cands if any(t in row[0] for t in tokens)]
-        if narrowed:
-            cands = narrowed
-    if len(cands) == 1:
-        return cands[0]
-    return None
+    cleaned = []
+    for bit in bits:
+        if not bit:
+            continue
+        piece = str(bit).strip()
+        if not piece or piece.lower() in _PLACEHOLDER_LOC:
+            continue
+        if piece not in cleaned:
+            cleaned.append(piece)
+    return cleaned
 
 
 def _location(job):
+    location = job.get("jobLocation")
+    if isinstance(location, list):
+        entries = location
+    elif location:
+        entries = [location]
+    else:
+        entries = []
     parts = []
-    jl = job.get("jobLocation")
-    for place in jl if isinstance(jl, list) else [jl]:
-        if not isinstance(place, dict):
-            continue
-        addr = place.get("address")
-        if isinstance(addr, dict):
-            bits = [
-                addr.get("streetAddress"),
-                addr.get("addressLocality"),
-                addr.get("addressRegion"),
-                addr.get("addressCountry"),
-            ]
-            bits = list(
-                dict.fromkeys(str(b).strip() for b in bits if b and str(b).strip())
-            )
-            if bits:
-                parts.append(", ".join(bits))
-        elif isinstance(addr, str) and addr.strip():
-            parts.append(addr.strip())
-    alr = job.get("applicantLocationRequirements")
-    for req in alr if isinstance(alr, list) else [alr]:
-        if isinstance(req, dict) and req.get("name"):
-            parts.append(str(req["name"]).strip())
-    if job.get("jobLocationType") == "TELECOMMUTE":
+    for entry in entries:
+        addr = entry.get("address", entry) if isinstance(entry, dict) else entry
+        joined = ", ".join(_address_parts(addr))
+        if joined and joined not in parts:
+            parts.append(joined)
+    if not parts:
+        req = job.get("applicantLocationRequirements")
+        names = []
+        if isinstance(req, dict):
+            names = [req.get("name")]
+        elif isinstance(req, list):
+            names = [r.get("name") for r in req if isinstance(r, dict)]
+        for name in names:
+            if name and str(name).strip().lower() not in _PLACEHOLDER_LOC:
+                parts.append(str(name).strip())
+    if not parts and str(job.get("jobLocationType") or "").upper() == "TELECOMMUTE":
         parts.append("Remote")
-    seen = []
-    for part in parts:
-        if part and part not in seen:
-            seen.append(part)
-    return "; ".join(seen) or None
+    return "; ".join(parts) if parts else None
 
 
-def _num(value):
-    if isinstance(value, float) and value.is_integer():
-        return str(int(value))
-    return str(value)
-
-
-def _salary(job):
+def _salary_struct(job):
     base = job.get("baseSalary")
     if not isinstance(base, dict):
         return {}
     value = base.get("value")
-    if not isinstance(value, dict):
-        return {}
-    currency = base.get("currency")
-    unit = value.get("unitText")
-    min_value = value.get("minValue")
-    max_value = value.get("maxValue")
-    single = value.get("value")
-    amount = None
-    if (
-        isinstance(min_value, (int, float))
-        and isinstance(max_value, (int, float))
-        and min_value != max_value
-    ):
-        amount = f"{_num(min_value)}-{_num(max_value)}"
-    elif isinstance(min_value, (int, float)):
-        amount = _num(min_value)
-    elif isinstance(max_value, (int, float)):
-        amount = _num(max_value)
-    elif isinstance(single, (int, float)):
-        amount = _num(single)
     out = {}
-    pieces = [str(p) for p in (currency, amount, unit) if p]
-    if pieces:
-        out["salary"] = " ".join(pieces)
-    if isinstance(min_value, (int, float)):
-        out["salary_min"] = float(min_value)
-    if isinstance(max_value, (int, float)):
-        out["salary_max"] = float(max_value)
-    if currency:
-        out["salary_currency"] = str(currency).strip() or None
-    if unit:
-        out["salary_period"] = str(unit).strip() or None
+    if isinstance(value, dict):
+        minv = _num(value.get("minValue"))
+        maxv = _num(value.get("maxValue"))
+        single = _num(value.get("value"))
+        lo = minv if minv is not None else single
+        hi = maxv if maxv is not None else single
+        if lo is not None:
+            out["salary_min"] = lo
+        if hi is not None:
+            out["salary_max"] = hi
+        period = _PERIOD_MAP.get(str(value.get("unitText") or "").strip().upper())
+        if period:
+            out["salary_period"] = period
+    else:
+        single = _num(value)
+        if single is not None:
+            out["salary_min"] = single
+            out["salary_max"] = single
+    if "salary_min" in out or "salary_max" in out:
+        currency = (
+            str(base.get("currency") or base.get("currencyCode") or "").strip().upper()
+        )
+        if currency:
+            out["salary_currency"] = currency
     return out
 
 
-def _clean(data):
-    return {k: v for k, v in data.items() if v is not None and v != ""}
+def _build(job, url, ident):
+    title = _text(job.get("title"))
+    company = _org_name(job)
+    description = _text(job.get("description"))
+    location = _location(job)
+    if not (title and company and location and description):
+        return None
+    record = {
+        "source": SOURCE,
+        "url": url,
+        "external_id": ident,
+        "title": title,
+        "company": company,
+        "location": location,
+        "description": description,
+    }
+    employment = job.get("employmentType")
+    if isinstance(employment, list):
+        employment = ", ".join(str(x) for x in employment if x)
+    employment = _text(employment)
+    if employment:
+        record["employment_type"] = employment
+    workplace = _text(job.get("jobLocationType"))
+    if workplace:
+        record["workplace_type"] = workplace
+    posted = _iso(job.get("datePosted"))
+    if posted:
+        record["posted_at"] = posted
+    expires = _iso(job.get("validThrough"))
+    if expires:
+        record["expires_at"] = expires
+    record.update(_salary_struct(job))
+    return record
 
 
 def crawl(ctx):
-    seen = set()
-    for listing in _LISTINGS:
+    seen_urls = set()
+    for listing in LISTINGS:
         try:
             page = ctx.fetch(listing)
         except Exception:
             continue
-        links = _links(page)
-        for job in _jobpostings(page):
-            match = _match_link(job, links, seen)
-            if not match:
+        blocks = _jobpostings(page)
+        if not blocks:
+            continue
+        for path, slug, ident in _rows(page):
+            url = urljoin(SITE, path)
+            if url in seen_urls:
                 continue
-            _slug, ident, url = match
-            title = _text(job.get("title"))
-            company = _org_name(job)
-            location = _location(job)
-            description = _text(job.get("description"))
-            if not (title and company and location and description):
+            job = _match_block(slug, blocks)
+            if job is None:
                 continue
-            seen.add(url)
-            employment = job.get("employmentType")
-            if isinstance(employment, list):
-                employment = ", ".join(str(x) for x in employment if x)
-            out = {
-                "url": url,
-                "title": title,
-                "company": company,
-                "location": location,
-                "description": description,
-                "source": "web3career",
-                "external_id": ident,
-                "employment_type": _text(employment),
-                "workplace_type": _text(job.get("jobLocationType")),
-                "posted_at": _iso(job.get("datePosted")),
-                "expires_at": _iso(job.get("validThrough")),
-            }
-            out.update(_salary(job))
-            yield _clean(out)
+            record = _build(job, url, ident)
+            if record is None:
+                continue
+            seen_urls.add(url)
+            yield record
