@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}Applications · Position tracker{% endblock %}
+{% block content %}
+<h1>Applications</h1>
+<p class="subtitle">Positions you've applied to — {{ total }} total. Advance a role's stage inline as it moves.</p>
+
+<section class="panel">
+  <div class="funnel">
+    <a class="stage{{ ' is-active' if stage is none else '' }}" href="/applications">
+      <span class="stage-count">{{ total }}</span>
+      <span class="stage-label">All</span>
+    </a>
+    {% for st in funnel %}
+    <a class="stage badge-{{ st.token }}{{ ' terminal' if st.terminal else '' }}{{ ' is-active' if stage == st.value else '' }}"
+       href="/applications?stage={{ st.value }}">
+      <span class="stage-count">{{ st.count }}</span>
+      <span class="stage-label">{{ st.label }}</span>
+    </a>
+    {% endfor %}
+  </div>
+</section>
+
+{% if rows %}
+<form class="filters" method="get" action="/applications">
+  {% if stage %}<input type="hidden" name="stage" value="{{ stage }}">{% endif %}
+  <div class="filter-line">
+    <span class="result-count">{% if stage %}{{ tracking.label(stage) }} · {% endif %}Page {{ page }} · {{ rows | length }} shown</span>
+    <select name="sort" data-autosubmit aria-label="Sort" class="push-right">
+      {% for value, label in [('applied', 'Recently applied'), ('updated', 'Recently updated'), ('score', 'Best match'), ('salary', 'Salary'), ('title', 'Title')] %}
+      <option value="{{ value }}"{{ ' selected' if sort == value else '' }}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <noscript><button type="submit" class="small">Sort</button></noscript>
+  </div>
+</form>
+
+<table class="grid positions">
+  <thead><tr>
+    <th>Title</th><th>Company</th><th>Salary</th><th>Board</th><th>Stage</th><th>Applied</th><th>Updated</th>
+  </tr></thead>
+  <tbody>
+  {% for p in rows %}
+  <tr class="{{ 'dimmed' if p.dismissed else '' }}">
+    <td class="title"><a href="/positions/{{ encode_pid(p.site, p.url) }}">{{ p.title }}</a>
+        {% if p.dismissed %}<span class="tag">dismissed</span>{% endif %}</td>
+    <td class="company">{% if p.company_canonical %}<a href="/positions?company_canonical={{ p.company_canonical | urlencode }}">{{ p.hiring_company or p.company }}</a>{% else %}{{ p.hiring_company or p.company }}{% endif %}</td>
+    <td class="nowrap">{{ p | salary }}</td>
+    <td><span class="lifecycle lc-{{ p.status }}">{{ p.status }}</span></td>
+    <td>
+      <form class="rowstatus" method="post" action="/positions/{{ encode_pid(p.site, p.url) }}/status">
+        <select name="track_status" data-autosubmit class="badge-{{ tracking.css_token(p.track_status) }}">
+          {% for value, label, token in tracking.choices() %}
+          <option value="{{ value }}"{{ ' selected' if p.track_status == value else '' }}>{{ label }}</option>
+          {% endfor %}
+        </select>
+        <noscript><button type="submit" class="small">Set</button></noscript>
+      </form>
+    </td>
+    <td class="nowrap">{{ p.applied_at | date }}</td>
+    <td class="age">{{ p.track_updated_at | age }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<nav class="pager">
+  {% if prev_url %}<a href="{{ prev_url }}">← Prev</a>{% else %}<span class="disabled">← Prev</span>{% endif %}
+  <span class="page">Page {{ page }}</span>
+  {% if next_url %}<a href="{{ next_url }}">Next →</a>{% else %}<span class="disabled">Next →</span>{% endif %}
+</nav>
+{% elif stage %}
+<p class="empty">No applications in the {{ tracking.label(stage) }} stage. <a href="/applications">Show all</a></p>
+{% else %}
+<p class="empty">You haven't logged any applications yet. Move a position to <strong>Applied</strong> from the <a href="/positions">Positions</a> list or a position's page, and it will show up here.</p>
+{% endif %}
+{% endblock %}

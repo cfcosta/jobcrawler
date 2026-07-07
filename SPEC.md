@@ -1095,7 +1095,7 @@ jobcrawler/
     cli.py cli_generate.py cli_optimize.py  # operator commands (§10)
     web/                    # `jobcrawl serve` FastAPI tracker over the shared store (§16) — NEW
       app.py                #   create_app(store) factory + serve_app(); routes, JSON api, presentation helpers
-      templates/            #   Jinja2: base/index/detail/dashboard (browse, funnel, per-position track panel)
+      templates/            #   Jinja2: base/index/detail/dashboard/applications (browse, funnel, applied pipeline)
       static/               #   app.css (dark theme) + app.js (progressive-enhancement auto-submit)
     crawlers/               # GENERATED, committed: <slug>.py; _pending/ staging, _history/ backups
     generators/             # GEPA-optimized generator-N.json artifacts (JSON, versioned; §4.11)
@@ -1493,6 +1493,13 @@ it, exactly like the match `reasons`; only the offline `jobcrawl match-trainset`
   **default score desc**, so the listing leads with the best match and unscored rows sink last); dismissed rows are
   hidden by default, both lifecycle states shown (you still care about a posting you applied to after the board
   closes it). Paginated; every position links to its detail page and carries lifecycle + match-score pills.
+- **Applications** (`GET /applications`) — the focused view of postings you've actually **applied to**
+  (`search_positions(applied=True)` → `applied_at IS NOT NULL`, so a later `rejected`/`withdrawn` stays visible —
+  the stamp is never cleared). A per-stage **funnel** across the applied→outcome stages (`applied_counts()`,
+  counting only applied rows, so a role rejected *before* you ever applied never inflates it) tops a list sorted
+  **newest-application-first** (`applied_at desc`; a `?stage=` chip filters to one stage), each row carrying the
+  same inline stage select as browse so an application advances through the pipeline in place. Dismissed rows are
+  kept — an applied role you later hid is still one you applied to.
 - **Position detail** (`GET /positions/{pid}`) — the full posting (structured fields + verbatim description),
   a link to the original posting plus — when the crawler supplied a distinct `apply_url` (aggregators and most ATS
   boards store the listing page as `url` and the company's own application URL as `apply_url`) — a prominent

@@ -1140,6 +1140,46 @@ def test_upsert_persists_company_canonical(store: StateStore) -> None:
     assert rec.company_canonical == "acme"
 
 
+# -- §16 Applications view: applied filter + per-stage breakdown -------------
+
+
+def test_search_positions_applied_filter_keeps_only_applied_rows(
+    store: StateStore,
+) -> None:
+    # Three postings in different personal stages; only the one with an application on
+    # record (applied_at stamped) is an "application".
+    for url in ("applied", "interested", "untouched"):
+        store.upsert_position("acme", url, fields=FIELDS, content_hash=url)
+    store.set_track_status("acme", "applied", "applied", stamp_applied=True)
+    store.set_track_status("acme", "interested", "interested", stamp_applied=False)
+
+    assert [r.url for r in store.search_positions(applied=True)] == ["applied"]
+
+    # The stamp survives a later terminal outcome — a rejected application is still one you
+    # applied to, so it stays in the view (applied_at is never cleared).
+    store.set_track_status("acme", "applied", "rejected", stamp_applied=False)
+    assert [r.url for r in store.search_positions(applied=True)] == ["applied"]
+    # A stage filter narrows within the applied set.
+    assert store.search_positions(applied=True, track_status="applied") == []
+    assert [
+        r.url for r in store.search_positions(applied=True, track_status="rejected")
+    ] == ["applied"]
+
+
+def test_applied_counts_breaks_down_only_applied_rows(store: StateStore) -> None:
+    for url in ("a", "b", "c", "never"):
+        store.upsert_position("acme", url, fields=FIELDS, content_hash=url)
+    store.set_track_status("acme", "a", "applied", stamp_applied=True)
+    store.set_track_status("acme", "b", "interviewing", stamp_applied=True)
+    store.set_track_status("acme", "c", "interviewing", stamp_applied=True)
+    # Rejected *before* applying (no stamp) — must not count as an application.
+    store.set_track_status("acme", "never", "rejected", stamp_applied=False)
+
+    counts = store.applied_counts()
+    assert counts == {"applied": 1, "interviewing": 2}
+    assert sum(counts.values()) == len(store.search_positions(applied=True))
+
+
 # -- §4.7 LLM extraction setters + cache -------------------------------------
 
 

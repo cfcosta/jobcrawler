@@ -1481,6 +1481,7 @@ class StateStore:
         min_score: int | None = None,
         min_salary: float | None = None,
         dismissed: bool | None = None,
+        applied: bool = False,
         exclude_company_applied: bool = False,
         sort: str = "recent",
         limit: int = 100,
@@ -1507,11 +1508,14 @@ class StateStore:
         - ``min_salary``  ``COALESCE(salary_usd_max, salary_usd_min) >= min_salary``, i.e. an
           annualized-USD floor (§4.6) — drops rows with no resolvable salary/currency.
         - ``dismissed``  ``None`` = both, ``False`` = hide dismissed, ``True`` = only dismissed.
+        - ``applied``  keep only rows you have actually applied to (``applied_at IS NOT NULL``,
+          §16) — the "Applications" page. Survives a later ``rejected``/``withdrawn`` since the
+          stamp is set on entering an applied-implying stage and never cleared (`tracking`).
         - ``exclude_company_applied``  drop rows whose hiring company already has an applied-to
           posting (grouped on ``company_canonical``, §16) — the browse twin of :meth:`matches`.
 
-        ``sort`` ∈ {recent, score, updated, salary, title}; NULL scores/salaries sink last
-        under a DESC sort. ``limit``/``offset`` paginate. Returns ``list[PositionRecord]``.
+        ``sort`` ∈ {recent, score, updated, salary, title, applied}; NULL scores/salaries/dates
+        sink last under a DESC sort. ``limit``/``offset`` paginate. Returns ``list[PositionRecord]``.
         """
         clauses: list[str] = []
         params: list[object] = []
@@ -1562,6 +1566,8 @@ class StateStore:
         if dismissed is not None:
             clauses.append("dismissed = ?")
             params.append(1 if dismissed else 0)
+        if applied:
+            clauses.append("applied_at IS NOT NULL")
         if exclude_company_applied:
             # Browse-side twin of matches()' flag: hide every row whose hiring company
             # already has an applied-to posting, grouped on the derived company_canonical
@@ -1580,6 +1586,7 @@ class StateStore:
             "updated": "track_updated_at DESC, first_seen DESC, url",
             "salary": "COALESCE(salary_usd_max, salary_usd_min) DESC, url",
             "title": "lower(title) ASC, url",
+            "applied": "applied_at DESC, track_updated_at DESC, url",
         }.get(sort, "first_seen DESC, site, url")
         rows = self._conn.execute(
             f"SELECT * FROM positions{where} ORDER BY {order} LIMIT ? OFFSET ?",
@@ -1603,6 +1610,21 @@ class StateStore:
         ).fetchone()
         out["dismissed"] = int(dm["n"])
         return out
+
+    def applied_counts(self) -> dict[str, int]:
+        """Per-stage tally over positions you've actually applied to (``applied_at`` set, §16).
+
+        The breakdown behind the "Applications" page: like :meth:`track_counts` but restricted
+        to rows with an application on record, so a ``rejected``/``withdrawn`` count here means
+        a role you applied to and lost — never one dismissed before you ever applied. Stages
+        with no applied rows are absent (the web layer zero-fills from `tracking.ORDER`); the
+        values sum to the page's total (``COUNT(*) WHERE applied_at IS NOT NULL``).
+        """
+        rows = self._conn.execute(
+            "SELECT track_status, COUNT(*) AS n FROM positions "
+            "WHERE applied_at IS NOT NULL GROUP BY track_status"
+        ).fetchall()
+        return {row["track_status"]: int(row["n"]) for row in rows}
 
     # -- manual crawl requests (§16 crawl-now button) --------------------------
     #

@@ -258,6 +258,7 @@ def _read_filters(params: Any) -> tuple[dict[str, Any], dict[str, Any]]:
 
     show_dismissed = _flag("show_dismissed")
     hide_applied_companies = _flag("hide_applied_companies")
+    applied = _flag("applied")
     remote_anywhere = _flag("remote_anywhere")
     relocation_offered = _flag("relocation_offered")
     status = _s("status")  # None/'all' => both open and closed
@@ -279,6 +280,7 @@ def _read_filters(params: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         "min_score": _int_param(params, "min_score"),
         "min_salary": _float_param(params, "min_salary"),
         "dismissed": None if show_dismissed else False,
+        "applied": applied,
         "exclude_company_applied": hide_applied_companies,
         "sort": sort,
     }
@@ -296,6 +298,7 @@ def _read_filters(params: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         "sort": sort,
         "show_dismissed": show_dismissed,
         "hide_applied_companies": hide_applied_companies,
+        "applied": applied,
         "remote_anywhere": remote_anywhere,
         "relocation_offered": relocation_offered,
     }
@@ -322,6 +325,30 @@ def _score_distribution(store: StateStore) -> list[dict[str, Any]]:
         }
         for (lo, hi), n in zip(bands, counts)
     ]
+
+
+def _applied_funnel(store: StateStore) -> tuple[list[dict[str, Any]], int]:
+    """The Applications page's per-stage breakdown + total (rows with ``applied_at`` set, §16).
+
+    Always shows the applied-implying and terminal stages — a legible pipeline even when a
+    stage is empty — plus any other stage a row was moved *back* to after applying, so the
+    chip counts always sum to the total. Each chip links to the stage-filtered list.
+    """
+    counts = store.applied_counts()
+    total = sum(counts.values())
+    core = tracking.APPLIED_IMPLYING | tracking.TERMINAL
+    funnel = [
+        {
+            "value": s.value,
+            "label": tracking.LABELS[s],
+            "token": tracking.CSS_TOKENS[s],
+            "count": counts.get(s.value, 0),
+            "terminal": s in tracking.TERMINAL,
+        }
+        for s in tracking.ORDER
+        if s in core or counts.get(s.value, 0) > 0
+    ]
+    return funnel, total
 
 
 # Coarse per-board coverage buckets for the dashboard, ordered attention-first (a failed
@@ -598,6 +625,55 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
                 "rows": rows,
                 "filters": raw,
                 "sites": site_list,
+                "page": page,
+                "has_next": has_next,
+                "prev_url": str(url.include_query_params(page=page - 1))
+                if page > 1
+                else None,
+                "next_url": str(url.include_query_params(page=page + 1))
+                if has_next
+                else None,
+            },
+        )
+
+    @app.get("/applications", response_class=HTMLResponse)
+    def applications(request: Request) -> Response:
+        """The personal application tracker (§16): only rows you've actually applied to.
+
+        A focused view over ``search_positions(applied=True)`` — grouped-count funnel across
+        the applied→outcome stages up top, the list below sorted newest-application-first, with
+        the same inline stage dropdown as browse so a role advances through the pipeline right
+        here. Dismissed rows are kept (an applied role you later hid is still one you applied to).
+        """
+        params = request.query_params
+        stage = (params.get("stage") or "").strip() or None
+        if stage is not None and not tracking.is_valid(stage):
+            stage = None  # ignore a bogus stage rather than 400 a browse page
+        sort = (params.get("sort") or "applied").strip() or "applied"
+        page = max(1, _int_param(params, "page") or 1)
+        rows = store.search_positions(
+            applied=True,
+            track_status=stage,
+            dismissed=None,
+            sort=sort,
+            limit=_PAGE_SIZE + 1,
+            offset=(page - 1) * _PAGE_SIZE,
+        )
+        has_next = len(rows) > _PAGE_SIZE
+        rows = rows[:_PAGE_SIZE]
+        funnel, total = _applied_funnel(store)
+        url = request.url
+        return templates.TemplateResponse(
+            request=request,
+            name="applications.html",
+            context={
+                "nav": "applications",
+                "msg": params.get("msg"),
+                "rows": rows,
+                "funnel": funnel,
+                "total": total,
+                "stage": stage,
+                "sort": sort,
                 "page": page,
                 "has_next": has_next,
                 "prev_url": str(url.include_query_params(page=page - 1))

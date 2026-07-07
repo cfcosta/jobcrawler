@@ -95,7 +95,7 @@ async def test_html_pages_render() -> None:
     store = _seeded_store()
     try:
         async with _client(create_app(store)) as c:
-            for path in ("/", "/positions", f"/positions/{_ACME_PID}"):
+            for path in ("/", "/positions", "/applications", f"/positions/{_ACME_PID}"):
                 r = await c.get(path)
                 assert r.status_code == 200, path
                 assert "text/html" in r.headers["content-type"]
@@ -223,6 +223,67 @@ async def test_relocation_filter_and_badge() -> None:
             rows = (await c.get("/api/positions?relocation_offered=1")).json()
             assert [row["url"] for row in rows] == ["https://acme.test/relo"]
             assert all(row["relocation"] == "offered" for row in rows)
+    finally:
+        store.close()
+
+
+# -- Applications page (§16): only rows you've applied to --------------------
+
+
+async def test_applications_page_lists_only_applied_positions() -> None:
+    store = _seeded_store()  # acme (scored) + beta (frontend), neither applied yet
+    try:
+        async with _client(create_app(store)) as c:
+            # Empty state until an application exists.
+            r = await c.get("/applications")
+            assert r.status_code == 200
+            assert "haven't logged any applications" in r.text
+            assert "Staff Engineer" not in r.text
+
+            # Apply to acme; it now appears, beta (never applied) does not.
+            store.set_track_status(
+                "acme", "https://acme.test/a", "applied", stamp_applied=True
+            )
+            r = await c.get("/applications")
+            assert "Staff Engineer" in r.text
+            assert "Frontend Engineer" not in r.text
+    finally:
+        store.close()
+
+
+async def test_applications_stage_filter_and_funnel() -> None:
+    store = _seeded_store()
+    try:
+        store.set_track_status(
+            "acme", "https://acme.test/a", "interviewing", stamp_applied=True
+        )
+        async with _client(create_app(store)) as c:
+            # The funnel always renders the applied pipeline stages, and the total is 1.
+            r = await c.get("/applications")
+            assert "Interviewing" in r.text and "Applied" in r.text
+
+            # Filtering to a stage with no rows shows the narrow empty state, not onboarding.
+            r = await c.get("/applications?stage=applied")
+            assert "No applications in the Applied stage" in r.text
+            # Filtering to the row's actual stage surfaces it.
+            r = await c.get("/applications?stage=interviewing")
+            assert "Staff Engineer" in r.text
+            # A bogus stage is ignored rather than erroring the page.
+            assert (await c.get("/applications?stage=bogus")).status_code == 200
+    finally:
+        store.close()
+
+
+async def test_api_positions_applied_filter() -> None:
+    store = _seeded_store()
+    try:
+        store.set_track_status(
+            "acme", "https://acme.test/a", "applied", stamp_applied=True
+        )
+        async with _client(create_app(store)) as c:
+            rows = (await c.get("/api/positions?applied=1")).json()
+            assert [row["url"] for row in rows] == ["https://acme.test/a"]
+            assert all(row["applied_at"] is not None for row in rows)
     finally:
         store.close()
 
