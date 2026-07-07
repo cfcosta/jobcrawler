@@ -807,6 +807,21 @@ def genfail_backoff_cap() -> float:
     return _duration_secs("JOBCRAWLER_GENFAIL_BACKOFF_CAP", "7d")
 
 
+def genfail_max_attempts() -> int:
+    """Consecutive generation failures before a site stops being auto-re-tried (§4.8).
+
+    The geometric backoff alone never gives up: at the cap it re-generates a chronically
+    dead board (a retired URL, an un-crawlable rewrite) every ``genfail_backoff_cap``
+    forever, burning generation budget on a board that will never come back on its own.
+    After this many consecutive failures the site is *parked* — held ``generation_failed``
+    and no longer re-generated — so the spend is bounded. It stays surfaced (not silent),
+    and un-parks the moment it heals on its own or an operator regenerates it by hand.
+    ``0`` disables the cap (retry forever, the historical behavior). Default 8 — with the
+    6h→7d backoff that is roughly three weeks of escalating retries, enough to ride out a
+    long outage before giving up."""
+    return _int("JOBCRAWLER_GENFAIL_MAX_ATTEMPTS", 8)
+
+
 def reopt_check() -> str:
     """How often the scheduler checks whether to dispatch the offline §4.11 GEPA
     self-improvement job (out-of-band; ``.compile()`` never runs in-band). Default 24h;

@@ -626,7 +626,11 @@ gate-passing crawler — including a forced RLM extraction (`final_reasoning == 
 output"`, §4.2) — the board enters a distinct **generation-failed** state (held with a geometric
 backoff, then re-tried with the — §4.11-improved — current generator), surfaced separately in
 `jobcrawl list`/`status` and *not* silently re-enqueued into the same failing generation (which
-would spin). A regeneration that **crashes** (the entrypoint refusing the corpus prefetch, LM
+would spin). The backoff alone never gives up — at its cap it would re-generate a chronically dead
+board (a retired URL, an un-crawlable rewrite) forever — so after `JOBCRAWLER_GENFAIL_MAX_ATTEMPTS`
+consecutive failures (default 8, `0` disables) the board is **parked**: held generation-failed and
+no longer auto-re-generated, bounding the spend. It stays surfaced and un-parks the moment it heals
+on its own or an operator regenerates it by hand. A regeneration that **crashes** (the entrypoint refusing the corpus prefetch, LM
 transport, sandbox runtime) lands in the same held state: an escaping exception writes no health
 record, so no backoff would engage and the site would re-enter the identical crash every tick —
 the hot loop this hold exists to prevent. Relatedly, the corpus prefetch itself must **degrade,

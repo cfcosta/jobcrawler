@@ -1193,6 +1193,7 @@ def _build_healer(
         body_quality_floor=config.description_quality_floor(),
         genfail_backoff=config.genfail_backoff(),
         genfail_backoff_cap=config.genfail_backoff_cap(),
+        genfail_max_attempts=config.genfail_max_attempts(),
         review_mode=config.review_gate,
         promote=promote,
         has_crawler=_has_live_crawler,  # §4.2 cold-start: write a first crawler if none

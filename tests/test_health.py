@@ -505,6 +505,82 @@ async def test_backoff_is_capped() -> None:
     assert regen_calls == 2
 
 
+def _failing_regen_store(clock: _Clock) -> StateStore:
+    # A confirmed staleness candidate: a good baseline run then a zero-positions run.
+    store = StateStore(":memory:", clock=clock)
+    baseline = store.start_run("s")
+    store.finish_run(baseline, items_found=8, new_items=8, errors=0, pages_fetched=2)
+    latest = store.start_run("s")
+    store.finish_run(latest, items_found=0, new_items=0, errors=1, pages_fetched=1)
+    return store
+
+
+async def test_generation_failed_is_parked_after_max_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A chronically dead board stops re-generating once the attempt cap is reached: the
+    # spend is bounded instead of re-running the generator every backoff-cap forever, and
+    # the operator is told exactly once at the crossing (§4.8).
+    events = _capture_notifications(monkeypatch)
+    clock = _Clock(T0)
+    store = _failing_regen_store(clock)
+    regen_calls = 0
+
+    async def reprobe(slug: str) -> int:
+        return 0
+
+    async def regenerate(slug: str) -> RegenOutcome:
+        nonlocal regen_calls
+        regen_calls += 1
+        return RegenOutcome.FAILED
+
+    healer = SelfHealer(
+        store,
+        reprobe=reprobe,
+        regenerate=regenerate,
+        clock=clock,
+        genfail_backoff=6 * 3600.0,
+        genfail_backoff_cap=1.0,  # retry almost immediately so the cap is what bounds it
+        genfail_max_attempts=3,
+    )
+
+    for i in range(6):
+        clock.now = T0 + timedelta(seconds=2 * i)  # always past the 1s backoff
+        assert await healer.assess("s") is HealthState.GENERATION_FAILED
+    assert regen_calls == 3  # parked after the 3rd failure; sweeps 4-6 never re-generate
+    assert [e for e, _m, _f in events].count("heal.parked") == 1
+
+
+async def test_genfail_max_attempts_zero_retries_forever() -> None:
+    # The cap is opt-out: 0 restores the historical retry-every-backoff behavior.
+    clock = _Clock(T0)
+    store = _failing_regen_store(clock)
+    regen_calls = 0
+
+    async def reprobe(slug: str) -> int:
+        return 0
+
+    async def regenerate(slug: str) -> RegenOutcome:
+        nonlocal regen_calls
+        regen_calls += 1
+        return RegenOutcome.FAILED
+
+    healer = SelfHealer(
+        store,
+        reprobe=reprobe,
+        regenerate=regenerate,
+        clock=clock,
+        genfail_backoff=6 * 3600.0,
+        genfail_backoff_cap=1.0,
+        genfail_max_attempts=0,  # no cap
+    )
+
+    for i in range(6):
+        clock.now = T0 + timedelta(seconds=2 * i)
+        assert await healer.assess("s") is HealthState.GENERATION_FAILED
+    assert regen_calls == 6  # every due sweep re-generates; never parked
+
+
 # -- cold-start bootstrap: a registry entry with no crawler yet (§4.2) --------
 
 

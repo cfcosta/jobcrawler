@@ -179,6 +179,7 @@ class SelfHealer:
         clock: Callable[[], datetime] = _utcnow,
         genfail_backoff: float = 6 * 3600.0,
         genfail_backoff_cap: float = 7 * 86400.0,
+        genfail_max_attempts: int = 8,
         review_mode: Callable[[], str] = lambda: "on",
         promote: Callable[[str], Awaitable[bool]] | None = None,
         has_crawler: Callable[[str], bool] | None = None,
@@ -203,6 +204,10 @@ class SelfHealer:
         self._clock = clock
         self._genfail_backoff = genfail_backoff
         self._genfail_backoff_cap = genfail_backoff_cap
+        # After this many consecutive generation failures a site is parked — held
+        # generation_failed and no longer auto-re-generated — so a chronically dead board
+        # stops burning generation budget forever. 0 disables the cap (retry indefinitely).
+        self._genfail_max_attempts = genfail_max_attempts
         # The current review gate ("on"/"auto"/"off") and a promote-staged-crawler hook;
         # together they auto-clear a pending-review strand when no longer human-gated.
         self._review_mode = review_mode
@@ -235,6 +240,12 @@ class SelfHealer:
         if held == HealthState.GENERATION_FAILED.value:
             # Held, but not forever: re-try with the (offline-improved) generator once
             # the geometric backoff elapses; until then surface the failed state (§4.8).
+            # Past the attempt cap the site is *parked* — a chronically dead board (a
+            # retired URL, an un-crawlable rewrite) stops re-generating so the spend is
+            # bounded. It stays surfaced as generation_failed and un-parks only when it
+            # heals on its own (→ HEALTHY above) or an operator regenerates it by hand.
+            if self._parked(record):
+                return HealthState.GENERATION_FAILED
             if record is None or not self._retry_due(record):
                 return HealthState.GENERATION_FAILED
         # A blackout might be a transient outage, so confirm it with a re-probe. A
@@ -260,7 +271,16 @@ class SelfHealer:
             )
             outcome = RegenOutcome.FAILED
         _notify_regen(slug, outcome)
-        return self._record(slug, regeneration_state(outcome))
+        state = self._record(slug, regeneration_state(outcome))
+        if state is HealthState.GENERATION_FAILED and self._just_parked(record):
+            notify(
+                "heal.parked",
+                f"parked {slug}: generation failed {self._genfail_max_attempts}x in a "
+                "row — no longer auto-retrying; regenerate by hand once the board is "
+                "crawlable again",
+                slug=slug,
+            )
+        return state
 
     async def _handle_pending(self, slug: str) -> HealthState:
         """A held pending-review site: hold for a human under ``on``, else auto-promote.
@@ -288,6 +308,31 @@ class SelfHealer:
         backoff = self._genfail_backoff * (2 ** max(0, record.attempts - 1))
         backoff = min(backoff, self._genfail_backoff_cap)
         return self._clock() >= record.updated_at + timedelta(seconds=backoff)
+
+    def _parked(self, record: HealthRecord | None) -> bool:
+        """True once a generation-failed site has spent its auto-retry budget (§4.8).
+
+        A parked site is held ``generation_failed`` and never re-generated again, so a
+        chronically dead board stops burning budget. ``genfail_max_attempts == 0`` opts
+        out (retry forever).
+        """
+        return (
+            self._genfail_max_attempts > 0
+            and record is not None
+            and record.attempts >= self._genfail_max_attempts
+        )
+
+    def _just_parked(self, prior: HealthRecord | None) -> bool:
+        """True when the failure just recorded is the one that reaches the attempt cap.
+
+        Fires exactly once at the crossing (``==``): once parked, later sweeps return
+        early via :meth:`_parked` and never reach the regeneration path again, so the
+        operator is notified a single time rather than every tick.
+        """
+        if self._genfail_max_attempts <= 0:
+            return False
+        prior_attempts = prior.attempts if prior is not None else 0
+        return prior_attempts + 1 == self._genfail_max_attempts
 
     def _record(self, slug: str, state: HealthState) -> HealthState:
         # Bump the consecutive-failure counter on generation_failed (drives the retry
