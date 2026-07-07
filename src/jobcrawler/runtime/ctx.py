@@ -64,6 +64,7 @@ class Ctx:
         allowed_hosts: Collection[str],
         *,
         client: httpx.Client | None = None,
+        proxy: str | None = None,
         user_agent: str | None = None,
         timeout: float = 20.0,
         solver: ChallengeSolver | None = None,
@@ -89,10 +90,15 @@ class Ctx:
         self._backoff = config.fetch_backoff() if backoff is None else backoff
         self._retry_cap = config.fetch_retry_cap() if retry_cap is None else retry_cap
         self._sleep = sleep
+        # ``proxy`` (the #19b egress chokepoint) is an explicit belt over the trust_env
+        # proxy env vars, so the bare live Ctx routes through the loopback allowlist proxy
+        # even if trust_env is ever disabled. Ignored when a client is injected (the
+        # offline replay/MockTransport path, which must not need a live proxy).
         self._client = client or httpx.Client(
             headers={"user-agent": user_agent or config.user_agent()},
             follow_redirects=False,
             timeout=timeout,
+            proxy=proxy,
         )
 
     @property

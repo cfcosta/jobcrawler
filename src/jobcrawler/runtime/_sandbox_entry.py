@@ -20,6 +20,8 @@ from typing import cast
 
 import httpx
 
+from jobcrawler import config
+from jobcrawler.runtime import egress
 from jobcrawler.runtime.contract import Job
 from jobcrawler.runtime.ctx import Ctx, crawler_facade
 from jobcrawler.runtime.hardening import harden_xml
@@ -52,8 +54,13 @@ def _build_ctx(
     if replay is None:
         # Live path. `polite` (set by `jobcrawl validate`) assembles the same §4.5
         # pacer+robots ctx the scheduled crawl uses, so a dry-run reflects production;
-        # default-off keeps a bare ctx for offline generation/scoring.
-        return build_live_ctx(allowed_hosts) if polite else Ctx(allowed_hosts)
+        # default-off keeps a bare ctx for offline generation/scoring. Both route
+        # through the #19b loopback allowlist proxy: `build_live_ctx` already honors
+        # `egress_proxy`, and the bare Ctx gets it threaded explicitly here (the parent
+        # overrides `JOBCRAWLER_EGRESS_PROXY` to the loopback chokepoint).
+        if polite:
+            return build_live_ctx(allowed_hosts)
+        return Ctx(allowed_hosts, proxy=config.egress_proxy())
 
     def handler(request: httpx.Request) -> httpx.Response:
         record = replay.get(str(request.url))
@@ -72,6 +79,7 @@ def _build_ctx(
 
 
 def main() -> None:
+    egress.arm_child_if_selected()  # arm the OS egress rung the parent selected (#19b)
     harden_xml()  # XXE / billion-laughs off before any candidate XML parse (§8)
     data = json.loads(sys.stdin.read())
     allowed_hosts = set(data["allowed_hosts"])

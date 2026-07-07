@@ -912,6 +912,48 @@ def egress_proxy() -> str | None:
     return _opt("JOBCRAWLER_EGRESS_PROXY")
 
 
+def egress_enforce() -> str:
+    """Tri-state §8/#19b OS-enforced-egress policy for the sandbox child (default ``auto``).
+
+    The env scrub (#19a) removes the loot; this governs the *exfil channel*. The child
+    always fetches through a per-crawl allowlisting loopback proxy (the data plane), but
+    whether an OS mechanism additionally forbids the child from opening any *other* socket
+    is a detect-and-degrade ladder:
+
+      * ``auto`` — the default: use the strongest OS rung actually available on the box
+        (seccomp connect-broker / netns), and if none is, degrade to the proxy-only path
+        and log the honest posture. Never refuses a crawl for a missing kernel feature.
+      * ``require`` — refuse the crawl (SandboxError-shaped, the site is skipped) unless a
+        real OS enforcement rung is armed. For high-assurance operators who would rather
+        skip a site than crawl it uncontained.
+      * ``off`` — the mechanism is bypassed (legacy direct client); still logged.
+
+    Parsed like :func:`review_gate`: unset → ``auto``; ``on``/``1``/``true``/``yes`` →
+    ``require``; ``off``/``0``/``false``/``no`` → ``off``; an unknown value → ``auto`` (the
+    safe, non-crawl-breaking default). :func:`egress_proxy` keeps its meaning — the
+    operator UPSTREAM proxy the loopback allowlist proxy chains through.
+    """
+    raw = os.getenv("JOBCRAWLER_EGRESS_ENFORCE")
+    if raw is None:
+        return "auto"
+    value = raw.strip().lower()
+    if value in {"auto", "require", "off"}:
+        return value
+    if value in {"on", "1", "true", "yes"}:
+        return "require"
+    if value in {"0", "false", "no"}:
+        return "off"
+    return "auto"
+
+
+def egress_resolve_timeout() -> float:
+    """``getaddrinfo`` budget (seconds) for the egress proxy's resolve-and-pin step (#19b).
+
+    Bounds a single DNS lookup in the trusted-parent proxy so a slow resolver can't wedge
+    a child's fetch; kept tight since the child does zero DNS of its own."""
+    return _float("JOBCRAWLER_EGRESS_RESOLVE_TIMEOUT", 5.0)
+
+
 # --- review (§8) -----------------------------------------------------------
 
 

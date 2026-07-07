@@ -33,13 +33,16 @@ import resource
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from jobcrawler import config
 from jobcrawler.generate.gates import check_ast
 from jobcrawler.generate.scoring import CandidateResult, ExceptionInfo
+from jobcrawler.runtime import egress
 from jobcrawler.runtime.contract import Job
 from jobcrawler.runtime.ssrf import SsrfError, check_url
 
@@ -147,6 +150,8 @@ def _run_child(
     timeout: float,
     mem_mb: int,
     cpu_seconds: int,
+    allowed_hosts: Collection[str],
+    live: bool,
 ) -> tuple[int, str, str]:
     """Run a sandbox child; return ``(returncode, stderr, result_text)`` (§8).
 
@@ -159,20 +164,43 @@ def _run_child(
     against the parent), while stderr is captured for the crash tail. Raises
     ``TimeoutExpired`` on a wall-clock breach — the caller maps it to a failure
     result — and always unlinks the temp file.
+
+    On a **live** child (``live=True``) the subprocess is wrapped in an
+    :class:`~jobcrawler.runtime.egress.EgressGuard` (#19b): the parent binds a
+    per-crawl allowlisting loopback proxy, points the child's proxy env at it, and
+    arms the strongest OS-enforcement rung available. Its env overrides are merged
+    over the curated :func:`_child_env` (proxy vars win) and any handshake fds are
+    passed through. In ``require`` mode with no real OS rung the guard raises
+    :class:`~jobcrawler.runtime.egress.EgressRefused` here — the caller maps it to a
+    ``SandboxError``-shaped result so the site is skipped (fail closed). The offline
+    replay path (``live=False``) skips the guard entirely: it never touches the
+    network (MockTransport ignores proxy env) and must not be refused.
     """
     fd, result_path = tempfile.mkstemp(prefix="jobcrawler-sandbox-", suffix=".json")
     os.close(fd)
     try:
-        proc = subprocess.run(
-            [sys.executable, "-m", entry, result_path],
-            input=payload,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=timeout,
-            env=_child_env(),
-            preexec_fn=_apply_limits(mem_mb, cpu_seconds),
-        )
+        with egress.EgressGuard(
+            allowed_hosts, enforce=config.egress_enforce()
+        ) if live else _no_egress() as guard:
+            if guard is not None and guard.refused is not None:
+                raise egress.EgressRefused(guard.refused)
+            env = _child_env()
+            pass_fds: tuple[int, ...] = ()
+            if guard is not None and guard.env:
+                env.update(guard.env)  # proxy/arm vars win over the curated base
+            if guard is not None:
+                pass_fds = guard.pass_fds
+            proc = subprocess.run(
+                [sys.executable, "-m", entry, result_path],
+                input=payload,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=timeout,
+                env=env,
+                pass_fds=pass_fds,
+                preexec_fn=_apply_limits(mem_mb, cpu_seconds),
+            )
         return proc.returncode, proc.stderr or "", Path(result_path).read_text(
             encoding="utf-8"
         )
@@ -181,6 +209,15 @@ def _run_child(
             os.unlink(result_path)
         except OSError:
             pass
+
+
+@contextmanager
+def _no_egress() -> Iterator[None]:
+    """The offline (replay) branch of ``_run_child``'s guard: a no-op context.
+
+    Keeps the ``with`` uniform so the live and offline paths share one body; yields
+    ``None`` so the guard checks below short-circuit."""
+    yield None
 
 
 def validate_crawler(
@@ -219,9 +256,15 @@ def validate_crawler(
             timeout=timeout,
             mem_mb=mem_mb,
             cpu_seconds=int(timeout) + 1,
+            allowed_hosts=allowed_hosts,
+            live=replay is None,
         )
     except subprocess.TimeoutExpired:
         return _failed("TimeoutError", f"crawler exceeded {timeout}s wall clock")
+    except egress.EgressRefused as exc:
+        # require-mode with no OS egress rung: skip the site rather than crawl it
+        # uncontained (fail closed). Shaped like any other sandbox failure (§8/#19b).
+        return _failed("SandboxError", f"egress refused: {exc}")
 
     if returncode != 0:
         return _failed(
@@ -306,11 +349,16 @@ def collect_crawler(
             timeout=timeout,
             mem_mb=mem_mb,
             cpu_seconds=int(cpu_seconds) + 1,
+            allowed_hosts=allowed_hosts,
+            live=True,  # a committed crawl always runs against the live site
         )
     except subprocess.TimeoutExpired:
         return _collect_failed(
             "TimeoutError", f"crawler exceeded {timeout}s wall clock"
         )
+    except egress.EgressRefused as exc:
+        # require-mode with no OS egress rung: report, don't crawl uncontained (§4.4/#19b).
+        return _collect_failed("SandboxError", f"egress refused: {exc}")
 
     if returncode != 0:
         # A non-zero exit is the kernel killing the child on a breached rlimit
@@ -342,9 +390,10 @@ def _collect_failed(kind: str, message: str, *, tail: str = "") -> CollectResult
 def _url_is_safe_to_store(url: str) -> bool:
     """A committed job's canonical url must be a real, non-internal http(s) target.
 
-    Applied in the trusted parent — the child execs the crawler in-process, so it
-    is not a hard boundary (that is #29's OS-enforced egress). Runs the §8 SSRF
-    kernel with the url's *own* host allowed, so the on-domain arm never fires:
+    Applied in the trusted parent — a belt on what a committed crawler *reports*,
+    complementing the #19b egress allowlist that bounds where it can *connect*
+    (:mod:`jobcrawler.runtime.egress`). Runs the §8 SSRF kernel with the url's *own*
+    host allowed, so the on-domain arm never fires:
     this is a host-agnostic safety floor, not a board-domain check. It keeps a
     committed crawler that drifts against live data from seeding the tracking
     store (and the §4.9 recheck re-fetch) with a loopback / private / link-local /

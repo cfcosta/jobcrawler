@@ -20,6 +20,7 @@ import traceback
 from collections.abc import Callable, Iterable
 from typing import cast
 
+from jobcrawler.runtime import egress
 from jobcrawler.runtime.contract import Job
 from jobcrawler.runtime.ctx import Ctx, crawler_facade
 from jobcrawler.runtime.hardening import harden_xml
@@ -37,6 +38,7 @@ def _build_ctx(allowed_hosts: set[str]) -> Ctx:
 
 
 def main() -> None:
+    egress.arm_child_if_selected()  # arm the OS egress rung the parent selected (#19b)
     harden_xml()  # XXE / billion-laughs off before any candidate XML parse (§8)
     data = json.loads(sys.stdin.read())
     ctx = _build_ctx(set(data["allowed_hosts"]))
