@@ -171,6 +171,8 @@ select.badge-muted { border-color: var(--muted); }
 .detail-head .sub { color: var(--fg-dim); margin: 0 0 10px; }
 .detail-head .meta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 0 0 10px; }
 .detail .ext { font-weight: 600; }
+.detail .links { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
+.detail .ext.apply { color: var(--accent-ink); background: var(--accent); padding: 4px 12px; border-radius: 6px; text-decoration: none; }
 .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 14px 0; }
 .kv dt { color: var(--fg-dim); font-size: 13px; }
 .kv dd { margin: 0; font-variant-numeric: tabular-nums; }

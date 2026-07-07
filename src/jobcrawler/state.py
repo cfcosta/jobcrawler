@@ -155,6 +155,7 @@ class PositionRecord:
     site: str
     url: str
     external_id: str | None
+    apply_url: str | None
     content_hash: str
     title: str
     company: str
@@ -236,6 +237,7 @@ CREATE TABLE IF NOT EXISTS positions (
     site            TEXT NOT NULL,
     url             TEXT NOT NULL,
     external_id     TEXT,
+    apply_url       TEXT,
     content_hash    TEXT NOT NULL,
     title           TEXT NOT NULL,
     company         TEXT NOT NULL,
@@ -315,6 +317,7 @@ CREATE TABLE IF NOT EXISTS crawl_requests (
 _POSITION_FIELDS: frozenset[str] = frozenset(
     {
         "external_id",
+        "apply_url",
         "title",
         "company",
         "company_canonical",
@@ -343,6 +346,11 @@ _POSITION_FIELDS: frozenset[str] = frozenset(
 # runs.signals / site_health.attempts retrofits.
 _POSITION_ADD_COLUMNS: tuple[tuple[str, str], ...] = (
     ("external_id", "TEXT"),
+    # The canonical external apply link (§4.6). Distinct from ``url`` for aggregators
+    # (RemoteOK/MyWeb3Jobs/WWR store the listing page as ``url`` and the company's own
+    # application URL here); many ATS crawlers set it to the hosted apply page. Nullable —
+    # rows written before it existed read NULL until their next crawl re-supplies it.
+    ("apply_url", "TEXT"),
     ("description", "TEXT"),
     ("discipline", "TEXT"),
     ("level", "TEXT"),
@@ -1733,6 +1741,7 @@ def _to_position(row: sqlite3.Row) -> PositionRecord:
         site=row["site"],
         url=row["url"],
         external_id=row["external_id"],
+        apply_url=row["apply_url"],
         content_hash=row["content_hash"],
         title=row["title"],
         company=row["company"],

@@ -972,6 +972,18 @@ def test_position_fields_includes_a_source_salary() -> None:
     assert fields["salary_currency"] == "USD" and fields["salary_period"] == "year"
 
 
+def test_position_fields_carries_the_apply_url() -> None:
+    # The crawler-supplied canonical apply link threads verbatim into the store fields so
+    # the §16 detail view can surface a distinct "Apply" action (aggregators store the
+    # listing page as ``url`` and the company's application URL as ``apply_url``).
+    from jobcrawler.runtime.normalize import enrich
+    from jobcrawler.runtime.runner import _position_fields
+
+    job = _job(apply_url="https://boards.example/acme/42")
+    fields = _position_fields(job, enrich(job))
+    assert fields["apply_url"] == "https://boards.example/acme/42"
+
+
 def test_recrawl_without_salary_keys_preserves_a_backfilled_salary() -> None:
     # End-to-end clobber guard: a salary-less upsert, then a §4.7 backfill, then an UNCHANGED
     # re-crawl (same content_hash, salary keys omitted) must leave the backfilled salary intact.

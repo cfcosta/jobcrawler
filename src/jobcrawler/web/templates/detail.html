@@ -15,7 +15,10 @@
       {% if p.employment_type %}<span class="tag">{{ p.employment_type }}</span>{% endif %}
       {% if p.department %}<span class="tag">{{ p.department }}</span>{% endif %}
     </p>
-    <p><a class="ext" href="{{ p.url }}" target="_blank" rel="noopener noreferrer">Open original posting ↗</a></p>
+    <p class="links">
+      {% if p.apply_url and p.apply_url != p.url %}<a class="ext apply" href="{{ p.apply_url }}" target="_blank" rel="noopener noreferrer">Apply ↗</a>{% endif %}
+      <a class="ext" href="{{ p.url }}" target="_blank" rel="noopener noreferrer">Open original posting ↗</a>
+    </p>
   </header>
 
   <div class="cols">

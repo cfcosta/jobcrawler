@@ -611,6 +611,27 @@ def test_upsert_persists_enrichment_and_salary_fields(store: StateStore) -> None
     )
 
 
+def test_upsert_persists_and_refreshes_apply_url(store: StateStore) -> None:
+    # The canonical apply link rides the crawler ``fields`` dict like external_id: it is
+    # stored on insert, read back on the detail record, and — being OUT of content_hash —
+    # refreshes on a same-hash re-crawl without marking the row changed.
+    store.upsert_position(
+        "acme",
+        "u",
+        fields={**FIELDS, "apply_url": "https://apply.example/acme/42"},
+        content_hash="h",
+    )
+    assert store.get_position("acme", "u").apply_url == "https://apply.example/acme/42"
+    result = store.upsert_position(
+        "acme",
+        "u",
+        fields={**FIELDS, "apply_url": "https://apply.example/acme/42-v2"},
+        content_hash="h",
+    )
+    assert result == "unchanged"
+    assert store.get_position("acme", "u").apply_url == "https://apply.example/acme/42-v2"
+
+
 def test_upsert_roundtrips_datetime_fields_as_iso(store: StateStore) -> None:
     posted = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
     expires = datetime(2026, 8, 1, tzinfo=timezone.utc)

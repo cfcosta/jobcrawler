@@ -1465,9 +1465,12 @@ it, exactly like the match `reasons`; only the offline `jobcrawl match-trainset`
   hidden by default, both lifecycle states shown (you still care about a posting you applied to after the board
   closes it). Paginated; every position links to its detail page and carries lifecycle + match-score pills.
 - **Position detail** (`GET /positions/{pid}`) — the full posting (structured fields + verbatim description),
-  the "why this matched" reasons (§4.7, operator-facing), a **track panel** (status select, applied/updated/seen
-  dates, dismiss/restore, and — for a crawlable board — a "crawl now" button), and a **notes** textarea. `pid`
-  is urlsafe-base64 of `(site, url)` since the url can't be a path segment.
+  a link to the original posting plus — when the crawler supplied a distinct `apply_url` (aggregators and most ATS
+  boards store the listing page as `url` and the company's own application URL as `apply_url`) — a prominent
+  **Apply** link (opened by the operator, never auto-actioned, §2), the "why this matched" reasons (§4.7,
+  operator-facing), a **track panel** (status select, applied/updated/seen dates, dismiss/restore, and — for a
+  crawlable board — a "crawl now" button), and a **notes** textarea. `pid` is urlsafe-base64 of `(site, url)`
+  since the url can't be a path segment.
 - **Dashboard** (`GET /dashboard`) — the pipeline **funnel** (counts per `track_status`), open/closed/matched
   tallies, the match-score distribution, per-site open counts, and recent run health.
 - **Manual triggers** — "crawl now" calls `store.request_crawl(slug)` to flag a board for the daemon's

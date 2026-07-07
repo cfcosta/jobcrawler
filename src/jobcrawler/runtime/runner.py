@@ -582,6 +582,7 @@ def _position_fields(job: Job, enriched: EnrichedJob) -> dict[str, object]:
     """
     fields: dict[str, object] = {
         "external_id": job.external_id,
+        "apply_url": job.apply_url,
         "title": job.title,
         "company": job.company,
         # Derived §16 dedup key, refreshed on every crawl. Kept OUT of ``content_hash``

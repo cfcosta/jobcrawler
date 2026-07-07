@@ -136,6 +136,7 @@ def _position_dict(p: PositionRecord) -> dict[str, Any]:
         "pid": encode_pid(p.site, p.url),
         "site": p.site,
         "url": p.url,
+        "apply_url": p.apply_url,
         "title": p.title,
         "company": p.company,
         "hiring_company": p.hiring_company,

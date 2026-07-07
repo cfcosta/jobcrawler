@@ -41,6 +41,7 @@ def _seeded_store() -> StateStore:
             "salary_max": 220000,
             "salary_currency": "USD",
             "description": "Build distributed systems in Rust.",
+            "apply_url": "https://apply.acme.test/a",
         },
         content_hash="h1",
     )
@@ -100,6 +101,9 @@ async def test_html_pages_render() -> None:
             r = await c.get(f"/positions/{_ACME_PID}")
             assert "Staff Engineer" in r.text
             assert "distributed systems" in r.text
+            # a distinct apply_url surfaces as an Apply link alongside the original posting
+            assert "https://apply.acme.test/a" in r.text
+            assert "Apply" in r.text
     finally:
         store.close()
 
@@ -188,6 +192,7 @@ async def test_api_single_position() -> None:
             body = r.json()
             assert body["pid"] == _ACME_PID
             assert body["salary"] == "USD 180,000–220,000"
+            assert body["apply_url"] == "https://apply.acme.test/a"
     finally:
         store.close()
 
