@@ -36,12 +36,19 @@ import logging
 import os
 import select
 import socket
+import struct
+import sys
 import threading
 import time
 from collections.abc import Collection
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
+
+if TYPE_CHECKING:
+    import subprocess
+
+    from jobcrawler.runtime.egress_seccomp import Broker
 
 from jobcrawler import config
 from jobcrawler.runtime.ssrf import screen_resolved_ip
@@ -62,6 +69,14 @@ _MAX_TUNNELS = 64  # concurrent tunnels one child may hold open
 _SPLICE_CHUNK = 65536
 _IDLE_TIMEOUT = 30.0  # per-tunnel idle before teardown
 _HARD_TIMEOUT = 600.0  # per-tunnel hard lifetime cap (matches collect wall clock)
+
+# The child ``os._exit`` code when it armed the firm rung but cannot run contained
+# (broker never attached, or a require-mode arm failure). The parent maps a non-zero
+# child exit to a SandboxError, so the site is skipped (fail closed).
+_EGRESS_CHILD_REFUSED = 97
+# Budget for the parent to hear the child's "armed" handshake before degrading (arming
+# is a couple of syscalls; a stall means the child wedged on import).
+_ARM_HANDSHAKE_TIMEOUT = 10.0
 
 
 class EgressRefused(RuntimeError):
@@ -401,24 +416,56 @@ class Posture:
 
 @dataclass
 class _FirmRung:
-    """A selected OS-enforcement rung: env the child arms from, fds to pass, its posture."""
+    """A selected OS-enforcement rung: env the child arms from, fds to pass, its posture.
+
+    The remaining fields are the parent-side handshake state :meth:`EgressGuard.attach`
+    uses after the child spawns: ``hs_read_fd`` (the parent reads the child's "armed" +
+    listener-fd message), ``ack_write_fd`` (the parent releases or aborts the child),
+    ``child_pass_fds`` (the child's ends the parent must close post-spawn so reads EOF),
+    and ``proxy_addr`` (the one destination the broker will broker a connect to)."""
 
     env: dict[str, str] = field(default_factory=dict)
     pass_fds: tuple[int, ...] = ()
     posture: Posture = field(
         default_factory=lambda: Posture("firm", "os-enforced", True)
     )
+    hs_read_fd: int = -1
+    ack_write_fd: int = -1
+    child_pass_fds: tuple[int, ...] = ()
+    proxy_addr: tuple[str, int] = ("127.0.0.1", 0)
 
 
 def _select_firm_rung(enforce: str, proxy: AllowlistProxy) -> _FirmRung | None:
     """Probe + select the strongest OS-enforcement rung, or ``None`` if none is armable.
 
-    Stage 1 ships the portable DATA PLANE and the honest ladder; the seccomp
-    connect-broker / netns rungs (which actually make egress *OS-enforced*) land in the
-    follow-up and replace this stub. Returning ``None`` degrades ``auto`` to the ``soft``
-    proxy-only posture and makes ``require`` refuse — both correct, fail-safe outcomes.
-    """
-    return None
+    On x86_64 Linux this selects the seccomp ``SECCOMP_RET_USER_NOTIF`` connect-broker
+    (:mod:`jobcrawler.runtime.egress_seccomp`): it opens the two handshake pipes and
+    builds the ``JOBCRAWLER_EGRESS_ARM`` env the child arms from. Selection here only
+    *sets up* the rung; :meth:`EgressGuard.attach` confirms the child actually armed
+    (post-spawn) before the posture is trusted as ``firm``. Returning ``None`` (no
+    supported OS rung) degrades ``auto`` to the ``soft`` proxy-only posture and makes
+    ``require`` refuse — both correct, fail-safe outcomes."""
+    from jobcrawler.runtime import egress_seccomp
+
+    if not egress_seccomp.supported():
+        return None
+    # child->parent: the "armed" byte + listener fd number; parent->child: go/abort ack.
+    hs_read, hs_write = os.pipe()
+    ack_read, ack_write = os.pipe()
+    os.set_inheritable(hs_write, True)
+    os.set_inheritable(ack_read, True)
+    env = {"JOBCRAWLER_EGRESS_ARM": f"{hs_write},{ack_read},{proxy.port},{enforce}"}
+    return _FirmRung(
+        env=env,
+        pass_fds=(hs_write, ack_read),
+        posture=Posture(
+            "firm", "seccomp connect-broker (SECCOMP_RET_USER_NOTIF)", True
+        ),
+        hs_read_fd=hs_read,
+        ack_write_fd=ack_write,
+        child_pass_fds=(hs_write, ack_read),
+        proxy_addr=("127.0.0.1", proxy.port),
+    )
 
 
 def _solver_exempt_hosts() -> tuple[str, ...]:
@@ -440,13 +487,21 @@ class EgressGuard:
     On ``__enter__`` it starts the data-plane proxy, selects the strongest OS rung, and
     exposes ``env`` (child env overrides), ``pass_fds``, and ``posture``. In ``require``
     mode with no real OS rung it sets ``refused`` (the sandbox raises
-    :class:`EgressRefused` and skips the site). ``__exit__`` tears the proxy down.
+    :class:`EgressRefused` and skips the site).
+
+    When a firm rung was selected the caller must, right after spawning the child and
+    before it crawls, call :meth:`attach` with the ``Popen`` handle: the child blocks
+    having armed its seccomp filter, and :meth:`attach` copies its listener fd, starts
+    the broker, and releases it. ``__exit__`` stops the broker and tears the proxy down.
     """
 
     def __init__(self, allowed_hosts: Collection[str], *, enforce: str) -> None:
         self._allowed = list(allowed_hosts)
         self._enforce = enforce
         self._proxy: AllowlistProxy | None = None
+        self._firm: _FirmRung | None = None
+        self._broker: Broker | None = None
+        self._attached = False
         self.env: dict[str, str] | None = None
         self.pass_fds: tuple[int, ...] = ()
         self.posture: Posture | None = None
@@ -499,13 +554,71 @@ class EgressGuard:
             )
             return self
 
+        self._firm = firm
         self.posture = firm.posture
         self.env = {**proxy_env, **firm.env}
         self.pass_fds = firm.pass_fds
-        _log.info("os_egress: %s (%s)", firm.posture.rung, firm.posture.detail)
+        _log.info("os_egress: %s (%s) — pending child arm", firm.posture.rung, firm.posture.detail)
         return self
 
+    def attach(self, proc: subprocess.Popen[Any]) -> None:
+        """Post-spawn: complete the firm-rung handshake and start the broker (#19b).
+
+        No-op unless a firm rung was selected. Closes the parent's copies of the child's
+        pipe ends (so a subsequent read sees EOF when the child exits), waits for the
+        child's "armed" message, copies the listener fd via ``pidfd_getfd``, starts the
+        broker, and releases the child with ``b"G"``. If the child could not arm, or the
+        broker cannot attach, the child's ack pipe is closed *without* ``b"G"`` — the
+        child then fails closed (``require``) or the posture is downgraded to ``soft``
+        (``auto``). Never raises: any error degrades rather than crashing the spawn."""
+        firm = self._firm
+        if firm is None:
+            return
+        self._attached = True
+        for fd in firm.child_pass_fds:  # release the child's ends we still hold
+            _close(fd)
+        try:
+            hs = _read_handshake(firm.hs_read_fd, _ARM_HANDSHAKE_TIMEOUT)
+            if len(hs) == 5 and hs[:1] == b"A":
+                from jobcrawler.runtime import egress_seccomp
+
+                child_listener_fd = struct.unpack("i", hs[1:5])[0]
+                broker = egress_seccomp.attach_broker(
+                    proc.pid, child_listener_fd, firm.proxy_addr
+                )
+                if broker is not None:
+                    self._broker = broker
+                    os.write(firm.ack_write_fd, b"G")  # release the child to crawl
+                    _log.info("os_egress: firm rung armed (seccomp connect-broker attached)")
+                    return
+                _log.error("os_egress: child armed but broker attach failed — aborting child")
+            elif hs[:1] == b"F":
+                # The child reported it could not arm. In `require` it has already
+                # `os._exit`ed (the non-zero code → SandboxError); in `auto` it kept
+                # running on the proxy env, so reflect the honest soft posture.
+                if self._enforce == "require":
+                    _log.critical("os_egress: REQUIRE but child could not arm seccomp — crawl refused")
+                else:
+                    self._degrade("child could not arm seccomp")
+            else:  # empty (timeout / child died) or malformed
+                self._degrade("no armed handshake from child")
+        finally:
+            _close(firm.ack_write_fd)  # a closed ack w/o "G" makes the child fail closed
+            _close(firm.hs_read_fd)
+
+    def _degrade(self, why: str) -> None:
+        """Downgrade a would-be firm crawl to the soft (proxy-only) posture, honestly logged."""
+        self.posture = Posture("soft", f"{why}; data-plane proxy only", False)
+        _log.warning("os_egress: firm rung unavailable at runtime (%s) — posture soft", why)
+
     def __exit__(self, *exc: object) -> bool:
+        if self._broker is not None:
+            self._broker.close()
+            self._broker = None
+        if self._firm is not None and not self._attached:
+            # attach() never ran (spawn failed before it) — reclaim its pipe fds.
+            for fd in (self._firm.hs_read_fd, self._firm.ack_write_fd, *self._firm.child_pass_fds):
+                _close(fd)
         if self._proxy is not None:
             self._proxy.close()
             self._proxy = None
@@ -516,16 +629,114 @@ def arm_child_if_selected() -> None:
     """Child-side: arm the OS-enforcement rung the parent selected, if any (#19b).
 
     Called as the very first line of each sandbox entry's ``main()``. When the parent
-    armed a firm rung it exports ``JOBCRAWLER_EGRESS_ARM`` describing the mechanism and
-    handshake fds; the child installs it here (in its OWN ``main`` — a seccomp
-    user-notify filter must be installed by the task it governs, never in ``preexec_fn``)
-    and confirms the armed state back to the parent broker. Stage 1 ships no firm rung,
-    so the variable is never set and this is a no-op — the data-plane proxy (wired via
-    the child's proxy env vars) is already in force regardless.
-    """
-    if not os.getenv("JOBCRAWLER_EGRESS_ARM"):
+    armed a firm rung it exports ``JOBCRAWLER_EGRESS_ARM`` (``hs_w,ack_r,proxy_port,mode``);
+    the child installs the seccomp filter here — in its OWN ``main``, since a user-notify
+    filter must be installed by the task it governs, never in a ``preexec_fn`` — then:
+
+      1. writes ``b"A"`` + its listener fd number to the handshake pipe;
+      2. blocks reading the parent's one-byte ack (the parent copies the listener via
+         ``pidfd_getfd`` and starts the broker before releasing us);
+      3. on ``b"G"`` closes its own listener copy (so escaped crawler code cannot
+         ``NOTIF_RECV``/``SEND`` to self-approve its traps) and returns to run the crawl.
+
+    A failure to arm, or an aborted handshake, either degrades to the data-plane proxy
+    (``auto``) or refuses the crawl via ``os._exit`` (``require``). When the variable is
+    unset (no firm rung, offline replay) this is a no-op — the data-plane proxy wired via
+    the child's proxy env vars is already in force regardless."""
+    raw = os.getenv("JOBCRAWLER_EGRESS_ARM")
+    if not raw:
         return
-    # Stage 2 (seccomp connect-broker / netns) installs the selected mechanism here.
+    try:
+        hs_w_s, ack_r_s, _port_s, mode = raw.split(",", 3)
+        hs_w, ack_r = int(hs_w_s), int(ack_r_s)
+    except (ValueError, AttributeError):
+        return  # malformed arm var; the proxy env still routes cooperative clients
+
+    from jobcrawler.runtime import egress_seccomp
+
+    try:
+        listener = egress_seccomp.install_connect_listener()
+    except OSError as exc:
+        _child_arm_failed(hs_w, mode, exc)
+        return
+    try:
+        os.write(hs_w, b"A" + struct.pack("i", listener))
+        _close(hs_w)
+        ack = _read_exact(ack_r, 1)
+        _close(ack_r)
+    except OSError as exc:
+        # The filter is already installed; without the broker every connect() would trap
+        # unanswered. Refuse loudly rather than run wedged.
+        _refuse_and_exit(f"egress handshake failed: {exc}")
+        return
+    if ack != b"G":
+        _refuse_and_exit("egress broker did not attach")
+        return
+    # The parent has copied the listener via pidfd_getfd; drop our handle before any
+    # untrusted crawler code runs so it cannot answer its own connect() traps.
+    _close(listener)
+
+
+def _child_arm_failed(hs_w: int, mode: str, exc: OSError) -> None:
+    """Report an arm failure to the parent, then refuse (``require``) or degrade (``auto``)."""
+    try:
+        os.write(hs_w, b"F")
+        _close(hs_w)
+    except OSError:
+        pass
+    if mode == "require":
+        _refuse_and_exit(f"failed to arm OS egress enforcement: {exc}")
+        return
+    _log.warning(
+        "os_egress: could not arm seccomp (%s); data-plane proxy still routes", exc
+    )
+
+
+def _refuse_and_exit(msg: str) -> None:
+    """Fail closed from the child: the crawl must not run uncontained (``require``)."""
+    sys.stderr.write(f"jobcrawler egress: {msg}; refusing to run uncontained\n")
+    sys.stderr.flush()
+    os._exit(_EGRESS_CHILD_REFUSED)
+
+
+def _read_exact(fd: int, n: int) -> bytes:
+    """Read exactly ``n`` bytes from ``fd`` (short read → the writer closed early)."""
+    buf = b""
+    while len(buf) < n:
+        chunk = os.read(fd, n - len(buf))
+        if not chunk:
+            break
+        buf += chunk
+    return buf
+
+
+def _close(fd: int) -> None:
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def _read_handshake(fd: int, timeout: float) -> bytes:
+    """Parent-side: read the child's armed handshake (``b"A"``+fd, or ``b"F"``) with a cap.
+
+    ``select``-bounded so a child that wedges during arm (never writes) degrades the
+    posture instead of blocking the daemon. Returns whatever arrived (possibly empty on
+    timeout or EOF)."""
+    deadline = time.monotonic() + timeout
+    buf = b""
+    while len(buf) < 5:
+        budget = deadline - time.monotonic()
+        if budget <= 0:
+            break
+        readable, _, _ = select.select([fd], [], [], budget)
+        if not readable:
+            break  # timed out waiting for the child to arm
+        chunk = os.read(fd, 5 - len(buf))
+        if not chunk:
+            break  # EOF: child wrote "F" and closed, or died
+        buf += chunk
+    return buf
 
 
 def _proxy_env(loopback: str) -> dict[str, str]:

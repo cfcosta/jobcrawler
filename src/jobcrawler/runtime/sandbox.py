@@ -170,11 +170,14 @@ def _run_child(
     per-crawl allowlisting loopback proxy, points the child's proxy env at it, and
     arms the strongest OS-enforcement rung available. Its env overrides are merged
     over the curated :func:`_child_env` (proxy vars win) and any handshake fds are
-    passed through. In ``require`` mode with no real OS rung the guard raises
-    :class:`~jobcrawler.runtime.egress.EgressRefused` here — the caller maps it to a
-    ``SandboxError``-shaped result so the site is skipped (fail closed). The offline
-    replay path (``live=False``) skips the guard entirely: it never touches the
-    network (MockTransport ignores proxy env) and must not be refused.
+    passed through. The child is spawned with ``Popen`` (not ``run``) so
+    :meth:`~jobcrawler.runtime.egress.EgressGuard.attach` can complete the firm-rung
+    handshake — copy the child's seccomp listener fd and start the connect-broker —
+    *between* spawn and the first fetch. In ``require`` mode with no real OS rung the
+    guard raises :class:`~jobcrawler.runtime.egress.EgressRefused` here — the caller
+    maps it to a ``SandboxError``-shaped result so the site is skipped (fail closed).
+    The offline replay path (``live=False``) skips the guard entirely: it never touches
+    the network (MockTransport ignores proxy env) and must not be refused.
     """
     fd, result_path = tempfile.mkstemp(prefix="jobcrawler-sandbox-", suffix=".json")
     os.close(fd)
@@ -190,20 +193,29 @@ def _run_child(
                 env.update(guard.env)  # proxy/arm vars win over the curated base
             if guard is not None:
                 pass_fds = guard.pass_fds
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 [sys.executable, "-m", entry, result_path],
-                input=payload,
+                stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout,
                 env=env,
                 pass_fds=pass_fds,
                 preexec_fn=_apply_limits(mem_mb, cpu_seconds),
             )
-        return proc.returncode, proc.stderr or "", Path(result_path).read_text(
-            encoding="utf-8"
-        )
+            if guard is not None:
+                # The child has armed its seccomp filter and is blocked awaiting our go;
+                # copy its listener fd, start the broker, release it. Must precede the
+                # first fetch — hence between Popen and communicate().
+                guard.attach(proc)
+            try:
+                _stdout, stderr = proc.communicate(input=payload, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()  # reap so the broker's NOTIF_RECV unblocks
+                raise
+            returncode = proc.returncode
+        return returncode, stderr or "", Path(result_path).read_text(encoding="utf-8")
     finally:
         try:
             os.unlink(result_path)
