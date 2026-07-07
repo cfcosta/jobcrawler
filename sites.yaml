@@ -2827,3 +2827,173 @@
     through a /welcome consent gate to the original posting — record it, don't fetch it). No
     salary is exposed anywhere — leave the salary quartet None. Direct, high-density fit: Rust
     backend, systems, blockchain/crypto, embedded and infrastructure roles, remote and onsite.
+
+- slug: devjobsscanner_rust
+  name: "DevJobsScanner — Rust"
+  url: https://www.devjobsscanner.com/api/searchFull/?search=rust&limit=200
+  render: static
+  enumerates_all: false
+  hints: >-
+    DevJobsScanner internal JSON search API (the data source behind the /rust-jobs/ page). GET
+    /api/searchFull/?search=rust&limit=200 — the trailing slash is required (the bare path
+    308-redirects to add it) and `limit` is server-capped at 200. Response shape is
+    `{jobs:[...], data:[{meta:{count:{total:N}}}]}`. Paginate with `&page=N`, 0-BASED, until
+    `jobs[]` comes back empty (`{"jobs":[],"data":[]}`); `data[0].meta.count.total` (~1877 at
+    capture, ~10 pages) is the running total. This aggregates many companies, so there is no
+    single site company — each job carries its own `company` plus a `source` (linkedin, dice,
+    devitjobs.uk/us, remoteok, ...). Per job: title=`title`, company=`company`,
+    location=`location` (or `city`), remote=`remoteOk` (bool), posted=`postedDate` (ISO8601;
+    `date` is the YYYY-MM-DD added-date), apply_url=`url` (the external board/ATS link),
+    external_id=`id` (stable, e.g. urn:li:jobPosting:… or dice_…; `_id` is an internal Mongo id
+    — do not use it). Salary is usually absent (salaryMin/Max = -1); when set, read
+    salaryMin/salaryMax/salaryCurrency plus the normalized salaryInDollars and the
+    salaryIsApproximated flag. `stackRequired[]`/`stackOptional[]` list skills; `search=rust`
+    matches every role that requires Rust. Windowed because it is a shifting, relevance-scored
+    query result set rather than a stable whole board. Strong fit: Rust backend, systems,
+    embedded, blockchain and infrastructure roles.
+
+- slug: nofluffjobs_rust
+  name: "NoFluffJobs — Rust"
+  url: https://nofluffjobs.com/Rust
+  render: static
+  hints: >-
+    NoFluffJobs Rust board — an aggregator (many companies), so do NOT set a site company;
+    each posting carries its own. Enumerate via the JSON API on the SAME host (there is no
+    separate api.* host): HTTP POST to
+    https://nofluffjobs.com/api/search/posting?page=1&salaryCurrency=PLN&salaryPeriod=month
+    with header `Content-Type: application/json` and body
+    `{"criteriaSearch":{"jobPosition":["rust"]},"pageSize":100}`. The `salaryCurrency` and
+    `salaryPeriod` query params are REQUIRED (omitting them returns HTTP 400; a GET returns
+    405). Read `response.postings[]`. Pagination: `response.exactMatchesPages` says how many
+    pages of EXACT Rust matches exist; with pageSize=100 they normally fit on page 1 — if it is
+    >1, loop page=1..exactMatchesPages and IGNORE any pages beyond it (those are fuzzy
+    "similar" non-Rust roles). IMPORTANT DEDUP: NoFluffJobs expands one remote posting into one
+    card per Polish province, so many `postings[]` share the same `reference` — dedupe by
+    `reference` and keep one per reference, using `reference` as the stable external_id. Per
+    posting: title=`title`; company=`name`; location=join `location.places[].city` with
+    `location.places[].country.name` (e.g. "Warszawa, Poland"); remote=`location.fullyRemote`
+    is true (prefer this over the top-level `fullyRemote`, which can be false even for a
+    100%-remote role); salary=`salary.from`/`salary.to`/`salary.currency` (values normalized to
+    the query's PLN/month) with `salary.type` giving employment type (permanent|b2b), only when
+    `salary.disclosedAt=="VISIBLE"`; posted=epoch-ms `posted` (`renewed` = last renewed,
+    epoch-ms); apply_url = "https://nofluffjobs.com/job/" + `posting.url`. Fit: Rust
+    engineering roles (backend / systems / blockchain), any seniority.
+
+- slug: rustjobs_fyi
+  name: "Rust Jobs (rustjobs.fyi)"
+  url: https://www.rustjobs.fyi/
+  render: static
+  hints: >-
+    Static server-rendered Next.js page: a plain GET of the URL returns the COMPLETE job list
+    (~30 roles) in the initial HTML — no API, no JS, no pagination. The jobs are a hardcoded
+    array rendered server-side and shuffled per request, so list order is meaningless. Each
+    role is an `<li>` with one `<a href="APPLY_URL" class="text-white">`: the title is the
+    anchor text before " at " (strip the "<!-- -->" React comment), the company is the
+    `<span class="text-red-300">`, and the location is the `<span class="text-gray-500 text-sm">`.
+    Map: title=anchor text before " at "; company=the text-red-300 span (do NOT split the title
+    on " at " — one employer is literally "Lincoln Laboratory at MIT"); location=the
+    text-gray-500 span; apply_url=the `<a>` href (links straight to the employer's ATS/careers
+    page — greenhouse/lever/ashby/workatastartup/etc.); external_id=the apply_url (unique,
+    stable per row). remote=infer from the location ("Remote"/"Hybrid Remote"). No salary and
+    no posted date exist in the source — do not synthesize them. Aggregator of many companies,
+    each row names its own employer. Roles are Rust engineering positions (the board's stated
+    scope is "no crypto").
+
+- slug: rustjobs_com
+  name: "Rust Jobs"
+  url: https://www.rustjobs.com/jobs.html
+  render: static
+  hints: >-
+    Static HTML board dedicated to the Rust language; aggregates many employers and recruiters
+    (no single company). Enumerate EVERY role from the crawl-start
+    https://www.rustjobs.com/jobs.html (breadcrumb "All Rust Jobs") — it lists all open roles
+    on one page with no pagination. Do NOT use the homepage "/", which shows only the latest 4.
+    Jobs are grouped under `<h2>` date headings (e.g. "December 27th, 2023"); each job is an
+    `<li>` holding a nested `<ul>` of four `<li>`: (1) `<a href=".../jobs/SLUG.html">TITLE</a>`
+    → title + detail URL; (2) "Company: Location" → company is the text before the colon,
+    location the text after; (3) salary as free text (USD or EUR, annual, often a range like
+    "$140k - $220k" or "Up to $200k", sometimes non-numeric like "Competitive salary fixed in
+    USD" — leave min/max None then); (4) a description snippet. posted date = the `<h2>` date
+    heading immediately above the job (format is inconsistent). remote = true if the location
+    contains "Remote". external_id = the SLUG in /jobs/SLUG.html. For the canonical apply URL
+    and full description, fetch the detail page /jobs/SLUG.html: title is `<h1>`, salary under
+    `<h2>Salary Range</h2>`, locations under `<h2>Locations</h2>`; the real apply link is
+    base64-encoded in a `var how_to_apply="..."` `<script>` under "How to Apply" — base64-decode
+    it to get text like "...apply at <URL>" (the URL points off-site, e.g. wellfound.com). If
+    decoding is unavailable, fall back to the rustjobs.com detail URL as apply_url. Company name
+    and posted date live only on the listing page (detail pages omit both), so enumerate from
+    /jobs.html and treat detail fetches as enrichment. Fit: Rust engineering roles across
+    backend, systems, blockchain and infrastructure. Note: low-volume / likely stale board.
+
+- slug: wearedevelopers_rust
+  name: "WeAreDevelopers — Rust"
+  url: https://www.wearedevelopers.com/en/jobs/s/rust
+  render: static
+  extra_hosts:
+    - wad-api.wearedevelopers.com
+  hints: >-
+    Ignore the SSR HTML and enumerate via the public JSON API on the sibling host
+    wad-api.wearedevelopers.com (no auth or cookies needed) — authorized via extra_hosts. This
+    is a Rust skill-filtered search (skill id = 18). List endpoint: GET
+    https://wad-api.wearedevelopers.com/api/v2/jobs?skills[]=18&job_listings_page=N . Read the
+    `job_listings` array (18 items/page; `job_ads` is a separate sponsored track, usually
+    empty). Paginate by incrementing `job_listings_page` from 1; STOP when `job_listings` is
+    empty or `pagination.job_listings_next_page` stops advancing (equals the page just
+    requested) — ~58 pages, ~1048 roles. To re-derive the skill id if it changes: GET
+    https://wad-api.wearedevelopers.com/api/v2/filter/jobs/category-page/meta-data?type=s&params[]=rust
+    (returns `skill.id` and `total_jobs`). Per listing: title=`title`, company=`company_name`,
+    location=`location` (freeform string), remote=`remote` (bool), posted=`last_published_at`
+    (ISO8601), salary=`salary` (min/max object, almost always null here) with `currency`
+    (defaults "EUR"), external_id=`id` (stable numeric), apply_url=`job_url` (external
+    source/ATS link, e.g. indeed/xing/amazon.jobs). The canonical WeAreDevelopers detail page
+    is https://www.wearedevelopers.com/en/jobs/ext/{id}/{slug}. Aggregator: each listing names
+    its own company; matched roles list Rust among their skills, so titles are often generic
+    (e.g. "Software Engineer") while Rust appears in the skills array. Fit: Rust-tagged backend,
+    systems and infrastructure roles.
+
+- slug: rustlang_com_br
+  name: "Rust Brasil — Vagas"
+  url: https://rustlang.com.br/vagas/
+  render: static
+  enumerates_all: false
+  hints: >-
+    Brazilian Rust-community job board; content is in Portuguese ("vagas" = openings). An
+    aggregator: every posting names its own employer, so do NOT assume a single company.
+    ENUMERATE: GET /vagas/ then follow pagination /vagas/page/2/ .. /vagas/page/5/ (10 roles
+    per page, ~50 open total; stop when a page 404s or the "Próxima" link is absent) — windowed
+    because the bare /vagas/ shows only the 10 latest. Each role is a `div.vaga-card` containing
+    an `h3.vaga-title`; IGNORE the ~6 trailing "outras fontes" cards (GitHub Issues, LinkedIn,
+    RustJobs, Filtra, Programathor, Newsletter) which have no title and no detail link. From the
+    card: title=`h3.vaga-title`; company=`span.vaga-company`; location=`a.vaga-location`;
+    remote=`a.vaga-badge` modifier class remote|presencial|hybrid (text Remoto/Presencial/Híbrido);
+    seniority=`a.vaga-badge.seniority`; tech tags=`a.tech-tag`. The card's `a.vaga-header` href
+    is the detail permalink, shape /vagas/<id>-<company>-<slug>/ — external_id is the leading
+    16-char lowercase-alnum token (e.g. bt7s0jir6rimlu5a). No per-job salary (the "R$4.000–8.000"
+    figures on the page are a general market guide, not per-posting). For posted date and the
+    real apply link, GET the detail page: posted = the `Article` JSON-LD `datePublished` (ISO);
+    apply_url = the primary button `a.btn.btn-primary` ("Candidatar-se →"), an external ATS link
+    (gem/greenhouse/lever/gupy/etc.); fall back to the rustlang detail URL if absent. Fit: Rust
+    (and Rust-adjacent systems/backend) engineering roles, many remote / LATAM / international.
+
+- slug: devjobs_de_rust
+  name: "DEVjobs.de — Rust (Germany)"
+  url: https://en.devjobs.de/jobs/rust
+  render: browser
+  hints: >-
+    Server-rendered HTML behind a Cloudflare managed challenge, so a plain GET returns 403 — a
+    real browser (JS + Sec-CH-UA client hints) is required to obtain the page; no CAPTCHA is
+    solved, the challenge clears automatically. Enumerate at https://en.devjobs.de/jobs/rust:
+    every open Rust role is an `<a href="/job/<32-hex-id>">` card (~15 roles, ALL on one page —
+    no pagination, no load-more, no infinite scroll). The card carries title (`<h2>`), company
+    name, city, a Hybrid/Home-Office badge, employment type, seniority and skill tags. For clean
+    structured fields, follow each /job/<id> detail page, which embeds a JSON-LD
+    `<script type="application/ld+json">` JobPosting: title=`title`,
+    company=`hiringOrganization.name`, location=`jobLocation[].address`
+    (addressLocality/addressRegion, addressCountry "DE"), posted=`datePosted` (ISO),
+    remote=the card "Hybrid" badge or `jobBenefits` "Home Office", employmentType=`employmentType`,
+    skills=`skills`. external_id=the 32-char hex (`identifier.value`, same as the /job/<id>
+    slug). apply_url=the detail URL https://en.devjobs.de/job/<external_id> (an on-site "Apply
+    now"/"Easy Apply" button; no external employer link is exposed). salary is usually absent
+    (no `baseSalary`); when present it is EUR/year. Multi-company aggregator (Quantum-systems,
+    Delivery Hero, Axel Springer, SQUER, IABG, ...), so each posting names its own company. Fit:
+    Rust-tagged developer/engineer roles based in Germany.
