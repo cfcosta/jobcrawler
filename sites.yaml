@@ -2793,3 +2793,20 @@
     (electrical/maintenance) with occasional software (HR-systems/data-engineering,
     digital-assets); intermittent fit via energy-operations/data-platform work; Portuguese,
     São Paulo/Fortaleza, on-site.
+
+- slug: zk_jobs_board
+  name: "ZK Jobs Board"
+  url: https://jobsboard.zeroknowledge.fm/jobs/
+  render: static
+  hints: >-
+    SmartJobBoard community board for the Zero Knowledge (zeroknowledge.fm) crypto/ZK
+    ecosystem; server-rendered HTML. Enumerate active roles from /jobs/ — each
+    `listing-item__jobs` card links to /job/<id>/<slug>/ — following `?page=N` pagination
+    until a page yields no new cards. Every detail page embeds a JSON-LD `JobPosting`
+    (`<script type="application/ld+json">`): read `title`, `hiringOrganization.name` (the
+    hiring company — this board aggregates many, so there is no single site company),
+    `jobLocation`, `baseSalary` (currency + min/maxValue + unitText HOUR/YEAR, often left
+    blank), `employmentType`, `datePosted`, `validThrough`, `industry`/`occupationalCategory`
+    and `description` (full HTML). apply_url = the canonical `url` in the JSON-LD. Stay on
+    jobsboard.zeroknowledge.fm. Small but curated; high signal for ZK, cryptography, Rust,
+    protocol, blockchain, and crypto-infrastructure roles.
