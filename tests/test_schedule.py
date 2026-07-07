@@ -279,6 +279,46 @@ async def test_regen_tick_is_a_noop_without_a_healer() -> None:
     assert await sched.regen_tick() == {}
 
 
+async def test_regen_tick_defers_over_budget_and_stays_due() -> None:
+    # A correlated drift wave: every site is a staleness candidate. With a zero budget the
+    # sweep assesses one site, then defers the rest rather than regenerating the whole
+    # roster back-to-back (which would freeze the crawl loop). The deferral stays due so the
+    # next tick resumes it, instead of waiting a full regen interval.
+    store = StateStore(":memory:", clock=lambda: T0)
+    slugs = ["s0", "s1", "s2"]
+    for slug in slugs:
+        base = store.start_run(slug)
+        store.finish_run(base, items_found=8, new_items=8, errors=0, pages_fetched=2)
+        latest = store.start_run(slug)
+        store.finish_run(latest, items_found=0, new_items=0, errors=1, pages_fetched=1)
+
+    ticking = {"t": T0}
+
+    def clock() -> datetime:
+        cur = ticking["t"]
+        ticking["t"] = cur + timedelta(seconds=1)  # each read advances 1s
+        return cur
+
+    sched = Scheduler(
+        [Site(slug=s, url=f"https://{s}.com") for s in slugs],
+        store=store,
+        crawl=_ok_crawl,
+        healer=_healer(store, reprobe_items=0, regen_passes=False),
+        clock=clock,
+        regen_check="24h",
+        regen_budget=0.0,
+    )
+
+    states = await sched.regen_tick()
+    assert len(states) == 1  # one assessed; the other two deferred to the next tick
+    assert sched._regen_incomplete is True
+
+    # The loop marks an incomplete sweep as still-due (completed=False keeps _next_regen==now).
+    now = clock()
+    sched.mark_regen(now, completed=not sched._regen_incomplete)
+    assert sched.regen_due(now) is True
+
+
 # -- structured run-loop logging (§4.9 operability) --------------------------
 
 

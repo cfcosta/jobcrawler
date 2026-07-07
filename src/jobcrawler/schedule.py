@@ -237,6 +237,7 @@ class Scheduler:
         adaptive_window: int | None = None,
         adaptive_target_n: float | None = None,
         bootstrap_budget: float | None = None,
+        regen_budget: float | None = None,
     ) -> None:
         self._sites = list(sites)
         self._store = store
@@ -349,6 +350,13 @@ class Scheduler:
             if bootstrap_budget is not None
             else config.bootstrap_budget()
         )
+        # §4.8 staleness-sweep pacing: how long one regen sweep may hold the loop before
+        # deferring the rest to the next tick (see regen_tick). ``_regen_incomplete`` lets
+        # a budget-deferred sweep stay due next tick instead of waiting a full interval.
+        self._regen_budget = (
+            regen_budget if regen_budget is not None else config.regen_budget()
+        )
+        self._regen_incomplete = False
         # Slugs a §16 "crawl now" button forced this tick (set by due_sites, read by
         # tick to jump a crawler-less forced site to the front of the bootstrap pass).
         self._forced_this_tick: frozenset[str] = frozenset()
@@ -647,10 +655,14 @@ class Scheduler:
             return False
         return self._next_regen is None or now >= self._next_regen
 
-    def mark_regen(self, now: datetime) -> None:
-        """Record that a sweep ran at ``now``; the next is one interval later."""
+    def mark_regen(self, now: datetime, *, completed: bool = True) -> None:
+        """Record that a sweep ran at ``now``; the next is one interval later.
+
+        ``completed=False`` — the sweep hit its time budget and deferred part of the
+        roster — instead keeps it due *now*, so the loop resumes the remainder on the next
+        tick rather than stranding it for a whole ``JOBCRAWLER_REGEN_CHECK`` interval."""
         if self._regen_interval is not None:
-            self._next_regen = now + self._regen_interval
+            self._next_regen = now + self._regen_interval if completed else now
 
     async def regen_tick(self) -> dict[str, HealthState]:
         """Assess every enabled site with a live crawler for staleness (§4.8).
@@ -666,19 +678,42 @@ class Scheduler:
         The first sweep fires on daemon boot (``_next_regen`` starts unset), which
         made this real: one restart into a cold roster held the loop for the whole
         roster's generations while freshly promoted crawlers sat uncrawled.
+
+        The sweep carries a time budget (``JOBCRAWLER_REGEN_BUDGET``): a drifted site
+        regenerates in-band for minutes, so a correlated drift wave (one ATS change hitting
+        many boards at once) would otherwise run every regeneration back-to-back in a single
+        tick and freeze all crawling. Cheap assesses sweep freely; once over budget the rest
+        defers, and ``_regen_incomplete`` keeps the sweep due next tick (via ``mark_regen``)
+        so a bounded slice clears each tick until the wave drains. The health state machine
+        (backoff / pending-review) makes each already-swept site cheap to re-assess, so
+        restarting from the top next tick converges without a resume cursor.
         """
+        self._regen_incomplete = False
         if self._healer is None:
             return {}
+        assessable = [
+            s for s in self._sites if s.enabled and self._has_crawler(s.slug)
+        ]
         states: dict[str, HealthState] = {}
-        for site in self._sites:
-            if not site.enabled or not self._has_crawler(site.slug):
-                continue
+        pass_started = self._clock()
+        for done, site in enumerate(assessable, start=1):
             try:
                 states[site.slug] = await self._healer.assess(site.slug)
             except Exception:
                 # One site's regenerate (LM / Deno / network) raising must not abort
                 # the sweep or the daemon — isolate it, log, and assess the rest (§4.8).
                 _log.exception("regen sweep failed for %s; skipping", site.slug)
+            elapsed = (self._clock() - pass_started).total_seconds()
+            if elapsed > self._regen_budget and done < len(assessable):
+                self._regen_incomplete = True
+                _log.info(
+                    "regen sweep over budget (%.0fs > %.0fs); deferring %d site(s)"
+                    " to the next tick",
+                    elapsed,
+                    self._regen_budget,
+                    len(assessable) - done,
+                )
+                break
         if states:
             _log.info("regen sweep assessed=%d %s", len(states), _state_summary(states))
         return states
@@ -916,7 +951,7 @@ class Scheduler:
                 now = self._clock()
                 if self.regen_due(now):
                     await self.regen_tick()
-                    self.mark_regen(now)
+                    self.mark_regen(now, completed=not self._regen_incomplete)
                 if self.reopt_due(now):
                     self.reopt_tick()
                     self.mark_reopt(now)

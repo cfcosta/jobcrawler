@@ -710,6 +710,21 @@ def bootstrap_budget() -> float:
     return _duration_secs("JOBCRAWLER_BOOTSTRAP_BUDGET", "60s")
 
 
+def regen_budget() -> float:
+    """Per-sweep time budget (seconds) for the §4.8 periodic staleness sweep.
+
+    ``regen_tick`` assesses every live site; a drifted one regenerates in-band, blocking
+    the single-process §4.9 loop for minutes. A correlated drift wave (an ATS HTML change
+    hitting a dozen boards at once, or the first post-boot sweep over a cold roster) would
+    otherwise run every regeneration back-to-back in one tick, freezing all crawling and
+    matching until the wave clears. Cheap assesses (healthy or in backoff) sweep freely;
+    once the sweep exceeds this budget the rest defers — but unlike the periodic cadence
+    the deferral resumes on the *next* tick, not a full ``JOBCRAWLER_REGEN_CHECK`` interval
+    later, so a bounded slice of the backlog clears each tick until it drains. Default:
+    one tick interval."""
+    return _duration_secs("JOBCRAWLER_REGEN_BUDGET", "60s")
+
+
 def adaptive_default() -> bool:
     """When true, a site with no explicit ``schedule`` is adaptive rather than using
     the fixed ``default_schedule``. Default true — the fleet self-tunes each source's
