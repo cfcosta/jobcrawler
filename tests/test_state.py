@@ -1564,3 +1564,42 @@ def test_concurrent_reads_and_writes_survive_a_shared_connection(tmp_path):
 
     assert not errors, errors
     s.close()
+
+
+def test_score_histogram_buckets_open_scored_rows_in_sql():
+    # §16 dashboard: the score histogram is a single SQL aggregate, not a 5000-row load.
+    # Only open, scored rows count; a score is placed in the first band that contains it.
+    s = StateStore(":memory:")
+
+    def scored(url: str, score: int, *, closed: bool = False) -> None:
+        s.upsert_position("acme", url, fields=FIELDS, content_hash=url)
+        s.set_match("acme", url, score=score, verdict="strong", reasons="[]")
+        if closed:
+            s.mark_closed("acme", url, reason="filled")
+
+    scored("a", 95)  # band 0: 80–100
+    scored("b", 80)  # band 0 (inclusive low edge)
+    scored("c", 79)  # band 1: 60–79
+    scored("d", 59)  # band 2: 40–59
+    scored("e", 0)  # band 4: 0–19
+    scored("f", 90, closed=True)  # closed → excluded
+    s.upsert_position("acme", "g", fields=FIELDS, content_hash="g")  # unscored → excluded
+
+    bands = [(80, 100), (60, 79), (40, 59), (20, 39), (0, 19)]
+    assert s.score_histogram(bands) == [2, 1, 1, 0, 1]
+    assert s.score_histogram([]) == []
+    s.close()
+
+
+def test_positions_status_score_index_is_created():
+    # The histogram / top-matches / matched-count paths depend on this index to avoid a
+    # full corpus scan+sort; _SCHEMA creates it (IF NOT EXISTS, so also on existing DBs).
+    s = StateStore(":memory:")
+    names = {
+        row["name"]
+        for row in s._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'positions'"
+        )
+    }
+    assert "positions_status_score" in names
+    s.close()

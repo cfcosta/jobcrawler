@@ -515,6 +515,16 @@ class StateStore:
             for name, ddl in _POSITION_ADD_COLUMNS:
                 if name not in position_cols:
                     self._conn.execute(f"ALTER TABLE positions ADD COLUMN {name} {ddl}")
+        # Built here rather than in _SCHEMA because it references status/match_score, which
+        # the loop above only just backfilled onto a pre-lifecycle DB. The §16 dashboard
+        # filters open+scored rows and orders by score (top matches, the score histogram,
+        # the "matched" count); without this index each was a full scan+sort of the whole
+        # corpus. status leads for the equality prefix, match_score DESC matches the ORDER
+        # BY, and both columns being covered makes the histogram index-only.
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS positions_status_score "
+            "ON positions (status, match_score DESC)"
+        )
         self._backfill_remote_scope()
 
     def _backfill_remote_scope(self) -> None:
@@ -1048,6 +1058,40 @@ class StateStore:
             (min_score, limit),
         ).fetchall()
         return [_to_position(r) for r in rows]
+
+    def score_histogram(self, bands: Collection[tuple[int, int]]) -> list[int]:
+        """Count open, scored positions falling in each inclusive ``[lo, hi]`` band.
+
+        The dashboard score histogram (§16) used to materialize up to 5000 full
+        ``PositionRecord`` objects — every column, including the multi-KB
+        ``description`` — just to read one integer each, which dominated page-load time
+        on a real corpus. This buckets in a single SQL aggregate over the
+        ``(status, match_score)`` index (index-only), returning one count per band.
+
+        Bands are matched in order, so overlapping ranges resolve to the first that
+        contains the score; a score outside every band is not counted. Returns a list of
+        counts aligned to ``bands``.
+        """
+        band_list = list(bands)
+        if not band_list:
+            return []
+        # lo/hi are trusted ints from the caller's band table (not user input), so the
+        # inline CASE is safe — mirrors the store's other f-string-composed SQL.
+        cases = " ".join(
+            f"WHEN match_score BETWEEN {int(lo)} AND {int(hi)} THEN {i}"
+            for i, (lo, hi) in enumerate(band_list)
+        )
+        rows = self._conn.execute(
+            f"SELECT CASE {cases} END AS band, COUNT(*) AS n "
+            "FROM positions WHERE status = 'open' AND match_score IS NOT NULL "
+            "GROUP BY band"
+        ).fetchall()
+        counts = [0] * len(band_list)
+        for row in rows:
+            band = row["band"]
+            if band is not None:
+                counts[band] = row["n"]
+        return counts
 
     def set_match(
         self,

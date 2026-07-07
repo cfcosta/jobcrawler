@@ -248,15 +248,14 @@ def _read_filters(params: Any) -> tuple[dict[str, Any], dict[str, Any]]:
 
 
 def _score_distribution(store: StateStore) -> list[dict[str, Any]]:
-    """Bucketed histogram of open match scores, high band first (dashboard)."""
+    """Bucketed histogram of open match scores, high band first (dashboard).
+
+    The counts come from a single SQL aggregate (:meth:`StateStore.score_histogram`) —
+    this used to load every open, scored row as a full record to bucket one integer,
+    which dominated dashboard load time on a large corpus.
+    """
     bands = [(80, 100), (60, 79), (40, 59), (20, 39), (0, 19)]
-    counts = [0] * len(bands)
-    for p in store.matches(0, limit=5000):
-        s = p.match_score or 0
-        for i, (lo, hi) in enumerate(bands):
-            if lo <= s <= hi:
-                counts[i] += 1
-                break
+    counts = store.score_histogram(bands)
     peak = max(counts) if counts else 0
     return [
         {
