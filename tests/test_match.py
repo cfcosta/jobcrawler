@@ -801,8 +801,10 @@ def test_drain_rebuilds_a_hash_faithful_candidate_from_the_row() -> None:
 
 
 def test_drain_leaves_descriptionless_rows_parked() -> None:
-    # A pre-description-column row can't re-present the posting; it must WAIT for the
-    # next crawl to backfill, not be silently dropped from the queue.
+    # A pre-description-column row can't re-present the posting; it must WAIT for the next
+    # crawl to backfill. pending_matches now EXCLUDES it from the drain window so it can't
+    # wedge the FIFO ahead of scorable rows — but it stays parked (match_pending) so the
+    # backfilling crawl re-presents it.
     from jobcrawler.match import drain_candidates
     from jobcrawler.state import StateStore
 
@@ -810,8 +812,40 @@ def test_drain_leaves_descriptionless_rows_parked() -> None:
     _seed_row(store, url="https://acme.example/jobs/1", description="")
     candidates, stats = drain_candidates(store, _prefs(), limit=10)
 
-    assert candidates == [] and stats["unscorable"] == 1
-    assert len(store.pending_matches(limit=10)) == 1  # still parked
+    # Excluded upstream, so the drain sees zero rows (nothing to classify unscorable)...
+    assert candidates == []
+    assert stats == {"rows": 0, "unscorable": 0, "prefiltered": 0}
+    # ...yet the row is still parked for a future crawl to backfill its description.
+    rec = store.get_position("acme", "https://acme.example/jobs/1")
+    assert rec is not None and rec.match_pending is True
+    store.close()
+
+
+def test_pending_matches_with_description_only_excludes_unscorable_rows() -> None:
+    # with_description_only (set by the LLM rebuild-drain) surfaces only rows the matcher
+    # can rebuild from the store. A row with a NULL description (pre-column migration) OR an
+    # empty-string one (what the runner writes for a textless post) is left out so it can't
+    # wedge the FIFO window ahead of scorable rows — it stays parked until a crawl backfills
+    # the text. The default (plain cache-drain) still returns all three.
+    from jobcrawler.state import StateStore
+
+    store = StateStore(":memory:")
+    _seed_row(
+        store, url="https://acme.example/has-desc", description="Ship Rust services."
+    )
+    _seed_row(store, url="https://acme.example/null-desc", description="")  # -> NULL
+    store.upsert_position(
+        "acme",
+        "https://acme.example/empty-desc",
+        fields={"title": "T", "company": "Acme", "location": "Remote", "description": ""},
+        content_hash="h-empty",
+    )
+    store.set_match_pending("acme", "https://acme.example/empty-desc")
+
+    kept = {rec.url for rec in store.pending_matches(limit=10, with_description_only=True)}
+    assert kept == {"https://acme.example/has-desc"}
+    # The unfiltered cache-drain keeps every parked row (scores by content_hash alone).
+    assert len(store.pending_matches(limit=10)) == 3
     store.close()
 
 

@@ -755,14 +755,17 @@ def drain_candidates(
     :func:`candidate_from_row`, and applies the free deterministic :func:`prefilter`.
     A row the prefilter now definitely rejects is UNPARKED without a verdict
     (``clear_match_pending``) so permanent mismatches can't clog every future drain
-    window; an unscorable row (no stored description yet) is left parked for the next
-    crawl to backfill. The caller feeds the candidates to :meth:`Matcher.score_new`,
-    which applies the cache, the daily cap, and fail-open parking as usual.
+    window. The window is drawn with ``with_description_only`` so description-less rows
+    (which rebuild to nothing) never occupy it — they stay parked for a re-crawl to
+    backfill; the residual ``unscorable`` count here is the belt-and-braces
+    content-hash-mismatch path in :func:`candidate_from_row`. The caller feeds the
+    candidates to :meth:`Matcher.score_new`, which applies the cache, the daily cap, and
+    fail-open parking as usual.
     """
     candidates: list[tuple[str, str, _RowEnriched]] = []
     unscorable = 0
     prefiltered = 0
-    rows = store.pending_matches(limit=limit)
+    rows = store.pending_matches(limit=limit, with_description_only=True)
     for rec in rows:
         enriched = candidate_from_row(rec)
         if enriched is None:

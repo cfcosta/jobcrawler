@@ -1483,9 +1483,10 @@ def test_crawlers_dir_default_is_config_driven() -> None:
 
 # -- daemon match-drain pass (§4.7): profile watch + requeue on edit ----------
 #
-# The seeded rows are DESCRIPTIONLESS on purpose: drain_candidates classifies them
-# unscorable (parked for the next crawl to backfill), so the pass exercises the whole
-# profile-watch/requeue/drain plumbing without ever reaching the LM boundary.
+# The seeded rows are DESCRIPTIONLESS on purpose: pending_matches now excludes rows the
+# matcher can't rebuild from the store (no description), so they never occupy the drain
+# window — the pass exercises the whole profile-watch/requeue/drain plumbing while the
+# parked rows wait for a crawl to backfill their text, and the LM boundary is never hit.
 
 
 def test_match_drain_pass_adopts_the_hash_then_requeues_on_profile_edit(
@@ -1515,12 +1516,17 @@ def test_match_drain_pass_adopts_the_hash_then_requeues_on_profile_edit(
     assert second["requeued"] == 2  # every OPEN row re-parked for rescoring
     assert cell["m"] is not old_matcher  # shared matcher rebuilt under the new hash
     assert store.get_meta("profile_hash") == load_profile(str(profile)).profile_hash
-    # Descriptionless rows stay parked (unscorable host-side) awaiting crawl backfill.
-    assert {r.url for r in store.pending_matches(limit=10)} == {
-        "https://acme.com/a",
-        "https://acme.com/b",
-    }
-    assert second["unscorable"] == 2
+    # Descriptionless rows are excluded from the rebuild-drain window (unscorable from the
+    # store) yet stay parked for a future crawl to backfill — they no longer wedge the FIFO
+    # ahead of scorable rows. The plain drain still counts them as pending.
+    assert store.pending_matches(limit=10, with_description_only=True) == []
+    assert len(store.pending_matches(limit=10)) == 2
+    assert second["rows"] == 0
+    assert second["unscorable"] == 0
+    a = store.get_position("acme", "https://acme.com/a")
+    b = store.get_position("acme", "https://acme.com/b")
+    assert a is not None and a.match_pending is True
+    assert b is not None and b.match_pending is True
     store.close()
 
 

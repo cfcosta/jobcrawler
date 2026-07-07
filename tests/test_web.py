@@ -289,7 +289,8 @@ async def test_api_rescore_requeues_open_rows() -> None:
             r = await c.post("/api/rescore")
             assert r.status_code == 202
             assert r.json() == {"requeued": 2}  # both open rows parked for the daemon
-            # the store now has the pending flags set
+            # the store now has the pending flags set (both rows, descriptionless or not —
+            # the plain drain keeps them; only the rebuild-drain filters descriptionless)
             assert len(store.pending_matches(limit=10)) == 2
     finally:
         store.close()

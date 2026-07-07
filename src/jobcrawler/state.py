@@ -1093,11 +1093,34 @@ class StateStore:
             self._conn.commit()
             return cur.rowcount
 
-    def pending_matches(self, *, limit: int) -> list[PositionRecord]:
-        """Open positions awaiting scoring, oldest-discovered first (FIFO backlog drain)."""
+    def pending_matches(
+        self, *, limit: int, with_description_only: bool = False
+    ) -> list[PositionRecord]:
+        """Open positions awaiting scoring, oldest-discovered first (FIFO backlog drain).
+
+        ``with_description_only`` narrows the window to rows the matcher can rebuild *from
+        the store* — those with a stored ``description``. The LLM rebuild-drain
+        (:func:`jobcrawler.match.drain_candidates`) sets it: a description-less row rebuilds
+        to nothing (``candidate_from_row`` yields ``None``), so if it were selected it would
+        be counted unscorable and left parked — sitting at the FIFO head and re-consuming
+        the ``limit`` window every tick while newer scorable rows starve behind it. Such a
+        row can only regain a description via a re-crawl (which drains it through the
+        per-site :meth:`pending_urls` seam), so the rebuild-drain excludes it rather than
+        let it wedge the window; it stays ``match_pending = 1`` until re-crawled or closed.
+
+        The default (``False``) returns every parked row, because the free cache-drain
+        (``rematch`` pass 1) scores by ``content_hash`` alone and never touches the
+        description — a description-less row with a cached verdict is legitimately scorable
+        there, so excluding it would forfeit a free hit.
+        """
+        clause = (
+            " AND description IS NOT NULL AND description != ''"
+            if with_description_only
+            else ""
+        )
         rows = self._conn.execute(
-            "SELECT * FROM positions WHERE status = 'open' AND match_pending = 1 "
-            "ORDER BY first_seen ASC, site, url LIMIT ?",
+            "SELECT * FROM positions WHERE status = 'open' AND match_pending = 1"
+            f"{clause} ORDER BY first_seen ASC, site, url LIMIT ?",
             (limit,),
         ).fetchall()
         return [_to_position(r) for r in rows]
