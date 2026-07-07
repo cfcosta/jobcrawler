@@ -158,6 +158,7 @@ tr.dimmed { opacity: .5; }
 .scope { font-size: 11px; padding: 0 6px; border-radius: 999px; text-transform: lowercase; }
 .scope-anywhere { background: rgba(34, 197, 94, .16); color: #86efac; }
 .scope-restricted { background: rgba(234, 179, 8, .16); color: #fde047; }
+.scope-relo { background: rgba(96, 165, 250, .16); color: #93c5fd; }
 
 /* per-status select tinting (list view) */
 select.badge-info { border-color: var(--info); }

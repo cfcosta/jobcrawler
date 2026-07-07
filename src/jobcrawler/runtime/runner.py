@@ -604,6 +604,7 @@ def _position_fields(job: Job, enriched: EnrichedJob) -> dict[str, object]:
         "level": enriched.level,
         "workplace": enriched.workplace,
         "remote_scope": enriched.remote_scope,
+        "relocation": enriched.relocation,
         "employment_type": job.employment_type,
         "department": job.department,
         "posted_at": job.posted_at,

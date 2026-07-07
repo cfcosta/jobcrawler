@@ -147,7 +147,9 @@ def format_salary(p: PositionRecord) -> str:
         if ulo is not None and uhi is not None and ulo != uhi:
             hint = f"{_compact_usd(ulo)}–{_compact_usd(uhi)}"
         else:
-            hint = _compact_usd(uhi if uhi is not None else ulo)  # type: ignore[arg-type]
+            single = uhi if uhi is not None else ulo
+            assert single is not None  # the `or` guard above ensures one is set
+            hint = _compact_usd(single)
         out += f" (~{hint}/yr)"
     return out
 
@@ -167,6 +169,7 @@ def _position_dict(p: PositionRecord) -> dict[str, Any]:
         "location_normalized": p.location_normalized,
         "workplace": p.workplace,
         "remote_scope": p.remote_scope,
+        "relocation": p.relocation,
         "level": p.level,
         "discipline": p.discipline,
         "employment_type": p.employment_type,
@@ -236,6 +239,7 @@ def _read_filters(params: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     show_dismissed = _flag("show_dismissed")
     hide_applied_companies = _flag("hide_applied_companies")
     remote_anywhere = _flag("remote_anywhere")
+    relocation_offered = _flag("relocation_offered")
     status = _s("status")  # None/'all' => both open and closed
     track_status = _s("track_status")
     sort = _s("sort") or "score"
@@ -250,6 +254,7 @@ def _read_filters(params: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         # "Remote anywhere" is a geographic-scope filter over remote roles; scope
         # 'anywhere' only ever lands on a workplace='remote' row, so it stands alone.
         "remote_scope": "anywhere" if remote_anywhere else None,
+        "relocation_offered": relocation_offered,
         "level": _s("level"),
         "min_score": _int_param(params, "min_score"),
         "min_salary": _float_param(params, "min_salary"),
@@ -272,6 +277,7 @@ def _read_filters(params: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         "show_dismissed": show_dismissed,
         "hide_applied_companies": hide_applied_companies,
         "remote_anywhere": remote_anywhere,
+        "relocation_offered": relocation_offered,
     }
     return kwargs, raw
 

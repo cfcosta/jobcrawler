@@ -21,6 +21,7 @@ from jobcrawler.runtime.normalize import (
     canonical_company,
     classify_discipline,
     classify_level,
+    classify_relocation,
     classify_remote_scope,
     classify_workplace,
     enrich,
@@ -273,6 +274,39 @@ def test_enrich_sets_remote_scope() -> None:
     assert restricted.remote_scope == "restricted"
     onsite = enrich(_job(location="Berlin, Germany", workplace_type="On-site"))
     assert onsite.remote_scope == "unspecified"
+
+
+# --- relocation / visa support ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("description", "expected"),
+    [
+        ("We offer relocation assistance to all new hires.", "offered"),
+        ("Relocation package and visa sponsorship included.", "offered"),
+        ("Visa sponsorship available for international candidates.", "offered"),
+        ("We provide relocation support; no visa sponsorship though.", "offered"),
+        ("Oferecemos auxílio realocação para quem muda de cidade.", "offered"),
+        # explicit refusals — negated before, negated after, and complete phrases
+        ("There is no relocation assistance for this role.", "none"),
+        ("Relocation assistance is not offered.", "none"),
+        ("We do not offer relocation.", "none"),
+        ("This position does not offer visa sponsorship.", "none"),
+        ("Não oferecemos realocação para esta vaga.", "none"),
+        # silence, and a mere requirement to relocate (not an employer offer)
+        ("Build distributed systems in Rust.", "unspecified"),
+        ("You must be willing to relocate to São Paulo.", "unspecified"),
+    ],
+)
+def test_classify_relocation(description: str, expected: str) -> None:
+    assert classify_relocation("Backend Engineer", description) == expected
+
+
+def test_enrich_sets_relocation() -> None:
+    offered = enrich(_job(description="Generous relocation package for the right hire."))
+    assert offered.relocation == "offered"
+    silent = enrich(_job(description="Build APIs."))
+    assert silent.relocation == "unspecified"
 
 
 # --- salary (four empirical formats + ambiguity) ---------------------------

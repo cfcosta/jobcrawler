@@ -109,6 +109,7 @@ class EnrichedJob:
     level: str
     workplace: str
     remote_scope: str
+    relocation: str
     salary: SalaryRange | None
 
 
@@ -663,6 +664,105 @@ def classify_remote_scope(workplace: str, location: str) -> str:
     return "unspecified"
 
 
+# --- relocation / visa support ---------------------------------------------
+# Whether the posting says the EMPLOYER helps you move for the role — relocation
+# assistance or visa sponsorship (``offered``), an explicit refusal (``none``), or
+# silence (``unspecified``). Deterministic and offline like the rest (§4.6); unlike
+# remote_scope this DOES read the body, because relocation is only ever stated there.
+# Negation-aware and conservative: a support cue ("relocation package", "sponsor a
+# visa") counts as an offer only when no negator sits right before OR right after it,
+# so "no relocation assistance" / "relocation is not offered" never read as an offer;
+# a curated set of complete refusal phrases then marks the explicit ``none``. A real
+# offer wins over an unrelated refusal elsewhere (a role can offer relocation yet not
+# sponsor visas), so the offer test runs first.
+
+_RELOC_NEG: frozenset[str] = frozenset(
+    {
+        "no", "not", "without", "cannot", "cant", "dont", "doesnt", "wont",
+        "unable", "never", "excluding", "nao", "sem", "nenhum", "nenhuma",
+    }
+)
+
+# Un-negated presence of any of these ⇒ ``offered`` (English + folded pt-BR).
+_RELOC_SUPPORT: tuple[str, ...] = (
+    "relocation assistance", "relocation support", "relocation package",
+    "relocation bonus", "relocation allowance", "relocation stipend",
+    "relocation reimbursement", "relocation benefit", "relocation benefits",
+    "paid relocation", "cover relocation", "covers relocation",
+    "help you relocate", "help with relocation", "assist with relocation",
+    "we offer relocation", "offer relocation", "offers relocation",
+    "provide relocation", "provides relocation", "relocation provided",
+    "relocation offered", "relocation available", "will relocate you",
+    "visa sponsorship", "sponsor a visa", "sponsor your visa", "sponsor visas",
+    "visa support", "immigration support", "immigration assistance",
+    "relocation and visa", "visa and relocation",
+    "auxilio realocacao", "auxilio mudanca", "auxilio a mudanca",
+    "pacote de realocacao", "apoio a mudanca", "apoio a realocacao",
+    "ajuda na mudanca", "realocacao oferecida", "patrocinio de visto",
+)
+
+# Complete refusal phrases ⇒ ``none`` (checked only after the offer test fails).
+_RELOC_DENY: tuple[str, ...] = (
+    "no relocation", "without relocation", "relocation not offered",
+    "relocation is not offered", "relocation not available",
+    "relocation is not available", "relocation not provided",
+    "relocation is not provided", "not offer relocation",
+    "does not offer relocation", "do not offer relocation",
+    "cannot offer relocation", "unable to offer relocation",
+    "no relocation assistance", "no relocation support", "no relocation package",
+    "no visa sponsorship", "no visa support", "no sponsorship",
+    "without sponsorship", "not sponsor", "cannot sponsor", "unable to sponsor",
+    "do not sponsor", "does not sponsor", "not able to sponsor",
+    "sem realocacao", "sem auxilio realocacao", "nao oferecemos realocacao",
+    "nao oferece realocacao", "nao ha realocacao",
+)
+
+
+def _reloc_signal(text: str) -> str | None:
+    """Scan the support cues: ``offered`` at the first un-negated one, else ``none`` if any
+    appeared but every occurrence was negated, else ``None`` (no support cue at all).
+
+    The negation window is two-sided because a refusal sits on either side of the cue:
+    "no relocation assistance" (before) and "relocation assistance is not offered" (after).
+    A single clean offer outranks refusals elsewhere, so it returns immediately.
+    """
+    signal: str | None = None
+    for phrase in _RELOC_SUPPORT:
+        start = text.find(phrase)
+        while start != -1:
+            end = start + len(phrase)
+            # Bound the negation window to the cue's own clause: a negator across a
+            # sentence/clause break belongs to a different statement ("relocation
+            # support; no visa sponsorship" offers relocation — the "no" is the visa's).
+            before_clause = re.split(r"[.;!?\n]", text[:start])[-1]
+            after_clause = re.split(r"[.;!?\n]", text[end : end + 40], maxsplit=1)[0]
+            before = [t for t in re.split(r"[^a-z0-9]+", before_clause) if t][-5:]
+            after = [t for t in re.split(r"[^a-z0-9]+", after_clause) if t][:4]
+            if not any(t in _RELOC_NEG for t in before) and not any(
+                t in _RELOC_NEG for t in after
+            ):
+                return "offered"
+            signal = "none"  # a negated support cue is itself an explicit refusal
+            start = text.find(phrase, end)
+    return signal
+
+
+def classify_relocation(title: str, description: str = "") -> str:
+    """Employer relocation/visa support stated in the posting: offered / none / unspecified.
+
+    Reads the body — that is where relocation lives. An un-negated relocation or visa
+    support cue ⇒ ``offered``; a negated support cue or a complete refusal phrase ⇒
+    ``none``; silence ⇒ ``unspecified``. Powers the "offers relocation" browse filter.
+    """
+    text = _fold((title or "") + ". " + (description or ""))
+    signal = _reloc_signal(text)
+    if signal == "offered":
+        return "offered"
+    if signal == "none" or _contains_any(text, _RELOC_DENY):
+        return "none"
+    return "unspecified"
+
+
 # --- location normalization ------------------------------------------------
 # Freeform location text ("são paulo, brasil", "Remote - US", "NEW YORK, NY") is
 # canonicalized to a consistent display + grouping string, WITHOUT losing the
@@ -1051,5 +1151,6 @@ def enrich(job: Job) -> EnrichedJob:
         level=classify_level(job.title, job.description),
         workplace=workplace,
         remote_scope=classify_remote_scope(workplace, job.location),
+        relocation=classify_relocation(job.title, job.description or ""),
         salary=salary,
     )

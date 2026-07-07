@@ -1422,6 +1422,7 @@ def test_migration_backfills_lifecycle_and_match_columns(tmp_path: object) -> No
         "discipline",
         "level",
         "workplace",
+        "relocation",
         "salary_min",
         "salary_max",
         "salary_currency",
@@ -1481,6 +1482,42 @@ def test_migration_backfills_salary_usd(tmp_path: object) -> None:
         # 10k–20k BRL/mo → ×12 months × 0.18 USD/BRL = 21.6k–43.2k USD/yr
         assert rec.salary_usd_min == pytest.approx(21_600.0)
         assert rec.salary_usd_max == pytest.approx(43_200.0)
+    finally:
+        s.close()
+
+
+def test_migration_backfills_relocation(tmp_path: object) -> None:
+    # A row with a stored description but no relocation signal (predating the column):
+    # opening the DB derives it from the body so the "offers relocation" filter works
+    # immediately, without waiting for the board's next crawl.
+    db = f"{tmp_path}/legacy.db"  # type: ignore[str-bytes-safe]
+    raw = sqlite3.connect(db)
+    raw.executescript(
+        """
+        CREATE TABLE positions (
+            site TEXT NOT NULL, url TEXT NOT NULL, content_hash TEXT NOT NULL,
+            title TEXT NOT NULL, company TEXT NOT NULL, location TEXT NOT NULL,
+            description TEXT, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
+            PRIMARY KEY (site, url)
+        );
+        INSERT INTO positions (site, url, content_hash, title, company, location,
+            description, first_seen, last_seen)
+        VALUES
+            ('acme', 'yes', 'h1', 'T', 'C', 'L', 'We offer relocation assistance.',
+                '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'),
+            ('acme', 'no', 'h2', 'T', 'C', 'L', 'Build distributed systems in Rust.',
+                '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
+        """
+    )
+    raw.commit()
+    raw.close()
+
+    s = StateStore(db)
+    try:
+        by_url = {r.url: r for r in s.open_positions("acme")}
+        assert by_url["yes"].relocation == "offered"
+        assert by_url["no"].relocation == "unspecified"
+        assert [r.url for r in s.search_positions(relocation_offered=True)] == ["yes"]
     finally:
         s.close()
 

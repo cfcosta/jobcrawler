@@ -168,6 +168,7 @@ class PositionRecord:
     level: str | None
     workplace: str | None
     remote_scope: str | None
+    relocation: str | None
     salary_min: float | None
     salary_max: float | None
     salary_currency: str | None
@@ -253,6 +254,7 @@ CREATE TABLE IF NOT EXISTS positions (
     level           TEXT,
     workplace       TEXT,
     remote_scope    TEXT,
+    relocation      TEXT,
     salary_min      REAL,
     salary_max      REAL,
     salary_currency TEXT,
@@ -334,6 +336,7 @@ _POSITION_FIELDS: frozenset[str] = frozenset(
         "level",
         "workplace",
         "remote_scope",
+        "relocation",
         "salary_min",
         "salary_max",
         "salary_currency",
@@ -369,6 +372,7 @@ _POSITION_ADD_COLUMNS: tuple[tuple[str, str], ...] = (
     ("level", "TEXT"),
     ("workplace", "TEXT"),
     ("remote_scope", "TEXT"),
+    ("relocation", "TEXT"),
     ("salary_min", "REAL"),
     ("salary_max", "REAL"),
     ("salary_currency", "TEXT"),
@@ -553,6 +557,7 @@ class StateStore:
         )
         self._backfill_remote_scope()
         self._backfill_salary_usd()
+        self._backfill_relocation()
 
     def _backfill_remote_scope(self) -> None:
         """Fill ``remote_scope`` for rows written before the column existed (§4.6).
@@ -624,6 +629,35 @@ class StateStore:
                 "WHERE site = ? AND url = ?",
                 updates,
             )
+
+    def _backfill_relocation(self) -> None:
+        """Fill ``relocation`` for rows written before the column existed (§4.6).
+
+        Derived from ``title``+``description`` via the same host-side classifier a fresh
+        crawl runs (:func:`classify_relocation`), so a populated DB gains the relocation
+        signal immediately instead of waiting for every board's next crawl. Only rows still
+        NULL that carry a stored ``description`` are read (the classifier needs the body);
+        the classifier never returns NULL, so once filled a later open matches nothing.
+        """
+        rows = self._conn.execute(
+            "SELECT site, url, title, description FROM positions "
+            "WHERE relocation IS NULL AND description IS NOT NULL"
+        ).fetchall()
+        if not rows:
+            return
+        from jobcrawler.runtime.normalize import classify_relocation
+
+        self._conn.executemany(
+            "UPDATE positions SET relocation = ? WHERE site = ? AND url = ?",
+            [
+                (
+                    classify_relocation(row["title"] or "", row["description"] or ""),
+                    row["site"],
+                    row["url"],
+                )
+                for row in rows
+            ],
+        )
 
     # -- item state (dedup) --------------------------------------------------
 
@@ -1428,6 +1462,7 @@ class StateStore:
         track_status: str | None = None,
         workplace: str | None = None,
         remote_scope: str | None = None,
+        relocation_offered: bool = False,
         level: str | None = None,
         min_score: int | None = None,
         min_salary: float | None = None,
@@ -1452,6 +1487,8 @@ class StateStore:
         - ``workplace``/``level``  exact, case-insensitive (e.g. ``'remote'``).
         - ``remote_scope``  exact geographic scope of a remote role (``'anywhere'`` powers the
           "remote anywhere" filter; ``'restricted'``/``'unspecified'`` also selectable).
+        - ``relocation_offered``  keep only rows whose posting states relocation/visa support
+          (``relocation = 'offered'``, §4.6) — the "offers relocation" filter.
         - ``min_score``  only rows scored at/above it (drops unscored).
         - ``min_salary``  ``COALESCE(salary_usd_max, salary_usd_min) >= min_salary``, i.e. an
           annualized-USD floor (§4.6) — drops rows with no resolvable salary/currency.
@@ -1497,6 +1534,8 @@ class StateStore:
         if remote_scope:
             clauses.append("lower(COALESCE(remote_scope, '')) = ?")
             params.append(remote_scope.lower())
+        if relocation_offered:
+            clauses.append("lower(COALESCE(relocation, '')) = 'offered'")
         if level:
             clauses.append("lower(COALESCE(level, '')) = ?")
             params.append(level.lower())
@@ -1841,6 +1880,7 @@ def _to_position(row: sqlite3.Row) -> PositionRecord:
         level=row["level"],
         workplace=row["workplace"],
         remote_scope=row["remote_scope"],
+        relocation=row["relocation"],
         salary_min=row["salary_min"],
         salary_max=row["salary_max"],
         salary_currency=row["salary_currency"],

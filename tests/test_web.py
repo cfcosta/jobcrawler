@@ -154,6 +154,35 @@ def test_format_salary_appends_usd_hint_for_non_usd() -> None:
     assert format_salary(usd) == "USD 120,000–140,000/year"  # type: ignore[arg-type]
 
 
+async def test_relocation_filter_and_badge() -> None:
+    store = StateStore(":memory:")
+    store.upsert_position(
+        "acme",
+        "https://acme.test/relo",
+        fields={**FIELDS, "title": "Relo Role", "relocation": "offered"},
+        content_hash="hr",
+    )
+    store.upsert_position(
+        "acme",
+        "https://acme.test/silent",
+        fields={**FIELDS, "title": "Quiet Role", "relocation": "unspecified"},
+        content_hash="hq",
+    )
+    try:
+        async with _client(create_app(store)) as c:
+            # the "offers relocation" checkbox is offered as a filter
+            r = await c.get("/positions")
+            assert 'name="relocation_offered"' in r.text
+            # and a row that offers relocation carries the badge
+            assert "relocation</span>" in r.text
+            # the filter keeps only rows whose posting states relocation support
+            rows = (await c.get("/api/positions?relocation_offered=1")).json()
+            assert [row["url"] for row in rows] == ["https://acme.test/relo"]
+            assert all(row["relocation"] == "offered" for row in rows)
+    finally:
+        store.close()
+
+
 async def test_health() -> None:
     store = _seeded_store()
     try:
