@@ -109,6 +109,35 @@ async def test_html_pages_render() -> None:
         store.close()
 
 
+async def test_detail_surfaces_full_record() -> None:
+    # #60: the detail page dumps every stored column, not just the header summary —
+    # the new Match/Classification/Compensation/Provenance panels expose the salary
+    # breakdown, the source board + content hash, and the discipline/level axis.
+    store = _seeded_store()
+    store.upsert_position(
+        "acme",
+        "https://acme.test/a",
+        fields={"discipline": "backend", "department": "Platform"},
+        content_hash="h1b",
+    )
+    try:
+        async with _client(create_app(store)) as c:
+            r = await c.get(f"/positions/{_ACME_PID}")
+            body = r.text
+            # the four new full-record panels are present
+            for heading in ("Match &amp; scoring", "Classification", "Compensation",
+                            "Provenance"):
+                assert heading in body, heading
+            # compensation is broken out with thousands separators (source USD range)
+            assert "180,000" in body and "220,000" in body
+            # provenance shows the source board slug + the content-hash label
+            assert "(acme)" in body and "Content hash" in body
+            # classification surfaces the crawl-normalized discipline
+            assert "backend" in body
+    finally:
+        store.close()
+
+
 async def test_company_links_group_by_canonical() -> None:
     store = _seeded_store()
     try:

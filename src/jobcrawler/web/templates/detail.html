@@ -10,6 +10,7 @@
     <p class="meta">
       <span class="lifecycle lc-{{ p.status }}">{{ p.status }}</span>
       {% if p.match_score is not none %}<span class="score-pill">Match {{ p.match_score }}{% if p.match_verdict %} · {{ p.match_verdict }}{% endif %}</span>{% endif %}
+      {% if p.discipline %}<span class="tag">{{ p.discipline }}</span>{% endif %}
       {% if p.level %}<span class="tag">{{ p.level }}</span>{% endif %}
       {% if p | salary %}<span class="tag">{{ p | salary }}</span>{% endif %}
       {% if p.employment_type %}<span class="tag">{{ p.employment_type }}</span>{% endif %}
@@ -37,8 +38,6 @@
       <dl class="kv">
         <dt>Applied</dt><dd>{{ p.applied_at | date }}</dd>
         <dt>Updated</dt><dd>{% if p.track_updated_at %}{{ p.track_updated_at | age }} ago{% else %}—{% endif %}</dd>
-        <dt>First seen</dt><dd>{{ p.first_seen | date }}</dd>
-        <dt>Posted</dt><dd>{{ p.posted_at | date }}</dd>
       </dl>
       <div class="actions">
         <form method="post" action="/positions/{{ pid }}/dismiss">
@@ -62,13 +61,78 @@
     </section>
   </div>
 
-  {% if reasons %}
+  {# ---- Match & scoring ------------------------------------------------ #}
   <section class="panel">
-    <h2>Why this matched</h2>
-    <ul class="reasons">{% for r in reasons %}<li>{{ r }}</li>{% endfor %}</ul>
+    <h2>Match &amp; scoring</h2>
+    <p class="badges">
+      {% if p.match_score is not none %}<span class="score-pill">Score {{ p.match_score }}</span>{% else %}<span class="tag">unscored</span>{% endif %}
+      {% if p.match_verdict %}<span class="tag">{{ p.match_verdict }}</span>{% endif %}
+      {% if p.match_pending %}<span class="tag tag-pending" title="Queued for the daemon to (re)score">rescore queued</span>{% endif %}
+      <span class="tag">scored {% if p.matched_at %}{{ p.matched_at | age }} ago{% else %}never{% endif %}</span>
+    </p>
+    {% if reasons %}<h3 class="sub-h">Reasons</h3><ul class="reasons">{% for r in reasons %}<li>{{ r }}</li>{% endfor %}</ul>{% endif %}
+    {% if concerns %}<h3 class="sub-h">Concerns</h3><ul class="concerns">{% for c in concerns %}<li>{{ c }}</li>{% endfor %}</ul>{% endif %}
+    {% if not reasons and not concerns %}<p class="empty">No reasons or concerns recorded.</p>{% endif %}
   </section>
-  {% endif %}
 
+  {# ---- Classification + Compensation --------------------------------- #}
+  <div class="cols">
+    <section class="panel">
+      <h2>Classification</h2>
+      <dl class="kv">
+        <dt>Discipline</dt><dd>{{ p.discipline or '—' }}</dd>
+        <dt>Level</dt><dd>{{ p.level or '—' }}</dd>
+        <dt>Workplace</dt><dd>{{ p.workplace or '—' }}</dd>
+        <dt>Remote scope</dt><dd>{{ p.remote_scope or '—' }}</dd>
+        <dt>Relocation</dt><dd>{{ p.relocation or '—' }}</dd>
+        <dt>Employment</dt><dd>{{ p.employment_type or '—' }}</dd>
+        <dt>Department</dt><dd>{{ p.department or '—' }}</dd>
+      </dl>
+    </section>
+
+    <section class="panel">
+      <h2>Compensation</h2>
+      {% if p.salary_min is not none or p.salary_max is not none %}
+      <p class="badges"><span class="tag">{{ p | salary }}</span></p>
+      <dl class="kv">
+        <dt>Currency</dt><dd>{{ p.salary_currency or '—' }}</dd>
+        <dt>Min</dt><dd>{% if p.salary_min is not none %}{{ "{:,.0f}".format(p.salary_min) }}{% else %}—{% endif %}</dd>
+        <dt>Max</dt><dd>{% if p.salary_max is not none %}{{ "{:,.0f}".format(p.salary_max) }}{% else %}—{% endif %}</dd>
+        <dt>Period</dt><dd>{{ p.salary_period or '—' }}</dd>
+        <dt>USD min/yr</dt><dd>{% if p.salary_usd_min is not none %}{{ "${:,.0f}".format(p.salary_usd_min) }}{% else %}—{% endif %}</dd>
+        <dt>USD max/yr</dt><dd>{% if p.salary_usd_max is not none %}{{ "${:,.0f}".format(p.salary_usd_max) }}{% else %}—{% endif %}</dd>
+      </dl>
+      {% else %}
+      <p class="empty">No compensation stated in the posting.</p>
+      {% endif %}
+    </section>
+  </div>
+
+  {# ---- Provenance / crawl metadata ----------------------------------- #}
+  <section class="panel">
+    <h2>Provenance &amp; crawl metadata</h2>
+    <dl class="kv">
+      <dt>Source board</dt><dd>{{ site_names.get(p.site, p.site) }} <span class="mono">({{ p.site }})</span></dd>
+      <dt>Lifecycle</dt><dd><span class="lifecycle lc-{{ p.status }}">{{ p.status }}</span></dd>
+      <dt>Listing URL</dt><dd class="mono"><a href="{{ p.url }}" target="_blank" rel="noopener noreferrer">{{ p.url }}</a></dd>
+      <dt>Apply URL</dt><dd class="mono">{% if p.apply_url %}<a href="{{ p.apply_url }}" target="_blank" rel="noopener noreferrer">{{ p.apply_url }}</a>{% else %}—{% endif %}</dd>
+      <dt>External id</dt><dd class="mono">{{ p.external_id or '—' }}</dd>
+      <dt>Content hash</dt><dd class="mono">{{ p.content_hash }}</dd>
+      <dt>Company (raw)</dt><dd>{{ p.company }}</dd>
+      <dt>Hiring company</dt><dd>{{ p.hiring_company or '—' }}</dd>
+      <dt>Company (canonical)</dt><dd>{{ p.company_canonical or '—' }}</dd>
+      <dt>Location (raw)</dt><dd>{{ p.location }}</dd>
+      <dt>Location (normalized)</dt><dd>{{ p.location_normalized or '—' }}</dd>
+      <dt>Posted</dt><dd>{{ p.posted_at | date }}</dd>
+      <dt>Expires</dt><dd>{{ p.expires_at | date }}</dd>
+      <dt>First seen</dt><dd>{{ p.first_seen | date }}</dd>
+      <dt>Last seen</dt><dd>{% if p.last_seen %}{{ p.last_seen | age }} ago{% else %}—{% endif %}</dd>
+      <dt>Missing streak</dt><dd>{{ p.missing_streak }}</dd>
+      <dt>Closed</dt><dd>{% if p.closed_at %}{{ p.closed_at | date }}{% else %}—{% endif %}</dd>
+    </dl>
+  </section>
+
+  {# ---- Raw description ----------------------------------------------- #}
   <section class="panel">
     <h2>Description</h2>
     {% if p.description %}<div class="description">{{ p.description }}</div>{% else %}<p class="empty">No description stored for this posting.</p>{% endif %}

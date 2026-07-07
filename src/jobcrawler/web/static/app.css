@@ -189,6 +189,13 @@ select.badge-muted { border-color: var(--muted); }
 .kv dd { margin: 0; font-variant-numeric: tabular-nums; }
 .reasons { margin: 0; padding-left: 18px; }
 .reasons li { margin: 3px 0; }
+/* detail — full-record panels (cluster #60) */
+.detail h3.sub-h { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--fg-dim); margin: 14px 0 6px; }
+.badges { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 0 0 10px; }
+.tag-pending { background: rgba(245, 158, 11, .16); color: #fcd34d; border-color: transparent; }
+.concerns { margin: 0; padding-left: 18px; }
+.concerns li { margin: 3px 0; color: #fcd34d; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; word-break: break-all; }
 .description { white-space: pre-wrap; word-break: break-word; color: var(--fg); background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 14px; max-height: 460px; overflow: auto; }
 
 /* pager + misc */

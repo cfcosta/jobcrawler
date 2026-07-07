@@ -473,6 +473,7 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
                 "p": rec,
                 "pid": pid,
                 "reasons": reasons_list(rec.match_reasons),
+                "concerns": reasons_list(rec.match_concerns),
                 "crawlable": rec.site in known_slugs,
             },
         )
