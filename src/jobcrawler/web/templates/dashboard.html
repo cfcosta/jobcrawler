@@ -64,7 +64,16 @@
 </div>
 
 <section class="panel">
-  <h2>Sites</h2>
+  <div class="panel-head">
+    <h2>Sites</h2>
+    {% if has_registry %}
+    <form method="post" action="/recrawl-all"
+          onsubmit="return confirm('Force a re-crawl of every enabled site and rescore all open positions?');">
+      <button type="submit" class="small secondary"
+              title="Queue a forced re-crawl of every enabled site and requeue all open positions for rescoring">Re-crawl &amp; rescore all</button>
+    </form>
+    {% endif %}
+  </div>
   {% if has_registry %}
   <table class="grid">
     <thead><tr><th>Site</th><th>Open</th><th>Health</th><th>Last run</th><th></th></tr></thead>

@@ -1612,6 +1612,28 @@ class StateStore:
             )
             self._conn.commit()
 
+    def request_crawl_all(self, slugs: Collection[str]) -> int:
+        """Queue a manual crawl of every slug in one transaction (§16, "re-crawl all").
+
+        The fleet-wide companion to :meth:`request_crawl`: forces every named site into the
+        scheduler's next due set regardless of cadence, in a single write instead of N.
+        Idempotent per slug (``ON CONFLICT`` refreshes ``requested_at``), so pressing the
+        button twice before the daemon drains collapses to one request each. Does nothing
+        itself; the daemon owns the crawl. Returns the number of slugs enqueued.
+        """
+        now = self._clock().isoformat()
+        rows = [(slug, now) for slug in slugs if slug]
+        if not rows:
+            return 0
+        with self._lock:
+            self._conn.executemany(
+                "INSERT INTO crawl_requests (slug, requested_at) VALUES (?, ?) "
+                "ON CONFLICT (slug) DO UPDATE SET requested_at = excluded.requested_at",
+                rows,
+            )
+            self._conn.commit()
+        return len(rows)
+
     def take_crawl_requests(self) -> list[str]:
         """Atomically drain and return all queued manual-crawl slugs (§16).
 

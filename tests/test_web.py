@@ -407,6 +407,58 @@ async def test_api_crawl_unknown_slug_with_registry() -> None:
         store.close()
 
 
+async def test_api_recrawl_all_forces_enabled_fleet_and_requeues() -> None:
+    # The "re-crawl & rescore everything" trigger (#57) enqueues a forced crawl for every
+    # *enabled* registry site and parks all open rows for the match-drain — one write each,
+    # never a crawl or LLM call in the web process.
+    store = _seeded_store()
+    sites = [
+        SimpleNamespace(slug="acme", company="Acme Corp", name="acme", enabled=True),
+        SimpleNamespace(slug="beta", company="Beta Inc", name="beta", enabled=True),
+        SimpleNamespace(slug="ghost", company="Ghost", name="ghost", enabled=False),
+    ]
+    try:
+        async with _client(create_app(store, sites=sites)) as c:
+            r = await c.post("/api/recrawl-all")
+            assert r.status_code == 202
+            # disabled 'ghost' is excluded; both open rows parked
+            assert r.json() == {"queued": 2, "requeued": 2}
+        # the daemon drains exactly the enabled slugs (ordered by requested_at, slug)
+        assert store.take_crawl_requests() == ["acme", "beta"]
+        assert len(store.pending_matches(limit=10)) == 2
+    finally:
+        store.close()
+
+
+async def test_recrawl_all_html_redirects_with_summary() -> None:
+    store = _seeded_store()
+    sites = [
+        SimpleNamespace(slug="acme", company="Acme Corp", name="acme", enabled=True)
+    ]
+    try:
+        async with _client(create_app(store, sites=sites)) as c:
+            r = await c.post("/recrawl-all")
+            assert r.status_code == 303
+            loc = r.headers["location"]
+            assert loc.startswith("/") and "msg=" in loc
+        assert store.take_crawl_requests() == ["acme"]
+    finally:
+        store.close()
+
+
+async def test_recrawl_all_without_registry_still_rescores() -> None:
+    # No registry → nothing to crawl, but the open-row requeue still runs (queued=0).
+    store = _seeded_store()
+    try:
+        async with _client(create_app(store)) as c:
+            r = await c.post("/api/recrawl-all")
+            assert r.status_code == 202
+            assert r.json() == {"queued": 0, "requeued": 2}
+        assert store.take_crawl_requests() == []
+    finally:
+        store.close()
+
+
 # -- HTML: form mutations redirect (303) -------------------------------------
 
 

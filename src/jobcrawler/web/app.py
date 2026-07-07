@@ -363,6 +363,22 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
         )
         return _require(site, url)
 
+    def _recrawl_all() -> tuple[int, int]:
+        """Force a full refresh: queue every enabled site to crawl + park all open rows.
+
+        Reuses the two existing single-owner primitives — :meth:`request_crawl` (idempotent
+        per-slug enqueue the daemon drains via ``take_crawl_requests``) and
+        :meth:`requeue_open_matches` (parks all open rows for the match-drain). It only
+        *enqueues* work, so it's safe whether or not the daemon is up (requests persist)
+        and never itself crawls or scores. Returns ``(sites_queued, rows_requeued)``.
+        """
+        slugs = [
+            getattr(s, "slug", "")
+            for s in site_list
+            if getattr(s, "enabled", True) and getattr(s, "slug", "")
+        ]
+        return store.request_crawl_all(slugs), store.requeue_open_matches()
+
     # -- HTML: dashboard ----------------------------------------------------
 
     @app.get("/", response_class=HTMLResponse)
@@ -510,6 +526,21 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
         n = store.requeue_open_matches()
         return _back(request, "/", f"Requeued {n} open positions for rescoring")
 
+    @app.post("/recrawl-all")
+    def post_recrawl_all(request: Request) -> Response:
+        queued, requeued = _recrawl_all()
+        if queued:
+            msg = (
+                f"Forced re-crawl of {queued} site(s) queued for the daemon; "
+                f"requeued {requeued} open position(s) for rescoring"
+            )
+        else:
+            msg = (
+                f"No sites in the registry to re-crawl; "
+                f"requeued {requeued} open position(s) for rescoring"
+            )
+        return _back(request, "/", msg)
+
     # -- JSON API (programmatic + tests) ------------------------------------
 
     @app.get("/api/positions")
@@ -556,6 +587,11 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
     @app.post("/api/rescore", status_code=202)
     def api_rescore() -> JSONResponse:
         return JSONResponse({"requeued": store.requeue_open_matches()}, status_code=202)
+
+    @app.post("/api/recrawl-all", status_code=202)
+    def api_recrawl_all() -> JSONResponse:
+        queued, requeued = _recrawl_all()
+        return JSONResponse({"queued": queued, "requeued": requeued}, status_code=202)
 
     @app.get("/health")
     def health() -> dict[str, bool]:

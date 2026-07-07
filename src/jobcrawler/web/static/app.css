@@ -60,6 +60,8 @@ h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .04em; color: v
   background: var(--panel); border: 1px solid var(--line);
   border-radius: var(--radius); padding: 16px; margin-bottom: 16px;
 }
+.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.panel-head h2 { margin-bottom: 0; }
 
 /* form controls */
 input, select, textarea, button {
