@@ -40,9 +40,10 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 
 def _utcnow() -> datetime:
@@ -382,18 +383,104 @@ _POSITION_ADD_COLUMNS: tuple[tuple[str, str], ...] = (
 )
 
 
+class _Result:
+    """The drained rows of one query plus the write metadata callers read.
+
+    Exposes the slice of the cursor API the store uses — ``fetchone`` / ``fetchall`` /
+    iteration and ``lastrowid`` / ``rowcount`` — over rows already fetched into memory,
+    so nothing touches the live connection after :class:`_SerializedConnection` drops
+    its lock.
+    """
+
+    def __init__(
+        self, rows: list[Any], lastrowid: int | None, rowcount: int
+    ) -> None:
+        self._rows = rows
+        self._pos = 0
+        self.lastrowid = lastrowid
+        self.rowcount = rowcount
+
+    def fetchone(self) -> Any:
+        if self._pos < len(self._rows):
+            row = self._rows[self._pos]
+            self._pos += 1
+            return row
+        return None
+
+    def fetchall(self) -> list[Any]:
+        rows = self._rows[self._pos :]
+        self._pos = len(self._rows)
+        return rows
+
+    def __iter__(self) -> Iterator[Any]:
+        while self._pos < len(self._rows):
+            row = self._rows[self._pos]
+            self._pos += 1
+            yield row
+
+
+class _SerializedConnection:
+    """Serializes every operation on one sqlite3 connection shared across threads.
+
+    ``sqlite3.connect(check_same_thread=False)`` lets a single connection cross
+    threads, but it does **not** make *concurrent* use safe: two threads stepping the
+    same connection race and raise ``sqlite3.InterfaceError: bad parameter or other API
+    misuse``. The web UI (§16) serves reads from an anyio threadpool while the §4.9
+    scheduler writes off-thread, so every call funnels through one reentrant lock.
+
+    Reads are drained under the lock — the cursor's rows are fetched into a
+    :class:`_Result` before the lock is released — so callers keep using
+    ``fetchone`` / ``fetchall`` / iteration afterwards without touching the live
+    connection. Writers that already hold the lock (``with self._lock:`` around
+    execute+commit) re-enter it harmlessly, which keeps a statement and its commit
+    atomic as one transaction.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, lock: threading.RLock) -> None:
+        self._conn = conn
+        self._lock = lock
+
+    def execute(self, sql: str, parameters: Any = ()) -> _Result:
+        with self._lock:
+            cur = self._conn.execute(sql, parameters)
+            return _Result(cur.fetchall(), cur.lastrowid, cur.rowcount)
+
+    def executemany(self, sql: str, seq_of_parameters: Any) -> _Result:
+        with self._lock:
+            cur = self._conn.executemany(sql, seq_of_parameters)
+            return _Result([], cur.lastrowid, cur.rowcount)
+
+    def executescript(self, sql: str) -> _Result:
+        with self._lock:
+            cur = self._conn.executescript(sql)
+            return _Result([], cur.lastrowid, cur.rowcount)
+
+    def commit(self) -> None:
+        with self._lock:
+            self._conn.commit()
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
+    def __getattr__(self, name: str) -> Any:
+        # Delegate anything we don't wrap (e.g. row_factory reads) to the raw conn.
+        return getattr(self._conn, name)
+
+
 class StateStore:
     def __init__(
         self, path: str = ":memory:", *, clock: Callable[[], datetime] = _utcnow
     ) -> None:
         self._clock = clock
-        self._lock = threading.Lock()  # the §4.9 scheduler may write off-thread
-        self._conn = sqlite3.connect(path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        self._lock = threading.RLock()  # serializes the shared connection (§16 + §4.9)
+        conn = sqlite3.connect(path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
         if path != ":memory:":
-            self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA busy_timeout=5000")
-        self._conn.executescript(_SCHEMA)
+            conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.executescript(_SCHEMA)
+        self._conn = _SerializedConnection(conn, self._lock)
         self._migrate()
         self._conn.commit()
 

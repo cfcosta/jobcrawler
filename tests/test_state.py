@@ -1530,3 +1530,37 @@ def test_clear_match_pending_unparks_without_a_verdict() -> None:
     assert s.pending_matches(limit=10) == []
     assert s.open_positions("acme")[0].match_score is None
     s.close()
+
+
+def test_concurrent_reads_and_writes_survive_a_shared_connection(tmp_path):
+    """Regression: the web UI (§16) serves reads from an anyio threadpool while the
+    §4.9 scheduler writes off-thread, both over one ``check_same_thread=False``
+    connection. Unserialized, concurrent stepping raised ``sqlite3.InterfaceError:
+    bad parameter or other API misuse`` (a hard 500 on the dashboard). All access now
+    funnels through one reentrant lock, so a storm of parallel calls completes cleanly.
+    """
+    import concurrent.futures
+
+    s = StateStore(str(tmp_path / "concurrent.db"))
+    for i in range(40):
+        s.upsert_position("acme", f"u{i}", fields=FIELDS, content_hash=f"h{i}")
+
+    errors: list[Exception] = []
+
+    def hammer(n: int) -> None:
+        try:
+            for r in range(30):
+                s.open_counts_by_site()
+                s.track_counts()
+                s.get_health("acme")
+                s.last_run("acme")
+                s.open_positions("acme")
+                s.mark_seen("acme", f"seen-{n}-{r}")
+        except Exception as exc:  # noqa: BLE001 — capture, assert on the main thread
+            errors.append(exc)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(hammer, range(8)))
+
+    assert not errors, errors
+    s.close()
