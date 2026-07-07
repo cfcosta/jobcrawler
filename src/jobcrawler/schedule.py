@@ -88,6 +88,12 @@ RecheckFetch = Callable[[str], Awaitable[tuple[int, str]]]
 # the profile reload; the scheduler owns only the cadence.
 MatchDrain = Callable[[], Awaitable[dict[str, int]]]
 
+# The §4.6 FX-refresh seam: pull live currency→USD rates from the endpoint and persist
+# them (jobcrawler.fx). Injected because the fetch touches the network and the store, both
+# owned by the daemon wiring (cli); the scheduler owns only the daily cadence. Returns the
+# rates now in effect (fail-soft — the closure never raises into the loop).
+FxRefresh = Callable[[], Awaitable[dict[str, float]]]
+
 
 class Site(BaseModel):
     """One entry of the §4.1 site registry — a job board to crawl on a cadence."""
@@ -229,6 +235,8 @@ class Scheduler:
         recheck_fetch: RecheckFetch | None = None,
         match_drain: MatchDrain | None = None,
         match_drain_check: str | None = None,
+        fx_refresh: FxRefresh | None = None,
+        fx_check: str | None = None,
         expired_markers: tuple[str, ...] | None = None,
         heal_cooldown: str | None = None,
         description_quality_floor: float | None = None,
@@ -313,6 +321,15 @@ class Scheduler:
         )
         self._match_drain = match_drain
         self._next_match_drain: datetime | None = None
+        # §4.6 currency-rate refresh: a daily out-of-band pull of live FX rates into the DB
+        # for the salary→USD band. Pure external-data observation (like recheck/match_drain),
+        # so EXEMPT from the master autonomy brake. Disabled unless both a cadence and the
+        # injected fetch seam are wired; the first pass fires on boot (cheap — one GET).
+        self._fx_interval = _optional_interval(
+            config.fx_refresh_interval() if fx_check is None else fx_check
+        )
+        self._fx_refresh = fx_refresh
+        self._next_fx: datetime | None = None
         # §4.8 event-driven healing: a drifted crawl assesses immediately (not waiting
         # for the periodic sweep), rate-limited per-site by this cooldown (None = off).
         self._heal_cooldown = _optional_interval(
@@ -941,6 +958,35 @@ class Scheduler:
             )
         return summary
 
+    def fx_due(self, now: datetime) -> bool:
+        """True if a §4.6 FX-rate refresh is due (``JOBCRAWLER_FX_REFRESH_INTERVAL``).
+
+        Like the recheck/match drain, NOT gated by the master autonomy switch: pulling
+        published exchange rates is external-data observation, not self-modification.
+        Requires both a cadence and the injected fetch seam. The first pass fires on boot
+        so a daemon that was down over a rate update catches up on the next start.
+        """
+        if self._fx_interval is None or self._fx_refresh is None:
+            return False
+        return self._next_fx is None or now >= self._next_fx
+
+    def mark_fx(self, now: datetime) -> None:
+        """Record that an FX refresh ran at ``now``; the next is one interval later.
+
+        Advanced whether or not the pull succeeded (the seam is fail-soft and returns the
+        retained rates), so a transient endpoint outage waits for the next cadence instead
+        of hammering the API every loop iteration.
+        """
+        if self._fx_interval is not None:
+            self._next_fx = now + self._fx_interval
+
+    async def fx_tick(self) -> dict[str, float]:
+        """Run one injected §4.6 FX refresh. The seam persists the rates and never raises."""
+        refresh = self._fx_refresh
+        if refresh is None:  # pragma: no cover - gated by fx_due
+            return {}
+        return await refresh()
+
     def _closure_reason(self, status: int, text: str) -> str | None:
         """Why a re-fetched open position should close now, or None to keep it open.
 
@@ -998,7 +1044,7 @@ class Scheduler:
         """
         _log.info(
             "scheduler starting sites=%d interval=%ss autonomy=%s "
-            "regen=%s reopt=%s recheck=%s match_drain=%s",
+            "regen=%s reopt=%s recheck=%s match_drain=%s fx=%s",
             len(self._sites),
             interval,
             "on" if self._autonomy else "OFF",
@@ -1006,6 +1052,7 @@ class Scheduler:
             "off" if self._reopt_interval is None else self._reopt_interval,
             "off" if self._recheck_interval is None else self._recheck_interval,
             "off" if self._match_drain_interval is None else self._match_drain_interval,
+            "off" if self._fx_interval is None else self._fx_interval,
         )
         while not stop.is_set():
             try:
@@ -1023,6 +1070,9 @@ class Scheduler:
                 if self.match_drain_due(now):
                     await self.match_drain_tick()
                     self.mark_match_drain(now)
+                if self.fx_due(now):
+                    await self.fx_tick()
+                    self.mark_fx(now)
                 self.adopt_watch_tick(now)
             except Exception:
                 # Last-resort guard: an unexpected error in a tick or sweep must not

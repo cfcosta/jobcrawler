@@ -562,3 +562,19 @@ def test_usd_annual_band_orders_currencies_coherently() -> None:
     usd_lo, usd_hi = usd_annual_band(120_000.0, 140_000.0, "USD", "year")
     assert brl_hi is not None and usd_lo is not None
     assert brl_hi < usd_lo
+
+
+def test_usd_annual_band_injected_rates_override_the_static_table() -> None:
+    # A live rate handed in as ``fx_rates`` is used instead of the static FX_TO_USD.
+    lo, hi = usd_annual_band(
+        80_000.0, 100_000.0, "EUR", "year", fx_rates={"EUR": 1.20}
+    )
+    assert (lo, hi) == pytest.approx((96_000.0, 120_000.0))
+
+
+def test_usd_annual_band_injected_rates_extend_currency_coverage() -> None:
+    # A currency the static table can't reach is unstated by default...
+    assert usd_annual_band(5_000_000.0, None, "JPY", "year") == (None, None)
+    # ...but converts once a live rate for it is supplied.
+    lo, _ = usd_annual_band(5_000_000.0, None, "JPY", "year", fx_rates={"JPY": 0.0064})
+    assert lo == pytest.approx(32_000.0)

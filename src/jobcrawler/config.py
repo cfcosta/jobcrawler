@@ -625,6 +625,24 @@ def recheck_interval() -> str:
     return _str("JOBCRAWLER_RECHECK_INTERVAL", "12h")
 
 
+def fx_endpoint() -> str:
+    """Currency-rate endpoint the §4.6 FX refresh pulls (:mod:`jobcrawler.fx`).
+
+    A keyless, USD-based JSON feed (default: exchangerate-api.com's open endpoint) read
+    out-of-band — never on the crawl path — so host-side salary→USD stays a pure, offline
+    function. The response is USD-based (1 USD = N units of X); the fetcher inverts to
+    store USD-per-unit. Override to point at a mirror or a keyed provider."""
+    return _str("JOBCRAWLER_FX_ENDPOINT", "https://open.er-api.com/v6/latest/USD")
+
+
+def fx_refresh_interval() -> str:
+    """How often the daemon refreshes currency exchange rates (§4.6). Default 24h — the
+    upstream feed updates once daily and coarse salary ranking tolerates FX drift, so a
+    daily pull is ample; ``off`` disables the loop (rates then only move via a manual
+    ``jobcrawl fx-refresh``, falling back to the static table until first run)."""
+    return _str("JOBCRAWLER_FX_REFRESH_INTERVAL", "24h")
+
+
 def recheck_cap() -> int:
     """Max standing positions the §4.9 recheck loop re-fetches per pass. Bounds the extra
     fetch (and solver/politeness) budget the loop spends on already-known rows so a fleet

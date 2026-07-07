@@ -1075,11 +1075,13 @@ _PERIODS_PER_YEAR: dict[str, float] = {
     "hour": _HOURS_PER_YEAR,
 }
 
-# Approximate spot rates: 1 unit of currency in USD. Deliberately STATIC — enrichment
-# is a pure, offline function (§4.6/§4.9) with no network in the crawl path, and coarse
-# ranking/filtering tolerates FX drift (bands are wide, and we sort/filter, not invoice).
-# Refresh occasionally against a live rate; USD is the identity. Keys match the currencies
-# ``_detect_currency`` emits.
+# Static fallback spot rates: 1 unit of currency in USD — the floor that keeps the
+# free-text majors convertible before the first live pull, and the default when no live
+# table is supplied. Enrichment stays a pure, offline function (§4.6/§4.9) with no network
+# in the crawl path, so live rates are fetched out-of-band (:mod:`jobcrawler.fx`, daily)
+# into the DB and overlaid via :meth:`StateStore.fx_table`, handed in as ``fx_rates``.
+# Coarse ranking tolerates FX drift (bands are wide, and we sort/filter, not invoice).
+# USD is the identity. Keys match the currencies ``_detect_currency`` emits.
 FX_TO_USD: dict[str, float] = {
     "USD": 1.0,
     "EUR": 1.08,
@@ -1093,6 +1095,8 @@ def usd_annual_band(
     salary_max: float | None,
     currency: str | None,
     period: str | None,
+    *,
+    fx_rates: dict[str, float] | None = None,
 ) -> tuple[float | None, float | None]:
     """Fold a source ``(min, max, currency, period)`` salary onto an annualized-USD band.
 
@@ -1101,8 +1105,14 @@ def usd_annual_band(
     factor. Returns ``(None, None)`` when the currency or period can't be resolved —
     never a half-converted figure — so an unrecognized salary reads as *unstated*
     rather than silently mis-ranked. A ``None`` bound stays ``None`` (open-ended band).
+
+    ``fx_rates`` is the currency→USD table to convert against; it defaults to the static
+    :data:`FX_TO_USD`. The host passes :meth:`StateStore.fx_table` (static floor overlaid
+    with refreshed live rates) so current rates are used without this pure step ever
+    touching the network.
     """
-    rate = FX_TO_USD.get((currency or "").strip().upper())
+    table = FX_TO_USD if fx_rates is None else fx_rates
+    rate = table.get((currency or "").strip().upper())
     factor = _PERIODS_PER_YEAR.get((period or "").strip().lower())
     if rate is None or factor is None:
         return (None, None)

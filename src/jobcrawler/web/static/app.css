@@ -279,3 +279,7 @@ details.cov-more summary { cursor: pointer; color: var(--fg-dim); font-size: 13p
 /* cap long prose on the detail page for readability on a wide viewport */
 .detail .description { max-width: 82ch; }
 .detail .reasons, .detail .concerns { max-width: 78ch; }
+
+/* FX attribution — required by the exchange-rate feed's terms wherever USD estimates show */
+.site-footer { padding: 20px 28px; color: var(--fg-dim); font-size: 12px; border-top: 1px solid var(--line); }
+.site-footer a { color: var(--fg-dim); text-decoration: underline; }

@@ -543,6 +543,69 @@ def test_interval_persists_across_reopen(tmp_path: object) -> None:
     s2.close()
 
 
+# -- fx rates: currency → USD conversion factors (§4.6) -----------------------
+
+
+def test_fx_rates_empty_until_set(store: StateStore) -> None:
+    assert store.get_fx_rates() == {}
+
+
+def test_set_then_get_fx_rates(store: StateStore) -> None:
+    store.set_fx_rates({"EUR": 1.14, "GBP": 1.32})
+    assert store.get_fx_rates() == {"EUR": 1.14, "GBP": 1.32}
+
+
+def test_set_fx_rates_upserts_per_currency(store: StateStore) -> None:
+    store.set_fx_rates({"EUR": 1.14, "GBP": 1.32})
+    store.set_fx_rates({"EUR": 1.20, "SEK": 0.10})
+    assert store.get_fx_rates() == {"EUR": 1.20, "GBP": 1.32, "SEK": 0.10}
+
+
+def test_set_fx_rates_empty_is_noop(store: StateStore) -> None:
+    store.set_fx_rates({})
+    assert store.get_fx_rates() == {}
+
+
+def test_fx_rates_age_is_none_until_set(store: StateStore) -> None:
+    assert store.fx_rates_age() is None
+
+
+def test_fx_rates_age_tracks_elapsed_time() -> None:
+    clock = _MutableClock(datetime(2026, 1, 1, tzinfo=timezone.utc))
+    s = StateStore(":memory:", clock=clock)
+    s.set_fx_rates({"EUR": 1.1})
+    assert s.fx_rates_age() == timedelta(0)
+    clock.now += timedelta(hours=6)
+    assert s.fx_rates_age() == timedelta(hours=6)
+    s.close()
+
+
+def test_fx_rates_persist_across_reopen(tmp_path: object) -> None:
+    db = f"{tmp_path}/state.db"  # type: ignore[str-bytes-safe]
+    s1 = StateStore(db)
+    s1.set_fx_rates({"EUR": 1.14})
+    s1.close()
+
+    s2 = StateStore(db)
+    assert s2.get_fx_rates() == {"EUR": 1.14}
+    s2.close()
+
+
+def test_fx_table_is_static_majors_when_empty(store: StateStore) -> None:
+    table = store.fx_table()
+    assert {"USD", "EUR", "GBP", "BRL"} <= table.keys()
+    assert table["USD"] == 1.0
+
+
+def test_fx_table_overlays_live_rates_on_static_floor(store: StateStore) -> None:
+    store.set_fx_rates({"EUR": 1.50, "SEK": 0.10})
+    table = store.fx_table()
+    assert table["EUR"] == 1.50  # live overrides the static major
+    assert table["SEK"] == 0.10  # a currency the static floor lacks is now present
+    assert "GBP" in table  # a static major absent from the live set is retained
+    assert table["USD"] == 1.0
+
+
 # -- position lifecycle: upsert new/changed/unchanged (§4.7 tracker) ----------
 
 

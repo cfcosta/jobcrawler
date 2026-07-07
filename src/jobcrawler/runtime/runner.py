@@ -244,6 +244,10 @@ def _process(
     # differing only on a tracking param must collapse to one canonical position.
     drop = config.tracking_param_denylist()
     markers = tuple(m.lower() for m in expired_markers)
+    # Snapshot the currency→USD table once per crawl (static floor + any live rates, §4.6):
+    # the annualized-USD band is a pure function of the job plus these rates, and rates only
+    # change out-of-band (:mod:`jobcrawler.fx`), so one read serves every job this crawl.
+    fx_rates = store.fx_table()
 
     # ``present`` = COMPLETE positions tracked this crawl; it gates the mass-closure guard
     # (a wholly-incomplete crawl leaves it empty → no diff-close). ``seen`` = every URL
@@ -287,7 +291,7 @@ def _process(
         outcome = store.upsert_position(
             slug,
             canon,
-            fields=_position_fields(job, enriched),
+            fields=_position_fields(job, enriched, fx_rates=fx_rates),
             content_hash=_content_hash(job),
         )
         present.add(canon)
@@ -572,7 +576,9 @@ def _has_marker(description: str, markers: tuple[str, ...]) -> bool:
 # --- position fields + content hash ----------------------------------------
 
 
-def _position_fields(job: Job, enriched: EnrichedJob) -> dict[str, object]:
+def _position_fields(
+    job: Job, enriched: EnrichedJob, *, fx_rates: dict[str, float] | None = None
+) -> dict[str, object]:
     """The ``positions`` columns for one job: raw identity + the §4.6 enrichment.
 
     Salary columns are written ONLY when the enrichment carries structured compensation
@@ -619,7 +625,7 @@ def _position_fields(job: Job, enriched: EnrichedJob) -> dict[str, object]:
         # Annualized-USD band for coherent cross-currency sort/filter (§4.6). Derived,
         # never hashed; NULL when the currency/period can't be resolved.
         usd_min, usd_max = usd_annual_band(
-            salary.min, salary.max, salary.currency, salary.period
+            salary.min, salary.max, salary.currency, salary.period, fx_rates=fx_rates
         )
         fields["salary_usd_min"] = usd_min
         fields["salary_usd_max"] = usd_max

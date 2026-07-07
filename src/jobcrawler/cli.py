@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, cast
 import yaml
 from pydantic import ValidationError
 
-from jobcrawler import config, generator_pointer, notify
+from jobcrawler import config, fx, generator_pointer, notify
 from jobcrawler.generate.scoring import CandidateResult
 from jobcrawler.governor import RateGovernor
 from jobcrawler.health import (
@@ -876,6 +876,30 @@ def cmd_rematch(args: argparse.Namespace) -> int:
         store.close()
 
 
+def cmd_fx_refresh(args: argparse.Namespace) -> int:
+    """Pull live currency→USD rates from the FX endpoint and store them (§4.6).
+
+    Manual counterpart to the daemon's daily refresh — useful on first setup (so salaries
+    convert at live rates instead of the static floor) or to force a mid-day update. Errors
+    surface here (unlike the fail-soft daemon path) so a misconfigured endpoint is visible.
+    """
+    store = StateStore(_db_path())
+    try:
+        try:
+            rates = fx.fetch_rates()
+        except Exception as exc:  # noqa: BLE001 - report any fetch/parse failure to the user
+            print(f"fx-refresh: could not fetch rates: {exc}")
+            return 1
+        store.set_fx_rates(rates)
+        sample = ", ".join(
+            f"{code}={rates[code]:.4f}" for code in ("EUR", "GBP", "BRL") if code in rates
+        )
+        print(f"fx-refresh: stored {len(rates)} exchange rates ({sample})")
+    finally:
+        store.close()
+    return 0
+
+
 def _run_rematch(store: StateStore) -> int:
     """Re-score the tracked backlog against the CURRENT profile, from the store (§4.7).
 
@@ -1245,6 +1269,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     async def match_drain() -> dict[str, int]:
         return await asyncio.to_thread(_match_drain_pass, store, matcher_cell)
 
+    # §4.6 FX refresh: the fetch is a blocking httpx GET + a store write, so run it off the
+    # event loop like every other host-side blocking step; fail-soft, so it never raises in.
+    async def fx_refresh() -> dict[str, float]:
+        return await asyncio.to_thread(fx.refresh_rates, store)
+
     # §4.1 hot-reload: the scheduler re-stats sites.yaml each tick and swaps in an
     # added/retired board without a restart; the healer's failure-capture hook reads the
     # same file fresh so a just-added board that breaks still feeds the §4.11 trainset.
@@ -1262,6 +1291,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         has_crawler=_has_live_crawler,  # route crawler-less sites to §4.2 bootstrap
         reload_sites=_make_sites_reloader(config.sites_path()),  # §4.1 hot-reload
         match_drain=match_drain,  # §4.7 profile watch + store-side pending drain
+        fx_refresh=fx_refresh,  # §4.6 daily currency-rate pull for the salary→USD band
         # §4.9 recheck: without this seam recheck_due() is always False, so neither the
         # windowed 404/expired-marker re-verification NOR the fleet-wide expire_due()
         # sweep (which lives inside recheck_tick) ever runs — stale/closed positions
@@ -1501,6 +1531,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="drain the pending-match backlog + re-evaluate verdicts after a profile edit",
     )
     rem.set_defaults(func=cmd_rematch)
+
+    sub.add_parser(
+        "fx-refresh",
+        help="fetch live currency exchange rates and store them for salary→USD conversion",
+    ).set_defaults(func=cmd_fx_refresh)
 
     prof = sub.add_parser(
         "profile", help="show the active candidate profile (prefs + hash)"

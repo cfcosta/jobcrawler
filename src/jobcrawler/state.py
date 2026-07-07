@@ -42,7 +42,7 @@ import sqlite3
 import threading
 from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 
@@ -311,6 +311,11 @@ CREATE TABLE IF NOT EXISTS meta (
 CREATE TABLE IF NOT EXISTS crawl_requests (
     slug         TEXT PRIMARY KEY,
     requested_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS fx_rates (
+    currency    TEXT PRIMARY KEY,
+    rate_to_usd REAL NOT NULL,
+    updated_at  TEXT NOT NULL
 );
 """
 
@@ -599,16 +604,20 @@ class StateStore:
         and idempotent: it reads only salaried rows still NULL in a *known* currency, so once
         filled a later open matches nothing. Rows in an unrecognized currency/period stay NULL
         (read as unstated by the salary sort/filter), exactly as a fresh crawl would leave them.
+        The convertible-currency set is the live :meth:`fx_table` (static majors plus any
+        refreshed rates), so a currency the static table couldn't reach becomes fillable the
+        first open after rates go live.
         """
-        from jobcrawler.runtime.normalize import FX_TO_USD, usd_annual_band
+        from jobcrawler.runtime.normalize import usd_annual_band
 
-        placeholders = ", ".join("?" for _ in FX_TO_USD)
+        table = self.fx_table()
+        placeholders = ", ".join("?" for _ in table)
         rows = self._conn.execute(
             "SELECT site, url, salary_min, salary_max, salary_currency, salary_period "
             "FROM positions WHERE salary_usd_min IS NULL AND salary_usd_max IS NULL "
             "AND (salary_min IS NOT NULL OR salary_max IS NOT NULL) "
             f"AND upper(COALESCE(salary_currency, '')) IN ({placeholders})",
-            tuple(FX_TO_USD),
+            tuple(table),
         ).fetchall()
         if not rows:
             return
@@ -619,6 +628,7 @@ class StateStore:
                 row["salary_max"],
                 row["salary_currency"],
                 row["salary_period"],
+                fx_rates=table,
             )
             if lo is None and hi is None:
                 continue  # unknown period — leave for a future crawl to resupply
@@ -1245,7 +1255,11 @@ class StateStore:
         from jobcrawler.runtime.normalize import usd_annual_band
 
         usd_min, usd_max = usd_annual_band(
-            salary_min, salary_max, salary_currency, salary_period
+            salary_min,
+            salary_max,
+            salary_currency,
+            salary_period,
+            fx_rates=self.fx_table(),
         )
         with self._lock:
             cur = self._conn.execute(
@@ -1673,6 +1687,69 @@ class StateStore:
                 (key, value),
             )
             self._conn.commit()
+
+    # -- fx rates (currency → USD conversion factors, §4.6) --------------------
+
+    def get_fx_rates(self) -> dict[str, float]:
+        """Every stored currency → USD conversion factor; empty dict if none set.
+
+        Persistence only — the factors are pulled out-of-band (a daily daemon job or
+        ``jobcrawl fx-refresh``, see :mod:`jobcrawler.fx`) and read back here so the
+        pure host-side salary conversion never touches the network (§4.6).
+        """
+        rows = self._conn.execute(
+            "SELECT currency, rate_to_usd FROM fx_rates"
+        ).fetchall()
+        return {row["currency"]: row["rate_to_usd"] for row in rows}
+
+    def set_fx_rates(self, rates: dict[str, float]) -> None:
+        """Upsert the currency → USD conversion factors, stamping ``updated_at``.
+
+        Idempotent per currency (``ON CONFLICT`` refreshes rate + timestamp); every row
+        in one call shares the same ``updated_at`` so :meth:`fx_rates_age` reads a single
+        freshness for the batch. A currency dropped from a later feed is *retained* (rows
+        are only upserted, never deleted) — a superset never shrinks the majors floor.
+        """
+        now = self._clock().isoformat()
+        rows = [(cur, rate, now) for cur, rate in rates.items()]
+        if not rows:
+            return
+        with self._lock:
+            self._conn.executemany(
+                "INSERT INTO fx_rates (currency, rate_to_usd, updated_at) "
+                "VALUES (?, ?, ?) "
+                "ON CONFLICT (currency) DO UPDATE SET "
+                "rate_to_usd = excluded.rate_to_usd, updated_at = excluded.updated_at",
+                rows,
+            )
+            self._conn.commit()
+
+    def fx_rates_age(self) -> timedelta | None:
+        """Time since the rates were last written, or None if never set.
+
+        Reads the newest ``updated_at`` and subtracts it from the clock so a caller can
+        judge staleness. ``updated_at`` is UTC ISO text (see :meth:`set_fx_rates`).
+        """
+        row = self._conn.execute(
+            "SELECT MAX(updated_at) AS updated_at FROM fx_rates"
+        ).fetchone()
+        if row is None or row["updated_at"] is None:
+            return None
+        return self._clock() - datetime.fromisoformat(row["updated_at"])
+
+    def fx_table(self) -> dict[str, float]:
+        """Static conversion factors overlaid with any live rates (§4.6 salary→USD).
+
+        The static :data:`FX_TO_USD` is the floor — it guarantees the handful of majors
+        the free-text detector emits stay convertible even before the first live refresh —
+        and persisted rates from :meth:`set_fx_rates` (a daily out-of-band pull, never the
+        crawl path) override and extend it. Callers hand the result to
+        :func:`usd_annual_band` so enrichment stays a pure function of its inputs.
+        """
+        from jobcrawler.runtime.normalize import FX_TO_USD
+
+        live = self.get_fx_rates()
+        return {**FX_TO_USD, **live} if live else dict(FX_TO_USD)
 
     def position_counts(self) -> dict[str, int]:
         """Coarse lifecycle tallies for status surfaces.

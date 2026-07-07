@@ -443,6 +443,19 @@ tests. The enrichment (`enrich(job) -> EnrichedJob`, a frozen dataclass of `job`
   (USD/EUR/GBP → year, BRL → month), overridden by an explicit `/hour` `/mês` `/ano` `per year`
   marker. **Conservative:** `None` when ambiguous; never invents a figure. `enrich` prefers the
   crawler's structured salary fields when set, else parses the verbatim `salary` text.
+- `usd_annual_band(min, max, currency, period, *, fx_rates=None)` → `(usd_min, usd_max)`. A
+  **derived comparison band**, not a claim about the posting: it converts the parsed figure to a
+  common annualized-USD scale (period → year by ×2080/×12; currency → USD by a rate factor) so
+  `min_salary` filters and the §16 UI can rank across currencies/periods. Persisted on the
+  position as `salary_usd_min/max` alongside the untouched source fields — never overwriting the
+  verbatim `salary` (the printed figure stays authoritative; this is a sort key, not a restatement).
+  Returns `(None, None)` for an unknown currency, so a figure we can't convert simply doesn't rank
+  rather than converting at a wrong rate. **FX rates are host-side and offline (§4.6 invariant):**
+  the crawl path never fetches a rate inline. `fx_rates` is injected from `StateStore.fx_table()` —
+  the static `FX_TO_USD` majors floor (conversion works before any pull, and survives a partial
+  feed) overlaid with the live `fx_rates` table, which a daily out-of-band job refreshes (§4.9) and
+  which broadens coverage to the feed's ~160 currencies. With no argument the function falls back to
+  the static floor, keeping it a pure in→out unit under test.
 
 ### 4.7 Dedup, position lifecycle & the matching pipeline
 This section **replaces the old news-ingest at-most-once story and the `POST /news` sink
@@ -669,6 +682,16 @@ operates the whole loop itself rather than relying on an external cron.
   `expires_at` and calls `expire_due()`. Like adaptive cadence it is **observation, not
   self-modification** — it neither rewrites a crawler nor swaps the generator — so it too is exempt
   from the autonomy brake.
+- **NEW — FX-rate refresh timer.** On `JOBCRAWLER_FX_REFRESH_INTERVAL` (default 24h) the scheduler
+  pulls live currency→USD rates from `JOBCRAWLER_FX_ENDPOINT` (a keyless USD-based feed) and writes
+  them to the `fx_rates` table for the §4.6 `usd_annual_band` conversion. This keeps the §4.6
+  pure/offline invariant intact: the rates are fetched **out-of-band** here (a plain host-side GET,
+  not through the crawl `ctx` SSRF path — same posture as `notify.py`), never inline on the crawl
+  path. It is **observation, not self-modification** (published exchange rates feeding a sort key), so
+  like the recheck it is **exempt from the autonomy brake**. Fail-soft: a failed pull is logged and
+  the last stored rates stand (the feed moves once a day and coarse ranking tolerates the drift); the
+  timer advances on every attempt so a flaky endpoint waits for the next window instead of retrying
+  each tick. `jobcrawl fx-refresh` forces a pull on demand (and surfaces errors, unlike the daemon).
 - **Bounded concurrency.** A global cap (`JOBCRAWLER_CONCURRENCY`) limits how many boards crawl at
   once; per-host limits come from §4.5. A board never overlaps its own prior run.
 - **Cold-start bootstrap is budgeted per tick.** A due site with no committed crawler is never
@@ -1254,6 +1277,8 @@ an `openrouter/…` slug billed per token. Selected knobs:
 | `JOBCRAWLER_EXPIRED_MARKERS` | 5 EN+pt-BR defaults | `\|`-separated closed-posting markers; empty disables (§4.6) |
 | `JOBCRAWLER_STABILITY_JACCARD` | `0.6` | §6 gate-3 URL-overlap threshold |
 | `JOBCRAWLER_ENUM_FLOOR_RATIO` | `0.5` | §6 enum floor vs the corpus posting-count oracle |
+| `JOBCRAWLER_FX_ENDPOINT` | `open.er-api.com/v6/latest/USD` | §4.6/§4.9 keyless USD-based FX feed; inverted to USD-per-unit for `usd_annual_band` (attribution: exchangerate-api.com) |
+| `JOBCRAWLER_FX_REFRESH_INTERVAL` | `24h` | §4.9 out-of-band FX-rate pull cadence; `off` disables (static `FX_TO_USD` floor then carries conversion) |
 | `JOBCRAWLER_STATE_URL` | `sqlite:///jobcrawler.db` | position/match/run/health/tracking store (§4.7/§16) |
 | `JOBCRAWLER_SERVE_HOST` | `127.0.0.1` | `jobcrawl serve` bind address (§16); **loopback by default** — the UI holds personal application data, so `0.0.0.0` only behind a trusted proxy/auth |
 | `JOBCRAWLER_SERVE_PORT` | `8765` | `jobcrawl serve` listen port (§16) |
@@ -1330,7 +1355,8 @@ an `openrouter/…` slug billed per token. Selected knobs:
   feed/API/Cloudflare tally (§4.10) sizing how much rides on the solver tier.
 - **Next (post-v1):** **multi-profile** (per-persona `PROFILE.md`, per-profile caches/caps); **apply-assist**
   (draft a tailored cover note from the match reasons — still human-sent, never auto-applied); **richer
-  salary normalization** (FX-normalized comparison, confidence bands — §14 Q3); **Postgres** state store
+  salary normalization** (FX-normalized comparison **shipped** — `usd_annual_band` over DB-cached live
+  rates, §4.6/§4.9; confidence bands still open — §14 Q3); **Postgres** state store
   (§14 Q5); cross-board repost dedup (§14 Q1).
 
 ## 14. Open questions / follow-ups
@@ -1346,9 +1372,12 @@ an `openrouter/…` slug billed per token. Selected knobs:
    single-company board auto)? The tier trades directly against **drift-MTTR** (§4.8) — more human review
    lengthens time-to-recovery — so the "right" default is an operating-point choice, not a fixed one, and
    auto-promotion leans on the §6 gates + versioned rollback (`jobcrawl rollback`) as its only safety net.
-3. **Salary inference confidence.** `parse_salary` is deliberately conservative (§4.6). Do we ever surface a
-   *confidence band* or an FX-normalized comparison for `min_salary` filtering across currencies/periods,
-   and how do we keep that from becoming the "invent a number" the never-invent rule forbids?
+3. **Salary inference confidence.** `parse_salary` is deliberately conservative (§4.6). The **FX-normalized
+   comparison shipped** — `usd_annual_band` derives a `salary_usd_min/max` sort key over a static majors
+   floor overlaid with a daily out-of-band live-rate pull (§4.6/§4.9), without touching the verbatim source
+   figure. Open: do we also surface a *confidence band* on the parsed figure, and how do we keep either
+   affordance from becoming the "invent a number" the never-invent rule forbids (the USD band already guards
+   this by returning `(None, None)`, i.e. simply not ranking, for a currency it can't convert)?
 4. **Per-source match budgets.** `match_daily_cap` is global. The fresh-vs-drain axis is handled — a
    `JOBCRAWLER_MATCH_DRAIN_FLOOR` slice is reserved so heavy new inflow can't starve the backlog drain
    (§4.7) — but *within* the fresh budget a noisy aggregator (RemoteOK) can still crowd out a high-signal

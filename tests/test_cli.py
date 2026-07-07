@@ -15,10 +15,11 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httpx
 import pytest
 from pytest import MonkeyPatch
 
-from jobcrawler import config, generator_pointer
+from jobcrawler import config, fx, generator_pointer
 from jobcrawler.cli import (
     PreflightError,
     _acquire_run_lock,
@@ -33,6 +34,7 @@ from jobcrawler.cli import (
     _run_rematch,
     build_parser,
     cmd_crawl,
+    cmd_fx_refresh,
     cmd_generate,
     cmd_list,
     cmd_login,
@@ -1161,6 +1163,54 @@ def test_cmd_rematch_without_a_profile_exits_two(
     monkeypatch.setenv("JOBCRAWLER_MATCH_MODEL", "test/match-model")
 
     assert cmd_rematch(build_parser().parse_args(["rematch"])) == 2
+
+
+# -- fx-refresh (§4.6): manual live currency-rate pull -----------------------
+
+
+def test_cmd_fx_refresh_is_registered() -> None:
+    assert build_parser().parse_args(["fx-refresh"]).func is cmd_fx_refresh
+
+
+def _fx_response(payload: object, status: int = 200) -> httpx.Response:
+    return httpx.Response(
+        status, json=payload, request=httpx.Request("GET", "https://fx.test/latest")
+    )
+
+
+def test_cmd_fx_refresh_fetches_and_persists_rates(
+    tmp_path: Path, monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A file-backed store so the rates survive the handler closing its own connection.
+    db = tmp_path / "state.db"
+    monkeypatch.setenv("JOBCRAWLER_STATE_URL", str(db))
+    payload = {"result": "success", "rates": {"EUR": 0.8, "GBP": 0.5, "BRL": 5.0}}
+    monkeypatch.setattr(fx.httpx, "get", lambda *a, **k: _fx_response(payload))
+
+    assert cmd_fx_refresh(build_parser().parse_args(["fx-refresh"])) == 0
+    out = capsys.readouterr().out
+    assert "stored" in out and "EUR=1.2500" in out  # USD-per-unit (1 / 0.8)
+
+    store = StateStore(str(db))
+    try:
+        assert store.get_fx_rates()["EUR"] == pytest.approx(1.25)
+    finally:
+        store.close()
+
+
+def test_cmd_fx_refresh_reports_a_fetch_failure_and_exits_one(
+    tmp_path: Path, monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Unlike the fail-soft daemon path, the manual command surfaces errors (exit 1) so a
+    # misconfigured endpoint is visible instead of silently leaving the static floor.
+    monkeypatch.setenv("JOBCRAWLER_STATE_URL", str(tmp_path / "state.db"))
+
+    def boom(*a: object, **k: object) -> httpx.Response:
+        raise httpx.ConnectError("endpoint down")
+
+    monkeypatch.setattr(fx.httpx, "get", boom)
+    assert cmd_fx_refresh(build_parser().parse_args(["fx-refresh"])) == 1
+    assert "could not fetch" in capsys.readouterr().out
 
 
 # -- profile view (§6) -------------------------------------------------------

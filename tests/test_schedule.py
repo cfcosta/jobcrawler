@@ -1821,3 +1821,68 @@ async def test_match_drain_tick_invokes_the_seam_and_marks_the_timer() -> None:
     assert sched.match_drain_due(T0) is False
     assert sched.match_drain_due(T0 + timedelta(minutes=9)) is False
     assert sched.match_drain_due(T0 + timedelta(minutes=10)) is True
+
+
+# -- §4.6 FX-refresh timer: daily out-of-band currency-rate pull --------------
+#
+# Also autonomy-EXEMPT: pulling published exchange rates is external-data observation
+# feeding the salary→USD band, not self-modification. Mirrors the match-drain timer.
+
+
+def test_fx_due_requires_both_a_cadence_and_a_seam() -> None:
+    store = StateStore(":memory:")
+    sites = [Site(slug="s0", url="https://x.com")]
+
+    async def refresh() -> dict[str, float]:
+        return {}
+
+    # A cadence but no fetch seam → disabled (a crawl-only deployment has no FX puller).
+    no_seam = Scheduler(
+        sites, store=store, crawl=_ok_crawl, clock=lambda: T0, fx_check="24h"
+    )
+    assert no_seam.fx_due(T0) is False
+    # A seam but the cadence turned off → disabled.
+    no_cadence = Scheduler(
+        sites,
+        store=store,
+        crawl=_ok_crawl,
+        clock=lambda: T0,
+        fx_check="off",
+        fx_refresh=refresh,
+    )
+    assert no_cadence.fx_due(T0) is False
+    # Both wired → due on the FIRST pass (a daemon down over a rate update catches up).
+    both = Scheduler(
+        sites,
+        store=store,
+        crawl=_ok_crawl,
+        clock=lambda: T0,
+        fx_check="24h",
+        fx_refresh=refresh,
+    )
+    assert both.fx_due(T0) is True
+
+
+async def test_fx_tick_invokes_the_seam_and_marks_the_timer() -> None:
+    calls: list[str] = []
+
+    async def refresh() -> dict[str, float]:
+        calls.append("refresh")
+        return {"EUR": 1.1, "GBP": 1.3, "BRL": 0.2}
+
+    sched = Scheduler(
+        [Site(slug="s0", url="https://x.com")],
+        store=StateStore(":memory:"),
+        crawl=_ok_crawl,
+        clock=lambda: T0,
+        fx_check="24h",
+        fx_refresh=refresh,
+    )
+    await sched.fx_tick()
+    assert calls == ["refresh"]
+    # The timer advances a full interval whether or not the pull succeeded, so a flaky
+    # endpoint waits for the next daily window instead of re-firing every loop tick.
+    sched.mark_fx(T0)
+    assert sched.fx_due(T0) is False
+    assert sched.fx_due(T0 + timedelta(hours=23)) is False
+    assert sched.fx_due(T0 + timedelta(hours=24)) is True
