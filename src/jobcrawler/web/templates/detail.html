@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}{{ p.title }} · {{ p.hiring_company or p.company }}{% endblock %}
+{% block main_class %}content-narrow{% endblock %}
 {% block content %}
 <div class="detail">
   <p><a class="back" href="/positions">← All positions</a></p>

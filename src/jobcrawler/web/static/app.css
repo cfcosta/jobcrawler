@@ -34,24 +34,26 @@ h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .04em; color: v
 /* topbar */
 .topbar {
   display: flex; align-items: center; gap: 16px;
-  padding: 10px 20px; background: var(--panel); border-bottom: 1px solid var(--line);
+  padding: 10px 28px; background: var(--panel); border-bottom: 1px solid var(--line);
   position: sticky; top: 0; z-index: 10; flex-wrap: wrap;
 }
 .nav { display: flex; align-items: center; gap: 14px; }
 .nav .brand { font-weight: 700; color: var(--fg); }
 .nav a { color: var(--fg-dim); }
 .nav a.active { color: var(--fg); }
-.search { display: flex; gap: 6px; flex: 1; min-width: 220px; }
+.search { display: flex; gap: 6px; flex: 1; min-width: 220px; max-width: 620px; }
 .search input { flex: 1; }
 .rescore { margin-left: auto; }
 
 /* flash */
 .flash {
-  margin: 12px 20px -4px; padding: 8px 14px; border-radius: var(--radius);
+  margin: 12px 28px -4px; padding: 8px 14px; border-radius: var(--radius);
   background: rgba(91, 157, 255, .12); border: 1px solid rgba(91, 157, 255, .35); color: var(--fg);
 }
 
-.content { max-width: 1100px; margin: 0 auto; padding: 20px; }
+.content { max-width: 1600px; margin: 0 auto; padding: 20px 28px 40px; }
+/* Long-form pages (the detail view) opt into a narrower measure so prose stays readable. */
+.content-narrow { max-width: 1080px; }
 .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 @media (max-width: 780px) { .cols { grid-template-columns: 1fr; } }
 
@@ -92,7 +94,7 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .funnel { display: flex; gap: 10px; flex-wrap: wrap; }
 .stage {
   display: flex; flex-direction: column; align-items: center; gap: 2px;
-  min-width: 92px; padding: 12px 10px; border-radius: var(--radius);
+  flex: 1 1 92px; min-width: 92px; padding: 12px 10px; border-radius: var(--radius);
   background: var(--panel-2); border: 1px solid var(--line); color: var(--fg);
 }
 .stage:hover { text-decoration: none; border-color: var(--accent); }
@@ -127,9 +129,15 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .matches { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .matches li { display: flex; align-items: center; gap: 10px; }
 .matches .score {
-  min-width: 34px; text-align: center; font-weight: 700; padding: 2px 6px; border-radius: 6px;
-  background: var(--panel-2); border: 1px solid var(--line);
+  flex: none; min-width: 34px; text-align: center; font-weight: 700; padding: 2px 6px; border-radius: 6px;
+  background: var(--panel-2); border: 1px solid var(--line); font-variant-numeric: tabular-nums;
 }
+.matches .score.strong { color: #86efac; border-color: rgba(34, 197, 94, .4); }
+.matches .mt { display: flex; flex-direction: column; min-width: 0; color: var(--fg); }
+.matches a.mt:hover { text-decoration: none; }
+.matches a.mt:hover .mt-title { text-decoration: underline; }
+.matches .mt-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.matches .mt-sub { font-size: 12px; color: var(--fg-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .matches .verdict { font-size: 12px; color: var(--fg-dim); margin-left: auto; }
 
 /* tables */
@@ -220,3 +228,54 @@ tr.selected td { background: rgba(91, 157, 255, .10); }
 .bulkbar .bulk-count { color: var(--fg-dim); font-size: 13px; margin-right: auto; }
 .bulkbar .bulk-count strong { color: var(--fg); font-variant-numeric: tabular-nums; }
 .bulkbar .bulk-group { display: flex; align-items: center; gap: 6px; }
+
+/* dashboard KPI strip */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.kpi {
+  display: flex; flex-direction: column; gap: 4px; padding: 14px 16px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); color: var(--fg);
+}
+a.kpi:hover { text-decoration: none; border-color: var(--accent); }
+.kpi-n { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.kpi-sub { font-size: 14px; font-weight: 400; color: var(--fg-dim); margin-left: 4px; }
+.kpi-k { font-size: 12px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: .04em; }
+.kpi.kpi-success .kpi-n { color: #86efac; }
+
+/* score distribution rows are drill-down links */
+a.dist-row { text-decoration: none; }
+a.dist-row:hover { text-decoration: none; }
+a.dist-row:hover .dist-label, a.dist-row:hover .dist-n { color: var(--fg); }
+a.dist-row:hover .dist-bar { outline: 1px solid var(--line); }
+
+/* crawler coverage panel */
+.cov-legend { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; }
+.cov-pill { font-size: 12px; padding: 1px 9px; border-radius: 999px; text-transform: capitalize; background: var(--panel-2); color: var(--fg-dim); }
+.cov-live { background: rgba(34, 197, 94, .16); color: #86efac; }
+.cov-stale { background: rgba(245, 158, 11, .16); color: #fcd34d; }
+.cov-review { background: rgba(139, 92, 246, .18); color: #c4b5fd; }
+.cov-failed { background: rgba(239, 68, 68, .16); color: #fca5a5; }
+.cov-disabled { background: var(--panel-2); color: var(--muted); }
+.cov-pending { background: var(--panel-2); color: var(--fg-dim); }
+.cov-total { margin-left: auto; color: var(--fg-dim); font-size: 13px; }
+.grid th.num, .grid td.num { text-align: right; font-variant-numeric: tabular-nums; }
+details.cov-more { margin-top: 14px; }
+details.cov-more summary { cursor: pointer; color: var(--fg-dim); font-size: 13px; }
+.cov-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.cov-chip { display: inline-flex; }
+.chip-btn { background: var(--panel-2); color: var(--fg); border: 1px solid var(--line); font-weight: 500; font-size: 12px; padding: 3px 10px; border-radius: 999px; }
+.chip-btn:hover:not(:disabled) { border-color: var(--accent); }
+
+/* positions filter bar as a two-row panel */
+.filters.panel { display: block; }
+.filter-line { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.filter-line + .filter-line { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+.filter-line .grow { flex: 1 1 220px; }
+.result-count { color: var(--fg-dim); font-size: 13px; margin: 0 0 10px; }
+
+/* keep the positions header in view while scrolling a long list (sits below the topbar) */
+.grid.positions thead th { position: sticky; top: 52px; z-index: 5; background: var(--bg); }
+.positions .score.strong { color: #86efac; }
+
+/* cap long prose on the detail page for readability on a wide viewport */
+.detail .description { max-width: 82ch; }
+.detail .reasons, .detail .concerns { max-width: 78ch; }

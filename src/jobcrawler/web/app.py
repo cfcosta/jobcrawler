@@ -315,12 +315,46 @@ def _score_distribution(store: StateStore) -> list[dict[str, Any]]:
     return [
         {
             "label": f"{lo}–{hi}",
+            "low": lo,
             "count": n,
             "pct": (100 * n // peak) if peak else 0,
             "strong": lo >= 60,
         }
         for (lo, hi), n in zip(bands, counts)
     ]
+
+
+# Coarse per-board coverage buckets for the dashboard, ordered attention-first (a failed
+# board should sort above a healthy one). The raw §4.8 ``HealthState`` values collapse into
+# these so the dashboard can show a legend + roll-up without importing the health enum.
+_COV_RANK = {
+    "failed": 0,
+    "review": 1,
+    "stale": 2,
+    "live": 3,
+    "disabled": 4,
+    "pending": 5,
+}
+
+
+def _cov_state(enabled: bool, health: "str | None") -> str:
+    """Fold a site's raw health string into a coarse coverage bucket (see :data:`_COV_RANK`).
+
+    ``pending`` is the catch-all for a board with no recorded health yet (never crawled,
+    or the healer hasn't classified it) — distinct from ``live`` so the dashboard can fold
+    the not-yet-crawled long tail out of the main table.
+    """
+    if not enabled:
+        return "disabled"
+    if health in ("generation_failed", "blocked"):
+        return "failed"
+    if health == "degraded":
+        return "review"
+    if health == "stale":
+        return "stale"
+    if health == "healthy":
+        return "live"
+    return "pending"
 
 
 def _bulk_msg(action: str, n: int, status_val: "tracking.TrackStatus | None") -> str:
@@ -472,28 +506,63 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
             }
             for s in tracking.ORDER
         ]
+        lifecycle = store.position_counts()
+        distribution = _score_distribution(store)
+        strong = sum(b["count"] for b in distribution if b["strong"])
+
+        # One query each for open counts / health / latest run, instead of a per-site
+        # loop that fired hundreds of queries against a full registry.
         open_by_site = store.open_counts_by_site()
-        per_site = [
-            {
-                "slug": getattr(s, "slug", ""),
-                "name": site_names.get(getattr(s, "slug", ""), getattr(s, "slug", "")),
-                "enabled": getattr(s, "enabled", True),
-                "open": open_by_site.get(getattr(s, "slug", ""), 0),
-                "health": store.get_health(getattr(s, "slug", "")) or "—",
-                "last_run": store.last_run(getattr(s, "slug", "")),
-            }
-            for s in site_list
+        health_by_site = store.health_by_site()
+        runs_by_site = store.latest_run_by_site()
+        per_site = []
+        cov_counts = {k: 0 for k in _COV_RANK}
+        for s in site_list:
+            slug = getattr(s, "slug", "")
+            enabled = getattr(s, "enabled", True)
+            health = health_by_site.get(slug)
+            state = _cov_state(enabled, health)
+            cov_counts[state] += 1
+            per_site.append(
+                {
+                    "slug": slug,
+                    "name": site_names.get(slug, slug),
+                    "enabled": enabled,
+                    "open": open_by_site.get(slug, 0),
+                    "health": health or "—",
+                    "last_run": runs_by_site.get(slug),
+                    "state": state,
+                }
+            )
+        per_site.sort(
+            key=lambda d: (_COV_RANK.get(str(d["state"]), 9), -int(d["open"]), str(d["name"]).lower())
+        )
+        # A board is "idle" (folded out of the table into a chip grid) only when it has
+        # never surfaced anything: pending health AND zero open positions. Anything with
+        # open roles stays in the table so its filtered-list link (#50) is reachable.
+        visible = [d for d in per_site if d["state"] != "pending" or d["open"]]
+        idle = [d for d in per_site if d["state"] == "pending" and not d["open"]]
+
+        kpis = [
+            {"label": "Open roles", "value": lifecycle["open"], "href": "/positions?status=open"},
+            {"label": "Strong ≥60", "value": strong, "href": "/positions?min_score=60&sort=score", "accent": "success"},
+            {"label": "Scored", "value": lifecycle["matched"], "href": "/positions?sort=score"},
+            {"label": "Awaiting score", "value": lifecycle["pending"]},
+            {"label": "Closed", "value": lifecycle["closed"], "href": "/positions?status=closed"},
+            {"label": "Boards live", "value": cov_counts["live"], "sub": len(per_site), "href": "#sites"},
         ]
+
         return templates.TemplateResponse(
             request=request,
             name="dashboard.html",
             context={
                 "nav": "dashboard",
                 "msg": request.query_params.get("msg"),
+                "kpis": kpis,
                 "funnel": funnel,
                 "dismissed": tcounts.get("dismissed", 0),
-                "lifecycle": store.position_counts(),
-                "distribution": _score_distribution(store),
+                "lifecycle": lifecycle,
+                "distribution": distribution,
                 "top_matches": store.matches(
                     0,
                     limit=8,
@@ -501,7 +570,9 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
                     exclude_dismissed=True,
                     exclude_company_applied=True,
                 ),
-                "per_site": per_site,
+                "per_site": visible,
+                "idle_sites": idle,
+                "coverage": {"total": len(per_site), "counts": cov_counts, "idle": len(idle)},
                 "has_registry": bool(site_list),
             },
         )

@@ -1705,6 +1705,28 @@ class StateStore:
         ).fetchall()
         return {row["site"]: int(row["n"]) for row in rows}
 
+    def health_by_site(self) -> dict[str, str]:
+        """Persisted §4.8 health state per site slug, in one query (§16 dashboard).
+
+        Folds the per-site :meth:`get_health` loop the dashboard used to run (one query
+        per registered board — hundreds on a full registry) into a single table scan.
+        """
+        rows = self._conn.execute("SELECT site, state FROM site_health").fetchall()
+        return {row["site"]: row["state"] for row in rows}
+
+    def latest_run_by_site(self) -> dict[str, RunRecord]:
+        """The most recent run per site slug, in one query (§16 dashboard).
+
+        Replaces a per-site :meth:`last_run` loop; the ``runs_by_site`` index makes the
+        per-site ``MAX(id)`` (each board's newest run) a cheap grouped lookup.
+        """
+        rows = self._conn.execute(
+            "SELECT r.* FROM runs r JOIN ("
+            "  SELECT site, MAX(id) AS mx FROM runs GROUP BY site"
+            ") m ON r.site = m.site AND r.id = m.mx"
+        ).fetchall()
+        return {row["site"]: _to_record(row) for row in rows}
+
     # -- LLM match cache & daily spend (§6/§8) --------------------------------
 
     def cached_match(

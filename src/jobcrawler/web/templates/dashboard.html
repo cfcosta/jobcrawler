@@ -3,6 +3,22 @@
 {% block content %}
 <h1>Dashboard</h1>
 
+<div class="kpis">
+  {% for k in kpis %}
+  {% if k.href %}
+  <a class="kpi kpi-{{ k.accent or 'plain' }}" href="{{ k.href }}">
+    <span class="kpi-n">{{ k.value }}{% if k.sub is defined %}<span class="kpi-sub">/ {{ k.sub }}</span>{% endif %}</span>
+    <span class="kpi-k">{{ k.label }}</span>
+  </a>
+  {% else %}
+  <div class="kpi kpi-{{ k.accent or 'plain' }}">
+    <span class="kpi-n">{{ k.value }}</span>
+    <span class="kpi-k">{{ k.label }}</span>
+  </div>
+  {% endif %}
+  {% endfor %}
+</div>
+
 <section class="panel">
   <h2>Your pipeline</h2>
   <div class="funnel">
@@ -20,26 +36,16 @@
   </div>
 </section>
 
-<section class="panel">
-  <h2>Crawl lifecycle</h2>
-  <div class="stats">
-    <div class="stat"><span class="n">{{ lifecycle.open }}</span><span class="k">Open</span></div>
-    <div class="stat"><span class="n">{{ lifecycle.closed }}</span><span class="k">Closed</span></div>
-    <div class="stat"><span class="n">{{ lifecycle.matched }}</span><span class="k">Scored</span></div>
-    <div class="stat"><span class="n">{{ lifecycle.pending }}</span><span class="k">Pending</span></div>
-  </div>
-</section>
-
 <div class="cols">
   <section class="panel">
     <h2>Match score distribution</h2>
     <div class="dist">
       {% for b in distribution %}
-      <div class="dist-row">
+      <a class="dist-row" href="/positions?min_score={{ b.low }}&amp;sort=score" title="Browse positions scoring {{ b.label }}">
         <span class="dist-label">{{ b.label }}</span>
         <span class="dist-bar"><span class="dist-fill{{ ' strong' if b.strong else '' }}" style="width: {{ b.pct }}%"></span></span>
         <span class="dist-n">{{ b.count }}</span>
-      </div>
+      </a>
       {% endfor %}
     </div>
   </section>
@@ -50,12 +56,11 @@
     <ul class="matches">
       {% for p in top_matches %}
       <li>
-        <a href="/positions/{{ encode_pid(p.site, p.url) }}">
-          <span class="score">{{ p.match_score }}</span>
-          <span class="mt">{{ p.title }} · {{ p.hiring_company or p.company }}</span>
+        <span class="score{{ ' strong' if p.match_score is not none and p.match_score >= 60 else '' }}">{{ p.match_score if p.match_score is not none else '—' }}</span>
+        <a class="mt" href="/positions/{{ encode_pid(p.site, p.url) }}">
+          <span class="mt-title">{{ p.title }}</span>
+          <span class="mt-sub">{{ p.hiring_company or p.company }}{% if p | salary %} · {{ p | salary }}{% endif %}{% if p.match_verdict %} · {{ p.match_verdict }}{% endif %}</span>
         </a>
-        {% if p | salary %}<span class="tag">{{ p | salary }}</span>{% endif %}
-        {% if p.match_verdict %}<span class="verdict">{{ p.match_verdict }}</span>{% endif %}
       </li>
       {% endfor %}
     </ul>
@@ -63,9 +68,9 @@
   </section>
 </div>
 
-<section class="panel">
+<section class="panel" id="sites">
   <div class="panel-head">
-    <h2>Sites</h2>
+    <h2>Crawler coverage</h2>
     {% if has_registry %}
     <form method="post" action="/recrawl-all"
           onsubmit="return confirm('Force a re-crawl of every enabled site and rescore all open positions?');">
@@ -75,14 +80,24 @@
     {% endif %}
   </div>
   {% if has_registry %}
+  <div class="cov-legend">
+    <span class="cov-pill cov-live">{{ coverage.counts.live }} live</span>
+    <span class="cov-pill cov-stale">{{ coverage.counts.stale }} stale</span>
+    <span class="cov-pill cov-review">{{ coverage.counts.review }} review</span>
+    <span class="cov-pill cov-failed">{{ coverage.counts.failed }} failed</span>
+    <span class="cov-pill cov-disabled">{{ coverage.counts.disabled }} off</span>
+    <span class="cov-pill cov-pending">{{ coverage.counts.pending }} pending</span>
+    <span class="cov-total">{{ coverage.total }} boards</span>
+  </div>
+  {% if per_site %}
   <table class="grid">
-    <thead><tr><th>Site</th><th>Open</th><th>Health</th><th>Last run</th><th></th></tr></thead>
+    <thead><tr><th>Site</th><th class="num">Open</th><th>Coverage</th><th>Last run</th><th></th></tr></thead>
     <tbody>
     {% for s in per_site %}
     <tr>
-      <td><a href="/positions?site={{ s.slug }}">{{ s.name }}</a>{% if not s.enabled %} <span class="tag">disabled</span>{% endif %}</td>
-      <td>{{ s.open }}</td>
-      <td><span class="health health-{{ s.health }}">{{ s.health }}</span></td>
+      <td><a href="/positions?site={{ s.slug }}">{{ s.name }}</a>{% if not s.enabled %} <span class="tag">off</span>{% endif %}</td>
+      <td class="num">{{ s.open }}</td>
+      <td><span class="cov-pill cov-{{ s.state }}">{{ s.state }}</span></td>
       <td>{% if s.last_run %}{{ s.last_run.started | age }} ago{% else %}—{% endif %}</td>
       <td>
         <form method="post" action="/sites/{{ s.slug }}/crawl">
@@ -93,6 +108,19 @@
     {% endfor %}
     </tbody>
   </table>
+  {% endif %}
+  {% if idle_sites %}
+  <details class="cov-more">
+    <summary>{{ coverage.idle }} boards awaiting a first crawl</summary>
+    <div class="cov-chips">
+      {% for s in idle_sites %}
+      <form method="post" action="/sites/{{ s.slug }}/crawl" class="cov-chip">
+        <button type="submit" class="chip-btn"{{ ' disabled' if not s.enabled else '' }} title="Crawl {{ s.name }} now">{{ s.name }}</button>
+      </form>
+      {% endfor %}
+    </div>
+  </details>
+  {% endif %}
   {% else %}
   <p class="empty">Site registry unavailable — crawl triggers disabled.</p>
   {% endif %}
