@@ -105,7 +105,10 @@
     Greenhouse EU board API, token `bvnk`. Whole board in one GET on the EU Greenhouse API
     host. Parse the standard Greenhouse fields. Strong match for stablecoin payments,
     crypto/fiat settlement, card issuing, transaction infrastructure and backend platform
-    roles.
+    roles. Emit a single-request crawler: with `content=true` this one GET already embeds
+    every role's full HTML content/description — parse it straight from the JSON and keep
+    EXTRA_HOSTS empty. Never fetch boards.greenhouse.io or a per-job page, and never
+    authorize a host merely linked inside a description.
 
 - slug: alchemy
   name: "Alchemy"
@@ -115,7 +118,11 @@
   hints: >-
     Greenhouse board API, token `alchemy`. Whole board in one GET. Parse the standard
     Greenhouse fields. Strong match for blockchain infrastructure, protocol APIs,
-    wallet/developer tooling, high-scale backend and distributed systems roles.
+    wallet/developer tooling, high-scale backend and distributed systems roles. Emit a
+    single-request crawler: with `content=true` this one GET already embeds every role's
+    full HTML content/description — parse it straight from the JSON and keep EXTRA_HOSTS
+    empty. Never fetch boards.greenhouse.io or a per-job page, and never authorize a host
+    merely linked inside a description.
 
 - slug: fireblocks
   name: "Fireblocks"
@@ -284,7 +291,11 @@
     Ashby job board API, token `chainlink-labs`. Parse the standard Ashby fields. Strong
     match for decentralized oracle infrastructure, blockchain protocols, on-chain finance,
     cryptography-adjacent backend, distributed systems and remote protocol engineering
-    roles.
+    roles. Emit a single-request crawler: this one GET returns every open role with its full
+    description in `descriptionPlain`/`descriptionHtml` (fall back to `descriptionHtml` when
+    the plain text is empty) plus compensation — parse them straight from the JSON and keep
+    EXTRA_HOSTS empty. Never fetch jobs.ashbyhq.com or a per-job page, and never authorize a
+    host merely linked inside a description.
 
 - slug: supabase
   name: "Supabase"
@@ -294,7 +305,11 @@
   hints: >-
     Ashby job board API, token `supabase`. Parse the standard Ashby fields. Strong match for
     database infrastructure, Postgres, storage, developer platform, edge/runtime systems,
-    APIs and remote backend roles.
+    APIs and remote backend roles. Emit a single-request crawler: this one GET returns every
+    open role with its full description in `descriptionPlain`/`descriptionHtml` (fall back to
+    `descriptionHtml` when the plain text is empty) plus compensation — parse them straight
+    from the JSON and keep EXTRA_HOSTS empty. Never fetch jobs.ashbyhq.com or a per-job page,
+    and never authorize a host merely linked inside a description.
 
 - slug: sentry
   name: "Sentry"
@@ -304,7 +319,11 @@
   hints: >-
     Ashby job board API, token `sentry`. Parse the standard Ashby fields. Strong match for
     observability, event ingestion, distributed storage, performance monitoring, reliability
-    engineering and backend platform roles.
+    engineering and backend platform roles. Emit a single-request crawler: this one GET
+    returns every open role with its full description in `descriptionPlain`/`descriptionHtml`
+    (fall back to `descriptionHtml` when the plain text is empty) plus compensation — parse
+    them straight from the JSON and keep EXTRA_HOSTS empty. Never fetch jobs.ashbyhq.com or a
+    per-job page, and never authorize a host merely linked inside a description.
 
 - slug: pinecone
   name: "Pinecone"
@@ -314,7 +333,11 @@
   hints: >-
     Ashby job board API, token `pinecone`. Parse the standard Ashby fields. Strong match for
     vector search, retrieval infrastructure, indexing, database systems, distributed storage
-    and performance engineering roles.
+    and performance engineering roles. Emit a single-request crawler: this one GET returns
+    every open role with its full description in `descriptionPlain`/`descriptionHtml` (fall
+    back to `descriptionHtml` when the plain text is empty) plus compensation — parse them
+    straight from the JSON and keep EXTRA_HOSTS empty. Never fetch jobs.ashbyhq.com or a
+    per-job page, and never authorize a host merely linked inside a description.
 
 - slug: turbopuffer
   name: "Turbopuffer"
@@ -364,7 +387,12 @@
   hints: >-
     Ashby job board API, token `oplabs`. Parse the standard Ashby fields. Strong match for
     Ethereum L2 protocol infrastructure, Rust/Go backend, rollup systems, on-chain data,
-    protocol reliability and remote engineering roles.
+    protocol reliability and remote engineering roles. Emit a single-request crawler: this
+    one GET returns every open role with its full description in
+    `descriptionPlain`/`descriptionHtml` (fall back to `descriptionHtml` when the plain text
+    is empty) plus compensation — parse them straight from the JSON and keep EXTRA_HOSTS
+    empty. Never fetch jobs.ashbyhq.com or a per-job page, and never authorize a host merely
+    linked inside a description.
 
 - slug: parity
   name: "Parity Technologies"
@@ -374,7 +402,12 @@
   hints: >-
     Ashby job board API, token `parity`. Parse the standard Ashby fields. Strong match for
     Rust systems engineering, blockchain protocols, Substrate/Polkadot, security,
-    distributed systems and globally remote engineering roles.
+    distributed systems and globally remote engineering roles. Emit a single-request crawler:
+    this one GET returns every open role with its full description in
+    `descriptionPlain`/`descriptionHtml` (fall back to `descriptionHtml` when the plain text
+    is empty) plus compensation — parse them straight from the JSON and keep EXTRA_HOSTS
+    empty. Never fetch jobs.ashbyhq.com or a per-job page, and never authorize a host merely
+    linked inside a description.
 
 - slug: spotify
   name: "Spotify"
