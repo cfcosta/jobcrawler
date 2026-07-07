@@ -574,10 +574,15 @@ daemon was down is caught immediately:
    stays parked for its next crawl to backfill; a row the deterministic prefilter now
    definitely rejects is **unparked verdict-less** (`clear_match_pending` — back to "tracked,
    unscored", so permanent mismatches can't clog the FIFO); survivors go through the ordinary
-   `score_new` path — cache hits free, fresh scoring under the daily cap, fail-open parking,
-   strong verdicts notified exactly like the runner's sink. Unchanged `(job, profile)` pairs
-   re-apply from cache for **zero tokens**, so a requeue of thousands of rows only pays for
-   verdicts the edit actually changed.
+   `score_new` path — cache hits free, fail-open parking, strong verdicts notified exactly
+   like the runner's sink. The drain scores against the **full** daily cap while fresh
+   crawl-time scoring holds `JOBCRAWLER_MATCH_DRAIN_FLOOR` (default 80) of that cap back: a
+   day of saturating new inflow can otherwise reserve the whole cap and starve the drain to
+   `granted=0` every tick, so the parked backlog never shrinks. Reserving a floor guarantees
+   the drain a slice; it still gets anything fresh scoring left unused (the floor is a
+   guarantee, not a ceiling). Unchanged `(job, profile)` pairs re-apply from cache for **zero
+   tokens**, so a requeue of thousands of rows only pays for verdicts the edit actually
+   changed.
 
 `jobcrawl rematch` runs the same logic on demand (free cache passes over parked + open scored
 rows, then one capped LLM drain from the store) and refreshes `meta.profile_hash`, so the
@@ -1231,6 +1236,7 @@ an `openrouter/…` slug billed per token. Selected knobs:
 | `JOBCRAWLER_MATCH_BATCH` | `10` | jobs per `dspy.Predict(MatchJobs)` call (§4.7) |
 | `JOBCRAWLER_MATCH_MIN_SCORE` | `70` | 0–100 score at/above which a match notifies (surface threshold, not a drop) |
 | `JOBCRAWLER_MATCH_DAILY_CAP` | `400` | hard per-UTC-day LLM-scored jobs; cache hits free; overflow → `match_pending` |
+| `JOBCRAWLER_MATCH_DRAIN_FLOOR` | `80` | §4.7 slice of the daily cap fresh scoring holds back for the backlog drain (fresh spends ≤ `cap − floor`; drain spends the floor + fresh's leftover); `0` = one shared budget |
 | `JOBCRAWLER_MATCH_RATE` | `10/m` | governor pacing for match LLM calls (≠ the daily volume cap) |
 | `JOBCRAWLER_EXTRACT_MODEL` | `sub_model()` fallback | the §4.7 match-time salary/employer extract LM; `require_extract_model` falls back to the cheap `sub_lm`, **never** the root planner; unset with no `sub_lm` ⇒ extraction is simply **off** |
 | `JOBCRAWLER_EXTRACT_MIN_SCORE` | `60` | 0–100 match score at/above which a salary-less posting is mined (below the notify threshold, above the noise floor) |
@@ -1343,9 +1349,11 @@ an `openrouter/…` slug billed per token. Selected knobs:
 3. **Salary inference confidence.** `parse_salary` is deliberately conservative (§4.6). Do we ever surface a
    *confidence band* or an FX-normalized comparison for `min_salary` filtering across currencies/periods,
    and how do we keep that from becoming the "invent a number" the never-invent rule forbids?
-4. **Per-source match budgets.** `match_daily_cap` is global. A noisy aggregator (RemoteOK) can crowd out a
-   high-signal single-company board within the daily budget. Do we want per-source or per-discipline
-   sub-budgets, or a priority ordering of the pending drain by prefilter-survival strength?
+4. **Per-source match budgets.** `match_daily_cap` is global. The fresh-vs-drain axis is handled — a
+   `JOBCRAWLER_MATCH_DRAIN_FLOOR` slice is reserved so heavy new inflow can't starve the backlog drain
+   (§4.7) — but *within* the fresh budget a noisy aggregator (RemoteOK) can still crowd out a high-signal
+   single-company board. Do we want per-source or per-discipline sub-budgets, or a priority ordering of the
+   pending drain by prefilter-survival strength rather than pure FIFO?
 5. **State store.** Postgres (matches a scaled deploy) vs. SQLite (simpler) for v1 — SQLite ships; revisit at
    volume.
 6. **Board list ownership & `enumerates_all` correctness.** A wrong `enumerates_all: true` on a windowed

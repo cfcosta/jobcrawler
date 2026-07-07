@@ -476,6 +476,7 @@ def build_matcher(store: StateStore) -> Matcher | None:
         governor=_MatchPacer(RateGovernor(config.match_rate())),
         clock=lambda: datetime.now(timezone.utc),
         max_tokens=config.match_max_tokens(),
+        drain_floor=config.match_drain_floor(),
         extract_model=extract_model,
         extract_min_score=config.extract_min_score(),
         extract_cap=config.extract_cap(),
@@ -579,7 +580,7 @@ def _match_drain_pass(
     )
     summary: dict[str, int] = {"requeued": requeued, **stats}
     if candidates:
-        result = matcher.score_new(candidates)
+        result = matcher.score_new(candidates, drain=True)
         summary["cached"] = cast(int, result["cached"])
         summary["scored"] = cast(int, result["scored"])
         summary["pending"] = cast(int, result["pending"])
@@ -966,7 +967,7 @@ def _run_rematch(store: StateStore) -> int:
             store, profile.prefs, limit=config.match_drain_cap()
         )
         if candidates:
-            result = matcher.score_new(candidates)
+            result = matcher.score_new(candidates, drain=True)
             llm_scored = cast(int, result["cached"]) + cast(int, result["scored"])
             _notify_strong_matches(
                 candidates,

@@ -1658,7 +1658,9 @@ class StateStore:
             )
             self._conn.commit()
 
-    def reserve_match_spend(self, day: str, n: int, *, cap: int) -> int:
+    def reserve_match_spend(
+        self, day: str, n: int, *, cap: int, reserved: int = 0
+    ) -> int:
         """Atomically claim up to ``n`` of ``day``'s remaining budget; return the grant.
 
         The daily cap's concurrency-safe primitive (§4.7/§8). Reads the day's current spend
@@ -1667,17 +1669,23 @@ class StateStore:
         ``asyncio.to_thread`` crawls can no longer each read a stale spend and collectively
         overshoot ``cap`` by up to the concurrency (the TOCTOU the plain
         ``match_spent`` + late ``bump_match_spend`` pair allowed). Returns
-        ``max(0, min(n, cap - current))``; the caller scores exactly that many and parks
-        the overflow pending. The grant is charged **up front** (before the LLM calls), so
-        the count reflects jobs *sent*, not just successfully scored — a failed batch still
-        burned tokens, and never under-counting is what keeps the shared cap sound.
+        ``max(0, min(n, cap - reserved - current))``; the caller scores exactly that many
+        and parks the overflow pending. The grant is charged **up front** (before the LLM
+        calls), so the count reflects jobs *sent*, not just successfully scored — a failed
+        batch still burned tokens, and never under-counting is what keeps the shared cap
+        sound.
+
+        ``reserved`` holds that many of the cap untouched for another caller (§4.7 drain
+        floor): the fresh crawl path passes the drain floor so a saturating day of new
+        postings still leaves the backlog drain a guaranteed slice, while the drain passes
+        ``0`` and so may spend the floor plus anything fresh scoring left unused.
         """
         with self._lock:
             row = self._conn.execute(
                 "SELECT scored FROM match_spend WHERE day = ?", (day,)
             ).fetchone()
             current = int(row["scored"]) if row is not None else 0
-            granted = max(0, min(n, cap - current))
+            granted = max(0, min(n, cap - reserved - current))
             if granted:
                 self._conn.execute(
                     "INSERT INTO match_spend (day, scored) VALUES (?, ?) "

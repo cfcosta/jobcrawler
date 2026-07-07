@@ -156,9 +156,10 @@ class FakeStore:
         self.spent += n
         self.bump_calls.append((day, n))
 
-    def reserve_match_spend(self, day, n, *, cap):
+    def reserve_match_spend(self, day, n, *, cap, reserved=0):
         # Mirrors StateStore.reserve_match_spend: atomic read+increment, returns the grant.
-        granted = max(0, min(n, cap - self.spent))
+        # ``reserved`` holds that much of the cap back for another caller (the drain floor).
+        granted = max(0, min(n, cap - reserved - self.spent))
         self.spent += granted
         self.reserve_calls.append((day, n, granted))
         return granted
@@ -207,6 +208,7 @@ def _matcher(
     model="openrouter/test/model",
     batch=10,
     daily_cap=1000,
+    drain_floor=0,
     profile=None,
     governor=None,
     extract_model=None,
@@ -219,6 +221,7 @@ def _matcher(
         model=model,
         batch=batch,
         daily_cap=daily_cap,
+        drain_floor=drain_floor,
         governor=governor or FakeGovernor(),
         clock=_clock,
         extract_model=extract_model,
@@ -537,6 +540,68 @@ def test_reserved_budget_is_cumulative_across_calls() -> None:
     assert (second["scored"], second["pending"]) == (2, 2)  # only 2 budget remained
     assert store.spent == 5  # cumulative reserve never exceeds the cap
     assert store.reserve_calls == [(_DAY, 3, 3), (_DAY, 4, 2)]
+
+
+def _disjoint_cands(tag: str, n: int) -> list:
+    """``n`` candidates whose titles carry ``tag`` so two passes don't share the cache."""
+    return [
+        (
+            "acme",
+            f"https://acme.example/{tag}/{i}",
+            FakeEnriched(job=FakeJob(title=f"{tag} Engineer {i}")),
+        )
+        for i in range(n)
+    ]
+
+
+def test_drain_floor_reserves_a_slice_of_the_cap_for_the_backlog_drain() -> None:
+    # #46: fresh crawl scoring and the backlog drain share ONE matcher drawing on ONE daily
+    # cap. Without a floor, a day of saturating fresh inflow reserves the whole cap and the
+    # drain gets granted=0 every tick — the parked backlog never shrinks. The drain floor
+    # holds a slice back: fresh may spend at most cap - floor; the drain (drain=True) may then
+    # spend the reserved floor plus whatever fresh left unused.
+    store = FakeStore()
+    matcher = _matcher(store, batch=10, daily_cap=10, drain_floor=4)
+    matcher._predict = FakePredictor(_all_score())
+
+    # Fresh inflow tries to grab everything: capped at cap - floor = 6, the other 14 parked.
+    fresh = matcher.score_new(_disjoint_cands("fresh", 20))
+    assert (fresh["scored"], fresh["pending"]) == (6, 14)
+
+    # The drain still gets the reserved floor (4), not starved to 0.
+    drained = matcher.score_new(_disjoint_cands("drain", 10), drain=True)
+    assert (drained["scored"], drained["pending"]) == (4, 6)
+    assert store.spent == 10  # exactly the cap, no overshoot
+    # Fresh reserved the 4-job floor; the drain reserved nothing and spent it.
+    assert store.reserve_calls == [(_DAY, 20, 6), (_DAY, 10, 4)]
+
+
+def test_drain_may_spend_fresh_leftover_above_its_floor() -> None:
+    # The floor is a guarantee, not a ceiling: when fresh scoring leaves budget unused the
+    # drain reserves nothing and so sweeps the remainder, not merely the floor.
+    store = FakeStore()
+    matcher = _matcher(store, batch=10, daily_cap=10, drain_floor=4)
+    matcher._predict = FakePredictor(_all_score())
+
+    fresh = matcher.score_new(_disjoint_cands("fresh", 2))  # light day: only 2 scored
+    assert fresh["scored"] == 2
+
+    drained = matcher.score_new(_disjoint_cands("drain", 20), drain=True)
+    assert drained["scored"] == 8  # floor 4 + the 4 fresh left unused, not just the floor
+
+
+def test_drain_floor_clamped_to_cap_never_reserves_below_zero() -> None:
+    # A floor larger than the cap clamps to the cap: fresh scoring reserves the whole budget
+    # (grant 0, all parked) rather than going negative, and the drain owns the full cap.
+    store = FakeStore()
+    matcher = _matcher(store, batch=10, daily_cap=5, drain_floor=100)
+    matcher._predict = FakePredictor(_all_score())
+
+    fresh = matcher.score_new(_disjoint_cands("fresh", 3))
+    assert (fresh["scored"], fresh["pending"]) == (0, 3)  # floor==cap → fresh gets nothing
+
+    drained = matcher.score_new(_disjoint_cands("drain", 8), drain=True)
+    assert (drained["scored"], drained["pending"]) == (5, 3)  # drain spends the full cap
 
 
 def test_malformed_llm_output_parks_pending_and_does_not_crash() -> None:

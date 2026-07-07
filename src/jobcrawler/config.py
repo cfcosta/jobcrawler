@@ -255,6 +255,17 @@ def match_daily_cap() -> int:
     return _int("JOBCRAWLER_MATCH_DAILY_CAP", 400)
 
 
+def match_drain_floor() -> int:
+    """Slice of ``match_daily_cap`` held in reserve for the §4.7 backlog drain, so a day
+    of heavy fresh inflow can't starve it (§4.7). Fresh crawl-time scoring may spend at
+    most ``daily_cap - drain_floor``; the drain (and profile-edit rematch) may spend the
+    remaining floor plus whatever fresh left unused. Without it, a crawl sweep that hits
+    the cap leaves the drain ``granted=0`` every tick and the parked backlog never shrinks.
+    Default 80 (20% of the 400 cap): raise it to drain backlog faster at the cost of fresh
+    scoring headroom, set 0 to restore the single shared budget. Clamped to the cap."""
+    return max(0, _int("JOBCRAWLER_MATCH_DRAIN_FLOOR", 80))
+
+
 def match_rate() -> str:
     """Governor pacing for the §4.7 match LM calls (``requests/interval``, e.g. the
     default ``10/m``). Smooths the batched match calls so a big new-position sweep can't

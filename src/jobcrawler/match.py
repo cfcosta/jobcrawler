@@ -326,6 +326,7 @@ class Matcher:
         governor: _Governor,
         clock: Callable[[], datetime],
         max_tokens: int = 4000,
+        drain_floor: int = 0,
         extract_model: str | None = None,
         extract_min_score: int = 60,
         extract_cap: int = 50,
@@ -335,6 +336,10 @@ class Matcher:
         self._model = model
         self._batch = max(1, batch)
         self._daily_cap = max(0, daily_cap)
+        # §4.7 drain floor: how much of the daily cap fresh crawl scoring holds back so the
+        # backlog drain always has a slice. Clamped to the cap (reserving more than the cap
+        # would zero fresh scoring; the drain would then own the whole budget).
+        self._drain_floor = max(0, min(drain_floor, self._daily_cap))
         self._governor = governor
         self._clock = clock
         # §4.7 match-time salary/employer extraction. OFF unless a (cheap) extract model is
@@ -357,7 +362,10 @@ class Matcher:
         self._extract_predict = dspy.Predict(ExtractFromDescription)
 
     def score_new(
-        self, candidates: Sequence[tuple[str, str, _Enriched]]
+        self,
+        candidates: Sequence[tuple[str, str, _Enriched]],
+        *,
+        drain: bool = False,
     ) -> dict[str, object]:
         """Score prefiltered new/changed jobs, returning an operational summary.
 
@@ -369,6 +377,11 @@ class Matcher:
         counts plus a ``results`` list of ``(site, url, MatchVerdict)`` applied this run
         (cache hits and fresh scores), which the runner filters by ``match_min_score``
         to notify strong matches.
+
+        ``drain=True`` marks the §4.7 backlog-drain / profile-edit rematch path: it may
+        spend the full daily cap (the reserved drain floor plus whatever fresh scoring left
+        unused). Fresh crawl scoring leaves it ``False`` and so holds ``drain_floor`` of the
+        cap back, guaranteeing the drain a slice even on a day of saturating new inflow.
         """
         day = self._clock().date().isoformat()
         results: list[tuple[str, str, MatchVerdict]] = []
@@ -398,8 +411,13 @@ class Matcher:
         # spend and collectively overshoot the cap (the TOCTOU the old match_spent-then-late
         # -bump pair allowed). The grant is charged UP FRONT — a failed batch still burned
         # tokens — and the overflow is parked pending (never dropped) for a later run to drain.
+        # Fresh scoring reserves the drain floor (holds it back for the backlog drain); the
+        # drain path reserves nothing, so it may spend that floor plus fresh's leftover.
+        reserved = 0 if drain else self._drain_floor
         granted = (
-            self._store.reserve_match_spend(day, len(misses), cap=self._daily_cap)
+            self._store.reserve_match_spend(
+                day, len(misses), cap=self._daily_cap, reserved=reserved
+            )
             if misses
             else 0
         )

@@ -1254,6 +1254,20 @@ def test_reserve_match_spend_grants_only_the_remaining_budget(
     assert store.reserve_match_spend("2026-07-03", 9, cap=5) == 5  # a new day is fresh
 
 
+def test_reserve_match_spend_holds_reserved_headroom_back(store: StateStore) -> None:
+    # #46 drain floor: ``reserved`` keeps that many of the cap untouched for another caller.
+    # Fresh scoring passes the floor so it can't claim the last ``reserved`` units; the drain
+    # passes 0 and so may spend them (plus whatever fresh left).
+    day = "2026-07-02"
+    assert store.reserve_match_spend(day, 10, cap=10, reserved=4) == 6  # capped at cap-floor
+    assert store.match_spent(day) == 6
+    # More fresh scoring still can't cross into the reserved 4.
+    assert store.reserve_match_spend(day, 10, cap=10, reserved=4) == 0
+    # The drain reserves nothing and claims the held-back remainder.
+    assert store.reserve_match_spend(day, 10, cap=10, reserved=0) == 4
+    assert store.match_spent(day) == 10  # exactly the cap, never beyond
+
+
 def test_reserve_match_spend_never_overshoots_under_concurrency() -> None:
     # The finding-5 fix hinges on this: N threads (concurrent crawls sharing ONE matcher via
     # asyncio.to_thread) racing to reserve from a single cap must grant EXACTLY the cap in
