@@ -172,6 +172,8 @@ class PositionRecord:
     salary_max: float | None
     salary_currency: str | None
     salary_period: str | None
+    salary_usd_min: float | None
+    salary_usd_max: float | None
     employment_type: str | None
     department: str | None
     posted_at: datetime | None
@@ -255,6 +257,8 @@ CREATE TABLE IF NOT EXISTS positions (
     salary_max      REAL,
     salary_currency TEXT,
     salary_period   TEXT,
+    salary_usd_min  REAL,
+    salary_usd_max  REAL,
     employment_type TEXT,
     department      TEXT,
     posted_at       TEXT,
@@ -334,6 +338,8 @@ _POSITION_FIELDS: frozenset[str] = frozenset(
         "salary_max",
         "salary_currency",
         "salary_period",
+        "salary_usd_min",
+        "salary_usd_max",
         "employment_type",
         "department",
         "posted_at",
@@ -367,6 +373,11 @@ _POSITION_ADD_COLUMNS: tuple[tuple[str, str], ...] = (
     ("salary_max", "REAL"),
     ("salary_currency", "TEXT"),
     ("salary_period", "TEXT"),
+    # §4.6 annualized-USD band derived from ``salary_*`` — the coherent cross-currency
+    # sort/filter key. Nullable; backfilled from existing salaries by ``_backfill_salary_usd``
+    # and refreshed on every crawl. Kept out of ``content_hash`` (salary never is).
+    ("salary_usd_min", "REAL"),
+    ("salary_usd_max", "REAL"),
     ("employment_type", "TEXT"),
     ("department", "TEXT"),
     # §16 hiring-company dedup key, derived host-side from ``company`` at upsert. Nullable so
@@ -541,6 +552,7 @@ class StateStore:
             "ON positions (status, match_score DESC)"
         )
         self._backfill_remote_scope()
+        self._backfill_salary_usd()
 
     def _backfill_remote_scope(self) -> None:
         """Fill ``remote_scope`` for rows written before the column existed (§4.6).
@@ -572,6 +584,46 @@ class StateStore:
                 for row in rows
             ],
         )
+
+    def _backfill_salary_usd(self) -> None:
+        """Fill the annualized-USD band for salaried rows written before the columns existed.
+
+        Derived from ``salary_*`` via the same host-side conversion a fresh crawl runs
+        (:func:`usd_annual_band`), so a populated DB gains a coherent cross-currency salary
+        sort/filter key immediately instead of waiting for every board's next crawl. Cheap
+        and idempotent: it reads only salaried rows still NULL in a *known* currency, so once
+        filled a later open matches nothing. Rows in an unrecognized currency/period stay NULL
+        (read as unstated by the salary sort/filter), exactly as a fresh crawl would leave them.
+        """
+        from jobcrawler.runtime.normalize import FX_TO_USD, usd_annual_band
+
+        placeholders = ", ".join("?" for _ in FX_TO_USD)
+        rows = self._conn.execute(
+            "SELECT site, url, salary_min, salary_max, salary_currency, salary_period "
+            "FROM positions WHERE salary_usd_min IS NULL AND salary_usd_max IS NULL "
+            "AND (salary_min IS NOT NULL OR salary_max IS NOT NULL) "
+            f"AND upper(COALESCE(salary_currency, '')) IN ({placeholders})",
+            tuple(FX_TO_USD),
+        ).fetchall()
+        if not rows:
+            return
+        updates: list[tuple[float | None, float | None, str, str]] = []
+        for row in rows:
+            lo, hi = usd_annual_band(
+                row["salary_min"],
+                row["salary_max"],
+                row["salary_currency"],
+                row["salary_period"],
+            )
+            if lo is None and hi is None:
+                continue  # unknown period — leave for a future crawl to resupply
+            updates.append((lo, hi, row["site"], row["url"]))
+        if updates:
+            self._conn.executemany(
+                "UPDATE positions SET salary_usd_min = ?, salary_usd_max = ? "
+                "WHERE site = ? AND url = ?",
+                updates,
+            )
 
     # -- item state (dedup) --------------------------------------------------
 
@@ -1151,16 +1203,33 @@ class StateStore:
         Guarded to ``salary_min IS NULL AND salary_max IS NULL`` so a source-structured
         salary — a crawler field or the §4.6 host parse — always wins and is never
         clobbered by an LLM guess. Salary is not part of ``content_hash``, so writing it
-        never re-dedups a posting or invalidates its match verdict. Returns whether a row
-        was actually filled (False = it already had a salary, or no such row).
+        never re-dedups a posting or invalidates its match verdict. The annualized-USD band
+        is derived here too, so an LLM-backfilled salary is sortable/filterable like any
+        other. Returns whether a row was actually filled (False = it already had a salary,
+        or no such row).
         """
+        from jobcrawler.runtime.normalize import usd_annual_band
+
+        usd_min, usd_max = usd_annual_band(
+            salary_min, salary_max, salary_currency, salary_period
+        )
         with self._lock:
             cur = self._conn.execute(
                 "UPDATE positions SET salary_min = ?, salary_max = ?, "
-                "salary_currency = ?, salary_period = ? "
+                "salary_currency = ?, salary_period = ?, "
+                "salary_usd_min = ?, salary_usd_max = ? "
                 "WHERE site = ? AND url = ? "
                 "AND salary_min IS NULL AND salary_max IS NULL",
-                (salary_min, salary_max, salary_currency, salary_period, site, url),
+                (
+                    salary_min,
+                    salary_max,
+                    salary_currency,
+                    salary_period,
+                    usd_min,
+                    usd_max,
+                    site,
+                    url,
+                ),
             )
             self._conn.commit()
             return cur.rowcount > 0
@@ -1384,7 +1453,8 @@ class StateStore:
         - ``remote_scope``  exact geographic scope of a remote role (``'anywhere'`` powers the
           "remote anywhere" filter; ``'restricted'``/``'unspecified'`` also selectable).
         - ``min_score``  only rows scored at/above it (drops unscored).
-        - ``min_salary``  ``COALESCE(salary_max, salary_min) >= min_salary`` (drops unstated).
+        - ``min_salary``  ``COALESCE(salary_usd_max, salary_usd_min) >= min_salary``, i.e. an
+          annualized-USD floor (§4.6) — drops rows with no resolvable salary/currency.
         - ``dismissed``  ``None`` = both, ``False`` = hide dismissed, ``True`` = only dismissed.
         - ``exclude_company_applied``  drop rows whose hiring company already has an applied-to
           posting (grouped on ``company_canonical``, §16) — the browse twin of :meth:`matches`.
@@ -1434,7 +1504,7 @@ class StateStore:
             clauses.append("match_score IS NOT NULL AND match_score >= ?")
             params.append(min_score)
         if min_salary is not None:
-            clauses.append("COALESCE(salary_max, salary_min) >= ?")
+            clauses.append("COALESCE(salary_usd_max, salary_usd_min) >= ?")
             params.append(min_salary)
         if dismissed is not None:
             clauses.append("dismissed = ?")
@@ -1455,7 +1525,7 @@ class StateStore:
             "recent": "first_seen DESC, site, url",
             "score": "match_score DESC, matched_at DESC, url",
             "updated": "track_updated_at DESC, first_seen DESC, url",
-            "salary": "COALESCE(salary_max, salary_min) DESC, url",
+            "salary": "COALESCE(salary_usd_max, salary_usd_min) DESC, url",
             "title": "lower(title) ASC, url",
         }.get(sort, "first_seen DESC, site, url")
         rows = self._conn.execute(
@@ -1775,6 +1845,8 @@ def _to_position(row: sqlite3.Row) -> PositionRecord:
         salary_max=row["salary_max"],
         salary_currency=row["salary_currency"],
         salary_period=row["salary_period"],
+        salary_usd_min=row["salary_usd_min"],
+        salary_usd_max=row["salary_usd_max"],
         employment_type=row["employment_type"],
         department=row["department"],
         posted_at=_dt("posted_at"),

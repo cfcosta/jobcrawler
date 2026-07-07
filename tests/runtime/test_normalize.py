@@ -26,6 +26,7 @@ from jobcrawler.runtime.normalize import (
     enrich,
     normalize_location,
     parse_salary,
+    usd_annual_band,
 )
 
 
@@ -480,3 +481,50 @@ def test_normalize_location_preserves_raw_for_content_hash() -> None:
     raw = "são paulo, brasil"
     normalize_location(raw)
     assert raw == "são paulo, brasil"
+
+
+# --- annualized-USD salary band (§4.6) -------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("salary_min", "salary_max", "currency", "period", "expected"),
+    [
+        # USD annual is the identity
+        (100_000.0, 150_000.0, "USD", "year", (100_000.0, 150_000.0)),
+        # monthly annualizes ×12; BRL converts at 0.18
+        (10_000.0, 20_000.0, "BRL", "month", (21_600.0, 43_200.0)),
+        # EUR/GBP annual conversion
+        (80_000.0, 100_000.0, "EUR", "year", (86_400.0, 108_000.0)),
+        (80_000.0, 100_000.0, "GBP", "year", (101_600.0, 127_000.0)),
+        # hourly annualizes ×2080
+        (50.0, 60.0, "USD", "hour", (104_000.0, 124_800.0)),
+        # case/whitespace-insensitive on both keys
+        (100_000.0, 100_000.0, " usd ", " Year ", (100_000.0, 100_000.0)),
+        # an open-ended bound stays open-ended
+        (None, 120_000.0, "USD", "year", (None, 120_000.0)),
+        # unknown currency or period → no half-converted figure
+        (100_000.0, 120_000.0, "JPY", "year", (None, None)),
+        (100_000.0, 120_000.0, "USD", "decade", (None, None)),
+        (100_000.0, 120_000.0, None, None, (None, None)),
+    ],
+)
+def test_usd_annual_band(
+    salary_min: float | None,
+    salary_max: float | None,
+    currency: str | None,
+    period: str | None,
+    expected: tuple[float | None, float | None],
+) -> None:
+    lo, hi = usd_annual_band(salary_min, salary_max, currency, period)
+    exp_lo, exp_hi = expected
+    assert lo == pytest.approx(exp_lo) if exp_lo is not None else lo is None
+    assert hi == pytest.approx(exp_hi) if exp_hi is not None else hi is None
+
+
+def test_usd_annual_band_orders_currencies_coherently() -> None:
+    # The whole point: a BRL-monthly range and a USD-annual range become comparable.
+    # 25k BRL/mo ≈ $54k/yr sits below a $120k/yr USD role once both are annualized-USD.
+    brl_lo, brl_hi = usd_annual_band(20_000.0, 25_000.0, "BRL", "month")
+    usd_lo, usd_hi = usd_annual_band(120_000.0, 140_000.0, "USD", "year")
+    assert brl_hi is not None and usd_lo is not None
+    assert brl_hi < usd_lo

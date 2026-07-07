@@ -212,6 +212,9 @@ def test_search_filters(store: StateStore) -> None:
         workplace="remote",
         level="senior",
         salary_max=210000,
+        salary_currency="USD",
+        salary_period="year",
+        salary_usd_max=210000,
     )
     _seed(store, site="beta", url="https://beta.test/b", workplace="onsite")
     store.set_match(

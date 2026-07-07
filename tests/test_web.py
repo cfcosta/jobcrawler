@@ -128,6 +128,32 @@ async def test_company_links_group_by_canonical() -> None:
         store.close()
 
 
+def test_format_salary_appends_usd_hint_for_non_usd() -> None:
+    from jobcrawler.web.app import format_salary
+
+    # a non-USD range keeps its source figure AND gains an annualized-USD hint
+    brl = SimpleNamespace(
+        salary_min=20000.0,
+        salary_max=25000.0,
+        salary_currency="BRL",
+        salary_period="month",
+        salary_usd_min=43200.0,
+        salary_usd_max=54000.0,
+    )
+    assert format_salary(brl) == "BRL 20,000–25,000/month (~$43k–$54k/yr)"  # type: ignore[arg-type]
+
+    # a USD posting needs no hint
+    usd = SimpleNamespace(
+        salary_min=120000.0,
+        salary_max=140000.0,
+        salary_currency="USD",
+        salary_period="year",
+        salary_usd_min=120000.0,
+        salary_usd_max=140000.0,
+    )
+    assert format_salary(usd) == "USD 120,000–140,000/year"  # type: ignore[arg-type]
+
+
 async def test_health() -> None:
     store = _seeded_store()
     try:

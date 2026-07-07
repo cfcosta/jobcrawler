@@ -115,8 +115,22 @@ def format_date(dt: datetime | None) -> str:
     return dt.date().isoformat() if dt is not None else "—"
 
 
+def _compact_usd(value: float) -> str:
+    """A short USD figure: ``$1.2M`` / ``$260k`` / ``$95`` (for hourly-derived lows)."""
+    if value >= 1_000_000:
+        return f"${value / 1_000_000:.1f}M"
+    if value >= 1_000:
+        return f"${value / 1_000:.0f}k"
+    return f"${value:.0f}"
+
+
 def format_salary(p: PositionRecord) -> str:
-    """A compact salary string from a record's ``salary_*`` fields; ``''`` when unstated."""
+    """A compact salary string from a record's ``salary_*`` fields; ``''`` when unstated.
+
+    Shows the source range verbatim, and — when the source isn't USD — appends the
+    annualized-USD equivalent (``~$…/yr``, §4.6) so a BRL/EUR/GBP figure is comparable
+    at a glance with the dollar postings it sorts against.
+    """
     lo, hi = p.salary_min, p.salary_max
     if lo is None and hi is None:
         return ""
@@ -127,7 +141,15 @@ def format_salary(p: PositionRecord) -> str:
         else f"{(hi if hi is not None else lo):,.0f}"
     )
     per = f"/{p.salary_period}" if p.salary_period else ""
-    return f"{cur} {body}{per}".strip()
+    out = f"{cur} {body}{per}".strip()
+    ulo, uhi = p.salary_usd_min, p.salary_usd_max
+    if cur.upper() != "USD" and (ulo is not None or uhi is not None):
+        if ulo is not None and uhi is not None and ulo != uhi:
+            hint = f"{_compact_usd(ulo)}–{_compact_usd(uhi)}"
+        else:
+            hint = _compact_usd(uhi if uhi is not None else ulo)  # type: ignore[arg-type]
+        out += f" (~{hint}/yr)"
+    return out
 
 
 def _position_dict(p: PositionRecord) -> dict[str, Any]:
@@ -154,6 +176,8 @@ def _position_dict(p: PositionRecord) -> dict[str, Any]:
         "salary_max": p.salary_max,
         "salary_currency": p.salary_currency,
         "salary_period": p.salary_period,
+        "salary_usd_min": p.salary_usd_min,
+        "salary_usd_max": p.salary_usd_max,
         "description": p.description,
         "status": p.status,
         "closed_at": _iso(p.closed_at),

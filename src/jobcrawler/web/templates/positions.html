@@ -36,7 +36,7 @@
   <input type="text" name="workplace" placeholder="Workplace" value="{{ filters.workplace }}" size="8">
   <input type="text" name="level" placeholder="Level" value="{{ filters.level }}" size="8">
   <input type="number" name="min_score" placeholder="Min score" value="{{ filters.min_score }}" min="0" max="100">
-  <input type="number" name="min_salary" placeholder="Min salary" value="{{ filters.min_salary }}">
+  <input type="number" name="min_salary" placeholder="Min $/yr" value="{{ filters.min_salary }}" title="Minimum annualized USD salary">
   <select name="sort" aria-label="Sort">
     {% for value, label in [('recent', 'Newest'), ('score', 'Best match'), ('updated', 'Recently updated'), ('salary', 'Salary'), ('title', 'Title')] %}
     <option value="{{ value }}"{{ ' selected' if filters.sort == value else '' }}>{{ label }}</option>

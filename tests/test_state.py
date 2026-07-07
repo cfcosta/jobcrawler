@@ -596,6 +596,8 @@ def test_upsert_persists_enrichment_and_salary_fields(store: StateStore) -> None
         "salary_max": 259200.0,
         "salary_currency": "USD",
         "salary_period": "year",
+        "salary_usd_min": 152800.0,
+        "salary_usd_max": 259200.0,
         "employment_type": "full_time",
         "department": "Platform",
     }
@@ -604,6 +606,7 @@ def test_upsert_persists_enrichment_and_salary_fields(store: StateStore) -> None
     assert (rec.discipline, rec.level, rec.workplace) == ("backend", "senior", "remote")
     assert (rec.salary_min, rec.salary_max) == (152800.0, 259200.0)
     assert (rec.salary_currency, rec.salary_period) == ("USD", "year")
+    assert (rec.salary_usd_min, rec.salary_usd_max) == (152800.0, 259200.0)
     assert (rec.employment_type, rec.department, rec.external_id) == (
         "full_time",
         "Platform",
@@ -1415,6 +1418,7 @@ def test_migration_backfills_lifecycle_and_match_columns(tmp_path: object) -> No
     cols = {row["name"] for row in s._conn.execute("PRAGMA table_info(positions)")}
     assert {
         "external_id",
+        "location_normalized",
         "discipline",
         "level",
         "workplace",
@@ -1422,6 +1426,8 @@ def test_migration_backfills_lifecycle_and_match_columns(tmp_path: object) -> No
         "salary_max",
         "salary_currency",
         "salary_period",
+        "salary_usd_min",
+        "salary_usd_max",
         "employment_type",
         "department",
         "posted_at",
@@ -1443,6 +1449,82 @@ def test_migration_backfills_lifecycle_and_match_columns(tmp_path: object) -> No
     s.set_match("acme", "u", score=90, verdict="strong", reasons="")
     assert [r.url for r in s.matches(70)] == ["u"]
     s.close()
+
+
+def test_migration_backfills_salary_usd(tmp_path: object) -> None:
+    # A row with a source salary but no annualized-USD band (predating the salary_usd
+    # columns): opening the DB derives it so the salary sort/filter works immediately,
+    # without waiting for the board's next crawl.
+    db = f"{tmp_path}/legacy.db"  # type: ignore[str-bytes-safe]
+    raw = sqlite3.connect(db)
+    raw.executescript(
+        """
+        CREATE TABLE positions (
+            site TEXT NOT NULL, url TEXT NOT NULL, content_hash TEXT NOT NULL,
+            title TEXT NOT NULL, company TEXT NOT NULL, location TEXT NOT NULL,
+            salary_min REAL, salary_max REAL, salary_currency TEXT, salary_period TEXT,
+            first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
+            PRIMARY KEY (site, url)
+        );
+        INSERT INTO positions (site, url, content_hash, title, company, location,
+            salary_min, salary_max, salary_currency, salary_period, first_seen, last_seen)
+        VALUES ('acme', 'u', 'h', 'T', 'C', 'L', 10000.0, 20000.0, 'BRL', 'month',
+            '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
+        """
+    )
+    raw.commit()
+    raw.close()
+
+    s = StateStore(db)
+    try:
+        rec = s.open_positions("acme")[0]
+        # 10k–20k BRL/mo → ×12 months × 0.18 USD/BRL = 21.6k–43.2k USD/yr
+        assert rec.salary_usd_min == pytest.approx(21_600.0)
+        assert rec.salary_usd_max == pytest.approx(43_200.0)
+    finally:
+        s.close()
+
+
+def test_search_positions_salary_sort_and_filter_are_usd_coherent(
+    store: StateStore,
+) -> None:
+    # A BRL-monthly and a USD-annual posting rank by their annualized-USD band, not the
+    # raw source number (25000 BRL/mo reads larger than 120000 USD/yr, but is far less in USD).
+    store.upsert_position(
+        "acme",
+        "brl",
+        fields={
+            **FIELDS,
+            "title": "BRL role",
+            "salary_min": 20000.0,
+            "salary_max": 25000.0,
+            "salary_currency": "BRL",
+            "salary_period": "month",
+            "salary_usd_min": 43200.0,
+            "salary_usd_max": 54000.0,
+        },
+        content_hash="h-brl",
+    )
+    store.upsert_position(
+        "acme",
+        "usd",
+        fields={
+            **FIELDS,
+            "title": "USD role",
+            "salary_min": 120000.0,
+            "salary_max": 140000.0,
+            "salary_currency": "USD",
+            "salary_period": "year",
+            "salary_usd_min": 120000.0,
+            "salary_usd_max": 140000.0,
+        },
+        content_hash="h-usd",
+    )
+
+    # highest annualized-USD first, despite the BRL row's larger raw number
+    assert [r.url for r in store.search_positions(sort="salary")] == ["usd", "brl"]
+    # the floor is USD/yr: $60k drops the ~$54k BRL role, keeps the $140k USD role
+    assert [r.url for r in store.search_positions(min_salary=60000.0)] == ["usd"]
 
 
 def test_positions_migration_is_idempotent(tmp_path: object) -> None:

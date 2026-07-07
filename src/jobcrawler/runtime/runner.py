@@ -72,6 +72,7 @@ from jobcrawler.runtime.normalize import (
     canonical_company,
     enrich,
     normalize_location,
+    usd_annual_band,
 )
 from jobcrawler.runtime.sandbox import collect_crawler
 from jobcrawler.state import StateStore
@@ -614,6 +615,13 @@ def _position_fields(job: Job, enriched: EnrichedJob) -> dict[str, object]:
         fields["salary_max"] = salary.max
         fields["salary_currency"] = salary.currency
         fields["salary_period"] = salary.period
+        # Annualized-USD band for coherent cross-currency sort/filter (§4.6). Derived,
+        # never hashed; NULL when the currency/period can't be resolved.
+        usd_min, usd_max = usd_annual_band(
+            salary.min, salary.max, salary.currency, salary.period
+        )
+        fields["salary_usd_min"] = usd_min
+        fields["salary_usd_max"] = usd_max
     return fields
 
 

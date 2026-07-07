@@ -960,6 +960,58 @@ def parse_salary(raw: str, description: str = "") -> SalaryRange | None:
     return SalaryRange(lo, hi, currency, period)
 
 
+# --- compensation normalization (annualized USD) ---------------------------
+# A salary's comparability axis is annualized US dollars. Source ranges arrive in
+# their own currency (USD/EUR/GBP/BRL) and period (year/month/hour); to sort and
+# filter one board's BRL-monthly coherently against another's USD-annual, both are
+# folded onto a single annualized-USD figure. The *display* keeps the source range
+# — this is only the ranking/filtering key (§4.6).
+
+# Work-hours per year for hourly→annual (40h × 52wk); monthly is ×12.
+_HOURS_PER_YEAR = 2080.0
+_PERIODS_PER_YEAR: dict[str, float] = {
+    "year": 1.0,
+    "month": 12.0,
+    "hour": _HOURS_PER_YEAR,
+}
+
+# Approximate spot rates: 1 unit of currency in USD. Deliberately STATIC — enrichment
+# is a pure, offline function (§4.6/§4.9) with no network in the crawl path, and coarse
+# ranking/filtering tolerates FX drift (bands are wide, and we sort/filter, not invoice).
+# Refresh occasionally against a live rate; USD is the identity. Keys match the currencies
+# ``_detect_currency`` emits.
+FX_TO_USD: dict[str, float] = {
+    "USD": 1.0,
+    "EUR": 1.08,
+    "GBP": 1.27,
+    "BRL": 0.18,
+}
+
+
+def usd_annual_band(
+    salary_min: float | None,
+    salary_max: float | None,
+    currency: str | None,
+    period: str | None,
+) -> tuple[float | None, float | None]:
+    """Fold a source ``(min, max, currency, period)`` salary onto an annualized-USD band.
+
+    The coherent cross-currency key behind the salary sort + ``min_salary`` filter
+    (§4.6): each bound is scaled by the currency's USD rate and the period's yearly
+    factor. Returns ``(None, None)`` when the currency or period can't be resolved —
+    never a half-converted figure — so an unrecognized salary reads as *unstated*
+    rather than silently mis-ranked. A ``None`` bound stays ``None`` (open-ended band).
+    """
+    rate = FX_TO_USD.get((currency or "").strip().upper())
+    factor = _PERIODS_PER_YEAR.get((period or "").strip().lower())
+    if rate is None or factor is None:
+        return (None, None)
+    scale = rate * factor
+    lo = None if salary_min is None else salary_min * scale
+    hi = None if salary_max is None else salary_max * scale
+    return (lo, hi)
+
+
 # --- top-level enrichment --------------------------------------------------
 
 
