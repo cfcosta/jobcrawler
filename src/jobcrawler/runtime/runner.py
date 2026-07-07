@@ -67,7 +67,12 @@ from jobcrawler.match import Matcher, MatchVerdict, prefilter
 from jobcrawler.runtime.contract import CrawlFn, Job
 from jobcrawler.runtime.ctx import Ctx
 from jobcrawler.runtime.hardening import harden_xml
-from jobcrawler.runtime.normalize import EnrichedJob, canonical_company, enrich
+from jobcrawler.runtime.normalize import (
+    EnrichedJob,
+    canonical_company,
+    enrich,
+    normalize_location,
+)
 from jobcrawler.runtime.sandbox import collect_crawler
 from jobcrawler.state import StateStore
 from jobcrawler.urls import canonicalize_url
@@ -589,6 +594,10 @@ def _position_fields(job: Job, enriched: EnrichedJob) -> dict[str, object]:
         # (that hashes the verbatim ``company``), so recomputing it is churn-free.
         "company_canonical": canonical_company(job.company),
         "location": job.location,
+        # Canonical display/grouping form of the verbatim ``location``. Like
+        # ``company_canonical`` it is kept OUT of ``content_hash`` (which hashes the
+        # raw ``location``), so recomputing it on every crawl is churn-free.
+        "location_normalized": normalize_location(job.location),
         "description": job.description,
         "discipline": enriched.discipline,
         "level": enriched.level,

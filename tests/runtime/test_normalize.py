@@ -24,6 +24,7 @@ from jobcrawler.runtime.normalize import (
     classify_remote_scope,
     classify_workplace,
     enrich,
+    normalize_location,
     parse_salary,
 )
 
@@ -418,3 +419,64 @@ def test_canonical_company_does_not_merge_distinct_names() -> None:
 def test_canonical_company_keeps_mid_name_suffix_token() -> None:
     # "Inc" only drops as a *trailing* token; a name that merely contains it survives.
     assert canonical_company("Incredible Health") == "incrediblehealth"
+
+
+# --- location normalization (§4.6) -----------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # country synonyms across language + abbreviation collapse to one form
+        ("são paulo, brasil", "São Paulo, Brazil"),
+        ("Remote, EUA", "Remote, United States"),
+        ("Austin, US", "Austin, United States"),
+        ("New York, USA", "New York, United States"),
+        ("London, UK", "London, United Kingdom"),
+        # consistent casing: all-lower and ALL-UPPER both title-case
+        ("new york", "New York"),
+        ("NEW YORK", "New York"),
+        # region / state codes stay upper as a whole part
+        ("Remote, EMEA", "Remote, EMEA"),
+        ("Austin, TX", "Austin, TX"),
+        # pt-BR / EN connectives stay lowercase inside a part
+        ("rio de janeiro", "Rio de Janeiro"),
+        ("isle of man", "Isle of Man"),
+        # remote phrasings normalize (incl. pt-BR)
+        ("Remoto", "Remote"),
+        ("fully remote", "Remote"),
+        # separators unify to commas; a spaced dash is a separator
+        ("Remote - US", "Remote, United States"),
+        ("Berlin | Germany", "Berlin, Germany"),
+        ("São Paulo / Brasil", "São Paulo, Brazil"),
+        # intra-word hyphen is NOT a separator
+        ("Winston-Salem, NC", "Winston-Salem, NC"),
+        # deliberate internal caps are preserved
+        ("McLean, VA", "McLean, VA"),
+        # duplicate parts collapse (raw + synonym alias too)
+        ("Remote, Remote", "Remote"),
+        ("United States, US", "United States"),
+        # whitespace is cleaned; empty in → empty out
+        ("  são   paulo ,  brasil ", "São Paulo, Brazil"),
+        ("", ""),
+        ("   ", ""),
+    ],
+)
+def test_normalize_location(raw: str, expected: str) -> None:
+    assert normalize_location(raw) == expected
+
+
+def test_normalize_location_is_stable_under_reapplication() -> None:
+    # Its own output is already canonical — re-normalizing is a no-op (idempotent),
+    # so recomputing on every crawl never drifts.
+    for raw in ("são paulo, brasil", "Remote - US", "new york, ny"):
+        once = normalize_location(raw)
+        assert normalize_location(once) == once
+
+
+def test_normalize_location_preserves_raw_for_content_hash() -> None:
+    # It NEVER mutates the caller's string — the raw ``location`` still feeds
+    # ``content_hash`` verbatim, so normalization can't silently re-score the backlog.
+    raw = "são paulo, brasil"
+    normalize_location(raw)
+    assert raw == "são paulo, brasil"

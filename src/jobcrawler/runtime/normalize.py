@@ -663,6 +663,123 @@ def classify_remote_scope(workplace: str, location: str) -> str:
     return "unspecified"
 
 
+# --- location normalization ------------------------------------------------
+# Freeform location text ("são paulo, brasil", "Remote - US", "NEW YORK, NY") is
+# canonicalized to a consistent display + grouping string, WITHOUT losing the
+# verbatim value (kept in ``location``, which also feeds ``content_hash``) or ever
+# inventing a place the text didn't state. Pure and offline like the rest (§4.6).
+
+# Whole-part synonyms (folded key -> canonical display), applied per comma-part
+# before casing so language/abbreviation variants group as one place: "Brasil"/
+# "Brazil"; "EUA"/"US"/"USA" -> "United States"; "Remoto" -> "Remote".
+_LOCATION_SYNONYMS: dict[str, str] = {
+    "brasil": "Brazil",
+    "brazil": "Brazil",
+    "eua": "United States",
+    "us": "United States",
+    "u.s.": "United States",
+    "u.s.a.": "United States",
+    "usa": "United States",
+    "united states": "United States",
+    "united states of america": "United States",
+    "estados unidos": "United States",
+    "uk": "United Kingdom",
+    "u.k.": "United Kingdom",
+    "united kingdom": "United Kingdom",
+    "great britain": "United Kingdom",
+    "reino unido": "United Kingdom",
+    "uae": "United Arab Emirates",
+    "remoto": "Remote",
+    "remote": "Remote",
+    "trabalho remoto": "Remote",
+    "fully remote": "Remote",
+    "100% remote": "Remote",
+    "anywhere": "Anywhere",
+}
+
+# Region/country/US-state codes kept UPPER when a *whole* comma-part equals one
+# (bare "ny" -> "NY", "emea" -> "EMEA"). Consulted only for a whole part, so the
+# Portuguese connective "de" in "Rio de Janeiro" never trips the Delaware code.
+_LOCATION_CODES: frozenset[str] = frozenset(
+    {
+        "eu", "emea", "apac", "latam", "anz", "mena", "dach", "nyc", "dc",
+        "al", "ak", "az", "ar", "ca", "co", "ct", "de", "fl", "ga", "hi", "id",
+        "il", "in", "ia", "ks", "ky", "la", "me", "md", "ma", "mi", "mn", "ms",
+        "mo", "mt", "ne", "nv", "nh", "nj", "nm", "ny", "nc", "nd", "oh", "ok",
+        "or", "pa", "ri", "sc", "sd", "tn", "tx", "ut", "vt", "va", "wa", "wv",
+        "wi", "wy",
+    }
+)
+
+# Connectives kept lowercase inside a multi-word part ("Rio de Janeiro", "Isle of
+# Man") — never applied to a part's leading token.
+_LOCATION_PARTICLES: frozenset[str] = frozenset(
+    {"de", "da", "do", "dos", "das", "e", "of", "the", "and", "el", "la", "los", "las"}
+)
+
+# Component separators normalized to a comma: pipe/slash/semicolon/middot, or a
+# *spaced* en/em/hyphen dash. Intra-word hyphens ("Winston-Salem") are left alone.
+_LOCATION_SEP = re.compile(r"\s*(?:[|/;·•]|[-–—]\s|\s[-–—])\s*")
+
+
+def _title_token(token: str, *, first: bool) -> str:
+    """Case one whitespace token of a location part.
+
+    Deliberately-internal capitals ("São", "McLean", "Île-de-France") are trusted
+    as-is; an all-lower connective ("de", "of") stays lower unless it leads the
+    part; everything else (all-lower or ALL-UPPER) is title-cased.
+    """
+    if not token:
+        return token
+    if not first and token.lower() in _LOCATION_PARTICLES:
+        return token.lower()
+    core = token.replace("'", "").replace("’", "").replace("-", "")
+    if core and not (core.islower() or core.isupper()):
+        return token  # preserve intentional internal caps
+    return token[:1].upper() + token[1:].lower()
+
+
+def _canon_location_part(part: str) -> str:
+    """Canonicalize one comma-separated location component (see below)."""
+    cleaned = " ".join(part.split())
+    if not cleaned:
+        return ""
+    folded = _fold(cleaned)
+    synonym = _LOCATION_SYNONYMS.get(folded)
+    if synonym is not None:
+        return synonym
+    if folded in _LOCATION_CODES:
+        return cleaned.upper()
+    tokens = cleaned.split(" ")
+    return " ".join(_title_token(t, first=(i == 0)) for i, t in enumerate(tokens))
+
+
+def normalize_location(raw: str) -> str:
+    """Canonicalize freeform location text for display + grouping (§4.6).
+
+    Cleans whitespace, unifies part separators to commas, maps known country /
+    region / remote synonyms so cross-language variants group ("Brasil"/"Brazil";
+    "EUA"/"US"/"USA"), consistently cases each component (state/region codes upper,
+    pt-BR/EN connectives lower, deliberate internal caps preserved), and drops
+    duplicate parts. Returns "" when nothing survives. Conservative: it
+    standardizes surface form only, never inferring a place the text didn't name.
+    """
+    if not raw or not raw.strip():
+        return ""
+    seen: set[str] = set()
+    parts: list[str] = []
+    for chunk in _LOCATION_SEP.sub(", ", raw).split(","):
+        canon = _canon_location_part(chunk)
+        if not canon:
+            continue
+        key = _fold(canon)
+        if key in seen:
+            continue
+        seen.add(key)
+        parts.append(canon)
+    return ", ".join(parts)
+
+
 # --- company dedup key -----------------------------------------------------
 # Legal/entity suffixes dropped when collapsing a hiring company to a grouping key,
 # in folded (lowercase, unaccented) form. Matched only as a *trailing* token, so an

@@ -162,6 +162,7 @@ class PositionRecord:
     company_canonical: str | None
     hiring_company: str | None
     location: str
+    location_normalized: str | None
     description: str | None
     discipline: str | None
     level: str | None
@@ -244,6 +245,7 @@ CREATE TABLE IF NOT EXISTS positions (
     company_canonical TEXT,
     hiring_company  TEXT,
     location        TEXT NOT NULL,
+    location_normalized TEXT,
     description     TEXT,
     discipline      TEXT,
     level           TEXT,
@@ -322,6 +324,7 @@ _POSITION_FIELDS: frozenset[str] = frozenset(
         "company",
         "company_canonical",
         "location",
+        "location_normalized",
         "description",
         "discipline",
         "level",
@@ -351,6 +354,10 @@ _POSITION_ADD_COLUMNS: tuple[tuple[str, str], ...] = (
     # application URL here); many ATS crawlers set it to the hosted apply page. Nullable —
     # rows written before it existed read NULL until their next crawl re-supplies it.
     ("apply_url", "TEXT"),
+    # §4.6 canonical display/grouping form of ``location`` (country/region synonyms
+    # folded, consistent casing). Derived host-side, kept out of ``content_hash``;
+    # nullable so it backfills on next crawl. Display falls back to raw ``location``.
+    ("location_normalized", "TEXT"),
     ("description", "TEXT"),
     ("discipline", "TEXT"),
     ("level", "TEXT"),
@@ -1367,7 +1374,8 @@ class StateStore:
         the operator can still find a role they applied to after the board closed it. Every
         filter is optional and ANDed; all are host-supplied (no crawler/generator input):
 
-        - ``query``   case-insensitive substring over title/company/location/description.
+        - ``query``   case-insensitive substring over title/company/location (raw +
+          normalized)/description.
         - ``site``    exact slug; ``company`` case-insensitive substring;
           ``company_canonical`` exact dedup key (the "positions at this company" link).
         - ``status``  crawler lifecycle ``'open'``/``'closed'`` (``None``/``'all'`` = both).
@@ -1391,9 +1399,10 @@ class StateStore:
             like = f"%{q.lower()}%"
             clauses.append(
                 "(lower(title) LIKE ? OR lower(company) LIKE ? "
-                "OR lower(location) LIKE ? OR lower(COALESCE(description, '')) LIKE ?)"
+                "OR lower(location) LIKE ? OR lower(COALESCE(location_normalized, '')) LIKE ? "
+                "OR lower(COALESCE(description, '')) LIKE ?)"
             )
-            params += [like, like, like, like]
+            params += [like, like, like, like, like]
         if site:
             clauses.append("site = ?")
             params.append(site)
@@ -1756,6 +1765,7 @@ def _to_position(row: sqlite3.Row) -> PositionRecord:
         company_canonical=row["company_canonical"],
         hiring_company=row["hiring_company"],
         location=row["location"],
+        location_normalized=row["location_normalized"],
         description=row["description"],
         discipline=row["discipline"],
         level=row["level"],
