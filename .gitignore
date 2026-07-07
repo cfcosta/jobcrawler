@@ -13,6 +13,13 @@ __pycache__/
 # direnv
 /.direnv/
 
+# Secrets — the LM provider key (OPENROUTER_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY)
+# and the Codex OAuth token live in a local dotenv, never in the tree. The tracked
+# template is deploy/jobcrawler.env.example (its name doesn't start with `.env`, so these
+# rules don't touch it); `.envrc` is likewise safe (no dot after `env`).
+.env
+.env.*
+
 # Runtime state / scratch
 *.db
 *.db-shm
@@ -22,5 +29,7 @@ err.txt
 # repo root; production points the JOBCRAWLER_* paths at /var/lib instead).
 optimize.lock
 optimize.log
+# single-instance flock for `jobcrawl run` (#26) — runtime state, sibling of optimize.lock
+run.lock
 trainset.jsonl
 /generators/
