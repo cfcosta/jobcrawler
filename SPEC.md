@@ -676,6 +676,10 @@ operates the whole loop itself rather than relying on an external cron.
   first) always run before more bootstrapping. Cheap assesses (a site in generation-failed backoff)
   don't consume the budget in any meaningful way, so a no-op sweep still covers the roster in one
   tick; deferral loses nothing because crawler-less sites are re-detected from disk every tick.
+  Within a pass, generations run in bounded-concurrency waves (`JOBCRAWLER_BOOTSTRAP_CONCURRENCY`,
+  default 3) so a fresh roster comes up in parallel instead of one multi-minute generation at a time,
+  while still capping simultaneous LM spend/rate; the time budget is checked at each wave boundary and
+  forced "crawl now" slugs run first, exempt from it.
 - **Retry & backoff (one owner per failure class).** A crawl that fails *before yielding any position*
   gets a small bounded backoff+jitter retry **here**; **transient fetch** errors belong to §4.5;
   **matching** failures are §4.7's fail-open-to-pending and are *not* scheduler-retried. Persistent
@@ -1268,6 +1272,7 @@ an `openrouter/…` slug billed per token. Selected knobs:
 | `JOBCRAWLER_FANOUT_N` / `FANOUT_TOKEN_CAP` | `4` / `2M/site` | §6 best-of-N width + the aggregate fan-out token ceiling (dspy records tokens for every provider; USD isn't priced for many slugs) |
 | `JOBCRAWLER_FANOUT_RETRIES` | `= FANOUT_N` | §6 redraws for LM/adapter-dead attempts (a failure never eats a comparison slot; attempts ≤ 2N) |
 | `JOBCRAWLER_BOOTSTRAP_BUDGET` | `60s` | §4.9 per-tick time budget for the cold-start bootstrap pass (over budget → roster defers to next tick) |
+| `JOBCRAWLER_BOOTSTRAP_CONCURRENCY` | `3` | §4.9 max cold-start generations run in parallel per wave (1 = sequential; caps concurrent LM spend/rate) |
 | `JOBCRAWLER_SOLVER` / `FLARESOLVERR_URL` / `JOBCRAWLER_CLEARANCE_TTL` / `JOBCRAWLER_EGRESS_PROXY` | `none` / — / `30m` / — | §4.10 challenge backend + clearance + IP/UA-pinned egress |
 | `JOBCRAWLER_NOTIFY_WEBHOOK` / `NOTIFY_TIMEOUT` | — / `10s` | optional operator webhook for autonomous actions + match alerts (§4.7/§4.9) |
 

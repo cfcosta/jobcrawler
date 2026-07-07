@@ -237,6 +237,7 @@ class Scheduler:
         adaptive_window: int | None = None,
         adaptive_target_n: float | None = None,
         bootstrap_budget: float | None = None,
+        bootstrap_concurrency: int | None = None,
         regen_budget: float | None = None,
         reload_sites: Callable[[], Iterable[Site] | None] | None = None,
     ) -> None:
@@ -350,6 +351,14 @@ class Scheduler:
             bootstrap_budget
             if bootstrap_budget is not None
             else config.bootstrap_budget()
+        )
+        # §4.2 cold-start fan-out: how many crawler generations run concurrently per wave.
+        # 1 restores the fully sequential pass; the time budget still bounds the whole
+        # pass and forced slugs are still attempted regardless (see _bootstrap_missing).
+        self._bootstrap_concurrency = (
+            bootstrap_concurrency
+            if bootstrap_concurrency is not None
+            else config.bootstrap_concurrency()
         )
         # §4.8 staleness-sweep pacing: how long one regen sweep may hold the loop before
         # deferring the rest to the next tick (see regen_tick). ``_regen_incomplete`` lets
@@ -567,23 +576,41 @@ class Scheduler:
         healer = self._healer
         states: dict[str, HealthState] = {}
         pass_started = self._clock()
-        for done, site in enumerate(sites, start=1):
+
+        async def _assess(slug: str) -> None:
+            # Isolated like the heal path: one generation raising can't abort the wave.
             try:
-                states[site.slug] = await healer.assess(site.slug)
+                states[slug] = await healer.assess(slug)
             except Exception:
-                _log.exception(
-                    "cold-start bootstrap failed for %s; skipping", site.slug
-                )
-            if site.slug in forced:
-                continue  # explicit request — never deferred by the budget
+                _log.exception("cold-start bootstrap failed for %s; skipping", slug)
+
+        # Forced slugs (this tick's manual "crawl now" requests) are attempted regardless
+        # of the budget; only the cadence-driven backlog yields. Both run in concurrent
+        # waves of _bootstrap_concurrency, so a fresh roster comes up in parallel rather
+        # than one multi-minute generation at a time. The budget is checked at each wave
+        # boundary — the coarser grain a concurrent pass allows, mirroring the old
+        # per-site check when concurrency is 1.
+        forced_sites = [s for s in sites if s.slug in forced]
+        backlog = [s for s in sites if s.slug not in forced]
+        k = self._bootstrap_concurrency
+
+        for i in range(0, len(forced_sites), k):
+            wave = forced_sites[i : i + k]
+            await asyncio.gather(*(_assess(s.slug) for s in wave))
+
+        done = 0
+        for i in range(0, len(backlog), k):
+            wave = backlog[i : i + k]
+            await asyncio.gather(*(_assess(s.slug) for s in wave))
+            done += len(wave)
             elapsed = (self._clock() - pass_started).total_seconds()
-            if elapsed > self._bootstrap_budget and done < len(sites):
+            if elapsed > self._bootstrap_budget and done < len(backlog):
                 _log.info(
                     "bootstrap pass over budget (%.0fs > %.0fs); deferring %d site(s)"
                     " to the next tick",
                     elapsed,
                     self._bootstrap_budget,
-                    len(sites) - done,
+                    len(backlog) - done,
                 )
                 break
         if states:

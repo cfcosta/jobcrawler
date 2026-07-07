@@ -1303,6 +1303,7 @@ async def test_bootstrap_over_budget_defers_and_the_next_tick_crawls_the_promote
         heal_cooldown="off",
         clock=clock,
         bootstrap_budget=60.0,
+        bootstrap_concurrency=1,  # per-site budget granularity (see the wave test below)
     )
 
     await sched.tick()
@@ -1350,6 +1351,7 @@ async def test_manual_crawl_now_on_a_crawlerless_site_jumps_the_bootstrap_queue(
         heal_cooldown="off",
         clock=clock,
         bootstrap_budget=60.0,
+        bootstrap_concurrency=1,  # per-site budget granularity (see the wave test below)
     )
 
     await sched.tick()
@@ -1360,7 +1362,46 @@ async def test_manual_crawl_now_on_a_crawlerless_site_jumps_the_bootstrap_queue(
     assert "c" in generated
 
 
-async def test_bootstrap_under_budget_sweeps_the_whole_roster() -> None:
+async def test_bootstrap_generates_in_bounded_concurrent_waves() -> None:
+    # §4.2: cold start runs generations in bounded-concurrency waves so a fresh roster
+    # comes up in parallel rather than one multi-minute generation at a time — but never
+    # more than JOBCRAWLER_BOOTSTRAP_CONCURRENCY at once (spend/rate-limit ceiling). With
+    # k=3 over six crawlerless boards, at most 3 assessments are ever in flight.
+    clock = _Clock(T0)
+    inflight = 0
+    peak = 0
+
+    class _ConcurrentHealer(_RecordingHealer):
+        async def assess(self, slug: str) -> HealthState:
+            nonlocal inflight, peak
+            inflight += 1
+            peak = max(peak, inflight)
+            await asyncio.sleep(0)  # yield so a whole wave overlaps before any finishes
+            try:
+                return await super().assess(slug)
+            finally:
+                inflight -= 1
+
+    healer = _ConcurrentHealer()
+    sites = [Site(slug=f"s{i}", url=f"https://s{i}.example") for i in range(6)]
+    sched = Scheduler(
+        sites,
+        store=StateStore(":memory:"),
+        crawl=_ok_crawl,
+        healer=healer,
+        has_crawler=lambda _slug: False,  # all crawlerless → all bootstrap candidates
+        autonomy=True,
+        regen_check="off",
+        heal_cooldown="off",
+        clock=clock,
+        bootstrap_budget=1e9,  # never defer: exercise the whole roster in one tick
+        bootstrap_concurrency=3,
+    )
+
+    await sched.tick()
+
+    assert healer.assessed == [f"s{i}" for i in range(6)]  # whole roster generated
+    assert peak == 3  # ...in waves of k, never more at once
     # The budget only bites after real generation work: cheap assesses (a site in
     # generation-failed backoff is a fast no-op) sweep through in a single tick.
     clock = _Clock(T0)
