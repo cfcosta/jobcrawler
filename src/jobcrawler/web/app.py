@@ -52,6 +52,25 @@ _WEB_DIR = Path(__file__).parent
 _TEMPLATES_DIR = _WEB_DIR / "templates"
 _STATIC_DIR = _WEB_DIR / "static"
 
+
+def _asset_url(name: str) -> str:
+    """Return ``/static/<name>`` stamped with the file's mtime (``?v=<mtime>``).
+
+    Starlette's ``StaticFiles`` serves app.css/app.js with an etag + last-modified but no
+    ``Cache-Control``, so browsers heuristically reuse a cached copy without revalidating.
+    After an edit that silently kept running the *old* asset — e.g. a stale app.js in which
+    the bulk-selection JS did not yet exist, so "select all" and the batch bar never worked.
+    Stamping the mtime into the query string changes the URL whenever the file changes,
+    forcing a fresh fetch while still allowing aggressive caching between edits. Read at
+    render time so edits land without restarting the server.
+    """
+    try:
+        version = int((_STATIC_DIR / name).stat().st_mtime)
+    except OSError:
+        version = 0
+    return f"/static/{name}?v={version}"
+
+
 _PAGE_SIZE = 50
 _BULK_ACTIONS = frozenset({"dismiss", "restore", "status", "note"})
 
@@ -347,6 +366,7 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
     jinja_globals["tracking"] = tracking
     jinja_globals["encode_pid"] = encode_pid
     jinja_globals["site_names"] = site_names
+    jinja_globals["asset"] = _asset_url
     jinja_filters = cast("dict[str, Any]", templates.env.filters)
     jinja_filters["reasons"] = reasons_list
     jinja_filters["age"] = humanize_age

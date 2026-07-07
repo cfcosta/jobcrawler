@@ -11,6 +11,7 @@ form→redirect mutations, and that the store's tracking axis is what actually m
 from __future__ import annotations
 
 import json
+import re
 from types import SimpleNamespace
 
 import httpx
@@ -134,6 +135,20 @@ async def test_detail_surfaces_full_record() -> None:
             assert "(acme)" in body and "Content hash" in body
             # classification surfaces the crawl-normalized discipline
             assert "backend" in body
+    finally:
+        store.close()
+
+
+async def test_static_assets_are_cache_busted() -> None:
+    # base.html must stamp app.css/app.js with a ?v=<mtime> cache-buster so an edited
+    # asset is refetched instead of a browser silently running a stale copy (the bug where
+    # the bulk-selection JS never loaded, so "select all" and the batch bar did nothing).
+    store = _seeded_store()
+    try:
+        async with _client(create_app(store)) as c:
+            body = (await c.get("/positions")).text
+            assert re.search(r'/static/app\.css\?v=\d+', body), "app.css is not cache-busted"
+            assert re.search(r'/static/app\.js\?v=\d+', body), "app.js is not cache-busted"
     finally:
         store.close()
 
