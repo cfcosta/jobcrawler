@@ -486,10 +486,12 @@ class Matcher:
                 len(items),
                 len(batch),
             )
-        by_index: dict[object, object] = {}
+        by_index: dict[int, object] = {}
         for item in items:
             if isinstance(item, dict):
-                by_index[item.get("index")] = item
+                idx = _coerce_index(item.get("index"))
+                if idx is not None:
+                    by_index[idx] = item
 
         applied: list[tuple[str, str, MatchVerdict]] = []
         for index, (site, url, _enriched, content_hash) in enumerate(batch):
@@ -577,10 +579,12 @@ class Matcher:
             prediction = self._extract_predict(jobs=jobs_json)
 
         items = _parse_extraction_list(getattr(prediction, "extractions", None))
-        by_index: dict[object, object] = {}
+        by_index: dict[int, object] = {}
         for item in items:
             if isinstance(item, dict):
-                by_index[item.get("index")] = item
+                idx = _coerce_index(item.get("index"))
+                if idx is not None:
+                    by_index[idx] = item
 
         applied = 0
         for index, (site, url, _enriched, content_hash) in enumerate(batch):
@@ -990,6 +994,27 @@ def _verdict_label(score: int) -> str:
     if score >= 40:
         return "weak"
     return "reject"
+
+
+def _coerce_index(value: object) -> int | None:
+    """Normalize an LLM-returned batch ``index`` to an int, or None if not numeric.
+
+    The prompt asks for an integer ``index`` echoing each job's position, but a model may
+    emit it as a string (``"3"``) or a float (``3.0``). All must map to the same int the
+    batch loop looks up by ``enumerate`` — otherwise a whole batch of string-indexed
+    verdicts misses on every lookup, parking every job AND re-charging the §8 daily cap on
+    the next drain. Rejects bool (an ``index`` is never True/False, and ``bool`` is an
+    ``int`` subclass that would otherwise collapse to 0/1)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, (float, str)):
+        try:
+            return int(round(float(value)))
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 def _to_verdict(item: object) -> MatchVerdict | None:

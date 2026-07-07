@@ -21,6 +21,7 @@ from jobcrawler.match import (
     MatchJobs,
     MatchVerdict,
     Matcher,
+    _coerce_index,
     _content_hash,
     _num_or_none,
     _parse_extraction_list,
@@ -583,6 +584,24 @@ def test_missing_index_parks_only_that_job() -> None:
     assert len(store.pending_calls) == 1
 
 
+def test_stringified_index_is_applied_not_parked() -> None:
+    # A model that echoes the index as a STRING ("0") must still resolve to the int the
+    # batch loop looks up by — otherwise EVERY job in the batch misses, parks, and the §8
+    # daily cap is re-charged on the next drain (audit #34-2.1).
+    store = FakeStore()
+    matcher = _matcher(store, batch=10)
+    predictor = FakePredictor(
+        lambda jobs: json.dumps([{"index": str(j["index"]), "score": 88} for j in jobs])
+    )
+    matcher._predict = predictor
+
+    summary = matcher.score_new(_candidates(2))
+
+    assert summary["scored"] == 2 and summary["pending"] == 0
+    assert len(store.set_match_calls) == 2
+    assert store.pending_calls == []
+
+
 def test_scores_are_clamped_to_0_100() -> None:
     store = FakeStore()
     matcher = _matcher(store, batch=10)
@@ -1031,6 +1050,31 @@ def test_extraction_fills_salary_and_employer_for_matched_salaryless_jobs() -> N
     assert len(store.extract_cache) == 2
 
 
+def test_extraction_applies_a_stringified_index() -> None:
+    # Same coercion contract as scoring: a string "0" index from the extract model must
+    # resolve to the int the batch loop looks up by, or the whole extract batch no-ops.
+    store = FakeStore()
+    matcher = _matcher(store, extract_model="openrouter/test/model")
+    matcher._predict = FakePredictor(_all_score(90))
+
+    def respond(jobs):
+        return json.dumps(
+            [
+                {
+                    "index": str(j["index"]),
+                    "salary": {"min": 100000, "max": 150000, "currency": "USD"},
+                }
+                for j in jobs
+            ]
+        )
+
+    matcher._extract_predict = FakeExtractPredictor(respond)
+    summary = matcher.score_new(_candidates(2))
+
+    assert summary["extracted"] == 2
+    assert len(store.salary_set) == 2
+
+
 def test_extraction_skips_jobs_that_already_have_structured_salary() -> None:
     store = FakeStore()
     matcher = _matcher(store, extract_model="openrouter/test/model")
@@ -1228,3 +1272,17 @@ def test_parse_extraction_list_tolerates_model_chatter() -> None:
         _parse_extraction_list(None)
     with pytest.raises(ValueError):
         _parse_extraction_list("   ")
+
+
+def test_coerce_index_normalizes_numeric_forms_and_rejects_the_rest() -> None:
+    assert _coerce_index(3) == 3
+    assert _coerce_index("3") == 3
+    assert _coerce_index(3.0) == 3
+    assert _coerce_index("3.0") == 3
+    # bool is an int subclass but is never a valid index — must not collapse to 0/1.
+    assert _coerce_index(True) is None
+    assert _coerce_index(False) is None
+    # non-numeric junk / missing → None (the item is skipped, not mis-keyed).
+    assert _coerce_index("abc") is None
+    assert _coerce_index(None) is None
+    assert _coerce_index([0]) is None
