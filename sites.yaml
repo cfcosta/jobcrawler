@@ -2810,3 +2810,20 @@
     and `description` (full HTML). apply_url = the canonical `url` in the JSON-LD. Stay on
     jobsboard.zeroknowledge.fm. Small but curated; high signal for ZK, cryptography, Rust,
     protocol, blockchain, and crypto-infrastructure roles.
+
+- slug: readytotouch_rust
+  name: "ReadyToTouch — Rust"
+  url: https://readytotouch.com/api/v1/unsafe/rust/vacancies.json
+  render: static
+  hints: >-
+    ReadyToTouch Rust vacancy aggregator — one public JSON GET returns the whole board as
+    `{companies:[...], vacancies:[...]}` (no auth; the 401 branch is only for logged-in
+    personalization/favorites). Each `vacancies[]` item: `id`, `title`, `short_description`,
+    `location.raw` (+ `location.country.code`), `remote` (bool), `date` (ISO posted_at),
+    `source` (int origin-ATS enum), `monthly_views`, `pinned_until`, and `company.id` — JOIN
+    that id against `companies[]` for the hiring company (`name`, `type`, `industries`,
+    `linkedin_profile.alias`). This board aggregates many companies, so there is no single
+    site company. apply_url / canonical link = https://readytotouch.com/v/<vacancy id> (302s
+    through a /welcome consent gate to the original posting — record it, don't fetch it). No
+    salary is exposed anywhere — leave the salary quartet None. Direct, high-density fit: Rust
+    backend, systems, blockchain/crypto, embedded and infrastructure roles, remote and onsite.
