@@ -387,6 +387,8 @@ async def test_dashboard_with_registry_renders_per_site() -> None:
             r = await c.get("/")
             assert r.status_code == 200
             assert "Acme Corp" in r.text  # per-site panel row
+            # the site name links to that site's filtered position list (#50)
+            assert 'href="/positions?site=acme"' in r.text
     finally:
         store.close()
 

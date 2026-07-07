@@ -71,7 +71,7 @@
     <tbody>
     {% for s in per_site %}
     <tr>
-      <td>{{ s.name }}{% if not s.enabled %} <span class="tag">disabled</span>{% endif %}</td>
+      <td><a href="/positions?site={{ s.slug }}">{{ s.name }}</a>{% if not s.enabled %} <span class="tag">disabled</span>{% endif %}</td>
       <td>{{ s.open }}</td>
       <td><span class="health health-{{ s.health }}">{{ s.health }}</span></td>
       <td>{% if s.last_run %}{{ s.last_run.started | age }} ago{% else %}—{% endif %}</td>
