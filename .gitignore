@@ -33,3 +33,4 @@ optimize.log
 run.lock
 trainset.jsonl
 /generators/
+/output
