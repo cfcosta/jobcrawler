@@ -1018,6 +1018,24 @@ def test_matches_exclude_company_applied_groups_surface_variants(
     assert store.matches(70, exclude_company_applied=True) == []
 
 
+def test_search_positions_filters_by_company_canonical(store: StateStore) -> None:
+    # The "positions at this company" link (#51) groups on the canonical dedup key, so
+    # surface variants ("Acme"/"Acme, Inc.") collapse to one company and a different
+    # company is excluded — an exact key match, not a fuzzy company-name substring.
+    _upsert_scored(store, "plain", company="Acme", canonical="acme")
+    _upsert_scored(store, "inc", company="Acme, Inc.", canonical="acme")
+    _upsert_scored(store, "globex", company="Globex", canonical="globex")
+
+    assert {r.url for r in store.search_positions(company_canonical="acme")} == {
+        "plain",
+        "inc",
+    }
+    assert [r.url for r in store.search_positions(company_canonical="globex")] == [
+        "globex"
+    ]
+    assert store.search_positions(company_canonical="absent") == []
+
+
 def test_matches_exclude_company_applied_falls_back_to_lower_company(
     store: StateStore,
 ) -> None:

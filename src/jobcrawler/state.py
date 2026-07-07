@@ -1347,6 +1347,7 @@ class StateStore:
         *,
         site: str | None = None,
         company: str | None = None,
+        company_canonical: str | None = None,
         status: str | None = None,
         track_status: str | None = None,
         workplace: str | None = None,
@@ -1367,7 +1368,8 @@ class StateStore:
         filter is optional and ANDed; all are host-supplied (no crawler/generator input):
 
         - ``query``   case-insensitive substring over title/company/location/description.
-        - ``site``    exact slug; ``company`` case-insensitive substring.
+        - ``site``    exact slug; ``company`` case-insensitive substring;
+          ``company_canonical`` exact dedup key (the "positions at this company" link).
         - ``status``  crawler lifecycle ``'open'``/``'closed'`` (``None``/``'all'`` = both).
         - ``track_status``  exact personal stage (``'applied'`` …).
         - ``workplace``/``level``  exact, case-insensitive (e.g. ``'remote'``).
@@ -1398,6 +1400,12 @@ class StateStore:
         if company:
             clauses.append("lower(company) LIKE ?")
             params.append(f"%{company.lower()}%")
+        if company_canonical:
+            # Exact match on the derived dedup key (§16) — the "all positions from this
+            # company" link. Collapses surface variants ("Acme, Inc."/"ACME") and, when
+            # the matcher set it, aggregator postings onto the real hiring company.
+            clauses.append("company_canonical = ?")
+            params.append(company_canonical)
         if status and status != "all":
             clauses.append("status = ?")
             params.append(status)

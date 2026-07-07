@@ -35,6 +35,7 @@ def _seeded_store() -> StateStore:
         "https://acme.test/a",
         fields={
             **FIELDS,
+            "company_canonical": "acme",
             "workplace": "remote",
             "level": "staff",
             "salary_min": 180000,
@@ -104,6 +105,25 @@ async def test_html_pages_render() -> None:
             # a distinct apply_url surfaces as an Apply link alongside the original posting
             assert "https://apply.acme.test/a" in r.text
             assert "Apply" in r.text
+    finally:
+        store.close()
+
+
+async def test_company_links_group_by_canonical() -> None:
+    store = _seeded_store()
+    try:
+        async with _client(create_app(store)) as c:
+            # each company on the list links to its canonical-grouped view (#51)
+            r = await c.get("/positions")
+            assert 'href="/positions?company_canonical=acme"' in r.text
+            # the filter returns only rows sharing that canonical key (beta's is NULL)
+            rows = (await c.get("/api/positions?company_canonical=acme")).json()
+            assert {row["site"] for row in rows} == {"acme"}
+            # an unknown canonical yields nothing
+            assert (await c.get("/api/positions?company_canonical=absent")).json() == []
+            # landing on the filtered view shows a clearable context chip
+            r = await c.get("/positions?company_canonical=acme")
+            assert "Company · Acme" in r.text
     finally:
         store.close()
 

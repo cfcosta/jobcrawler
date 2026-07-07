@@ -137,9 +137,17 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .grid tr:hover td { background: rgba(255, 255, 255, .02); }
 .positions .score { font-weight: 700; font-variant-numeric: tabular-nums; text-align: center; }
 .positions .title a { font-weight: 600; }
+.positions .company a { color: var(--fg); }
+.positions .company a:hover { color: var(--accent); }
 .positions .age { color: var(--fg-dim); font-variant-numeric: tabular-nums; }
 .nowrap { white-space: nowrap; }
 tr.dimmed { opacity: .5; }
+
+/* active-filter context chips (arriving via a site/company link) */
+.context { display: flex; gap: 8px; flex-wrap: wrap; margin: -4px 0 16px; }
+.chip { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; padding: 4px 10px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--line); color: var(--fg); }
+.chip-x { color: var(--fg-dim); font-weight: 700; line-height: 1; }
+.chip-x:hover { color: var(--danger); text-decoration: none; }
 
 /* badges / pills */
 .tag { display: inline-block; font-size: 12px; padding: 1px 7px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--line); color: var(--fg-dim); }

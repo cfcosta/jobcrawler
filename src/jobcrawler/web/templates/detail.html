@@ -6,7 +6,7 @@
 
   <header class="detail-head">
     <h1>{{ p.title }}</h1>
-    <p class="sub">{{ p.hiring_company or p.company }} · {{ p.location }}{% if p.workplace %} · {{ p.workplace }}{% if p.remote_scope == 'anywhere' %} <span class="scope scope-anywhere" title="Open to candidates anywhere">anywhere</span>{% elif p.remote_scope == 'restricted' %} <span class="scope scope-restricted" title="Remote but geographically restricted — see location">restricted</span>{% endif %}{% endif %}</p>
+    <p class="sub">{% if p.company_canonical %}<a href="/positions?company_canonical={{ p.company_canonical | urlencode }}">{{ p.hiring_company or p.company }}</a>{% else %}{{ p.hiring_company or p.company }}{% endif %} · {{ p.location }}{% if p.workplace %} · {{ p.workplace }}{% if p.remote_scope == 'anywhere' %} <span class="scope scope-anywhere" title="Open to candidates anywhere">anywhere</span>{% elif p.remote_scope == 'restricted' %} <span class="scope scope-restricted" title="Remote but geographically restricted — see location">restricted</span>{% endif %}{% endif %}</p>
     <p class="meta">
       <span class="lifecycle lc-{{ p.status }}">{{ p.status }}</span>
       {% if p.match_score is not none %}<span class="score-pill">Match {{ p.match_score }}{% if p.match_verdict %} · {{ p.match_verdict }}{% endif %}</span>{% endif %}
