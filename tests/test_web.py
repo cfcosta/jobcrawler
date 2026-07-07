@@ -488,6 +488,90 @@ async def test_recrawl_all_without_registry_still_rescores() -> None:
         store.close()
 
 
+# -- Bulk actions on the positions list (#58) --------------------------------
+
+
+async def test_bulk_status_dismiss_and_note() -> None:
+    store = _seeded_store()
+    pid_a = encode_pid("acme", "https://acme.test/a")
+    pid_b = encode_pid("beta", "https://beta.test/b")
+    try:
+        async with _client(create_app(store)) as c:
+            # bulk "set stage → applied" across both rows stamps applied_at like the
+            # single-row path (implies_applied)
+            r = await c.post(
+                "/positions/bulk",
+                data={
+                    "action": "status",
+                    "pids": [pid_a, pid_b],
+                    "track_status": "applied",
+                },
+            )
+            assert r.status_code == 303 and "msg=" in r.headers["location"]
+            assert _get(store).track_status == "applied"
+            assert _get(store).applied_at is not None
+            beta = store.get_position("beta", "https://beta.test/b")
+            assert beta is not None and beta.track_status == "applied"
+
+            # bulk dismiss one row
+            await c.post("/positions/bulk", data={"action": "dismiss", "pids": [pid_a]})
+            assert _get(store).dismissed is True
+
+            # JSON bulk note appends (not overwrites) and counts hits
+            r = await c.post(
+                "/api/positions/bulk",
+                json={"action": "note", "pids": [pid_a], "note": "ping"},
+            )
+            assert r.json() == {"action": "note", "updated": 1}
+            assert "ping" in (_get(store).notes or "")
+
+            # a bad stage value is a 400 before any write
+            bad = await c.post(
+                "/api/positions/bulk",
+                json={"action": "status", "pids": [pid_a], "track_status": "nope"},
+            )
+            assert bad.status_code == 400
+    finally:
+        store.close()
+
+
+async def test_bulk_edge_cases() -> None:
+    store = _seeded_store()
+    pid_a = encode_pid("acme", "https://acme.test/a")
+    stale = encode_pid("ghost", "https://ghost.test/x")  # never in the store
+    try:
+        async with _client(create_app(store)) as c:
+            # empty selection → 303 with a "nothing selected" flash, no error
+            r = await c.post("/positions/bulk", data={"action": "dismiss", "pids": []})
+            assert r.status_code == 303 and "No+positions+selected" in r.headers[
+                "location"
+            ].replace("%20", "+")
+
+            # unknown action → 400
+            bad = await c.post(
+                "/api/positions/bulk", json={"action": "explode", "pids": [pid_a]}
+            )
+            assert bad.status_code == 400
+
+            # a stale pid mixed with a live one applies only to the live row
+            r = await c.post(
+                "/api/positions/bulk",
+                json={"action": "dismiss", "pids": [pid_a, stale]},
+            )
+            assert r.json() == {"action": "dismiss", "updated": 1}
+            assert _get(store).dismissed is True
+
+            # note append is newline-joined onto an existing note
+            store.set_notes("acme", "https://acme.test/a", "first")
+            await c.post(
+                "/api/positions/bulk",
+                json={"action": "note", "pids": [pid_a], "note": "second"},
+            )
+            assert (_get(store).notes or "") == "first\nsecond"
+    finally:
+        store.close()
+
+
 # -- HTML: form mutations redirect (303) -------------------------------------
 
 

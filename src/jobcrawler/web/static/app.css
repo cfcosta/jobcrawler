@@ -203,3 +203,20 @@ select.badge-muted { border-color: var(--muted); }
 .pager .disabled { opacity: .4; }
 .empty { color: var(--fg-dim); }
 .back { color: var(--fg-dim); font-size: 13px; }
+
+/* bulk selection (positions list) */
+.grid th.sel, .grid td.sel { width: 1%; text-align: center; padding-right: 0; }
+.bulk-check, #bulk-all { cursor: pointer; }
+tr.selected td { background: rgba(91, 157, 255, .10); }
+
+.bulkbar {
+  position: sticky; bottom: 0; z-index: 9;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+  margin-top: 12px; padding: 10px 14px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: 0 -6px 18px rgba(0, 0, 0, .35);
+}
+.bulkbar.is-empty { display: none; }
+.bulkbar .bulk-count { color: var(--fg-dim); font-size: 13px; margin-right: auto; }
+.bulkbar .bulk-count strong { color: var(--fg); font-variant-numeric: tabular-nums; }
+.bulkbar .bulk-group { display: flex; align-items: center; gap: 6px; }

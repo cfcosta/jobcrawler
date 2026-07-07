@@ -53,6 +53,7 @@ _TEMPLATES_DIR = _WEB_DIR / "templates"
 _STATIC_DIR = _WEB_DIR / "static"
 
 _PAGE_SIZE = 50
+_BULK_ACTIONS = frozenset({"dismiss", "restore", "status", "note"})
 
 
 # -- identity encoding ------------------------------------------------------
@@ -303,6 +304,20 @@ def _score_distribution(store: StateStore) -> list[dict[str, Any]]:
     ]
 
 
+def _bulk_msg(action: str, n: int, status_val: "tracking.TrackStatus | None") -> str:
+    """A flash summary for a bulk apply (mirrors the single-row messages)."""
+    noun = "position" if n == 1 else "positions"
+    if action == "dismiss":
+        return f"Dismissed {n} {noun}"
+    if action == "restore":
+        return f"Restored {n} {noun}"
+    if action == "status" and status_val is not None:
+        return f"{n} {noun} → {tracking.label(status_val.value)}"
+    if action == "note":
+        return f"Appended note to {n} {noun}"
+    return f"Updated {n} {noun}"
+
+
 def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
     """Build the FastAPI app over an injected ``store`` (the DI seam the tests rely on).
 
@@ -362,6 +377,49 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
             site, url, status.value, stamp_applied=tracking.implies_applied(status)
         )
         return _require(site, url)
+
+    def _apply_bulk(
+        action: str, pids: list[str], *, track_status: str = "", note: str = ""
+    ) -> tuple[int, "tracking.TrackStatus | None"]:
+        """Apply one bulk ``action`` across ``pids`` via the per-row mutators; count hits.
+
+        Reuses the exact single-row seams (``set_dismissed``/``set_track_status``/
+        ``set_notes``) so the tracking axis stays host-adjudicated (§8). Unknown/stale ids
+        (a row deleted or never present) are skipped, not fatal, so a partially-stale
+        selection still applies to the rows that remain. The stage value is validated once,
+        up front — a bad value raises ``ValueError`` before any write, so the batch is
+        all-or-nothing on validation. ``note`` is *appended* (read-modify-write through
+        ``set_notes``), newline-joined onto any existing notes.
+        """
+        status_val: tracking.TrackStatus | None = None
+        if action == "status":
+            status_val = tracking.parse(track_status)  # ValueError -> caller maps to 400
+        body = note.strip()
+        n = 0
+        for pid in pids:
+            site, url = decode_pid(pid)
+            rec = store.get_position(site, url)
+            if rec is None:
+                continue
+            if action == "dismiss":
+                store.set_dismissed(site, url, True)
+            elif action == "restore":
+                store.set_dismissed(site, url, False)
+            elif action == "status":
+                assert status_val is not None
+                store.set_track_status(
+                    site,
+                    url,
+                    status_val.value,
+                    stamp_applied=tracking.implies_applied(status_val),
+                )
+            elif action == "note":
+                existing = (rec.notes or "").rstrip()
+                store.set_notes(
+                    site, url, f"{existing}\n{body}".strip() if existing else body
+                )
+            n += 1
+        return n, status_val
 
     def _recrawl_all() -> tuple[int, int]:
         """Force a full refresh: queue every enabled site to crawl + park all open rows.
@@ -511,6 +569,28 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
         store.set_dismissed(site, url, on)
         return _back(request, f"/positions/{pid}", "Dismissed" if on else "Restored")
 
+    @app.post("/positions/bulk")
+    def post_bulk(
+        request: Request,
+        action: str = Form(...),
+        pids: list[str] = Form(default=[]),
+        track_status: str = Form(""),
+        note: str = Form(""),
+    ) -> Response:
+        if action not in _BULK_ACTIONS:
+            raise HTTPException(status_code=400, detail=f"unknown bulk action {action!r}")
+        if not pids:
+            return _back(request, "/positions", "No positions selected")
+        if action == "note" and not note.strip():
+            return _back(request, "/positions", "Nothing to append")
+        try:
+            n, status_val = _apply_bulk(
+                action, pids, track_status=track_status, note=note
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        return _back(request, "/positions", _bulk_msg(action, n, status_val))
+
     @app.post("/sites/{slug}/crawl")
     def post_crawl(request: Request, slug: str) -> Response:
         store.request_crawl(slug)
@@ -579,6 +659,23 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
         store.set_dismissed(body.site, body.url, body.dismissed)
         return JSONResponse(_position_dict(_require(body.site, body.url)))
 
+    @app.post("/api/positions/bulk")
+    def api_bulk(body: "BulkBody") -> JSONResponse:
+        if body.action not in _BULK_ACTIONS:
+            raise HTTPException(
+                status_code=400, detail=f"unknown bulk action {body.action!r}"
+            )
+        try:
+            n, _ = _apply_bulk(
+                body.action,
+                body.pids,
+                track_status=body.track_status or "",
+                note=body.note or "",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        return JSONResponse({"action": body.action, "updated": n})
+
     @app.post("/api/crawl", status_code=202)
     def api_crawl(body: "CrawlBody") -> JSONResponse:
         store.request_crawl(body.slug)
@@ -617,6 +714,13 @@ class DismissBody(BaseModel):
     site: str
     url: str
     dismissed: bool = True
+
+
+class BulkBody(BaseModel):
+    pids: list[str]
+    action: str
+    track_status: str | None = None
+    note: str | None = None
 
 
 class CrawlBody(BaseModel):
