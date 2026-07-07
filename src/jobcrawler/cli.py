@@ -28,7 +28,7 @@ import json
 import logging
 import os
 import signal
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -1109,7 +1109,49 @@ def _record_site_failure(sites: Sequence[Site], slug: str) -> None:
         )
 
 
-def _build_healer(store: StateStore, sites: Sequence[Site]) -> SelfHealer:
+def _make_sites_reloader(path: str) -> Callable[[], list[Site] | None]:
+    """A §4.1 hot-reload probe for the scheduler: return the freshly parsed registry
+    when ``sites.yaml`` changed on disk since the last call, else ``None``.
+
+    Lets an operator add or retire boards without bouncing the daemon. The probe is
+    cheap on the common path — a single ``stat`` — and only re-parses when the mtime
+    moves. A malformed mid-edit save (a half-written file caught between truncate and
+    write) is swallowed with a warning and the current roster is kept; the next clean
+    save bumps the mtime and is picked up. The mtime advances even past a failed parse
+    so a persistently-broken file warns once, not every tick.
+    """
+    try:
+        last_mtime: float | None = os.stat(path).st_mtime
+    except OSError:
+        last_mtime = None  # not there yet; a later create will register as a change
+
+    def reload() -> list[Site] | None:
+        nonlocal last_mtime
+        try:
+            mtime = os.stat(path).st_mtime
+        except OSError:
+            return None  # briefly absent (atomic replace in flight) — retry next tick
+        if mtime == last_mtime:
+            return None
+        last_mtime = mtime
+        try:
+            return load_sites(path)
+        except (yaml.YAMLError, ValidationError, OSError) as exc:
+            _log.warning(
+                "sites.yaml changed but did not parse (%s); keeping the current roster",
+                exc,
+            )
+            return None
+
+    return reload
+
+
+def _build_healer(
+    store: StateStore,
+    sites: Sequence[Site],
+    *,
+    sites_source: Callable[[], Sequence[Site]] | None = None,
+) -> SelfHealer:
     """The production §4.8 self-healer the scheduler drives on its regen timer.
 
     ``reprobe`` re-runs the live crawler (a real failure vs a transient blip);
@@ -1117,7 +1159,12 @@ def _build_healer(store: StateStore, sites: Sequence[Site]) -> SelfHealer:
     A confirmed failure is first captured as a §4.11 hard case, so a genuinely
     broken site feeds the offline optimizer before self-healing tries to fix it.
     Both live calls run off the event loop via ``to_thread``.
+
+    ``sites_source`` (when given) is consulted at failure time for the *current*
+    registry, so a board added or retired since boot via §4.1 hot-reload is resolved
+    against the live roster rather than the frozen one; it falls back to ``sites``.
     """
+    resolve_sites = sites_source if sites_source is not None else lambda: sites
 
     async def reprobe(slug: str) -> int:
         return await asyncio.to_thread(_probe, slug)
@@ -1142,7 +1189,7 @@ def _build_healer(store: StateStore, sites: Sequence[Site]) -> SelfHealer:
         store,
         reprobe=reprobe,
         regenerate=regenerate,
-        on_confirmed_failure=lambda slug: _record_site_failure(sites, slug),
+        on_confirmed_failure=lambda slug: _record_site_failure(resolve_sites(), slug),
         body_quality_floor=config.description_quality_floor(),
         genfail_backoff=config.genfail_backoff(),
         genfail_backoff_cap=config.genfail_backoff_cap(),
@@ -1196,12 +1243,22 @@ def cmd_run(args: argparse.Namespace) -> int:
     async def match_drain() -> dict[str, int]:
         return await asyncio.to_thread(_match_drain_pass, store, matcher_cell)
 
+    # §4.1 hot-reload: the scheduler re-stats sites.yaml each tick and swaps in an
+    # added/retired board without a restart; the healer's failure-capture hook reads the
+    # same file fresh so a just-added board that breaks still feeds the §4.11 trainset.
+    def _live_sites() -> Sequence[Site]:
+        try:
+            return load_sites(config.sites_path())
+        except (FileNotFoundError, yaml.YAMLError, ValidationError, OSError):
+            return sites  # unreadable mid-edit; fall back to the boot roster
+
     scheduler = Scheduler(
         sites,
         store=store,
         crawl=crawl,
-        healer=_build_healer(store, sites),
+        healer=_build_healer(store, sites, sites_source=_live_sites),
         has_crawler=_has_live_crawler,  # route crawler-less sites to §4.2 bootstrap
+        reload_sites=_make_sites_reloader(config.sites_path()),  # §4.1 hot-reload
         match_drain=match_drain,  # §4.7 profile watch + store-side pending drain
         # §4.9 recheck: without this seam recheck_due() is always False, so neither the
         # windowed 404/expired-marker re-verification NOR the fleet-wide expire_due()

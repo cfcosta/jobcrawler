@@ -238,6 +238,7 @@ class Scheduler:
         adaptive_target_n: float | None = None,
         bootstrap_budget: float | None = None,
         regen_budget: float | None = None,
+        reload_sites: Callable[[], Iterable[Site] | None] | None = None,
     ) -> None:
         self._sites = list(sites)
         self._store = store
@@ -357,6 +358,11 @@ class Scheduler:
             regen_budget if regen_budget is not None else config.regen_budget()
         )
         self._regen_incomplete = False
+        # §4.1 hot-reload: an optional probe that returns the freshly-parsed registry when
+        # sites.yaml changed on disk (else None), so an operator can add/remove boards
+        # without bouncing the daemon. Checked at the top of each tick. None disables it —
+        # the many tests that inject a fixed roster keep their frozen list.
+        self._reload_sites = reload_sites
         # Slugs a §16 "crawl now" button forced this tick (set by due_sites, read by
         # tick to jump a crawler-less forced site to the front of the bootstrap pass).
         self._forced_this_tick: frozenset[str] = frozenset()
@@ -584,6 +590,34 @@ class Scheduler:
             _log.info("bootstrap generated=%d %s", len(states), _state_summary(states))
         return states
 
+    def _maybe_reload_sites(self) -> None:
+        """Swap in a hot-reloaded registry when sites.yaml changed on disk (§4.1).
+
+        The probe returns None when the file is unchanged or failed to parse (a
+        half-written mid-edit save keeps the current roster), so the common path is a
+        cheap stat. A persisted site keeps its cadence — that state lives in the run
+        history keyed by slug, not on the Site object — so only genuinely new slugs are
+        immediately due; a removed slug simply stops being dispatched (any in-flight crawl
+        finishes and cleans up on its own).
+        """
+        if self._reload_sites is None:
+            return
+        fresh = self._reload_sites()
+        if fresh is None:
+            return
+        roster = list(fresh)
+        old = {s.slug for s in self._sites}
+        new = {s.slug for s in roster}
+        self._sites = roster
+        added, removed = sorted(new - old), sorted(old - new)
+        if added or removed:
+            _log.info(
+                "sites.yaml reloaded: added=%s removed=%s (now %d site(s))",
+                ",".join(added) or "-",
+                ",".join(removed) or "-",
+                len(roster),
+            )
+
     async def tick(self) -> list[CrawlSummary]:
         """Dispatch every currently-due site (bounded), returning the successes.
 
@@ -597,6 +631,7 @@ class Scheduler:
         FileNotFoundError); it's routed to the §4.2 cold-start bootstrap after the crawl
         wave, which writes its first crawler honoring the review gate.
         """
+        self._maybe_reload_sites()
         due = self.due_sites()
         crawlable = [s for s in due if self._has_crawler(s.slug)]
         missing = [s for s in due if not self._has_crawler(s.slug)]

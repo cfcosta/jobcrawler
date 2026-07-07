@@ -279,6 +279,42 @@ async def test_regen_tick_is_a_noop_without_a_healer() -> None:
     assert await sched.regen_tick() == {}
 
 
+async def test_tick_hot_reloads_the_registry() -> None:
+    # §4.1: a board added to sites.yaml after boot is crawled on the next tick without a
+    # restart, and a probe returning None (file unchanged) leaves the roster in place.
+    store = StateStore(":memory:", clock=lambda: T0)
+    crawled: list[str] = []
+
+    async def crawl(site: Site) -> CrawlSummary:
+        crawled.append(site.slug)
+        return _summary(site.slug)
+
+    fresh = [
+        Site(slug="s0", url="https://s0.com"),
+        Site(slug="new", url="https://new.com"),
+    ]
+    calls = {"n": 0}
+
+    def reload_sites() -> list[Site] | None:
+        calls["n"] += 1
+        return fresh if calls["n"] == 1 else None  # changed once, then steady
+
+    sched = Scheduler(
+        [Site(slug="s0", url="https://s0.com")],
+        store=store,
+        crawl=crawl,
+        clock=lambda: T0,
+        reload_sites=reload_sites,
+    )
+
+    await sched.tick()
+    assert "new" in crawled  # the just-added board dispatched the same tick
+    assert {s.slug for s in sched._sites} == {"s0", "new"}
+
+    await sched.tick()  # reload now returns None
+    assert {s.slug for s in sched._sites} == {"s0", "new"}  # roster unchanged
+
+
 async def test_regen_tick_defers_over_budget_and_stays_due() -> None:
     # A correlated drift wave: every site is a staleness candidate. With a zero budget the
     # sweep assesses one site, then defers the rest rather than regenerating the whole

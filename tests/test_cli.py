@@ -26,6 +26,7 @@ from jobcrawler.cli import (
     _configure_logging,
     _db_path,
     _humanize_secs,
+    _make_sites_reloader,
     _match_drain_pass,
     _probe,
     _record_site_failure,
@@ -1231,6 +1232,31 @@ def test_record_site_failure_unknown_slug_is_a_noop(
     _record_site_failure([], "ghost")  # not in the registry
 
     assert load_records(path) == []
+
+
+def test_sites_reloader_detects_changes_and_survives_a_bad_file(
+    tmp_path: Path,
+) -> None:
+    # §4.1 hot-reload probe: None while unchanged, a fresh roster once the file's mtime
+    # moves, and None (roster kept) on a malformed mid-edit save — never an exception.
+    path = tmp_path / "sites.yaml"
+    path.write_text("- slug: a\n  url: https://a.com\n")
+    os.utime(path, (1000, 1000))
+
+    reload = _make_sites_reloader(str(path))
+    assert reload() is None  # mtime matches the one captured at construction
+
+    path.write_text("- slug: a\n  url: https://a.com\n- slug: b\n  url: https://b.com\n")
+    os.utime(path, (2000, 2000))
+    fresh = reload()
+    assert fresh is not None and {s.slug for s in fresh} == {"a", "b"}
+
+    assert reload() is None  # steady again at the new mtime
+
+    # A half-written save is swallowed: the probe reports "no usable change", not a crash.
+    path.write_text("this: [is: not: valid")
+    os.utime(path, (3000, 3000))
+    assert reload() is None
 
 
 async def test_build_healer_records_hard_case_on_confirmed_failure(
