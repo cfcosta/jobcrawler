@@ -10,9 +10,22 @@ EXTRA_HOSTS = []
 SITEMAP_URL = "https://wise.jobs/vacanciessitemap.xml"
 COMPANY = "Wise"
 SOURCE = "wise"
-MAX_POSTINGS = 8
+MAX_POSTINGS = 6
 
 JID_RE = re.compile(r"-jid-(\d+)$")
+SALARY_RE = re.compile(
+    r"^\s*([\d.,]+)\s*[-–]\s*([\d.,]+)\s+([A-Za-z]{3})\s+([A-Za-z]+)\s*$"
+)
+
+PERIODS = {
+    "annual": "year",
+    "annually": "year",
+    "yearly": "year",
+    "monthly": "month",
+    "weekly": "week",
+    "daily": "day",
+    "hourly": "hour",
+}
 
 
 def _text(value):
@@ -21,11 +34,14 @@ def _text(value):
     if isinstance(value, str):
         value = html.unescape(value)
         value = re.sub(r"<\s*br\s*/?\s*>", "\n", value, flags=re.I)
-        value = re.sub(r"</\s*(p|div|li|h[1-6]|tr)\s*>", "\n", value, flags=re.I)
+        value = re.sub(
+            r"</\s*(p|div|li|h[1-6]|section|tr|ul|ol)\s*>", "\n", value, flags=re.I
+        )
         value = re.sub(r"<[^>]+>", " ", value)
         value = html.unescape(value)
         value = re.sub(r"[ \t\r\f\v]+", " ", value)
-        value = re.sub(r"\n\s*", "\n", value)
+        value = re.sub(r"\n[ \t]+", "\n", value)
+        value = re.sub(r"\n{3,}", "\n\n", value)
         return value.strip() or None
     if isinstance(value, list):
         parts = [_text(v) for v in value]
@@ -93,30 +109,51 @@ def _location(job):
     remote = job.get("jobLocationType")
     if remote and str(remote).strip() not in parts:
         parts.append(str(remote).strip())
-    return "; ".join(dict.fromkeys(parts)) if parts else None
+    seen = []
+    for part in parts:
+        if part not in seen:
+            seen.append(part)
+    return "; ".join(seen) if seen else None
+
+
+def _to_float(value):
+    try:
+        return float(value.replace(",", ""))
+    except ValueError:
+        return None
 
 
 def _salary(job):
     benefits = job.get("jobBenefits")
     if isinstance(benefits, list):
         benefits = ", ".join(str(b).strip() for b in benefits if b)
-    if isinstance(benefits, str) and benefits.strip():
-        return benefits.strip()
-    base = job.get("baseSalary")
-    if isinstance(base, str) and base.strip():
-        return base.strip()
-    return None
+    if not isinstance(benefits, str):
+        return {}
+    raw = html.unescape(benefits).strip()
+    if not raw:
+        return {}
+    out = {"salary": raw}
+    match = SALARY_RE.match(raw)
+    if match:
+        low = _to_float(match.group(1))
+        high = _to_float(match.group(2))
+        if low is not None:
+            out["salary_min"] = low
+        if high is not None:
+            out["salary_max"] = high
+        out["salary_currency"] = match.group(3).upper()
+        period = match.group(4).lower()
+        out["salary_period"] = PERIODS.get(period, period)
+    return out
 
 
 def _external_id(url, job):
+    ident = job.get("identifier")
+    if isinstance(ident, dict) and ident.get("value"):
+        return str(ident["value"]).strip() or None
     match = JID_RE.search(urlparse(url).path)
     if match:
-        return match.group(1)
-    ident = job.get("identifier")
-    if isinstance(ident, dict):
-        value = ident.get("value")
-        if value:
-            return str(value).strip() or None
+        return "wise-" + match.group(1)
     return None
 
 
@@ -144,10 +181,6 @@ def _urls_from_sitemap(xml):
     return [loc for _, __, loc in items]
 
 
-def _clean_dict(data):
-    return {k: v for k, v in data.items() if v is not None and v != ""}
-
-
 def crawl(ctx):
     xml = ctx.fetch(SITEMAP_URL)
     for url in _urls_from_sitemap(xml)[:MAX_POSTINGS]:
@@ -167,14 +200,11 @@ def crawl(ctx):
             "url": _text(job.get("url")) or url,
             "title": title,
             "company": COMPANY,
-            "location": _text(location),
+            "location": location,
             "description": description,
             "source": SOURCE,
             "external_id": _external_id(url, job),
-            "salary": _salary(job),
-            "employment_type": _text(job.get("employmentType")),
-            "department": _text(job.get("industry")),
             "posted_at": _text(job.get("datePosted")),
-            "expires_at": _text(job.get("validThrough")),
         }
-        yield _clean_dict(out)
+        out.update(_salary(job))
+        yield {k: v for k, v in out.items() if v is not None and v != ""}

@@ -5,7 +5,7 @@ import re
 SITE = "https://www.brex.com/careers"
 EXTRA_HOSTS = []
 
-MAX_JOBS = 8
+MAX_JOBS = 6
 
 _NEXT_DATA_RE = re.compile(
     r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>', re.I | re.S

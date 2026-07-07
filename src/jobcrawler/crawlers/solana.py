@@ -1,3 +1,4 @@
+import datetime
 import html
 import json
 import re
@@ -7,7 +8,8 @@ SITE = "https://jobs.solana.com/"
 EXTRA_HOSTS = []
 
 SOURCE = "solana"
-MAX_JOBS = 6
+MAX_JOBS = 8
+DEADLINE_SECONDS = 6.5
 
 _NEXT_DATA_RE = re.compile(
     r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>', re.I | re.S
@@ -19,12 +21,17 @@ _JOB_PATH_RE = re.compile(r"/companies/[^/]+/jobs/[^/?#]+")
 
 _SCRIPT_STYLE_RE = re.compile(r"(?is)<\s*(script|style)\b.*?</\s*\1\s*>")
 _BR_RE = re.compile(r"(?i)<\s*br\s*/?\s*>")
-_BLOCK_END_RE = re.compile(r"(?i)</\s*(p|div|li|tr|h1|h2|h3|h4|ul|ol)\s*>")
+_BLOCK_END_RE = re.compile(
+    r"(?i)</\s*(p|div|li|tr|h1|h2|h3|h4|h5|h6|ul|ol|section|header)\s*>"
+)
 _LI_RE = re.compile(r"(?i)<\s*li\b[^>]*>")
 _TAG_RE = re.compile(r"(?s)<[^>]+>")
 _INLINE_WS_RE = re.compile(r"[ \t\r\f\v]+")
 _PAD_NL_RE = re.compile(r" *\n *")
 _MULTI_NL_RE = re.compile(r"\n{3,}")
+_HTTP_RE = re.compile(r"(?i)^https?://")
+
+_PERIOD_SENTINELS = {"period_not_defined", "not_defined", ""}
 
 
 def _clean(value):
@@ -35,10 +42,9 @@ def _clean(value):
 
 
 def _strip_html(value):
-    if not value:
+    if not isinstance(value, str) or not value:
         return None
-    text = str(value)
-    text = _SCRIPT_STYLE_RE.sub(" ", text)
+    text = _SCRIPT_STYLE_RE.sub(" ", value)
     text = _BR_RE.sub("\n", text)
     text = _BLOCK_END_RE.sub("\n", text)
     text = _LI_RE.sub("\n- ", text)
@@ -79,7 +85,7 @@ def _next_data(page):
     if not match:
         return None
     raw = match.group(1)
-    for candidate in (html.unescape(raw), raw):
+    for candidate in (raw, html.unescape(raw)):
         try:
             return json.loads(candidate)
         except ValueError:
@@ -87,65 +93,68 @@ def _next_data(page):
     return None
 
 
+def _current_job(data):
+    if not isinstance(data, dict):
+        return None
+    props = data.get("props")
+    page_props = props.get("pageProps") if isinstance(props, dict) else None
+    state = page_props.get("initialState") if isinstance(page_props, dict) else None
+    jobs = state.get("jobs") if isinstance(state, dict) else None
+    current = jobs.get("currentJob") if isinstance(jobs, dict) else None
+    return current if isinstance(current, dict) else None
+
+
 def _sitemap_job_urls(sitemap):
     rows = []
-    for idx, block in enumerate(_URL_BLOCK_RE.findall(sitemap)):
+    seen = set()
+    for block in _URL_BLOCK_RE.findall(sitemap):
         loc_match = _LOC_RE.search(block)
         if not loc_match:
             continue
         loc = html.unescape(loc_match.group(1)).strip()
-        if not _JOB_PATH_RE.search(loc):
+        if loc in seen or not _JOB_PATH_RE.search(loc):
             continue
-        lm_match = _LASTMOD_RE.search(block)
-        lastmod = lm_match.group(1).strip() if lm_match else ""
-        rows.append((lastmod, -idx, loc))
+        seen.add(loc)
+        lastmod_match = _LASTMOD_RE.search(block)
+        lastmod = lastmod_match.group(1).strip() if lastmod_match else ""
+        rows.append((lastmod, loc))
     rows.sort(reverse=True)
-    seen = set()
-    ordered = []
-    for _, __, loc in rows:
-        if loc not in seen:
-            seen.add(loc)
-            ordered.append(loc)
-    return ordered
+    return [loc for _, loc in rows]
 
 
-def _money_from_cents(value):
-    try:
-        amount = int(value) / 100.0
-    except (TypeError, ValueError):
+def _cents(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    if amount.is_integer():
-        return str(int(amount))
-    return f"{amount:.2f}".rstrip("0").rstrip(".")
+    return float(value) / 100.0
 
 
-def _salary(job):
+def _apply_salary(job, out):
     if not job.get("compensationPublic"):
-        return None
-    low = _money_from_cents(job.get("compensationAmountMinCents"))
-    high = _money_from_cents(job.get("compensationAmountMaxCents"))
-    if not low and not high:
-        return None
+        return
+    low = _cents(job.get("compensationAmountMinCents"))
+    high = _cents(job.get("compensationAmountMaxCents"))
+    if low is None and high is None:
+        return
+    if low is not None:
+        out["salary_min"] = low
+    if high is not None:
+        out["salary_max"] = high
     currency = _clean(job.get("compensationCurrency"))
-    period = _clean(job.get("compensationPeriod"))
-    if period == "period_not_defined":
-        period = None
-    if low and high and low != high:
-        text = f"{low} - {high}"
-    else:
-        text = low or high
     if currency:
-        text = f"{currency} {text}"
-    if period:
-        text = f"{text} / {period}"
-    return text
+        out["salary_currency"] = currency
+    period = _clean(job.get("compensationPeriod"))
+    if period and period.lower() not in _PERIOD_SENTINELS:
+        out["salary_period"] = period
 
 
 def _apply_url(job):
+    external = _clean(job.get("url"))
+    if external and _HTTP_RE.match(external):
+        return external
     path = _clean(job.get("applicationPath"))
     if path:
         return urljoin(SITE, path)
-    return _clean(job.get("url"))
+    return None
 
 
 def _build(job, page_url):
@@ -177,7 +186,7 @@ def _build(job, page_url):
     }
 
     ident = job.get("id")
-    if ident is not None:
+    if isinstance(ident, (int, str)):
         ident = str(ident).strip()
         if ident:
             out["external_id"] = ident
@@ -198,36 +207,28 @@ def _build(job, page_url):
     if department:
         out["department"] = department
 
-    salary = _salary(job)
-    if salary:
-        out["salary"] = salary
-
     apply_url = _apply_url(job)
     if apply_url:
         out["apply_url"] = apply_url
 
+    _apply_salary(job, out)
     return out
 
 
 def crawl(ctx):
-    sitemap = ctx.fetch(urljoin(SITE, "sitemap.xml"))
+    start = datetime.datetime.now()
+    sitemap = ctx.fetch(urljoin(SITE, "/sitemap.xml"))
     yielded = 0
-    for url in _sitemap_job_urls(sitemap):
+    for page_url in _sitemap_job_urls(sitemap):
         if yielded >= MAX_JOBS:
             break
+        if (datetime.datetime.now() - start).total_seconds() > DEADLINE_SECONDS:
+            break
         try:
-            page = ctx.fetch(url)
+            page = ctx.fetch(page_url)
         except Exception:
             continue
-        data = _next_data(page)
-        if not isinstance(data, dict):
-            continue
-        props = data.get("props")
-        page_props = props.get("pageProps") if isinstance(props, dict) else None
-        state = page_props.get("initialState") if isinstance(page_props, dict) else None
-        jobs = state.get("jobs") if isinstance(state, dict) else None
-        current = jobs.get("currentJob") if isinstance(jobs, dict) else None
-        item = _build(current, url)
-        if item:
+        job = _build(_current_job(_next_data(page)), page_url)
+        if job:
             yielded += 1
-            yield item
+            yield job
