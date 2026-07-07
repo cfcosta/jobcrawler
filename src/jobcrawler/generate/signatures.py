@@ -59,11 +59,18 @@ class GenerateCrawler(dspy.Signature):
     and crawl(ctx) yielding Jobs). SITE must be exactly the given site_url — the
     acceptance gate rejects a SITE on any other host, even the board's own
     careers domain; job *urls*, by contrast, keep the source's canonical posting
-    links wherever they live. ctx.fetch reaches only SITE's host plus hosts you
-    declare in a module-level EXTRA_HOSTS list of bare hostnames (e.g.
-    EXTRA_HOSTS = ["employability-portal.gupy.io"]) — declare every cross-host
-    API you fetch; only hosts the site's own served bytes name are admitted, and
-    an undeclared host fails validation with an SsrfError naming it. Yield one
+    links wherever they live. ctx.fetch reaches only SITE's host plus any
+    operator-authorized EXTRA_HOSTS (a module-level list of bare hostnames, e.g.
+    EXTRA_HOSTS = ["employability-portal.gupy.io"]). Default EXTRA_HOSTS to
+    empty: a host merely NAMED in the fetched bytes (a jobUrl, an apply link, a
+    URL inside a description) is attacker-influenced and NOT authorized —
+    declaring it fails the §8 host-admission gate, which admits only hosts the
+    operator pre-declared in the registry. For a single-endpoint ATS API
+    (Greenhouse/Lever/Ashby) the one response already carries every open role and
+    its FULL description, so read it all from there and never fetch a per-job
+    page. Declare an EXTRA_HOST only when you must fetch a cross-host backend to
+    enumerate the board and the operator hint vouches for it; an undeclared or
+    unauthorized host fails validation with an SsrfError naming it. Yield one
     Job per open role with url, title,
     company, location, and the FULL description text, plus every structured field
     the source actually states — salary, employment_type, workplace_type,
