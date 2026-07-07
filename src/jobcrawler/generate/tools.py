@@ -32,7 +32,7 @@ from html.parser import HTMLParser
 from typing import TYPE_CHECKING
 from urllib.parse import urljoin, urlsplit
 
-from jobcrawler.runtime.contract import Ctx
+from jobcrawler.runtime.contract import Ctx, declared_extra_hosts
 from jobcrawler.runtime.ssrf import SsrfError, check_url
 from jobcrawler.urls import host_on_domain, normalize_host
 
@@ -415,11 +415,16 @@ def make_host_tools(
         descriptions are clipped previews — the scorer grades the full extracted
         text), any ``schema_errors`` naming missing or invalid Job fields (url /
         title / company / location / description / source), and any top-level
-        ``exception`` — the write → validate → fix signal to use before SUBMIT."""
+        ``exception`` — the write → validate → fix signal to use before SUBMIT.
+        Also lists any ``inadmissible_hosts``: EXTRA_HOSTS you declared that the
+        operator did NOT authorize. Admission drops them, so the crawler ran
+        WITHOUT them here yet is still refused at the §8 gate — remove the dead
+        declarations before SUBMIT (never add a host merely to silence this)."""
         # Bind the sandbox validator at call time (not construction) so building the
         # tools for pure discovery never imports the subprocess-sandbox machinery.
         run_in_sandbox = validate_fn or _sandbox_validate()
         run_hosts = hosts
+        inadmissible: tuple[str, ...] = ()
         if registry_hosts is not None:
             # Lazy like _sandbox_validate: gates pulls scoring/pydantic, which the
             # pure discovery helpers must not pay for.
@@ -430,6 +435,18 @@ def make_host_tools(
                 registry_hosts=registry_hosts,
                 evidence_hosts=evidence_hosts,
             )
+            # A declared EXTRA_HOST admission won't grant is silently absent from
+            # run_hosts, so a candidate that over-declares but never fetches it
+            # passes here yet is refused at the §8 acceptance gate. Surface the dead
+            # declarations in-band so the model drops them (not so it authorizes them).
+            try:
+                inadmissible = tuple(
+                    h
+                    for h in declared_extra_hosts(source)
+                    if normalize_host(f"https://{h}") not in run_hosts
+                )
+            except SyntaxError:
+                inadmissible = ()
         result = run_in_sandbox(
             source, allowed_hosts=run_hosts, timeout=validate_timeout
         )
@@ -437,6 +454,7 @@ def make_host_tools(
             "item_count": result.item_count,
             "samples": [_preview_sample(sample) for sample in result.samples],
             "schema_errors": result.schema_errors,
+            "inadmissible_hosts": inadmissible,
             "exception": None
             if result.exception is None
             else {

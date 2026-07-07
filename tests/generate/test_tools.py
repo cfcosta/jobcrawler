@@ -273,6 +273,60 @@ def test_validate_tool_runs_under_the_admission_shaped_allowlist() -> None:
     assert seen["hosts"] == {"example.com", "api.example.net"}
 
 
+def test_validate_tool_flags_inadmissible_declared_hosts() -> None:
+    # A declared EXTRA_HOST the operator never authorized is silently dropped from
+    # the run allowlist, so a candidate that over-declares but never fetches it
+    # would PASS here yet be refused at gate 1(b). The tool surfaces it as
+    # inadmissible_hosts so the model drops the dead declaration in write → fix.
+    seen: dict[str, set[str]] = {}
+
+    def fake_validate(
+        source: str, *, allowed_hosts: object, **_kw: object
+    ) -> CandidateResult:
+        seen["hosts"] = set(cast("set[str]", allowed_hosts))
+        return CandidateResult(
+            item_count=3, samples=[], schema_errors=[], pages_fetched=1
+        )
+
+    ctx = _ctx(lambda r: httpx.Response(404), host="example.com")
+    _f, _fd, _sm, validate = make_host_tools(
+        ctx,
+        {"example.com", "api.example.net"},
+        registry_hosts={"example.com"},
+        evidence_hosts=["api.example.net"],
+        validate_fn=fake_validate,
+    )
+    out = validate(
+        'SITE = "https://example.com"\n'
+        'EXTRA_HOSTS = ["api.example.net", "evil.example.org"]\n'
+        "def crawl(ctx):\n    yield 1\n"
+    )
+    # api.example.net is operator-evidenced → admitted; evil.example.org is not.
+    assert seen["hosts"] == {"example.com", "api.example.net"}
+    assert out["inadmissible_hosts"] == ("evil.example.org",)
+
+
+def test_validate_tool_reports_no_inadmissible_hosts_for_a_clean_declaration() -> None:
+    # The common single-GET case: no EXTRA_HOSTS declared → nothing to drop.
+    def fake_validate(
+        source: str, *, allowed_hosts: object, **_kw: object
+    ) -> CandidateResult:
+        return CandidateResult(
+            item_count=5, samples=[], schema_errors=[], pages_fetched=1
+        )
+
+    ctx = _ctx(lambda r: httpx.Response(404), host="example.com")
+    _f, _fd, _sm, validate = make_host_tools(
+        ctx,
+        {"example.com"},
+        registry_hosts={"example.com"},
+        evidence_hosts=[],
+        validate_fn=fake_validate,
+    )
+    out = validate('SITE = "https://example.com"\ndef crawl(ctx):\n    yield 1\n')
+    assert out["inadmissible_hosts"] == ()
+
+
 # -- §8 observed-host evidence --------------------------------------------------
 
 
