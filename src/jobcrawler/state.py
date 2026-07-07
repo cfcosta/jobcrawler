@@ -164,6 +164,7 @@ class PositionRecord:
     discipline: str | None
     level: str | None
     workplace: str | None
+    remote_scope: str | None
     salary_min: float | None
     salary_max: float | None
     salary_currency: str | None
@@ -244,6 +245,7 @@ CREATE TABLE IF NOT EXISTS positions (
     discipline      TEXT,
     level           TEXT,
     workplace       TEXT,
+    remote_scope    TEXT,
     salary_min      REAL,
     salary_max      REAL,
     salary_currency TEXT,
@@ -320,6 +322,7 @@ _POSITION_FIELDS: frozenset[str] = frozenset(
         "discipline",
         "level",
         "workplace",
+        "remote_scope",
         "salary_min",
         "salary_max",
         "salary_currency",
@@ -343,6 +346,7 @@ _POSITION_ADD_COLUMNS: tuple[tuple[str, str], ...] = (
     ("discipline", "TEXT"),
     ("level", "TEXT"),
     ("workplace", "TEXT"),
+    ("remote_scope", "TEXT"),
     ("salary_min", "REAL"),
     ("salary_max", "REAL"),
     ("salary_currency", "TEXT"),
@@ -424,6 +428,38 @@ class StateStore:
             for name, ddl in _POSITION_ADD_COLUMNS:
                 if name not in position_cols:
                     self._conn.execute(f"ALTER TABLE positions ADD COLUMN {name} {ddl}")
+        self._backfill_remote_scope()
+
+    def _backfill_remote_scope(self) -> None:
+        """Fill ``remote_scope`` for rows written before the column existed (§4.6).
+
+        The scope derives from ``workplace``+``location`` via the very classifier a fresh
+        crawl runs (:func:`classify_remote_scope`), so a populated DB gains the geographic
+        scope immediately instead of waiting for every board's next crawl to re-serve the
+        row. Idempotent and cheap: it only reads rows still NULL with a known ``workplace``,
+        and the classifier never returns NULL — so once filled, a later open matches nothing
+        and skips. (Rows with a NULL ``workplace`` stay NULL, which the filters/display read
+        as ``unspecified`` anyway.)
+        """
+        rows = self._conn.execute(
+            "SELECT site, url, workplace, location FROM positions "
+            "WHERE remote_scope IS NULL AND workplace IS NOT NULL"
+        ).fetchall()
+        if not rows:
+            return
+        from jobcrawler.runtime.normalize import classify_remote_scope
+
+        self._conn.executemany(
+            "UPDATE positions SET remote_scope = ? WHERE site = ? AND url = ?",
+            [
+                (
+                    classify_remote_scope(row["workplace"] or "", row["location"] or ""),
+                    row["site"],
+                    row["url"],
+                )
+                for row in rows
+            ],
+        )
 
     # -- item state (dedup) --------------------------------------------------
 
@@ -1152,6 +1188,7 @@ class StateStore:
         status: str | None = None,
         track_status: str | None = None,
         workplace: str | None = None,
+        remote_scope: str | None = None,
         level: str | None = None,
         min_score: int | None = None,
         min_salary: float | None = None,
@@ -1172,6 +1209,8 @@ class StateStore:
         - ``status``  crawler lifecycle ``'open'``/``'closed'`` (``None``/``'all'`` = both).
         - ``track_status``  exact personal stage (``'applied'`` …).
         - ``workplace``/``level``  exact, case-insensitive (e.g. ``'remote'``).
+        - ``remote_scope``  exact geographic scope of a remote role (``'anywhere'`` powers the
+          "remote anywhere" filter; ``'restricted'``/``'unspecified'`` also selectable).
         - ``min_score``  only rows scored at/above it (drops unscored).
         - ``min_salary``  ``COALESCE(salary_max, salary_min) >= min_salary`` (drops unstated).
         - ``dismissed``  ``None`` = both, ``False`` = hide dismissed, ``True`` = only dismissed.
@@ -1206,6 +1245,9 @@ class StateStore:
         if workplace:
             clauses.append("lower(COALESCE(workplace, '')) = ?")
             params.append(workplace.lower())
+        if remote_scope:
+            clauses.append("lower(COALESCE(remote_scope, '')) = ?")
+            params.append(remote_scope.lower())
         if level:
             clauses.append("lower(COALESCE(level, '')) = ?")
             params.append(level.lower())
@@ -1539,6 +1581,7 @@ def _to_position(row: sqlite3.Row) -> PositionRecord:
         discipline=row["discipline"],
         level=row["level"],
         workplace=row["workplace"],
+        remote_scope=row["remote_scope"],
         salary_min=row["salary_min"],
         salary_max=row["salary_max"],
         salary_currency=row["salary_currency"],

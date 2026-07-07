@@ -141,6 +141,7 @@ def _position_dict(p: PositionRecord) -> dict[str, Any]:
         "hiring_company": p.hiring_company,
         "location": p.location,
         "workplace": p.workplace,
+        "remote_scope": p.remote_scope,
         "level": p.level,
         "discipline": p.discipline,
         "employment_type": p.employment_type,
@@ -207,6 +208,7 @@ def _read_filters(params: Any) -> tuple[dict[str, Any], dict[str, Any]]:
 
     show_dismissed = _flag("show_dismissed")
     hide_applied_companies = _flag("hide_applied_companies")
+    remote_anywhere = _flag("remote_anywhere")
     status = _s("status")  # None/'all' => both open and closed
     track_status = _s("track_status")
     sort = _s("sort") or "score"
@@ -217,6 +219,9 @@ def _read_filters(params: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         "status": status,
         "track_status": track_status,
         "workplace": _s("workplace"),
+        # "Remote anywhere" is a geographic-scope filter over remote roles; scope
+        # 'anywhere' only ever lands on a workplace='remote' row, so it stands alone.
+        "remote_scope": "anywhere" if remote_anywhere else None,
         "level": _s("level"),
         "min_score": _int_param(params, "min_score"),
         "min_salary": _float_param(params, "min_salary"),
@@ -237,6 +242,7 @@ def _read_filters(params: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         "sort": sort,
         "show_dismissed": show_dismissed,
         "hide_applied_companies": hide_applied_companies,
+        "remote_anywhere": remote_anywhere,
     }
     return kwargs, raw
 

@@ -31,6 +31,7 @@
     <option value="{{ value }}"{{ ' selected' if filters.sort == value else '' }}>{{ label }}</option>
     {% endfor %}
   </select>
+  <label class="chk"><input type="checkbox" name="remote_anywhere" value="1"{{ ' checked' if filters.remote_anywhere else '' }}> Remote anywhere</label>
   <label class="chk"><input type="checkbox" name="show_dismissed" value="1"{{ ' checked' if filters.show_dismissed else '' }}> Show dismissed</label>
   <label class="chk"><input type="checkbox" name="hide_applied_companies" value="1"{{ ' checked' if filters.hide_applied_companies else '' }}> Hide applied companies</label>
   <button type="submit">Apply</button>
@@ -49,7 +50,7 @@
     <td class="title"><a href="/positions/{{ encode_pid(p.site, p.url) }}">{{ p.title }}</a>
         {% if p.dismissed %}<span class="tag">dismissed</span>{% endif %}</td>
     <td>{{ p.hiring_company or p.company }}</td>
-    <td>{{ p.location }}{% if p.workplace %} · {{ p.workplace }}{% endif %}</td>
+    <td>{{ p.location }}{% if p.workplace %} · {{ p.workplace }}{% if p.remote_scope == 'anywhere' %} <span class="scope scope-anywhere" title="Open to candidates anywhere">anywhere</span>{% elif p.remote_scope == 'restricted' %} <span class="scope scope-restricted" title="Remote but geographically restricted — see location">restricted</span>{% endif %}{% endif %}</td>
     <td class="nowrap">{{ p | salary }}</td>
     <td><span class="lifecycle lc-{{ p.status }}">{{ p.status }}</span></td>
     <td>

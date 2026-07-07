@@ -15,11 +15,13 @@ from jobcrawler.runtime.contract import Job
 from jobcrawler.runtime.normalize import (
     DISCIPLINES,
     LEVELS,
+    REMOTE_SCOPES,
     WORKPLACES,
     SalaryRange,
     canonical_company,
     classify_discipline,
     classify_level,
+    classify_remote_scope,
     classify_workplace,
     enrich,
     parse_salary,
@@ -219,6 +221,56 @@ def test_workplace_unrecognized_structured_falls_to_text() -> None:
 
 def test_workplace_hybrid_beats_remote_in_text() -> None:
     assert classify_workplace("", "", "Hybrid role, remote up to 3 days") == "hybrid"
+
+
+# --- remote geographic scope (anywhere / restricted / unspecified) ---------
+
+
+@pytest.mark.parametrize(
+    ("location", "expected"),
+    [
+        # Explicit worldwide signal, nothing concrete left over -> anywhere.
+        ("Anywhere in the World", "anywhere"),
+        ("Home based - Worldwide", "anywhere"),
+        ("Remote - Anywhere", "anywhere"),
+        ("Remote (Global)", "anywhere"),
+        ("Fully remote, work from anywhere", "anywhere"),
+        # A concrete place named -> restricted, even alongside a worldwide-ish word.
+        ("Remote, US", "restricted"),
+        ("United States (Remote)", "restricted"),
+        ("Remote-Friendly, United States", "restricted"),  # Anthropic (#38)
+        ("New York, NY (HQ)", "restricted"),  # Ramp (#36)
+        ("Home based - EMEA", "restricted"),
+        ("Remote (Canada)", "restricted"),
+        ("Remote - Australia", "restricted"),
+        ("Anywhere in the US", "restricted"),  # worldwide word but a country residual
+        # Remote with no locational signal either way -> unspecified.
+        ("Remote", "unspecified"),
+        ("", "unspecified"),
+        ("N/A", "unspecified"),
+    ],
+)
+def test_remote_scope_for_remote_roles(location: str, expected: str) -> None:
+    result = classify_remote_scope("remote", location)
+    assert result in REMOTE_SCOPES
+    assert result == expected
+
+
+@pytest.mark.parametrize("workplace", ["hybrid", "onsite", "unspecified", ""])
+def test_remote_scope_only_applies_to_remote(workplace: str) -> None:
+    # Scope is meaningless for a role that isn't remote — even a worldwide location.
+    assert classify_remote_scope(workplace, "Anywhere in the World") == "unspecified"
+
+
+def test_enrich_sets_remote_scope() -> None:
+    anywhere = enrich(_job(location="Anywhere in the World", workplace_type="Remote"))
+    assert anywhere.workplace == "remote"
+    assert anywhere.remote_scope == "anywhere"
+    restricted = enrich(_job(location="New York, NY (HQ)", workplace_type="Remote"))
+    assert restricted.workplace == "remote"
+    assert restricted.remote_scope == "restricted"
+    onsite = enrich(_job(location="Berlin, Germany", workplace_type="On-site"))
+    assert onsite.remote_scope == "unspecified"
 
 
 # --- salary (four empirical formats + ambiguity) ---------------------------

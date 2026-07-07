@@ -234,6 +234,63 @@ def test_search_filters(store: StateStore) -> None:
     ]
 
 
+def test_search_remote_scope_filter(store: StateStore) -> None:
+    # The "remote anywhere" UI filter maps to remote_scope='anywhere'.
+    _seed(
+        store,
+        url="https://acme.test/anywhere",
+        workplace="remote",
+        remote_scope="anywhere",
+    )
+    _seed(
+        store,
+        url="https://acme.test/us",
+        workplace="remote",
+        remote_scope="restricted",
+    )
+    _seed(store, url="https://acme.test/office", workplace="onsite")  # scope NULL
+
+    assert [p.url for p in store.search_positions(remote_scope="anywhere")] == [
+        "https://acme.test/anywhere"
+    ]
+    assert [p.url for p in store.search_positions(remote_scope="ANYWHERE")] == [
+        "https://acme.test/anywhere"
+    ]  # case-insensitive
+    assert [p.url for p in store.search_positions(remote_scope="restricted")] == [
+        "https://acme.test/us"
+    ]
+    # No filter => all three, regardless of scope.
+    assert len(store.search_positions()) == 3
+
+
+def test_reopen_backfills_remote_scope(tmp_path: object) -> None:
+    # Rows written before the column existed (remote_scope NULL) get the host-side
+    # scope on the next open, from workplace+location — no re-crawl needed (§4.6).
+    path = str(tmp_path / "positions.db")  # type: ignore[operator]
+    first = StateStore(path)
+    _seed(
+        first,
+        url="https://acme.test/ramp",
+        workplace="remote",
+        location="New York, NY (HQ)",
+    )  # Ramp: remote but US-only
+    _seed(
+        first,
+        url="https://acme.test/world",
+        workplace="remote",
+        location="Anywhere in the World",
+    )
+    assert _get(first, url="https://acme.test/ramp").remote_scope is None
+    first.close()
+
+    reopened = StateStore(path)
+    try:
+        assert _get(reopened, url="https://acme.test/ramp").remote_scope == "restricted"
+        assert _get(reopened, url="https://acme.test/world").remote_scope == "anywhere"
+    finally:
+        reopened.close()
+
+
 def test_search_track_status_and_lifecycle(store: StateStore) -> None:
     _seed(store, url="https://acme.test/a")
     _seed(store, url="https://acme.test/b")

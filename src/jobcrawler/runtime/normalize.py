@@ -83,6 +83,8 @@ LEVELS: frozenset[str] = frozenset(
     }
 )
 WORKPLACES: frozenset[str] = frozenset({"remote", "hybrid", "onsite", "unspecified"})
+# Geographic scope of a remote role (§4.6). Meaningful only when workplace is remote.
+REMOTE_SCOPES: frozenset[str] = frozenset({"anywhere", "restricted", "unspecified"})
 
 
 # --- value objects ---------------------------------------------------------
@@ -106,6 +108,7 @@ class EnrichedJob:
     discipline: str
     level: str
     workplace: str
+    remote_scope: str
     salary: SalaryRange | None
 
 
@@ -583,6 +586,83 @@ def classify_workplace(workplace_type: str, location: str, description: str) -> 
     return _match_workplace(text) or "unspecified"
 
 
+# --- remote geographic scope -----------------------------------------------
+# ``workplace='remote'`` says a role is remote but NOT *where you may sit* — that
+# scope lives in the freeform ``location`` ("Anywhere in the World" vs "Remote,
+# US" vs "New York, NY (HQ)"). ``remote_scope`` recovers the coarse distinction so
+# a US-only remote no longer reads as bare "Remote" and a "remote anywhere" filter
+# becomes possible. Deliberately conservative and asymmetric: only an explicit
+# worldwide signal with NO concrete place left over earns ``anywhere``; ANY residual
+# place token (a country/region/state/city) is ``restricted``; a bare "Remote" with
+# no locational signal either way is ``unspecified``. We never read the description
+# — it names cities constantly and would manufacture false ``anywhere``/``restricted``.
+
+# Worldwide signals. Multi-word entries rely on the folded ``location`` keeping its
+# spaces; their component tokens also live in ``_SCOPE_FILLER`` so they don't count
+# as a leftover place.
+_SCOPE_GLOBAL = (
+    "anywhere",
+    "worldwide",
+    "world wide",
+    "world",
+    "global",
+    "globally",
+    "everywhere",
+    "international",
+    "location independent",
+    "any location",
+    "any country",
+    "nomad",
+)
+# Folded tokens that are NOT a geographic restriction: remote-arrangement words, the
+# worldwide-signal tokens (so they don't read as a place), generic noise, and
+# structural stopwords. Deliberately EXCLUDES every place token — "us", "usa", "uk",
+# "eu", "emea", "apac", "united", "states", "york", … must survive as residual so a
+# scoped remote lands in ``restricted``.
+_SCOPE_FILLER: frozenset[str] = frozenset(
+    {
+        # remote arrangement
+        "remote", "remoto", "remotely", "fully", "wfh", "telecommute", "telework",
+        "distributed", "virtual", "home", "based", "work", "office", "hq",
+        "headquarters", "hybrid", "onsite",
+        # worldwide-signal tokens (kept out of the residual place set)
+        "anywhere", "worldwide", "world", "wide", "global", "globally", "everywhere",
+        "international", "location", "independent", "any", "country", "nomad",
+        "planet", "earth",
+        # generic non-place noise
+        "friendly", "only", "position", "positions", "role", "roles", "job", "jobs",
+        "opportunity", "opportunities", "team", "teams", "flexible", "optional",
+        "preferred", "locations", "available", "tbd", "na",
+        # structural stopwords ("us"/"eu" are places, NOT stopwords — excluded here)
+        "in", "the", "an", "of", "or", "and", "on", "at", "to", "for", "from", "with",
+        "within", "across", "is", "be", "our", "your", "a", "n",
+    }
+)
+
+
+def classify_remote_scope(workplace: str, location: str) -> str:
+    """Coarse geographic scope of a remote role: anywhere / restricted / unspecified.
+
+    Only meaningful for a ``remote`` ``workplace`` (hybrid/onsite carry their city in
+    ``location`` already and return ``unspecified``). Strips remote/worldwide filler
+    from the folded ``location``; a non-empty residual names a concrete place →
+    ``restricted``; an empty residual with a worldwide signal → ``anywhere``; empty and
+    silent → ``unspecified``. Conservative by construction: it only ever *demotes* a
+    remote from an assumed "anywhere", never invents a worldwide claim the text
+    doesn't make (the failure the operator saw: Ramp/Anthropic US-only roles reading
+    as bare "Remote").
+    """
+    if workplace != "remote":
+        return "unspecified"
+    folded = _fold(location or "")
+    residual = [t for t in re.split(r"[^a-z0-9]+", folded) if t and t not in _SCOPE_FILLER]
+    if residual:
+        return "restricted"
+    if _contains_any(folded, _SCOPE_GLOBAL):
+        return "anywhere"
+    return "unspecified"
+
+
 # --- company dedup key -----------------------------------------------------
 # Legal/entity suffixes dropped when collapsing a hiring company to a grouping key,
 # in folded (lowercase, unaccented) form. Matched only as a *trailing* token, so an
@@ -793,12 +873,14 @@ def enrich(job: Job) -> EnrichedJob:
     salary = _salary_from_fields(job)
     if salary is None:
         salary = parse_salary(job.salary or "", job.description or "")
+    workplace = classify_workplace(
+        job.workplace_type or "", job.location, job.description
+    )
     return EnrichedJob(
         job=job,
         discipline=classify_discipline(job.title, job.description),
         level=classify_level(job.title, job.description),
-        workplace=classify_workplace(
-            job.workplace_type or "", job.location, job.description
-        ),
+        workplace=workplace,
+        remote_scope=classify_remote_scope(workplace, job.location),
         salary=salary,
     )
