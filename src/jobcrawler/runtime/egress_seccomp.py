@@ -363,7 +363,15 @@ class Broker:
             upstream.close()
             self._respond(notif_id, val=0, error=-errno.EACCES)
             return
-        upstream.detach()  # the child owns the fd now (installed at sockfd via SETFD)
+        # ADDFD *duplicates* our socket into the child (it refcounts the shared open file
+        # description, like dup) — it does NOT consume the parent's fd. The child now holds
+        # its own copy at ``sockfd``, so we must close OURS or every brokered connect() leaks
+        # a socket in the long-lived daemon: they accumulate in CLOSE_WAIT and eventually
+        # exhaust the fd table, killing the §6 best-of-N fan-out with EMFILE ("Too many open
+        # files"). ``detach()`` is the trap here — it returns the fd WITHOUT closing it, so it
+        # leaked one per connect; ``close()`` releases the parent's copy while the child's
+        # dup keeps the connection alive.
+        upstream.close()
         # ADDFD installs the fd but leaves connect() pending; complete it with success.
         self._respond(notif_id, val=0, error=0)
 

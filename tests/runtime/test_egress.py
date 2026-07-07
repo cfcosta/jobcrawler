@@ -339,6 +339,104 @@ def test_firm_rung_brokers_proxy_connect_and_denies_the_rest() -> None:
         echo.close()
 
 
+_FIRM_CHILD_MULTI = """
+import os, socket, struct, sys
+sys.path.insert(0, {src!r})
+from jobcrawler.runtime import egress_seccomp
+hs_w, ack_r, host, port, n = {hs_w}, {ack_r}, {host!r}, {port}, {n}
+fd = egress_seccomp.install_connect_listener()
+os.write(hs_w, b"A" + struct.pack("i", fd)); os.close(hs_w)
+if os.read(ack_r, 1) != b"G":
+    os._exit(3)
+os.close(ack_r); os.close(fd)
+ok = 0
+for _ in range(n):
+    s = socket.socket()
+    try:
+        s.connect((host, port)); s.sendall(b"hi")
+        if s.recv(64) == b"ECHO:hi":
+            ok += 1
+    finally:
+        s.close()
+os._exit(0 if ok == n else 5)
+"""
+
+
+@pytest.mark.skipif(
+    not egress_seccomp.supported(), reason="seccomp connect-broker is x86_64-Linux only"
+)
+def test_broker_does_not_leak_a_fd_per_brokered_connect() -> None:
+    # Regression: SECCOMP_IOCTL_NOTIF_ADDFD *duplicates* the broker's socket into the child
+    # (dup semantics — it refcounts the shared open file description), so the broker must
+    # close its OWN copy after injecting it. When it detach()ed instead (returns the fd
+    # without closing it), every brokered connect() leaked a socket in the long-lived
+    # daemon — they piled up in CLOSE_WAIT until the fd table was exhausted and the §6
+    # best-of-N fan-out died with OSError [Errno 24] Too many open files. So a child that
+    # connects N times must NOT grow the parent's fd table by ~N.
+    n = 16
+    echo = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    echo.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    echo.bind(("127.0.0.1", 0))
+    echo.listen(8)
+    origin = echo.getsockname()
+
+    def _serve() -> None:
+        while True:
+            try:
+                conn, _ = echo.accept()
+            except OSError:
+                return
+            try:
+                conn.recv(64)
+                conn.sendall(b"ECHO:hi")
+            finally:
+                conn.close()
+
+    threading.Thread(target=_serve, daemon=True).start()
+
+    src = os.path.dirname(
+        os.path.dirname(os.path.dirname(egress_seccomp.__file__))
+    )
+    hs_r, hs_w = os.pipe()
+    ack_r, ack_w = os.pipe()
+    os.set_inheritable(hs_w, True)
+    os.set_inheritable(ack_r, True)
+    script = _FIRM_CHILD_MULTI.format(
+        src=src, hs_w=hs_w, ack_r=ack_r, host=origin[0], port=origin[1], n=n
+    )
+    broker = None
+    proc = subprocess.Popen([sys.executable, "-c", script], pass_fds=(hs_w, ack_r))
+    try:
+        os.close(hs_w)
+        os.close(ack_r)
+        hdr = os.read(hs_r, 5)
+        assert len(hdr) == 5 and hdr[:1] == b"A", f"child did not arm: {hdr!r}"
+        listener_fd = struct.unpack("i", hdr[1:5])[0]
+        broker = egress_seccomp.attach_broker(proc.pid, listener_fd, origin)
+        assert broker is not None
+        before = len(os.listdir("/proc/self/fd"))  # broker attached, before any connect
+        os.write(ack_w, b"G")
+        rc = proc.wait(timeout=20)
+        assert rc == 0, f"child exit {rc} (0=all {n} connects brokered)"
+        after = len(os.listdir("/proc/self/fd"))
+        # The fix keeps this flat; the detach() leak grew it by ~n (one CLOSE_WAIT socket
+        # per brokered connect). Generous slack for unrelated churn, still far below n.
+        assert after - before <= 3, (
+            f"broker leaked ~{after - before} fds over {n} connects (detach() regression)"
+        )
+    finally:
+        for fd in (hs_r, ack_w):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if broker is not None:
+            broker.close()
+        if proc.poll() is None:
+            proc.kill()
+        echo.close()
+
+
 def test_arm_child_if_selected_is_a_noop_without_selection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
