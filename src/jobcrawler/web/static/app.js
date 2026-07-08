@@ -1,12 +1,42 @@
 // Progressive enhancement only — every mutation is a real <form> that works without JS.
-// A <select data-autosubmit> submits its form on change, so changing a position's stage
-// (in the list or on the detail page) is one click instead of change-then-submit.
+// A <select data-autosubmit> submits its form on change. A row-level stage change goes
+// through an inline fetch (no full-page reload mid-triage); anything else (the detail
+// page, the applications sort) falls back to a normal submit.
 document.addEventListener("change", function (event) {
   const el = event.target;
-  if (el.matches("[data-autosubmit]") && el.form) {
-    el.form.submit();
+  if (!el.matches("[data-autosubmit]") || !el.form) return;
+  const form = el.form;
+  if (form.classList.contains("rowstatus")) {
+    event.preventDefault();
+    const value = el.value;
+    postForm(form.getAttribute("action"), { track_status: value }).then(() => {
+      el.className = "badge-" + stageToken(value);
+      Toast.show("Stage → " + labelize(value));
+    });
+  } else {
+    form.submit();
   }
 });
+
+// The tracking CSS token / label maps, mirrored from jobcrawler.tracking so an inline
+// stage change can recolor its select and name itself without a round-trip. Kept tiny;
+// the server stays the source of truth (the next page load re-renders from it).
+const STAGE_TOKENS = {
+  new: "neutral",
+  interested: "info",
+  applied: "progress",
+  interviewing: "warn",
+  offer: "good",
+  accepted: "success",
+  rejected: "danger",
+  withdrawn: "muted",
+};
+function stageToken(value) {
+  return STAGE_TOKENS[value] || "muted";
+}
+function labelize(value) {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
 
 // ---------------------------------------------------------------------------
 // Toasts — small, self-dismissing status cards (also the undo affordance).
@@ -234,6 +264,56 @@ function postForm(path, data) {
         if (btn) btn.click();
       }
     });
+  }
+
+  // Inline bulk apply: POST the selection via fetch and update the affected rows in
+  // place instead of a full-page reload. The submitter names the action; without JS the
+  // same form posts normally (the server 303s back to the list).
+  bar.addEventListener("submit", function (event) {
+    const action = (event.submitter && event.submitter.value) || "";
+    if (!action) return;
+    event.preventDefault();
+    const selected = boxes().filter((b) => b.checked);
+    if (!selected.length) return;
+    const data = new URLSearchParams();
+    data.append("action", action);
+    selected.forEach((b) => data.append("pids", b.value));
+    if (action === "status") {
+      const sel = bar.querySelector('select[name="track_status"]');
+      if (sel) data.append("track_status", sel.value);
+    } else if (action === "note") {
+      const n = bar.querySelector('input[name="note"]');
+      if (n) data.append("note", n.value);
+    }
+    postForm("/positions/bulk", data).then(() => {
+      const rows = selected.map((b) => b.closest("tr"));
+      if (action === "dismiss") rows.forEach((r) => r && r.classList.add("dimmed"));
+      if (action === "restore") rows.forEach((r) => r && r.classList.remove("dimmed"));
+      if (action === "status") {
+        const value = bar.querySelector('select[name="track_status"]').value;
+        rows.forEach((r) => {
+          const rs = r && r.querySelector('.rowstatus select[name="track_status"]');
+          if (rs) {
+            rs.value = value;
+            rs.className = "badge-" + stageToken(value);
+          }
+        });
+      }
+      selected.forEach((b) => (b.checked = false));
+      if (note) note.value = "";
+      sync();
+      Toast.show(bulkMessage(action, selected.length));
+    });
+  });
+
+  function bulkMessage(action, n) {
+    const verb = {
+      dismiss: "Dismissed",
+      restore: "Restored",
+      status: "Staged",
+      note: "Noted",
+    }[action];
+    return `${verb} ${n} position${n === 1 ? "" : "s"}`;
   }
 
   sync();
