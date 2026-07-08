@@ -3033,3 +3033,20 @@
     title+datePosted. Closure rides validThrough expiry, not the enumerate-diff. Fit:
     senior remote backend/full-stack contract work (Rust, Go, Python, Node) at hourly
     marketplace rates; worldwide-friendly, aligned with a contractor/PJ profile.
+
+- slug: clickhouse
+  name: "ClickHouse"
+  url: https://boards-api.greenhouse.io/v1/boards/clickhouse/jobs?content=true
+  render: static
+  company: "ClickHouse"
+  hints: >-
+    Greenhouse board API, token `clickhouse`. One GET returns the whole public board
+    (~160 roles; clickhouse.com/company/careers is just the front for it). Each job has
+    stable `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and
+    `content` = the full HTML-ENTITY-ESCAPED description; html.unescape it, then strip
+    tags. Greenhouse exposes no salary or employment_type in this board API. Emit a
+    single-request crawler: parse straight from the JSON, keep EXTRA_HOSTS empty, never
+    fetch boards.greenhouse.io or a per-job page, and never authorize a host merely
+    linked inside a description. Fit: columnar-database/OLAP infrastructure — core
+    database internals (C++), cloud platform, distributed systems, Rust/Go tooling,
+    SRE and backend platform roles; many roles remote across regions.
