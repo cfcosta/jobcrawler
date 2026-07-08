@@ -1181,6 +1181,32 @@ def test_applied_counts_breaks_down_only_applied_rows(store: StateStore) -> None
     assert sum(counts.values()) == len(store.search_positions(applied=True))
 
 
+def test_applied_company_exclusion_is_indexed(store: StateStore) -> None:
+    # Perf guard (§16): the applied-company exclusion is a correlated NOT EXISTS over the
+    # derived company key restricted to applied rows. Unindexed it is O(N²) — minutes on a
+    # multi-thousand-row corpus. A PARTIAL EXPRESSION index on that key (applied rows only)
+    # is what lets the planner index-search per row instead of scanning the whole table.
+    rows = store._conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' "
+        "AND name='positions_applied_company_key'"
+    ).fetchall()
+    assert rows, "positions_applied_company_key index missing"
+    ddl = str(rows[0]["sql"])
+    assert "applied_at IS NOT NULL" in ddl  # partial: indexes only the (few) applied rows
+    assert "company" in ddl.lower()  # keyed on the derived company-name expression
+    # and the planner actually uses it for the exclusion subquery (no full p2 scan)
+    plan = store._conn.execute(
+        "EXPLAIN QUERY PLAN SELECT 1 FROM positions WHERE NOT EXISTS ("
+        "SELECT 1 FROM positions p2 WHERE "
+        "COALESCE(NULLIF(p2.company_canonical, ''), lower(p2.company)) "
+        "= COALESCE(NULLIF(positions.company_canonical, ''), lower(positions.company)) "
+        "AND COALESCE(NULLIF(p2.company_canonical, ''), lower(p2.company)) != '' "
+        "AND p2.applied_at IS NOT NULL)"
+    ).fetchall()
+    detail = " ".join(str(r["detail"]) for r in plan)
+    assert "positions_applied_company_key" in detail, f"index not used: {detail}"
+
+
 # -- §4.2 crawler-generation log ---------------------------------------------
 
 

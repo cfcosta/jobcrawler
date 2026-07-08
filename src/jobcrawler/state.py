@@ -571,6 +571,19 @@ class StateStore:
             "CREATE INDEX IF NOT EXISTS positions_status_score "
             "ON positions (status, match_score DESC)"
         )
+        # The §16 applied-company exclusion (dashboard "top matches" + the "hide applied
+        # companies" browse filter) is a correlated NOT EXISTS over the derived company key,
+        # restricted to applied rows. Unindexed that is an O(N²) scan-per-row: on a
+        # multi-thousand-row corpus with a handful of applied rows it ran for *minutes*. A
+        # PARTIAL EXPRESSION index on the same key expression, limited to the (few)
+        # applied_at rows, turns each row's lookup into an index search — minutes → tens of
+        # ms. It references company_canonical/applied_at, backfilled just above, so like
+        # positions_status_score it is built here rather than in _SCHEMA.
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS positions_applied_company_key "
+            "ON positions (COALESCE(NULLIF(company_canonical, ''), lower(company))) "
+            "WHERE applied_at IS NOT NULL"
+        )
         self._backfill_remote_scope()
         self._backfill_salary_usd()
         self._backfill_relocation()
