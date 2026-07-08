@@ -36,15 +36,24 @@
 
 <table class="grid positions">
   <thead><tr>
-    <th>Title</th><th>Company</th><th>Salary</th><th>Board</th><th>Stage</th><th>Applied</th><th>Updated</th>
+    <th>Position</th><th>Salary</th><th>Status</th><th>Stage</th><th>Applied</th><th>Updated</th>
   </tr></thead>
   <tbody>
   {% for p in rows %}
   <tr class="{{ 'dimmed' if p.dismissed else '' }}">
-    <td class="title"><a href="/positions/{{ encode_pid(p.site, p.url) }}">{{ p.title }}</a>
-        <a class="ext row-ext" href="{{ ext_url(p) }}" target="_blank" rel="noopener noreferrer" title="Open the position page (the real ATS posting on aggregator boards)">↗</a>
-        {% if p.dismissed %}<span class="tag">dismissed</span>{% endif %}</td>
-    <td class="company">{% if p.company_canonical %}<a href="/positions?company_canonical={{ p.company_canonical | urlencode }}">{{ p.hiring_company or p.company }}</a>{% else %}{{ p.hiring_company or p.company }}{% endif %}</td>
+    <td class="pos"><div class="pos-wrap">
+      <span class="avatar" style="--hue: {{ hue_of(p.hiring_company or p.company) }}" aria-hidden="true">{{ ((p.hiring_company or p.company or '·') | first) | upper }}</span>
+      <span class="pos-main">
+        <span class="pos-title">
+          <a href="/positions/{{ encode_pid(p.site, p.url) }}">{{ p.title }}</a>
+          <a class="ext row-ext" href="{{ ext_url(p) }}" target="_blank" rel="noopener noreferrer" title="Open the position page (the real ATS posting on aggregator boards)">↗</a>
+          {% if p.dismissed %}<span class="tag">dismissed</span>{% endif %}
+        </span>
+        <span class="pos-sub">
+          {% if p.company_canonical %}<a href="/positions?company_canonical={{ p.company_canonical | urlencode }}">{{ p.hiring_company or p.company }}</a>{% else %}<span>{{ p.hiring_company or p.company }}</span>{% endif %}
+        </span>
+      </span>
+    </div></td>
     <td class="nowrap">{{ p | salary }}</td>
     <td><span class="lifecycle lc-{{ p.status }}">{{ p.status }}</span></td>
     <td>

@@ -10,7 +10,7 @@
     <p class="sub">{% if p.company_canonical %}<a href="/positions?company_canonical={{ p.company_canonical | urlencode }}">{{ p.hiring_company or p.company }}</a>{% else %}{{ p.hiring_company or p.company }}{% endif %} · {{ p.location_normalized or p.location }}{% if p.workplace %} · {{ p.workplace }}{% if p.remote_scope == 'anywhere' %} <span class="scope scope-anywhere" title="Open to candidates anywhere">anywhere</span>{% elif p.remote_scope == 'restricted' %} <span class="scope scope-restricted" title="Remote but geographically restricted — see location">restricted</span>{% endif %}{% endif %}{% if p.relocation == 'offered' %} <span class="scope scope-relo" title="Relocation or visa support mentioned in the posting">relocation</span>{% endif %}</p>
     <p class="meta">
       <span class="lifecycle lc-{{ p.status }}">{{ p.status }}</span>
-      {% if p.match_score is not none %}<span class="score-pill" title="freshness-adjusted; base fit {{ p.match_score }}">Match {{ score_of(p) }}{% if p.match_verdict %} · {{ p.match_verdict }}{% endif %}</span>{% endif %}
+      {% if p.match_score is not none %}<span class="score-chip band-{{ score_band(p) }}" title="freshness-adjusted; base fit {{ p.match_score }}">{{ score_of(p) }}{% if p.match_verdict %} · {{ p.match_verdict }}{% endif %}</span>{% endif %}
       {% if p.discipline %}<span class="tag">{{ p.discipline }}</span>{% endif %}
       {% if p.level %}<span class="tag">{{ p.level }}</span>{% endif %}
       {% if p | salary %}<span class="tag">{{ p | salary }}</span>{% endif %}
@@ -72,7 +72,7 @@
   <section class="panel">
     <h2>Match &amp; scoring</h2>
     <p class="badges">
-      {% if p.match_score is not none %}<span class="score-pill" title="freshness-decayed effective score (§6)">Score {{ score_of(p) }}</span><span class="tag" title="the matcher's raw fit, before freshness decay">base fit {{ p.match_score }}</span>{% else %}<span class="tag">unscored</span>{% endif %}
+      {% if p.match_score is not none %}<span class="score-chip band-{{ score_band(p) }}" title="freshness-decayed effective score (§4.7)">{{ score_of(p) }}</span><span class="tag" title="the matcher's raw fit, before freshness decay">base fit {{ p.match_score }}</span>{% else %}<span class="tag">unscored</span>{% endif %}
       {% if p.match_verdict %}<span class="tag">{{ p.match_verdict }}</span>{% endif %}
       {% if p.match_pending %}<span class="tag tag-pending" title="Queued for the daemon to (re)score">rescore queued</span>{% endif %}
       <span class="tag">scored {% if p.matched_at %}{{ p.matched_at | age }} ago{% else %}never{% endif %}</span>

@@ -260,19 +260,52 @@ a.kpi:hover { text-decoration: none; border-color: var(--accent); }
 .kpi-delta.zero { color: var(--ink-3); font-weight: 400; }
 
 /* ---- score chips (the product's spine) ----------------------------------- */
+/* One language everywhere: the chip always carries the numeral; the band color
+   (aligned with the §4.7 verdict bands) reinforces it, never replaces it. */
 
-.score {
-  font-weight: 700; font-variant-numeric: tabular-nums; text-align: center;
+.score { font-weight: 700; font-variant-numeric: tabular-nums; text-align: center; }
+.score-chip {
+  display: inline-flex; align-items: center; justify-content: center; flex: none;
+  min-width: 38px; padding: 3px 8px; border-radius: 8px;
+  font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums;
+  background: var(--raised); color: var(--ink-3);
 }
-.matches .score, .score.chip-score {
-  flex: none; min-width: 36px; padding: 3px 7px; border-radius: 8px; font-size: 13px;
-  background: var(--raised); color: var(--ink-2); border: 1px solid transparent;
+.score-chip.band-strong { background: color-mix(in srgb, var(--band-strong) 15%, transparent); color: var(--band-strong); }
+.score-chip.band-solid { background: color-mix(in srgb, var(--band-solid) 14%, transparent); color: var(--band-solid); }
+.score-chip.band-mid { background: var(--raised); color: var(--ink-2); }
+.score-chip.band-low, .score-chip.band-none { background: transparent; color: var(--band-low); }
+
+/* ---- position row anatomy (positions + applications) ----------------------- */
+
+.avatar {
+  flex: none; width: 30px; height: 30px; border-radius: 9px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 13px; font-weight: 700; user-select: none;
+  background: hsl(var(--hue, 210) 45% 50% / 0.16);
+  color: hsl(var(--hue, 210) 48% 38%);
 }
-.matches .score.strong, .score.chip-score.strong {
-  background: color-mix(in srgb, var(--band-strong) 16%, transparent);
-  color: var(--band-strong);
+@media (prefers-color-scheme: dark) {
+  .avatar { color: hsl(var(--hue, 210) 60% 70%); }
 }
-.positions .score.strong { color: var(--band-strong); }
+.pos-wrap { display: flex; align-items: center; gap: 11px; min-width: 0; }
+.pos-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.pos-title { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.pos-title > a:first-child {
+  font-weight: 600; color: var(--ink); font-size: 13.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pos-title > a:first-child:hover { color: var(--accent); text-decoration: none; }
+.pos-sub {
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+  font-size: 12.5px; color: var(--ink-3); white-space: nowrap;
+}
+.pos-sub a { color: var(--ink-3); }
+.pos-sub a:hover { color: var(--accent); text-decoration: none; }
+.pos-sub .sep { opacity: 0.6; }
+.pos-sub .loc { overflow: hidden; text-overflow: ellipsis; }
+td.pos { max-width: 0; width: 55%; }
+.positions .salary { font-variant-numeric: tabular-nums; }
+.stage-cell .rowstatus { margin: 0; }
 
 /* ---- top matches ---------------------------------------------------------- */
 
@@ -330,11 +363,6 @@ tr.dimmed { opacity: 0.45; }
 .lifecycle { font-size: 11.5px; padding: 1px 8px; border-radius: 999px; text-transform: capitalize; }
 .lc-open { background: color-mix(in srgb, var(--good) 14%, transparent); color: var(--good-text); }
 .lc-closed { background: var(--raised); color: var(--ink-3); }
-.score-pill {
-  font-size: 12px; font-weight: 600; padding: 2px 10px; border-radius: 999px;
-  background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent-strong);
-  font-variant-numeric: tabular-nums;
-}
 .scope { font-size: 10.5px; padding: 0 7px; border-radius: 999px; text-transform: lowercase; }
 .scope-anywhere { background: color-mix(in srgb, var(--good) 14%, transparent); color: var(--good-text); }
 .scope-restricted { background: color-mix(in srgb, var(--warning) 16%, transparent); color: var(--warning); }

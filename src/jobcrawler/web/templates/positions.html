@@ -59,21 +59,33 @@
 <table class="grid positions">
   <thead><tr>
     <th class="sel"><input type="checkbox" id="bulk-all" aria-label="Select all rows on this page"></th>
-    <th>Score</th><th>Title</th><th>Company</th><th>Location</th><th>Salary</th><th>Status</th><th>Stage</th><th>Age</th>
+    <th>Score</th><th>Position</th><th>Salary</th><th>Stage</th><th>Age</th>
   </tr></thead>
   <tbody>
   {% for p in rows %}
   <tr class="{{ 'dimmed' if p.dismissed else '' }}">
     <td class="sel"><input type="checkbox" class="bulk-check" name="pids" value="{{ encode_pid(p.site, p.url) }}" form="bulk" aria-label="Select this position"></td>
-    <td class="score{{ ' strong' if score_of(p) is not none and score_of(p) >= 60 else '' }}"{% if p.match_score is not none %} title="base fit {{ p.match_score }}, adjusted for freshness"{% endif %}>{{ score_of(p) if score_of(p) is not none else '—' }}</td>
-    <td class="title"><a href="/positions/{{ encode_pid(p.site, p.url) }}">{{ p.title }}</a>
-        <a class="ext row-ext" href="{{ ext_url(p) }}" target="_blank" rel="noopener noreferrer" title="Open the position page (the real ATS posting on aggregator boards)">↗</a>
-        {% if p.dismissed %}<span class="tag">dismissed</span>{% endif %}</td>
-    <td class="company">{% if p.company_canonical %}<a href="/positions?company_canonical={{ p.company_canonical | urlencode }}">{{ p.hiring_company or p.company }}</a>{% else %}{{ p.hiring_company or p.company }}{% endif %}</td>
-    <td>{{ p.location_normalized or p.location }}{% if p.workplace %} · {{ p.workplace }}{% if p.remote_scope == 'anywhere' %} <span class="scope scope-anywhere" title="Open to candidates anywhere">anywhere</span>{% elif p.remote_scope == 'restricted' %} <span class="scope scope-restricted" title="Remote but geographically restricted — see location">restricted</span>{% endif %}{% endif %}{% if p.relocation == 'offered' %} <span class="scope scope-relo" title="Relocation or visa support mentioned in the posting">relocation</span>{% endif %}</td>
-    <td class="nowrap">{{ p | salary }}</td>
-    <td><span class="lifecycle lc-{{ p.status }}">{{ p.status }}</span></td>
-    <td>
+    <td class="score"{% if p.match_score is not none %} title="base fit {{ p.match_score }}, adjusted for freshness"{% endif %}><span class="score-chip band-{{ score_band(p) }}">{{ score_of(p) if score_of(p) is not none else '—' }}</span></td>
+    <td class="pos"><div class="pos-wrap">
+      <span class="avatar" style="--hue: {{ hue_of(p.hiring_company or p.company) }}" aria-hidden="true">{{ ((p.hiring_company or p.company or '·') | first) | upper }}</span>
+      <span class="pos-main">
+        <span class="pos-title">
+          <a href="/positions/{{ encode_pid(p.site, p.url) }}">{{ p.title }}</a>
+          <a class="ext row-ext" href="{{ ext_url(p) }}" target="_blank" rel="noopener noreferrer" title="Open the position page (the real ATS posting on aggregator boards)">↗</a>
+          {% if p.status == 'closed' %}<span class="lifecycle lc-closed">closed</span>{% endif %}
+          {% if p.dismissed %}<span class="tag">dismissed</span>{% endif %}
+        </span>
+        <span class="pos-sub">
+          {% if p.company_canonical %}<a href="/positions?company_canonical={{ p.company_canonical | urlencode }}">{{ p.hiring_company or p.company }}</a>{% else %}<span>{{ p.hiring_company or p.company }}</span>{% endif %}
+          <span class="sep">·</span>
+          <span class="loc">{{ p.location_normalized or p.location }}{% if p.workplace and p.workplace != 'unspecified' %} · {{ p.workplace }}{% endif %}</span>
+          {% if p.remote_scope == 'anywhere' %}<span class="scope scope-anywhere" title="Open to candidates anywhere">anywhere</span>{% elif p.remote_scope == 'restricted' %}<span class="scope scope-restricted" title="Remote but geographically restricted — see location">restricted</span>{% endif %}
+          {% if p.relocation == 'offered' %}<span class="scope scope-relo" title="Relocation or visa support mentioned in the posting">relocation</span>{% endif %}
+        </span>
+      </span>
+    </div></td>
+    <td class="nowrap salary">{{ p | salary }}</td>
+    <td class="stage-cell">
       <form class="rowstatus" method="post" action="/positions/{{ encode_pid(p.site, p.url) }}/status">
         <select name="track_status" data-autosubmit class="badge-{{ tracking.css_token(p.track_status) }}">
           {% for value, label, token in tracking.choices() %}

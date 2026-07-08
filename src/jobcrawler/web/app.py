@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import logging
 from datetime import datetime, timezone
@@ -179,6 +180,32 @@ def _display_score(p: PositionRecord) -> int | None:
     the raw match fit when a query didn't compute the effective one, or None if unscored."""
     value = p.effective_score if p.effective_score is not None else p.match_score
     return round(value) if value is not None else None
+
+
+def _score_band(p: PositionRecord) -> str:
+    """The display band for a score chip, aligned with the §4.7 verdict bands:
+    strong ≥80 (apply now), solid 60-79 (worth a look), mid 40-59 (stretch),
+    low <40 (noise), none (unscored). The chip always shows the numeral — the band
+    color reinforces, never replaces, the number."""
+    score = _display_score(p)
+    if score is None:
+        return "none"
+    if score >= 80:
+        return "strong"
+    if score >= 60:
+        return "solid"
+    if score >= 40:
+        return "mid"
+    return "low"
+
+
+def _hue_of(name: str | None) -> int:
+    """Deterministic avatar hue (0-359) for a company name — stable across restarts
+    (md5, not the per-process-salted ``hash``), no external favicon fetches."""
+    if not name or not name.strip():
+        return 210
+    digest = hashlib.md5(name.strip().lower().encode()).digest()  # noqa: S324
+    return int.from_bytes(digest[:2], "big") % 360
 
 
 def _ext_url(p: PositionRecord) -> str:
@@ -468,6 +495,8 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
     jinja_globals["ext_url"] = (
         _ext_url  # the real position page (ATS behind aggregators)
     )
+    jinja_globals["score_band"] = _score_band  # chip band, aligned w/ verdict bands
+    jinja_globals["hue_of"] = _hue_of  # deterministic company-avatar hue
     jinja_filters = cast("dict[str, Any]", templates.env.filters)
     jinja_filters["reasons"] = reasons_list
     jinja_filters["age"] = humanize_age

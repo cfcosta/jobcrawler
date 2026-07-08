@@ -56,7 +56,7 @@
     <ul class="matches">
       {% for p in top_matches %}
       <li>
-        <span class="score{{ ' strong' if score_of(p) is not none and score_of(p) >= 60 else '' }}"{% if p.match_score is not none %} title="base fit {{ p.match_score }}, adjusted for freshness"{% endif %}>{{ score_of(p) if score_of(p) is not none else '—' }}</span>
+        <span class="score-chip band-{{ score_band(p) }}"{% if p.match_score is not none %} title="base fit {{ p.match_score }}, adjusted for freshness"{% endif %}>{{ score_of(p) if score_of(p) is not none else '—' }}</span>
         <a class="mt" href="/positions/{{ encode_pid(p.site, p.url) }}">
           <span class="mt-title">{{ p.title }}</span>
           <span class="mt-sub">{{ p.hiring_company or p.company }}{% if p | salary %} · {{ p | salary }}{% endif %}{% if p.match_verdict %} · {{ p.match_verdict }}{% endif %}</span>
