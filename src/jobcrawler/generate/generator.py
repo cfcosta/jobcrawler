@@ -27,6 +27,7 @@ from dspy.primitives import CodeInterpreter
 from jobcrawler import config
 from jobcrawler.generate.budget import reset_subcalls
 from jobcrawler.generate.signatures import DiscoveryStrategy, GenerateCrawler
+from jobcrawler.lm import run_llm_loop
 
 
 class CrawlerGenerator(dspy.Module):
@@ -87,10 +88,11 @@ class CrawlerGenerator(dspy.Module):
     ) -> dspy.Prediction:
         """Sync entry point for the dspy optimizers (§4.11): BootstrapFewShot/GEPA
         call modules synchronously, so bridge to ``aforward``. The offline optimize
-        job runs outside any event loop, so ``asyncio.run`` is safe here; the §4.9
-        scheduler and §6 best-of-N drive ``aforward`` directly.
+        job runs outside any event loop, so a fresh loop per call is safe here (via
+        ``run_llm_loop``, which drains litellm's logging worker so the loop closes
+        clean); the §4.9 scheduler and §6 best-of-N drive ``aforward`` directly.
         """
-        return asyncio.run(
+        return run_llm_loop(
             self.aforward(site_url=site_url, corpus=corpus, render=render, hints=hints)
         )
 

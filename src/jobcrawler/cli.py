@@ -263,7 +263,9 @@ def _positions_block(store: StateStore) -> list[str]:
     top = store.matches(config.match_min_score(), limit=1)
     if top:
         best = top[0]
-        lines.append(f"top match: [{_display_score(best)}] {best.title} @ {best.company}")
+        lines.append(
+            f"top match: [{_display_score(best)}] {best.title} @ {best.company}"
+        )
     else:
         lines.append("top match: none")
     return lines
@@ -901,7 +903,9 @@ def cmd_fx_refresh(args: argparse.Namespace) -> int:
             return 1
         store.set_fx_rates(rates)
         sample = ", ".join(
-            f"{code}={rates[code]:.4f}" for code in ("EUR", "GBP", "BRL") if code in rates
+            f"{code}={rates[code]:.4f}"
+            for code in ("EUR", "GBP", "BRL")
+            if code in rates
         )
         print(f"fx-refresh: stored {len(rates)} exchange rates ({sample})")
     finally:
@@ -944,7 +948,9 @@ def cmd_generation_log(args: argparse.Namespace) -> int:
 
 def _block(label: str, text: str) -> str:
     """Indent a captured prompt/completion under a label for the verbose generation log."""
-    indented = "\n".join("      " + line for line in str(text).splitlines()) or "      —"
+    indented = (
+        "\n".join("      " + line for line in str(text).splitlines()) or "      —"
+    )
     return f"    · {label}:\n{indented}"
 
 
@@ -1403,7 +1409,15 @@ def cmd_run(args: argparse.Namespace) -> int:
             except Exception:  # noqa: BLE001
                 _log.exception("web UI failed to start; scheduler continuing headless")
 
-        await asyncio.gather(scheduler.run(stop=stop), _web())
+        try:
+            await asyncio.gather(scheduler.run(stop=stop), _web())
+        finally:
+            # If anything drove litellm on this loop, its lazily-spawned logging
+            # worker is still running; stop it before asyncio.run closes the loop so
+            # shutdown doesn't log "Task was destroyed but it is pending!".
+            from jobcrawler.lm import drain_litellm_logging
+
+            await drain_litellm_logging()
 
     try:
         asyncio.run(serve())
@@ -1524,7 +1538,8 @@ def build_parser() -> argparse.ArgumentParser:
         "run", help="start the scheduler daemon + web tracker UI (§16)"
     )
     run_p.add_argument(
-        "--host", help="web UI bind address (default: JOBCRAWLER_SERVE_HOST or 127.0.0.1)"
+        "--host",
+        help="web UI bind address (default: JOBCRAWLER_SERVE_HOST or 127.0.0.1)",
     )
     run_p.add_argument(
         "--port", type=int, help="web UI port (default: JOBCRAWLER_SERVE_PORT or 8765)"
@@ -1629,7 +1644,10 @@ def build_parser() -> argparse.ArgumentParser:
     genlog.add_argument("site", nargs="?", help="filter to one site slug")
     genlog.add_argument("--limit", type=int, default=20)
     genlog.add_argument(
-        "-v", "--verbose", action="store_true", help="dump each attempt's LLM prompts/completions"
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="dump each attempt's LLM prompts/completions",
     )
     genlog.set_defaults(func=cmd_generation_log)
 

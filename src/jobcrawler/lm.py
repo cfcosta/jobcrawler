@@ -29,7 +29,9 @@ decide whether a token check is even needed, and must not pull dspy to do so.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import asyncio
+from collections.abc import Coroutine
+from typing import TYPE_CHECKING, Any, TypeVar
 
 if TYPE_CHECKING:
     import dspy
@@ -259,3 +261,65 @@ def build_lm(
     if max_tokens is not None:
         kwargs["max_tokens"] = max_tokens
     return cls(model, **kwargs)
+
+
+# --- litellm LoggingWorker hygiene: drain before a short-lived loop closes ---------
+#
+# litellm's global LoggingWorker lazily spawns a background asyncio task
+# (``LoggingWorker._worker_loop``) inside whatever event loop is running when the first
+# async completion finishes. Generation runs each attempt in its own ``asyncio.run``
+# loop on a worker thread (§4.2/§6), and litellm never cancels that task when the loop
+# goes away — on the next loop it merely drops its *reference* (``_ensure_queue`` on
+# loop change). The stranded task then surfaces as ``Task was destroyed but it is
+# pending!`` in the daemon's stderr (one per generation loop, batched at GC time), and
+# whatever usage/success callbacks were still queued are silently dropped. The fix
+# therefore belongs at OUR loop exits: flush what's queued (bounded), then stop the
+# worker task cleanly so nothing outlives the loop.
+
+_T = TypeVar("_T")
+
+
+async def drain_litellm_logging(
+    *, worker: Any | None = None, flush_timeout: float = 5.0
+) -> None:
+    """Flush and stop litellm's logging worker in the current event loop.
+
+    Best-effort by design: a missing/re-laid-out litellm, a wedged callback, or a
+    worker still bound to a foreign closed loop must never turn loop shutdown into a
+    hang or an error — hence the bounded flush and the blanket excepts. ``worker``
+    exists for tests; production callers always drain the global singleton.
+    """
+    if worker is None:
+        try:
+            from litellm.litellm_core_utils.logging_worker import GLOBAL_LOGGING_WORKER
+        except Exception:  # pragma: no cover - litellm layout changed; nothing to drain
+            return
+        worker = GLOBAL_LOGGING_WORKER
+    try:
+        # Run the queued callbacks rather than discarding them (usage accounting rides
+        # on these), but never wait past the bound — the loop is shutting down.
+        await asyncio.wait_for(worker.flush(), timeout=flush_timeout)
+    except Exception:
+        pass
+    try:
+        await worker.stop()
+    except Exception:
+        pass
+
+
+def run_llm_loop(coro: Coroutine[Any, Any, _T]) -> _T:
+    """``asyncio.run`` for an LLM-driving coroutine, draining litellm at loop exit.
+
+    Every fresh-loop entry point that can reach litellm (the §4.2 generation paths,
+    the optimizers' sync bridge) must come through here instead of a bare
+    ``asyncio.run`` so the loop it creates never strands litellm's logging worker.
+    The drain runs on failure too — a raising candidate must not leak the task.
+    """
+
+    async def _main() -> _T:
+        try:
+            return await coro
+        finally:
+            await drain_litellm_logging()
+
+    return asyncio.run(_main())

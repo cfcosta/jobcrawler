@@ -26,7 +26,6 @@ The whole path is live (LM, Deno, network); the gating + delivery logic is unit-
 from __future__ import annotations
 
 import argparse
-import asyncio
 import re
 from collections.abc import Collection
 from pathlib import Path
@@ -47,7 +46,7 @@ from jobcrawler.generate.gates import (
 from jobcrawler.generate.adversarial import cross_validate
 from jobcrawler.generate.budget import CappedLM
 from jobcrawler.generate.lm_capture import begin_capture, capture_callback, end_capture
-from jobcrawler.lm import build_lm
+from jobcrawler.lm import build_lm, run_llm_loop
 from jobcrawler.generate.generator import best_of_n, load_generator
 from jobcrawler.generate.scoring import CandidateResult, make_reward_fn
 from jobcrawler.generate.snapshot import prefetch_corpus
@@ -75,9 +74,11 @@ def generate_command(args: argparse.Namespace) -> int:
     if not targets:
         print("no matching sites to generate")
         return 1
-    store = _open_store()  # record each attempt's outcome + LLM log to generation_log (§4.2)
+    store = (
+        _open_store()
+    )  # record each attempt's outcome + LLM log to generation_log (§4.2)
     try:
-        return asyncio.run(_run(targets, store))
+        return run_llm_loop(_run(targets, store))
     finally:
         store.close()
 
@@ -99,7 +100,7 @@ def regenerate_one(slug: str, *, store: StateStore | None = None) -> RegenOutcom
     if site is None:
         return RegenOutcome.FAILED
     root_lm, sub_lm = _build_lms()
-    return asyncio.run(
+    return run_llm_loop(
         _generate_one(site, root_lm, sub_lm, mode=config.review_gate(), store=store)
     )
 
@@ -167,7 +168,10 @@ async def _run(targets: list[Site], store: StateStore | None = None) -> int:
     for site in targets:
         # Operator-run generate writes live (stage defaults off); only a generation
         # that produced no gate-passing crawler counts as a failure.
-        if await _generate_one(site, root_lm, sub_lm, store=store) is RegenOutcome.FAILED:
+        if (
+            await _generate_one(site, root_lm, sub_lm, store=store)
+            is RegenOutcome.FAILED
+        ):
             failures += 1
     return 1 if failures else 0
 
@@ -190,7 +194,9 @@ async def _generate_one(
     attempt_reason = "generation did not complete"
     attempt_score: float | None = None
     try:
-        result, attempt_reason, attempt_score = await _run_generation(site, root_lm, sub_lm, mode=mode)
+        result, attempt_reason, attempt_score = await _run_generation(
+            site, root_lm, sub_lm, mode=mode
+        )
         return result
     except Exception as exc:  # enrich the record, then let the healer see the failure
         attempt_reason = f"{type(exc).__name__}: {exc}"[:500]

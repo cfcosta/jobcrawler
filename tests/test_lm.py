@@ -10,6 +10,7 @@ These are asserted by capturing the constructor kwargs — no LM is ever really 
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -312,3 +313,76 @@ def test_install_codex_responses_fix_replaces_the_transform(
     installed = ChatGPTResponsesAPIConfig.transform_response_api_response
     assert installed is not stock
     assert installed.__name__ == "patched"
+
+
+# --- litellm LoggingWorker drain ---------------------------------------------------
+#
+# litellm lazily spawns its LoggingWorker task inside whatever loop is running when the
+# first async completion lands. Generation drives each attempt in its own short-lived
+# ``asyncio.run`` loop, which used to strand that task at loop close ("Task was
+# destroyed but it is pending!" in the daemon log, one per loop) and silently drop the
+# queued callbacks. ``run_llm_loop``/``drain_litellm_logging`` must run what's queued
+# and stop the worker before the loop closes — success or failure alike. These tests
+# own their loops via ``asyncio.run``, so they are deliberately sync.
+
+
+def test_drain_flushes_queued_callbacks_and_stops_the_worker() -> None:
+    from litellm.litellm_core_utils.logging_worker import LoggingWorker
+
+    worker = LoggingWorker()
+    ran: list[str] = []
+
+    async def callback() -> None:
+        ran.append("x")
+
+    async def main() -> None:
+        worker.ensure_initialized_and_enqueue(callback())
+        await lm.drain_litellm_logging(worker=worker)
+        # The invariant that kills the "Task was destroyed" noise: nothing of the
+        # worker survives to be stranded when this loop closes.
+        assert worker._worker_task is None
+
+    asyncio.run(main())
+    assert ran == ["x"]  # the queued callback was executed, not dropped
+
+
+def test_run_llm_loop_returns_the_value_and_drains_the_global_worker() -> None:
+    from litellm.litellm_core_utils.logging_worker import GLOBAL_LOGGING_WORKER
+
+    ran: list[str] = []
+
+    async def callback() -> None:
+        ran.append("x")
+
+    async def work() -> str:
+        GLOBAL_LOGGING_WORKER.ensure_initialized_and_enqueue(callback())
+        return "done"
+
+    assert lm.run_llm_loop(work()) == "done"
+    assert ran == ["x"]
+    assert GLOBAL_LOGGING_WORKER._worker_task is None
+
+
+def test_run_llm_loop_drains_even_when_the_coroutine_raises() -> None:
+    from litellm.litellm_core_utils.logging_worker import GLOBAL_LOGGING_WORKER
+
+    async def callback() -> None:
+        pass
+
+    async def work() -> None:
+        GLOBAL_LOGGING_WORKER.ensure_initialized_and_enqueue(callback())
+        raise RuntimeError("candidate failed")
+
+    # A raising generation candidate must still leave the loop clean behind it.
+    with pytest.raises(RuntimeError, match="candidate failed"):
+        lm.run_llm_loop(work())
+    assert GLOBAL_LOGGING_WORKER._worker_task is None
+
+
+def test_run_llm_loop_is_a_plain_runner_when_litellm_never_ran() -> None:
+    # The common no-LLM path (e.g. a generation that fails before any call): the
+    # drain must be a silent no-op, not an error.
+    async def work() -> int:
+        return 7
+
+    assert lm.run_llm_loop(work()) == 7
