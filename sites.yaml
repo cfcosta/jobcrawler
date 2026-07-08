@@ -1877,30 +1877,6 @@
     for backend, Rust, Go, distributed systems, platform, fintech, crypto and
     search/retrieval terms.
 
-- slug: himalayas_backend
-  name: "Himalayas — Backend Remote Jobs"
-  url: https://himalayas.app/jobs/api/search?q=backend&sort=recent
-  render: static
-  enumerates_all: false
-  hints: >-
-    Himalayas public JSON search API. Windowed remote-search crawl; paginate with the
-    documented page parameter and keep enumerates_all:false. Response includes totalCount
-    and jobs[] with guid, title, companyName, employmentType, location/timezone
-    restrictions, salary when present, full description, pubDate, expiryDate and
-    applicationLink. Query is seeded with backend to match senior
-    backend/distributed-systems roles.
-
-- slug: himalayas_rust
-  name: "Himalayas — Rust Remote Jobs"
-  url: https://himalayas.app/jobs/api/search?q=rust&sort=recent
-  render: static
-  enumerates_all: false
-  hints: >-
-    Himalayas public JSON search API, Rust-seeded. Same shape as himalayas_backend: jobs[]
-    carry guid, title, companyName, employmentType, location/timezone restrictions, salary
-    when present, full description, pubDate, expiryDate and applicationLink. Treat as a
-    recent search window; closure through detail/expiry recheck.
-
 - slug: hnhiring
   name: "HNHiring"
   url: https://hnhiring.com/
@@ -2462,18 +2438,6 @@
     API explicitly returns all active matching jobs; use detail 404/expired markers for
     closure. Fetch detail pages on the same host for the full description. Fit: remote jobs
     hiring in Brazil; useful for UTC-3 and Brazil-eligible backend roles.
-
-- slug: himalayas_brazil_software
-  name: "Himalayas — Brazil Software Engineering"
-  url: https://himalayas.app/jobs/countries/brazil/software-engineer
-  render: static
-  enumerates_all: false
-  hints: >-
-    Job-board listing/search source. Multi-company source; do not stamp a fixed `company`.
-    Parse company from each posting/card/detail page. Treat as a windowed source unless the
-    API explicitly returns all active matching jobs; use detail 404/expired markers for
-    closure. Fetch detail pages on the same host for the full description. Fit: remote
-    software engineering jobs available to candidates in Brazil.
 
 - slug: getonboard_programming
   name: "Get on Board — Programming"
