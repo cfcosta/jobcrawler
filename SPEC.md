@@ -518,7 +518,7 @@ dropping a job**:
    `profile_hash` and **lazily invalidates** every verdict — rescoring is automatic but pays only
    for jobs actually re-examined, never the whole backlog.
 2. **Daily cap.** `store.match_spent(today)` counts only **LLM-scored** jobs (cache hits are
-   free). Misses beyond `match_daily_cap` (default 400/UTC-day) are `set_match_pending` — **never
+   free). Misses beyond `match_daily_cap` (default 800/UTC-day) are `set_match_pending` — **never
    dropped** — and drained by later runs / the recheck loop.
 3. **Batched scoring.** Affordable misses are scored `match_batch` (default 10) at a time in **one
    `dspy.Predict(MatchJobs)` call per batch**, under `dspy.context(lm=dspy.LM(model,
@@ -603,7 +603,7 @@ daemon was down is caught immediately:
    unscored", so permanent mismatches can't clog the FIFO); survivors go through the ordinary
    `score_new` path — cache hits free, fail-open parking, strong verdicts notified exactly
    like the runner's sink. The drain scores against the **full** daily cap while fresh
-   crawl-time scoring holds `JOBCRAWLER_MATCH_DRAIN_FLOOR` (default 80) of that cap back: a
+   crawl-time scoring holds `JOBCRAWLER_MATCH_DRAIN_FLOOR` (default 160) of that cap back: a
    day of saturating new inflow can otherwise reserve the whole cap and starve the drain to
    `granted=0` every tick, so the parked backlog never shrinks. Reserving a floor guarantees
    the drain a slice; it still gets anything fresh scoring left unused (the floor is a
@@ -693,7 +693,7 @@ enough organic drift events to exist first — a bootstrapping circularity).
 operates the whole loop itself rather than relying on an external cron.
 
 - **Due-selection.** Each board has a cadence (`schedule` in §4.1, else `JOBCRAWLER_DEFAULT_SCHEDULE`,
-  default **4h** — job boards move on the order of days, not minutes). The scheduler keeps `next_run`
+  default **2h** — job boards move on the order of days, not minutes). The scheduler keeps `next_run`
   per board in the store and dispatches those whose time has come.
 - **Adaptive cadence.** A board flagged `adaptive` (the fleet default via `JOBCRAWLER_ADAPTIVE_DEFAULT`)
   learns its own interval from recent hit/miss outcomes (an AIMD hit-rate controller steering toward
@@ -701,7 +701,7 @@ operates the whole loop itself rather than relying on an external cron.
   3d]`. Adaptive cadence is **timing, not code**, and stays within the politeness band, so it is
   **exempt from the §4.8/§4.11 autonomy brake** (which freezes only self-*modification*).
 - **NEW — recheck / expiry timer.** On `JOBCRAWLER_RECHECK_INTERVAL` (default 12h) the scheduler
-  re-fetches up to `recheck_cap` (default 150, oldest-checked first) standing **open** positions to
+  re-fetches up to `recheck_cap` (default 300, oldest-checked first) standing **open** positions to
   confirm they are still live. This is the **only** closure signal for `enumerates_all: false` sources
   (where the diff is unsound), and it also re-verifies enumerating rows against `expired_markers` /
   `expires_at` and calls `expire_due()`. The recheck GET follows **same-host** redirects (bounded,
@@ -725,8 +725,8 @@ operates the whole loop itself rather than relying on an external cron.
   once; per-host limits come from §4.5. A board never overlaps its own prior run.
 - **Cold-start bootstrap is budgeted per tick.** A due site with no committed crawler is never
   crawled (it would only `FileNotFoundError`); the tick routes it to the §4.2 bootstrap **after** the
-  crawl wave. That pass carries a time budget (`JOBCRAWLER_BOOTSTRAP_BUDGET`, default one tick
-  interval): one generation blocks the single-process loop for many minutes, and an unbudgeted pass
+  crawl wave. That pass carries a time budget (`JOBCRAWLER_BOOTSTRAP_BUDGET`, default two tick
+  intervals): one generation blocks the single-process loop for many minutes, and an unbudgeted pass
   over a cold roster runs every generation back-to-back inside a single tick — while each freshly
   promoted crawler sits idle, due but never dispatched, until the whole wave ends. Over budget, the
   rest of the roster defers to the next tick, where crawls (including the just-promoted crawler's
@@ -734,7 +734,7 @@ operates the whole loop itself rather than relying on an external cron.
   don't consume the budget in any meaningful way, so a no-op sweep still covers the roster in one
   tick; deferral loses nothing because crawler-less sites are re-detected from disk every tick.
   Within a pass, generations run in bounded-concurrency waves (`JOBCRAWLER_BOOTSTRAP_CONCURRENCY`,
-  default 3) so a fresh roster comes up in parallel instead of one multi-minute generation at a time,
+  default 6) so a fresh roster comes up in parallel instead of one multi-minute generation at a time,
   while still capping simultaneous LM spend/rate; the time budget is checked at each wave boundary and
   forced "crawl now" slugs run first, exempt from it.
 - **Retry & backoff (one owner per failure class).** A crawl that fails *before yielding any position*
@@ -1289,9 +1289,9 @@ an `openrouter/…` slug billed per token. Selected knobs:
 | `JOBCRAWLER_MATCH_MIN_SCORE` | `70` | 0–100 score at/above which a match notifies (surface threshold, not a drop) |
 | `JOBCRAWLER_SCORE_HALF_LIFE_DAYS` | `30` | §4.7 freshness decay: the *effective* score's bonus above the floor halves every this-many days of posting age (from `posted_at`, else `first_seen`), so a newer posting outranks an equally-good older one |
 | `JOBCRAWLER_SCORE_FRESHNESS_FLOOR` | `0.6` | §4.7 freshness-decay floor in [0,1]: the smallest recency multiplier, so a great fit stays represented (never below 60% of its raw score); `1.0` disables decay |
-| `JOBCRAWLER_MATCH_DAILY_CAP` | `400` | hard per-UTC-day LLM-scored jobs; cache hits free; overflow → `match_pending` |
-| `JOBCRAWLER_MATCH_DRAIN_FLOOR` | `80` | §4.7 slice of the daily cap fresh scoring holds back for the backlog drain (fresh spends ≤ `cap − floor`; drain spends the floor + fresh's leftover); `0` = one shared budget |
-| `JOBCRAWLER_MATCH_RATE` | `10/m` | governor pacing for match LLM calls (≠ the daily volume cap) |
+| `JOBCRAWLER_MATCH_DAILY_CAP` | `800` | hard per-UTC-day LLM-scored jobs; cache hits free; overflow → `match_pending` |
+| `JOBCRAWLER_MATCH_DRAIN_FLOOR` | `160` | §4.7 slice of the daily cap fresh scoring holds back for the backlog drain (fresh spends ≤ `cap − floor`; drain spends the floor + fresh's leftover); `0` = one shared budget |
+| `JOBCRAWLER_MATCH_RATE` | `20/m` | governor pacing for match LLM calls (≠ the daily volume cap) |
 | `JOBCRAWLER_EXTRACT_MODEL` | `sub_model()` fallback | the §4.7 match-time salary/employer extract LM; `require_extract_model` falls back to the cheap `sub_lm`, **never** the root planner; unset with no `sub_lm` ⇒ extraction is simply **off** |
 | `JOBCRAWLER_EXTRACT_MIN_SCORE` | `60` | 0–100 match score at/above which a salary-less posting is mined (below the notify threshold, above the noise floor) |
 | `JOBCRAWLER_EXTRACT_CAP` | `50` | hard per-run ceiling on *fresh* (cache-miss) description extractions; cache hits free; overflow retried next run |
@@ -1299,7 +1299,7 @@ an `openrouter/…` slug billed per token. Selected knobs:
 | `JOBCRAWLER_FIRST_CRAWL_CAP` | `30` | newest-K new positions matched on a board's *first* crawl (§4.7) |
 | `JOBCRAWLER_CLOSE_AFTER_MISSES` | `2` | consecutive absences from an enumerating board before a position closes (§4.7) |
 | `JOBCRAWLER_RECHECK_INTERVAL` | `12h` | §4.9 recheck loop cadence (the only closure signal for `enumerates_all:false`) |
-| `JOBCRAWLER_RECHECK_CAP` | `150` | max standing open positions re-fetched per recheck pass |
+| `JOBCRAWLER_RECHECK_CAP` | `300` | max standing open positions re-fetched per recheck pass |
 | `JOBCRAWLER_MIN_ITEMS` | `1` | §6 min positions (a 1–2 role board is legitimate; enum-floor+stability carry completeness) |
 | `JOBCRAWLER_MIN_DESCRIPTION_CHARS` | `300` | §6/§4.6 min description length |
 | `JOBCRAWLER_MIN_DESCRIPTION_QUALITY` | `0.6` | §6 fraction of sampled descriptions that must clear the length floor |
@@ -1314,13 +1314,13 @@ an `openrouter/…` slug billed per token. Selected knobs:
 | `JOBCRAWLER_SERVE_HOST` | `127.0.0.1` | `jobcrawl run` web UI bind address (§16; `--host` overrides); **loopback by default** — the UI holds personal application data, so `0.0.0.0` only behind a trusted proxy/auth |
 | `JOBCRAWLER_SERVE_PORT` | `8765` | `jobcrawl run` web UI listen port (§16; `--port` overrides) |
 | `JOBCRAWLER_USER_AGENT` | `jobcrawler/0.1 (+job tracker)` | sent on every request |
-| `JOBCRAWLER_RATE_LIMIT` | `1/s/host` | §4.5 politeness cap |
+| `JOBCRAWLER_RATE_LIMIT` | `2/s/host` | §4.5 politeness cap |
 | `JOBCRAWLER_MAX_PAGES` | `200` | per-crawl page budget (sized for paginated boards, §4.5) |
 | `JOBCRAWLER_EXTRA_HOSTS_CAP` | `3` | §6 gate-1(b) max declared `EXTRA_HOSTS`; the blast-radius bound atop the evidence rule (§8) |
-| `JOBCRAWLER_DEFAULT_SCHEDULE` | `4h` | fixed cadence for a board with no `schedule` and adaptive off |
+| `JOBCRAWLER_DEFAULT_SCHEDULE` | `2h` | fixed cadence for a board with no `schedule` and adaptive off |
 | `JOBCRAWLER_ADAPTIVE_DEFAULT` | `on` | a board with no explicit cadence is adaptive (§4.9) |
-| `JOBCRAWLER_MIN_SCHEDULE` / `MAX_SCHEDULE` | `1h` / `3d` | adaptive-interval politeness floor / staleness ceiling |
-| `JOBCRAWLER_CONCURRENCY` | `4` | max boards crawled concurrently |
+| `JOBCRAWLER_MIN_SCHEDULE` / `MAX_SCHEDULE` | `30m` / `3d` | adaptive-interval politeness floor / staleness ceiling |
+| `JOBCRAWLER_CONCURRENCY` | `8` | max boards crawled concurrently |
 | `JOBCRAWLER_AUTONOMY` | `on` | master brake over all self-modification (heal/regen/promote/reopt/adopt/rollback) |
 | `JOBCRAWLER_REVIEW_GATE` | `auto` | tri-state delivery: `auto` (promote+backup) / `on` (stage for `promote`) / `off` (write live) |
 | `JOBCRAWLER_REGEN_CHECK` | `24h` | staleness-evaluation cadence (§4.8) |
@@ -1333,8 +1333,8 @@ an `openrouter/…` slug billed per token. Selected knobs:
 | `JOBCRAWLER_MAX_ITERATIONS` / `MAX_LLM_CALLS` / `MAX_SUBCALLS` | `20` / `40` / `60` | RLM caps + the unconditional host sub-call kill (§4.2) |
 | `JOBCRAWLER_FANOUT_N` / `FANOUT_TOKEN_CAP` | `4` / `2M/site` | §6 best-of-N width + the aggregate fan-out token ceiling (dspy records tokens for every provider; USD isn't priced for many slugs) |
 | `JOBCRAWLER_FANOUT_RETRIES` | `= FANOUT_N` | §6 redraws for LM/adapter-dead attempts (a failure never eats a comparison slot; attempts ≤ 2N) |
-| `JOBCRAWLER_BOOTSTRAP_BUDGET` | `60s` | §4.9 per-tick time budget for the cold-start bootstrap pass (over budget → roster defers to next tick) |
-| `JOBCRAWLER_BOOTSTRAP_CONCURRENCY` | `3` | §4.9 max cold-start generations run in parallel per wave (1 = sequential; caps concurrent LM spend/rate) |
+| `JOBCRAWLER_BOOTSTRAP_BUDGET` | `2m` | §4.9 per-tick time budget for the cold-start bootstrap pass (over budget → roster defers to next tick) |
+| `JOBCRAWLER_BOOTSTRAP_CONCURRENCY` | `6` | §4.9 max cold-start generations run in parallel per wave (1 = sequential; caps concurrent LM spend/rate) |
 | `JOBCRAWLER_SOLVER` / `FLARESOLVERR_URL` / `JOBCRAWLER_CLEARANCE_TTL` / `JOBCRAWLER_EGRESS_PROXY` | `none` / — / `30m` / — | §4.10 challenge backend + clearance + IP/UA-pinned egress |
 | `JOBCRAWLER_NOTIFY_WEBHOOK` / `NOTIFY_TIMEOUT` | — / `10s` | optional operator webhook for autonomous actions + match alerts (§4.7/§4.9) |
 

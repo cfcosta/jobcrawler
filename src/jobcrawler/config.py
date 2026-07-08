@@ -266,10 +266,10 @@ def match_daily_cap() -> int:
     token-budget backstop (§4.7/§8). Only *LLM-scored* jobs count: a cache hit (a job
     whose ``content_hash`` + ``profile_hash`` was already scored) is FREE and never
     charged against it. Jobs past the cap are ``set_match_pending``, NEVER dropped — a
-    later run or the recheck loop drains them within budget. Default 400: bounds a bad
+    later run or the recheck loop drains them within budget. Default 800: bounds a bad
     crawl or a fresh-profile rematch storm from blowing the daily spend. Raise it only
     with the token bill in view."""
-    return _int("JOBCRAWLER_MATCH_DAILY_CAP", 400)
+    return _int("JOBCRAWLER_MATCH_DAILY_CAP", 800)
 
 
 def match_drain_floor() -> int:
@@ -278,17 +278,17 @@ def match_drain_floor() -> int:
     most ``daily_cap - drain_floor``; the drain (and profile-edit rematch) may spend the
     remaining floor plus whatever fresh left unused. Without it, a crawl sweep that hits
     the cap leaves the drain ``granted=0`` every tick and the parked backlog never shrinks.
-    Default 80 (20% of the 400 cap): raise it to drain backlog faster at the cost of fresh
+    Default 160 (20% of the 800 cap): raise it to drain backlog faster at the cost of fresh
     scoring headroom, set 0 to restore the single shared budget. Clamped to the cap."""
-    return max(0, _int("JOBCRAWLER_MATCH_DRAIN_FLOOR", 80))
+    return max(0, _int("JOBCRAWLER_MATCH_DRAIN_FLOOR", 160))
 
 
 def match_rate() -> str:
     """Governor pacing for the §4.7 match LM calls (``requests/interval``, e.g. the
-    default ``10/m``). Smooths the batched match calls so a big new-position sweep can't
+    default ``20/m``). Smooths the batched match calls so a big new-position sweep can't
     burst the provider into rate-limit errors; it paces *calls*, orthogonal to the daily
     token cap which bounds *volume*. Same governor grammar as the crawl rate limit."""
-    return _str("JOBCRAWLER_MATCH_RATE", "10/m")
+    return _str("JOBCRAWLER_MATCH_RATE", "20/m")
 
 
 def match_max_tokens() -> int:
@@ -449,7 +449,7 @@ def user_agent() -> str:
 
 
 def rate_limit() -> str:
-    return _str("JOBCRAWLER_RATE_LIMIT", "1/s/host")
+    return _str("JOBCRAWLER_RATE_LIMIT", "2/s/host")
 
 
 def max_pages() -> int:
@@ -664,8 +664,8 @@ def recheck_cap() -> int:
     """Max standing positions the §4.9 recheck loop re-fetches per pass. Bounds the extra
     fetch (and solver/politeness) budget the loop spends on already-known rows so a fleet
     with thousands of open positions doesn't starve fresh crawls; the oldest-checked rows
-    go first, so all rows are covered over successive passes. Default 150."""
-    return _int("JOBCRAWLER_RECHECK_CAP", 150)
+    go first, so all rows are covered over successive passes. Default 300."""
+    return _int("JOBCRAWLER_RECHECK_CAP", 300)
 
 
 def match_drain_interval() -> str:
@@ -690,15 +690,15 @@ def match_drain_cap() -> int:
 
 
 def default_schedule() -> str:
-    """Fixed crawl cadence for a site with no ``schedule:`` and adaptive off. Default 4h
+    """Fixed crawl cadence for a site with no ``schedule:`` and adaptive off. Default 2h
     (up from the news-era 30m): job boards move on the order of days, not minutes, so a
-    4h base catches a new posting the day it lands while staying polite. Adaptive cadence
+    2h base catches a new posting the day it lands while staying polite. Adaptive cadence
     (on by default) overrides this per-site from the observed hit rate."""
-    return _str("JOBCRAWLER_DEFAULT_SCHEDULE", "4h")
+    return _str("JOBCRAWLER_DEFAULT_SCHEDULE", "2h")
 
 
 def concurrency() -> int:
-    return _int("JOBCRAWLER_CONCURRENCY", 4)
+    return _int("JOBCRAWLER_CONCURRENCY", 8)
 
 
 # --- adaptive cadence (§4.9, the hit-rate controller) ----------------------
@@ -721,10 +721,10 @@ def _duration_secs(name: str, default: str) -> float:
 
 def min_schedule() -> float:
     """Politeness floor (seconds) for an adaptive interval — the controller never shrinks
-    below this no matter how busy a source is. Default 1h (up from the news-era 15m): job
-    postings don't churn minute-to-minute, so an hourly floor is the fastest a board ever
+    below this no matter how busy a source is. Default 30m (up from the news-era 15m): job
+    postings don't churn minute-to-minute, so a half-hour floor is the fastest a board ever
     needs to be hit, and keeps the fleet polite under a busy hit rate."""
-    return _duration_secs("JOBCRAWLER_MIN_SCHEDULE", "1h")
+    return _duration_secs("JOBCRAWLER_MIN_SCHEDULE", "30m")
 
 
 def max_schedule() -> float:
@@ -752,12 +752,12 @@ def bootstrap_budget() -> float:
     behind it) starved until the wave ends. Cheap assesses (a site in backoff)
     sweep through freely; once the pass exceeds this budget it defers the rest of
     the roster to the next tick — a crawler-less site is re-detected from disk
-    every tick, so deferral loses nothing. Default: one tick interval."""
-    return _duration_secs("JOBCRAWLER_BOOTSTRAP_BUDGET", "60s")
+    every tick, so deferral loses nothing. Default: two tick intervals."""
+    return _duration_secs("JOBCRAWLER_BOOTSTRAP_BUDGET", "2m")
 
 
 def bootstrap_concurrency() -> int:
-    """How many §4.2 cold-start generations may run at once (default 3).
+    """How many §4.2 cold-start generations may run at once (default 6).
 
     A fresh roster of N crawler-less boards otherwise generates one crawler at a time —
     N back-to-back multi-minute LM generations before the fleet is online. Bounded
@@ -765,7 +765,7 @@ def bootstrap_concurrency() -> int:
     is LM-heavy, so a large fan-out would multiply the instantaneous token load and risk
     provider rate limits. ``1`` restores the fully sequential pass. The per-tick time
     budget and the forced-slug exemption apply across waves exactly as before."""
-    return max(1, _int("JOBCRAWLER_BOOTSTRAP_CONCURRENCY", 3))
+    return max(1, _int("JOBCRAWLER_BOOTSTRAP_CONCURRENCY", 6))
 
 
 def regen_budget() -> float:
@@ -779,8 +779,8 @@ def regen_budget() -> float:
     once the sweep exceeds this budget the rest defers — but unlike the periodic cadence
     the deferral resumes on the *next* tick, not a full ``JOBCRAWLER_REGEN_CHECK`` interval
     later, so a bounded slice of the backlog clears each tick until it drains. Default:
-    one tick interval."""
-    return _duration_secs("JOBCRAWLER_REGEN_BUDGET", "60s")
+    two tick intervals."""
+    return _duration_secs("JOBCRAWLER_REGEN_BUDGET", "2m")
 
 
 def adaptive_default() -> bool:
@@ -856,8 +856,8 @@ def genfail_backoff() -> float:
     backoff it is re-tried with the *current* generator (which the offline §4.11 loop
     keeps improving). The delay grows geometrically per consecutive failure (×2 each)
     up to ``genfail_backoff_cap``, so a chronically broken site backs off without ever
-    giving up. Default 6h."""
-    return _duration_secs("JOBCRAWLER_GENFAIL_BACKOFF", "6h")
+    giving up. Default 3h."""
+    return _duration_secs("JOBCRAWLER_GENFAIL_BACKOFF", "3h")
 
 
 def genfail_backoff_cap() -> float:

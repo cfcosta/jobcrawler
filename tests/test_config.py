@@ -324,13 +324,13 @@ def test_crawlers_dir_honors_env_override(monkeypatch: pytest.MonkeyPatch) -> No
 # --- adaptive cadence (§4.9 hit-rate controller) ---------------------------
 
 
-def test_min_schedule_defaults_to_1h_in_seconds(
+def test_min_schedule_defaults_to_30m_in_seconds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Job postings don't churn minute-to-minute; the adaptive politeness floor rises
-    # from the news-era 15m to an hourly floor.
+    # from the news-era 15m to a half-hour floor.
     monkeypatch.delenv("JOBCRAWLER_MIN_SCHEDULE", raising=False)
-    assert config.min_schedule() == 60 * 60
+    assert config.min_schedule() == 30 * 60
 
 
 def test_max_schedule_defaults_to_3d_in_seconds(
@@ -354,7 +354,7 @@ def test_schedule_bounds_fall_back_on_malformed_value(
 ) -> None:
     # A typo in the bound must not crash the daemon at boot — fall back to default.
     monkeypatch.setenv("JOBCRAWLER_MIN_SCHEDULE", "every-so-often")
-    assert config.min_schedule() == 60 * 60
+    assert config.min_schedule() == 30 * 60
 
 
 def test_adaptive_target_n_defaults_to_two(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -618,9 +618,9 @@ def test_recheck_interval_honors_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.recheck_interval() == "6h"
 
 
-def test_recheck_cap_defaults_to_150(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_recheck_cap_defaults_to_300(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("JOBCRAWLER_RECHECK_CAP", raising=False)
-    assert config.recheck_cap() == 150
+    assert config.recheck_cap() == 300
 
 
 def test_recheck_cap_parses_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -628,11 +628,11 @@ def test_recheck_cap_parses_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.recheck_cap() == 500
 
 
-def test_default_schedule_defaults_to_4h(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Up from the news-era 30m: job boards move on the order of days, so a 4h base is
+def test_default_schedule_defaults_to_2h(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Up from the news-era 30m: job boards move on the order of days, so a 2h base is
     # fresh enough while staying polite.
     monkeypatch.delenv("JOBCRAWLER_DEFAULT_SCHEDULE", raising=False)
-    assert config.default_schedule() == "4h"
+    assert config.default_schedule() == "2h"
 
 
 def test_default_schedule_honors_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -725,10 +725,10 @@ def test_match_min_score_parses_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.match_min_score() == 85
 
 
-def test_match_daily_cap_defaults_to_400(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_match_daily_cap_defaults_to_800(monkeypatch: pytest.MonkeyPatch) -> None:
     # The hard token-budget backstop: cache hits are free, only LLM-scored jobs count.
     monkeypatch.delenv("JOBCRAWLER_MATCH_DAILY_CAP", raising=False)
-    assert config.match_daily_cap() == 400
+    assert config.match_daily_cap() == 800
 
 
 def test_match_daily_cap_parses_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -736,9 +736,9 @@ def test_match_daily_cap_parses_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.match_daily_cap() == 1000
 
 
-def test_match_rate_defaults_to_10_per_minute(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_match_rate_defaults_to_20_per_minute(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("JOBCRAWLER_MATCH_RATE", raising=False)
-    assert config.match_rate() == "10/m"
+    assert config.match_rate() == "20/m"
 
 
 def test_match_rate_honors_env(monkeypatch: pytest.MonkeyPatch) -> None:
