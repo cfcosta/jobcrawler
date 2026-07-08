@@ -441,9 +441,7 @@ class _Result:
     its lock.
     """
 
-    def __init__(
-        self, rows: list[Any], lastrowid: int | None, rowcount: int
-    ) -> None:
+    def __init__(self, rows: list[Any], lastrowid: int | None, rowcount: int) -> None:
         self._rows = rows
         self._pos = 0
         self.lastrowid = lastrowid
@@ -614,7 +612,9 @@ class StateStore:
             "UPDATE positions SET remote_scope = ? WHERE site = ? AND url = ?",
             [
                 (
-                    classify_remote_scope(row["workplace"] or "", row["location"] or ""),
+                    classify_remote_scope(
+                        row["workplace"] or "", row["location"] or ""
+                    ),
                     row["site"],
                     row["url"],
                 )
@@ -1464,7 +1464,9 @@ class StateStore:
 
     def get_position(self, site: str, url: str) -> PositionRecord | None:
         """One position by identity ``(site, url)``, any lifecycle state, or None."""
-        eff = self._effective_score_sql()  # §4.7 freshness-decayed score for the detail view
+        eff = (
+            self._effective_score_sql()
+        )  # §4.7 freshness-decayed score for the detail view
         row = self._conn.execute(
             f"SELECT *, {eff} AS effective_score FROM positions WHERE site = ? AND url = ?",
             (site, url),
@@ -1626,7 +1628,9 @@ class StateStore:
         if level:
             clauses.append("lower(COALESCE(level, '')) = ?")
             params.append(level.lower())
-        eff = self._effective_score_sql()  # §4.7 freshness-decayed score (min_score + score sort)
+        eff = (
+            self._effective_score_sql()
+        )  # §4.7 freshness-decayed score (min_score + score sort)
         if min_score is not None:
             # Rounded to match the integer score the UI shows (see matches()).
             clauses.append(f"match_score IS NOT NULL AND round({eff}) >= ?")
@@ -1948,6 +1952,18 @@ class StateStore:
         """
         rows = self._conn.execute("SELECT site, state FROM site_health").fetchall()
         return {row["site"]: row["state"] for row in rows}
+
+    def health_updated_by_site(self) -> dict[str, str]:
+        """Latest §4.8 health-state timestamp (ISO) per site slug, in one query.
+
+        The fairness key for the §4.2 bootstrap and §4.8 regen sweeps: both order
+        their backlog least-recently-attempted FIRST, and every assess outcome bumps
+        this timestamp, so an attempted site structurally moves to the back of the
+        queue. A slug absent here has never been attempted and sorts before
+        everything (the sweeps treat a missing key as the empty string).
+        """
+        rows = self._conn.execute("SELECT site, updated_at FROM site_health").fetchall()
+        return {row["site"]: row["updated_at"] for row in rows}
 
     def latest_run_by_site(self) -> dict[str, RunRecord]:
         """The most recent run per site slug, in one query (§16 dashboard).

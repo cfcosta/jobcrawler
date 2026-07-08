@@ -1315,6 +1315,60 @@ async def test_bootstrap_over_budget_defers_and_the_next_tick_crawls_the_promote
     assert healer.assessed == ["a", "b"]  # then the roster continues
 
 
+async def test_bootstrap_retries_least_recently_attempted_first() -> None:
+    # The starvation regression: the pass restarts from the head of its list every
+    # tick and the budget defers the rest, so REGISTRY order let head-of-roster sites
+    # cycling out of backoff eat every tick's budget while the tail sat eligible for
+    # hours (observed live: 72 late-roster sites frozen at attempts=1 while early
+    # entries collected third attempts). The backlog must run least-recently-attempted
+    # first, with never-attempted sites ahead of everything.
+    clock = _Clock(T0)
+    store = StateStore(":memory:", clock=clock)
+    # Registry order is a, b, c — but a failed a minute ago, b failed two hours ago,
+    # and c has never been attempted at all.
+    clock.now = T0 - timedelta(hours=2)
+    store.set_health("b", "generation_failed")
+    clock.now = T0 - timedelta(minutes=1)
+    store.set_health("a", "generation_failed")
+    clock.now = T0
+
+    generated: set[str] = set()
+
+    class _PromotingHealer(_RecordingHealer):
+        async def assess(self, slug: str) -> HealthState:
+            clock.now += timedelta(minutes=20)  # generation-scale wall time
+            generated.add(slug)
+            return await super().assess(slug)
+
+    healer = _PromotingHealer()
+    sched = Scheduler(
+        [
+            Site(slug="a", url="https://a.com"),
+            Site(slug="b", url="https://b.com"),
+            Site(slug="c", url="https://c.com"),
+        ],
+        store=store,
+        crawl=_ok_crawl,
+        healer=healer,
+        has_crawler=lambda slug: slug in generated,
+        autonomy=True,
+        regen_check="off",
+        heal_cooldown="off",
+        clock=clock,
+        bootstrap_budget=60.0,
+        bootstrap_concurrency=1,
+    )
+
+    await sched.tick()
+    assert healer.assessed == ["c"]  # never-attempted beats every failed site
+
+    await sched.tick()
+    assert healer.assessed == ["c", "b"]  # then the longest-waiting failure
+
+    await sched.tick()
+    assert healer.assessed == ["c", "b", "a"]  # the freshest failure goes last
+
+
 async def test_manual_crawl_now_on_a_crawlerless_site_jumps_the_bootstrap_queue() -> (
     None
 ):

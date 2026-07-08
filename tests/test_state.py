@@ -188,6 +188,25 @@ def test_set_health_overwrites_prior_state(store: StateStore) -> None:
     assert store.get_health("acme") == "generation_failed"
 
 
+def test_health_updated_by_site_maps_latest_attempt_times() -> None:
+    # The §4.2/§4.8 sweep-fairness key: one bulk query of each site's latest health
+    # timestamp, bumped on every re-attempt, absent for never-attempted sites.
+    now = {"t": datetime(2026, 7, 8, 10, 0, tzinfo=timezone.utc)}
+    s = StateStore(":memory:", clock=lambda: now["t"])
+    s.set_health("a", "generation_failed")
+    now["t"] = datetime(2026, 7, 8, 12, 0, tzinfo=timezone.utc)
+    s.set_health("b", "healthy")
+
+    first = s.health_updated_by_site()
+    assert set(first) == {"a", "b"}  # never-attempted sites simply absent
+    assert first["a"] < first["b"]  # ISO text orders chronologically
+
+    now["t"] = datetime(2026, 7, 8, 13, 0, tzinfo=timezone.utc)
+    s.set_health("a", "generation_failed")  # a re-attempt bumps the timestamp
+    assert s.health_updated_by_site()["a"] > first["b"]
+    s.close()
+
+
 def test_health_persists_across_reopen(tmp_path: object) -> None:
     db = f"{tmp_path}/state.db"  # type: ignore[str-bytes-safe]
     s1 = StateStore(db)
@@ -696,7 +715,9 @@ def test_upsert_persists_and_refreshes_apply_url(store: StateStore) -> None:
         content_hash="h",
     )
     assert result == "unchanged"
-    assert store.get_position("acme", "u").apply_url == "https://apply.example/acme/42-v2"
+    assert (
+        store.get_position("acme", "u").apply_url == "https://apply.example/acme/42-v2"
+    )
 
 
 def test_upsert_roundtrips_datetime_fields_as_iso(store: StateStore) -> None:
@@ -1070,7 +1091,9 @@ def test_matches_exclude_company_applied_drops_sibling_openings(
     # default listing is unchanged — the full scored corpus
     assert {r.url for r in store.matches(70)} == {"acme-1", "acme-2", "globex-1"}
     # company-applied exclusion removes both Acme rows, leaving the other company's lead
-    assert [r.url for r in store.matches(70, exclude_company_applied=True)] == ["globex-1"]
+    assert [r.url for r in store.matches(70, exclude_company_applied=True)] == [
+        "globex-1"
+    ]
 
 
 def test_matches_exclude_company_applied_groups_surface_variants(
@@ -1109,7 +1132,9 @@ def test_matches_exclude_company_applied_falls_back_to_lower_company(
     # Rows written before the company_canonical column read NULL. The grouping COALESCEs to
     # lower(company), so same-company dedup still holds until they're re-crawled.
     for url in ["a", "b"]:
-        store.upsert_position("acme", url, fields=FIELDS, content_hash=url)  # no canonical
+        store.upsert_position(
+            "acme", url, fields=FIELDS, content_hash=url
+        )  # no canonical
         store.set_match("acme", url, score=90, verdict="strong", reasons="")
     store.set_track_status("acme", "a", "applied", stamp_applied=True)
 
@@ -1125,13 +1150,21 @@ def test_matches_exclude_company_applied_empty_key_never_cross_excludes(
         store.upsert_position(
             "acme",
             url,
-            fields={"title": "E", "company": "", "company_canonical": "", "location": "R"},
+            fields={
+                "title": "E",
+                "company": "",
+                "company_canonical": "",
+                "location": "R",
+            },
             content_hash=url,
         )
         store.set_match("acme", url, score=90, verdict="strong", reasons="")
     store.set_track_status("acme", "a", "applied", stamp_applied=True)
 
-    assert {r.url for r in store.matches(70, exclude_company_applied=True)} == {"a", "b"}
+    assert {r.url for r in store.matches(70, exclude_company_applied=True)} == {
+        "a",
+        "b",
+    }
 
 
 def test_upsert_persists_company_canonical(store: StateStore) -> None:
@@ -1192,7 +1225,9 @@ def test_applied_company_exclusion_is_indexed(store: StateStore) -> None:
     ).fetchall()
     assert rows, "positions_applied_company_key index missing"
     ddl = str(rows[0]["sql"])
-    assert "applied_at IS NOT NULL" in ddl  # partial: indexes only the (few) applied rows
+    assert (
+        "applied_at IS NOT NULL" in ddl
+    )  # partial: indexes only the (few) applied rows
     assert "company" in ddl.lower()  # keyed on the derived company-name expression
     # and the planner actually uses it for the exclusion subquery (no full p2 scan)
     plan = store._conn.execute(
@@ -1213,9 +1248,14 @@ def test_applied_company_exclusion_is_indexed(store: StateStore) -> None:
 def _seed_scored(store: StateStore, url: str, score: int, age_days: float) -> None:
     now = store._clock()
     store.upsert_position(
-        "b", url,
-        fields={"title": "T", "company": "Co" + url, "location": "R",
-                "posted_at": (now - timedelta(days=age_days)).isoformat()},
+        "b",
+        url,
+        fields={
+            "title": "T",
+            "company": "Co" + url,
+            "location": "R",
+            "posted_at": (now - timedelta(days=age_days)).isoformat(),
+        },
         content_hash=url,
     )
     store.set_match("b", url, score=score, verdict="strong", reasons="[]")
@@ -1236,7 +1276,9 @@ def test_effective_score_decays_with_age_but_a_great_fit_stays_represented() -> 
         # a fresh posting keeps its full fit; an equally-good older one decays below it
         assert round(fresh) == 80
         assert old < fresh
-        assert [m.url for m in s.matches(0, limit=10)][0] == "fresh"  # newer ranks higher
+        assert [m.url for m in s.matches(0, limit=10)][
+            0
+        ] == "fresh"  # newer ranks higher
         # ...but a great fit is still represented: never below floor(0.6) × base
         assert great >= 0.6 * 95 - 0.01
     finally:
@@ -1270,7 +1312,9 @@ def test_score_freshness_floor_of_one_disables_decay(
         _seed_scored(s, "old", 90, 365)
         (m,) = s.matches(0, limit=10)
         eff = m.effective_score
-        assert eff is not None and round(eff) == 90  # floor 1.0 → effective == base, no decay
+        assert (
+            eff is not None and round(eff) == 90
+        )  # floor 1.0 → effective == base, no decay
     finally:
         s.close()
 
@@ -1284,8 +1328,12 @@ def test_generation_log_records_and_reads_back(store: StateStore) -> None:
         outcome="failed",
         reason="no candidate produced",
         llm_log=[
-            {"model": "m", "prompt": "generate", "completion": None,
-             "error": "OSError: [Errno 24] Too many open files"},
+            {
+                "model": "m",
+                "prompt": "generate",
+                "completion": None,
+                "error": "OSError: [Errno 24] Too many open files",
+            },
         ],
     )
     store.record_generation("beta", outcome="promoted", reason="ok", score=0.94)
@@ -1318,8 +1366,12 @@ def test_generation_log_retention_prunes_oldest(store: StateStore) -> None:
 def test_set_salary_fills_an_empty_row_and_reports_it(store: StateStore) -> None:
     store.upsert_position("acme", "u", fields=FIELDS, content_hash="h")  # no salary
     filled = store.set_salary(
-        "acme", "u", salary_min=120000.0, salary_max=160000.0,
-        salary_currency="USD", salary_period="year",
+        "acme",
+        "u",
+        salary_min=120000.0,
+        salary_max=160000.0,
+        salary_currency="USD",
+        salary_period="year",
     )
     assert filled is True
     rec = store.open_positions("acme")[0]
@@ -1331,12 +1383,18 @@ def test_set_salary_never_clobbers_a_source_salary(store: StateStore) -> None:
     # A crawler/§4.6 salary on the row wins: the guard refuses the LLM backfill and the
     # existing figures survive untouched.
     store.upsert_position(
-        "acme", "u", fields={**FIELDS, "salary_min": 90000.0, "salary_max": 90000.0},
+        "acme",
+        "u",
+        fields={**FIELDS, "salary_min": 90000.0, "salary_max": 90000.0},
         content_hash="h",
     )
     filled = store.set_salary(
-        "acme", "u", salary_min=200000.0, salary_max=200000.0,
-        salary_currency="USD", salary_period="year",
+        "acme",
+        "u",
+        salary_min=200000.0,
+        salary_max=200000.0,
+        salary_currency="USD",
+        salary_period="year",
     )
     assert filled is False
     rec = store.open_positions("acme")[0]
@@ -1346,8 +1404,12 @@ def test_set_salary_never_clobbers_a_source_salary(store: StateStore) -> None:
 def test_set_salary_missing_row_is_a_noop(store: StateStore) -> None:
     assert (
         store.set_salary(
-            "acme", "nope", salary_min=1.0, salary_max=2.0,
-            salary_currency="USD", salary_period="year",
+            "acme",
+            "nope",
+            salary_min=1.0,
+            salary_max=2.0,
+            salary_currency="USD",
+            salary_period="year",
         )
         is False
     )
@@ -1364,7 +1426,9 @@ def test_set_hiring_company_repoints_the_canonical_dedup_key(store: StateStore) 
     assert rec.company == "Confidential"  # the board field is left as crawled
 
 
-def test_set_hiring_company_empty_canonical_keeps_the_crawl_key(store: StateStore) -> None:
+def test_set_hiring_company_empty_canonical_keeps_the_crawl_key(
+    store: StateStore,
+) -> None:
     # An employer name that canonicalises to nothing must not wipe the crawl-derived key.
     _upsert_scored(store, "u", company="Acme", canonical="acme")
     store.set_hiring_company("acme", "u", name="The Group", canonical="")
@@ -1536,7 +1600,9 @@ def test_reserve_match_spend_holds_reserved_headroom_back(store: StateStore) -> 
     # Fresh scoring passes the floor so it can't claim the last ``reserved`` units; the drain
     # passes 0 and so may spend them (plus whatever fresh left).
     day = "2026-07-02"
-    assert store.reserve_match_spend(day, 10, cap=10, reserved=4) == 6  # capped at cap-floor
+    assert (
+        store.reserve_match_spend(day, 10, cap=10, reserved=4) == 6
+    )  # capped at cap-floor
     assert store.match_spent(day) == 6
     # More fresh scoring still can't cross into the reserved 4.
     assert store.reserve_match_spend(day, 10, cap=10, reserved=4) == 0
@@ -1993,7 +2059,9 @@ def test_score_histogram_buckets_open_scored_rows_in_sql():
     scored("d", 59)  # band 2: 40–59
     scored("e", 0)  # band 4: 0–19
     scored("f", 90, closed=True)  # closed → excluded
-    s.upsert_position("acme", "g", fields=FIELDS, content_hash="g")  # unscored → excluded
+    s.upsert_position(
+        "acme", "g", fields=FIELDS, content_hash="g"
+    )  # unscored → excluded
 
     bands = [(80, 100), (60, 79), (40, 59), (20, 39), (0, 19)]
     assert s.score_histogram(bands) == [2, 1, 1, 0, 1]

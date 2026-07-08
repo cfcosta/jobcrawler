@@ -580,7 +580,10 @@ class Scheduler:
         pass is over budget the rest of the roster defers to the next tick, where
         crawls — including the freshly promoted crawler's first — always run first.
         Deferral loses nothing: a crawler-less site is re-detected from disk every
-        tick, and the health state machine still owns per-site backoff.
+        tick, and the health state machine still owns per-site backoff. The backlog is
+        ordered least-recently-attempted first (see below) — in registry order, a
+        budget-deferred tail could starve forever behind head-of-roster sites cycling
+        out of backoff.
 
         Slugs in ``forced`` (this tick's manual "crawl now" requests, sorted to the
         front by the caller) are exempt from the budget cutoff: an operator who pressed
@@ -609,6 +612,16 @@ class Scheduler:
         # per-site check when concurrency is 1.
         forced_sites = [s for s in sites if s.slug in forced]
         backlog = [s for s in sites if s.slug not in forced]
+        # Least-recently-attempted FIRST (never-attempted before everything). The pass
+        # restarts from the head of this list every tick and the budget defers the
+        # rest, so registry order would starve the tail: with enough head-of-roster
+        # sites cycling out of their genfail backoffs, the first expensive wave always
+        # lands before the tail is reached — observed live as 72 late-roster sites
+        # frozen at attempts=1 for 8+ hours while early entries collected third
+        # attempts. Every assess outcome bumps the site's health timestamp, so an
+        # attempted site structurally moves to the back and fairness needs no cursor.
+        last_attempt = self._store.health_updated_by_site()
+        backlog.sort(key=lambda s: last_attempt.get(s.slug, ""))
         k = self._bootstrap_concurrency
 
         for i in range(0, len(forced_sites), k):
@@ -763,14 +776,19 @@ class Scheduler:
         many boards at once) would otherwise run every regeneration back-to-back in a single
         tick and freeze all crawling. Cheap assesses sweep freely; once over budget the rest
         defers, and ``_regen_incomplete`` keeps the sweep due next tick (via ``mark_regen``)
-        so a bounded slice clears each tick until the wave drains. The health state machine
-        (backoff / pending-review) makes each already-swept site cheap to re-assess, so
-        restarting from the top next tick converges without a resume cursor.
+        so a bounded slice clears each tick until the wave drains. The sweep runs
+        least-recently-attempted first (every assess bumps the site's health timestamp),
+        so the budget-deferred tail cannot starve behind early sites that keep
+        re-becoming expensive — no resume cursor needed.
         """
         self._regen_incomplete = False
         if self._healer is None:
             return {}
         assessable = [s for s in self._sites if s.enabled and self._has_crawler(s.slug)]
+        # Same fairness rule as the §4.2 bootstrap pass: least-recently-attempted
+        # first, so a correlated drift wave at the roster head can't starve the tail.
+        last_attempt = self._store.health_updated_by_site()
+        assessable.sort(key=lambda s: last_attempt.get(s.slug, ""))
         states: dict[str, HealthState] = {}
         pass_started = self._clock()
         for done, site in enumerate(assessable, start=1):
