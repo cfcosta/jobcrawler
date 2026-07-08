@@ -112,17 +112,19 @@
 
 - slug: alchemy
   name: "Alchemy"
-  url: https://boards-api.greenhouse.io/v1/boards/alchemy/jobs?content=true
+  # Moved off Greenhouse (token `alchemy` is a 404 as of 2026-07): the live board is
+  # Ashby. Feed from api.ashbyhq.com; posting URLs on jobs.ashbyhq.com (§8).
+  url: https://api.ashbyhq.com/posting-api/job-board/alchemy?includeCompensation=true
   render: static
   company: "Alchemy"
+  extra_hosts:
+    - jobs.ashbyhq.com
   hints: >-
-    Greenhouse board API, token `alchemy`. Whole board in one GET. Parse the standard
-    Greenhouse fields. Strong match for blockchain infrastructure, protocol APIs,
-    wallet/developer tooling, high-scale backend and distributed systems roles. Emit a
-    single-request crawler: with `content=true` this one GET already embeds every role's
-    full HTML content/description — parse it straight from the JSON and keep EXTRA_HOSTS
-    empty. Never fetch boards.greenhouse.io or a per-job page, and never authorize a host
-    merely linked inside a description.
+    Ashby job board API, token `alchemy`. Whole board in one JSON GET — parse the standard
+    Ashby fields straight from it, keep to a single request, and never authorize a host
+    merely linked inside a description. Strong match for blockchain infrastructure,
+    protocol APIs, wallet/developer tooling, high-scale backend and distributed systems
+    roles.
 
 - slug: fireblocks
   name: "Fireblocks"
@@ -622,12 +624,14 @@
   render: static
   enumerates_all: false
   hints: >-
-    Rust-only job board. Windowed crawl: fetch the newest listing page, collect job detail
-    links under /jobs/, and parse each detail page for title, company, remote/location text,
-    salary text, posted age/date, full description and apply email/link. Treat as windowed
-    because the homepage exposes a freshest slice with load-more behavior. Excellent match
-    for Rust backend, distributed systems, infrastructure, search, fintech and blockchain
-    roles.
+    Rust-only job board. The board answers HTTP 429 to non-browser user agents on the
+    very first request (same operator/UA gate as golang.cafe): pass a desktop-browser
+    User-Agent via ctx.fetch(headers=...) on EVERY fetch. Windowed crawl: fetch the
+    newest listing page, collect job detail links under /jobs/, and parse each detail
+    page for title, company, remote/location text, salary text, posted age/date, full
+    description and apply email/link. Treat as windowed because the homepage exposes a
+    freshest slice with load-more behavior. Excellent match for Rust backend, distributed
+    systems, infrastructure, search, fintech and blockchain roles.
 
 - slug: letsgetrusty
   name: "LetsGetRusty Jobs"
@@ -1060,17 +1064,17 @@
 
 - slug: nethermind
   name: "Nethermind"
-  url: https://www.nethermind.io/open-roles
+  url: https://api.ashbyhq.com/posting-api/job-board/nethermind?includeCompensation=true
   render: static
   company: "Nethermind"
-  enumerates_all: false
+  # Ashby serves the feed from api.ashbyhq.com (the registry host); the canonical
+  # posting URLs live on the sibling host jobs.ashbyhq.com — authorize it (§8).
+  extra_hosts:
+    - jobs.ashbyhq.com
   hints: >-
-    Custom careers board. Treat as a windowed crawl unless the generated crawler proves that
-    a same-host API or sitemap enumerates every active posting. Fetch the listing, collect
-    active job detail URLs, then parse each detail page for title, description, location,
-    apply_url, employment_type, posted_at and expires_at when present. Strong match for
-    blockchain client engineering, EVM, protocol infrastructure, cryptography, Rust/Go/C#
-    systems and remote roles.
+    Ashby job board API, token `nethermind`. Parse the standard Ashby fields from the one
+    JSON GET. Strong match for blockchain client engineering, EVM, protocol
+    infrastructure, cryptography, Rust/Go/C# systems and remote roles.
 
 - slug: qdrant
   name: "Qdrant"
@@ -1140,15 +1144,17 @@
 
 - slug: tigerdata
   name: "TigerData / Timescale"
-  url: https://boards-api.greenhouse.io/v1/boards/timescale/jobs?content=true
+  # The Timescale→TigerData rebrand retired the Greenhouse board (token `timescale`
+  # 404s as of 2026-07); the live board is Ashby token `tigerdata`. Feed from
+  # api.ashbyhq.com; posting URLs on jobs.ashbyhq.com (§8).
+  url: https://api.ashbyhq.com/posting-api/job-board/tigerdata?includeCompensation=true
   render: static
   company: "TigerData / Timescale"
+  extra_hosts:
+    - jobs.ashbyhq.com
   hints: >-
-    Greenhouse board API, token `timescale`. One GET to the url returns the whole public
-    board. Each job has stable `id`, `title`, flattened `location.name`, `absolute_url`,
-    `updated_at`, and `content` = the full HTML-ENTITY-ESCAPED description; html.unescape
-    it, then strip tags. Greenhouse does not expose salary or employment_type in this board
-    API. Strong match for PostgreSQL, time-series databases, storage/query systems,
+    Ashby job board API, token `tigerdata`. Parse the standard Ashby fields from the one
+    JSON GET. Strong match for PostgreSQL, time-series databases, storage/query systems,
     observability data and backend infrastructure.
 
 - slug: cockroach_labs
@@ -1325,17 +1331,17 @@
 
 - slug: teleport
   name: "Teleport"
-  url: https://goteleport.com/careers/
+  url: https://api.ashbyhq.com/posting-api/job-board/goteleport?includeCompensation=true
   render: static
   company: "Teleport"
-  enumerates_all: false
+  # Ashby serves the feed from api.ashbyhq.com (the registry host); the canonical
+  # posting URLs live on the sibling host jobs.ashbyhq.com — authorize it (§8).
+  extra_hosts:
+    - jobs.ashbyhq.com
   hints: >-
-    Custom careers board. Treat as a windowed crawl unless the generated crawler proves that
-    a same-host API or sitemap enumerates every active posting. Fetch the listing, collect
-    active job detail URLs, then parse each detail page for title, description, location,
-    apply_url, employment_type, posted_at and expires_at when present. Strong match for
-    identity/security infrastructure, zero-trust access, Kubernetes, Go backend and
-    distributed systems roles.
+    Ashby job board API, token `goteleport`. Parse the standard Ashby fields from the one
+    JSON GET. Strong match for identity/security infrastructure, zero-trust access,
+    Kubernetes, Go backend and distributed systems roles.
 
 - slug: docker
   name: "Docker"
@@ -1489,10 +1495,13 @@
   render: static
   enumerates_all: false
   hints: >-
-    Go-specific job board with remote and salary-forward postings. Crawl newest jobs and
-    fetch detail pages for company, title, full description, location/remote requirement,
-    salary when explicit, posted_at and apply_url. Windowed source; enumerates_all:false.
-    Strong match for Go backend, API platform, cloud and infrastructure roles.
+    Go-specific job board with remote and salary-forward postings. The board answers
+    HTTP 429 to non-browser user agents on the very first request (RemoteOK-style UA
+    gate): pass a desktop-browser User-Agent via ctx.fetch(headers=...) on EVERY fetch.
+    Crawl newest jobs and fetch detail pages for company, title, full description,
+    location/remote requirement, salary when explicit, posted_at and apply_url. Windowed
+    source; enumerates_all:false. Strong match for Go backend, API platform, cloud and
+    infrastructure roles.
 
 - slug: kube_careers
   name: "Kube Careers"
@@ -1508,7 +1517,8 @@
 
 - slug: gitjobs_dev
   name: "GitJobs.dev"
-  url: https://www.gitjobs.dev/
+  # Apex only: the www. host does not resolve (NXDOMAIN as of 2026-07).
+  url: https://gitjobs.dev/
   render: static
   enumerates_all: false
   hints: >-
@@ -1599,6 +1609,10 @@
   url: https://jobs.canapi.com/
   render: static
   enumerates_all: false
+  # The Getro board host stopped resolving (NXDOMAIN as of 2026-07) and canapi.com
+  # names no replacement board; disabled so generation stops retrying a dead host.
+  # Re-enable if the portfolio board returns.
+  enabled: false
   hints: >-
     Fintech and financial-infrastructure portfolio job board. Windowed listing/detail crawl.
     Strong source for banking, payments, risk, compliance, APIs and backend/platform
@@ -1665,15 +1679,17 @@
 
 - slug: materialize
   name: "Materialize"
-  url: https://boards-api.greenhouse.io/v1/boards/materialize/jobs?content=true
+  # Moved off Greenhouse (token `materialize` is a 404 as of 2026-07): the live board
+  # is Ashby. Feed from api.ashbyhq.com; posting URLs on jobs.ashbyhq.com (§8).
+  url: https://api.ashbyhq.com/posting-api/job-board/materialize?includeCompensation=true
   render: static
   company: "Materialize"
+  extra_hosts:
+    - jobs.ashbyhq.com
   hints: >-
-    Greenhouse board API, token `materialize`. One GET returns the whole public board. Each
-    job has stable `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`,
-    and `content` = full HTML-ENTITY-ESCAPED description. Use html.unescape, then strip
-    tags. No salary or employment_type fields in this API. Strong match for streaming data
-    systems, distributed databases, Rust-heavy infrastructure and event-driven backends.
+    Ashby job board API, token `materialize`. Parse the standard Ashby fields from the one
+    JSON GET. Strong match for streaming data systems, distributed databases, Rust-heavy
+    infrastructure and event-driven backends.
 
 - slug: elastic
   name: "Elastic"
@@ -1852,7 +1868,9 @@
   render: static
   enumerates_all: false
   hints: >-
-    Arbeitnow public job board API. Windowed/paginated remote feed; page through pagination
+    Arbeitnow public job board API. The API rate-limits aggressively: fetch a handful of
+    paced pages per crawl and STOP on the first 429 with whatever was already collected —
+    never retry a 429 in-run. Windowed/paginated remote feed; page through pagination
     or next links if present, but treat as enumerates_all:false unless a full run proves
     complete active-board coverage. Each job exposes slug, company_name, title, location,
     remote boolean, tags, job_types, created_at, url and full description. Filter downstream
