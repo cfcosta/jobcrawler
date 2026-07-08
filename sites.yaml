@@ -1900,17 +1900,6 @@
     tags, posted date, expiry/dead markers and apply URL. Strong supplemental source for
     Rust, Go, protocol infrastructure, wallets, exchanges and stablecoin/payments roles.
 
-- slug: remoterocketship_backend_latam
-  name: "Remote Rocketship — Backend Latin America"
-  url: https://www.remoterocketship.com/country/latin-america/jobs/backend-developer/
-  render: static
-  enumerates_all: false
-  hints: >-
-    Remote Rocketship backend search scoped to Latin America. Windowed source; fetch listing
-    pages and job details for title, company, location/country constraints, remote markers,
-    tags, full description and apply URL. Useful for Brazil/UTC-3 friendly backend roles;
-    use detail recheck rather than close-missing on the listing window.
-
 - slug: chime
   name: "Chime"
   url: https://boards-api.greenhouse.io/v1/boards/chime/jobs?content=true
@@ -2414,30 +2403,6 @@
     closure. Fetch detail pages on the same host for the full description. Fit: remote
     blockchain/Web3 developer roles that overlap protocol, wallet and backend
     infrastructure.
-
-- slug: remote_rocketship_latam_software
-  name: "Remote Rocketship — LatAm Software Engineering"
-  url: https://www.remoterocketship.com/country/latin-america/jobs/software-engineer/
-  render: static
-  enumerates_all: false
-  hints: >-
-    Job-board listing/search source. Multi-company source; do not stamp a fixed `company`.
-    Parse company from each posting/card/detail page. Treat as a windowed source unless the
-    API explicitly returns all active matching jobs; use detail 404/expired markers for
-    closure. Fetch detail pages on the same host for the full description. Fit: US/EU remote
-    software engineering jobs hiring in Latin America, including backend and senior roles.
-
-- slug: remote_rocketship_brazil_backend
-  name: "Remote Rocketship — Brazil Backend"
-  url: https://www.remoterocketship.com/?locations=Brazil&page=1&sort=DateAdded
-  render: static
-  enumerates_all: false
-  hints: >-
-    Job-board listing/search source. Multi-company source; do not stamp a fixed `company`.
-    Parse company from each posting/card/detail page. Treat as a windowed source unless the
-    API explicitly returns all active matching jobs; use detail 404/expired markers for
-    closure. Fetch detail pages on the same host for the full description. Fit: remote jobs
-    hiring in Brazil; useful for UTC-3 and Brazil-eligible backend roles.
 
 - slug: getonboard_programming
   name: "Get on Board — Programming"
