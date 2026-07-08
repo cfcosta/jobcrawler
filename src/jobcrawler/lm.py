@@ -241,6 +241,11 @@ def build_lm(
     if cls is None:
         cls = dspy.LM
 
+    # Provider-independent litellm hygiene: keep its logging worker from binding an
+    # asyncio task to whichever loop happens to be running when a completion lands
+    # (dspy's sync→async bridges make short-lived loops routine — see the neuter).
+    _neuter_litellm_logging_worker()
+
     if is_chatgpt(model):
         # Lazy import: only pull the auth module (and, through it, litellm) when a
         # chatgpt slug is actually in play. Pinning CHATGPT_TOKEN_DIR before the LM is
@@ -275,6 +280,12 @@ def build_lm(
 # whatever usage/success callbacks were still queued are silently dropped. The fix
 # therefore belongs at OUR loop exits: flush what's queued (bounded), then stop the
 # worker task cleanly so nothing outlives the loop.
+#
+# That covers the loops jobcrawler creates. dspy additionally bridges sync→async with
+# bare ``asyncio.run`` in places we don't control (``Tool.__call__``, ``syncify``), so
+# RLM generation still ran litellm inside short-lived loops that stranded the worker —
+# hence the second layer: ``build_lm`` neuters the global worker at the source so no
+# loop, ours or dspy's, ever spawns it (see :func:`_neuter_litellm_logging_worker`).
 
 _T = TypeVar("_T")
 
@@ -305,6 +316,47 @@ async def drain_litellm_logging(
         await worker.stop()
     except Exception:
         pass
+
+
+_logging_worker_neutered = False
+
+
+def _neuter_litellm_logging_worker() -> None:
+    """Idempotently stop litellm's global LoggingWorker from ever spawning its task.
+
+    The drain above cleans up the loops WE create, but dspy bridges sync→async with
+    bare ``asyncio.run`` in places we don't control (``Tool.__call__`` for the RLM's
+    host tools, ``syncify``), so generation kept running litellm inside short-lived
+    loops that stranded the worker regardless — observed as "Task was destroyed but it
+    is pending!" bursts at candidate boundaries even with every jobcrawler loop
+    draining. Neutering at the source ends the class of leak: ``enqueue``/``start``
+    are replaced on the global instance so no task is ever created, and each queued
+    coroutine is closed deterministically instead of leaking.
+
+    What's dropped is litellm-internal *telemetry* only: dspy reads token usage
+    synchronously off each response (``settings.usage_tracker.add_usage`` — what the
+    §4.2 fan-out cap consumes), the §4.2 LLM log rides dspy callbacks, and dspy pins
+    ``litellm.cache = None`` (its own on-disk cache instead), so the worker's async
+    cache-add feeder is dormant. Patching the *instance* (not the class) leaves other
+    ``LoggingWorker`` instances — e.g. the drain tests' locals — untouched.
+    """
+    global _logging_worker_neutered
+    if _logging_worker_neutered:
+        return
+    # Set first: a failed/absent patch must not be retried on every LM build.
+    _logging_worker_neutered = True
+    try:
+        from litellm.litellm_core_utils.logging_worker import GLOBAL_LOGGING_WORKER
+    except Exception:  # pragma: no cover - litellm layout changed; nothing to neuter
+        return
+
+    def _drop(coroutine: Coroutine[Any, Any, Any]) -> None:
+        # Deterministic, warning-free drop: never awaited, never wrapped in a task.
+        coroutine.close()
+
+    GLOBAL_LOGGING_WORKER.ensure_initialized_and_enqueue = _drop  # ty: ignore[invalid-assignment]
+    GLOBAL_LOGGING_WORKER.enqueue = _drop  # ty: ignore[invalid-assignment]
+    GLOBAL_LOGGING_WORKER.start = lambda: None  # ty: ignore[invalid-assignment]
 
 
 def run_llm_loop(coro: Coroutine[Any, Any, _T]) -> _T:

@@ -346,20 +346,20 @@ def test_drain_flushes_queued_callbacks_and_stops_the_worker() -> None:
     assert ran == ["x"]  # the queued callback was executed, not dropped
 
 
-def test_run_llm_loop_returns_the_value_and_drains_the_global_worker() -> None:
+def test_run_llm_loop_returns_the_value_and_leaves_no_global_worker_task() -> None:
+    # Holds under both regimes: with the stock worker the drain flushes and stops it;
+    # with the production neuter installed (any earlier build_lm) nothing ever starts.
+    # Either way the invariant is the same — no task survives to be stranded.
     from litellm.litellm_core_utils.logging_worker import GLOBAL_LOGGING_WORKER
 
-    ran: list[str] = []
-
     async def callback() -> None:
-        ran.append("x")
+        pass
 
     async def work() -> str:
         GLOBAL_LOGGING_WORKER.ensure_initialized_and_enqueue(callback())
         return "done"
 
     assert lm.run_llm_loop(work()) == "done"
-    assert ran == ["x"]
     assert GLOBAL_LOGGING_WORKER._worker_task is None
 
 
@@ -386,3 +386,27 @@ def test_run_llm_loop_is_a_plain_runner_when_litellm_never_ran() -> None:
         return 7
 
     assert lm.run_llm_loop(work()) == 7
+
+
+def test_neutered_global_worker_never_spawns_a_task_in_an_ephemeral_loop() -> None:
+    # dspy bridges sync→async with bare asyncio.run (Tool.__call__, syncify) — loops
+    # jobcrawler can't wrap. After the neuter (installed by every build_lm), litellm
+    # enqueueing inside such a loop must create NO worker task (nothing to strand at
+    # loop close) and must close the telemetry coroutine instead of leaking it.
+    import inspect
+
+    from litellm.litellm_core_utils.logging_worker import GLOBAL_LOGGING_WORKER
+
+    lm._neuter_litellm_logging_worker()
+
+    async def telemetry() -> None:
+        raise AssertionError("a neutered worker must never execute telemetry")
+
+    coro = telemetry()
+
+    async def ephemeral() -> None:
+        GLOBAL_LOGGING_WORKER.ensure_initialized_and_enqueue(coro)
+        assert GLOBAL_LOGGING_WORKER._worker_task is None
+
+    asyncio.run(ephemeral())
+    assert inspect.getcoroutinestate(coro) == "CORO_CLOSED"
