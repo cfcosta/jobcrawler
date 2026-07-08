@@ -867,15 +867,17 @@
 
 - slug: rippling
   name: "Rippling"
-  url: https://www.rippling.com/careers
+  url: https://www.rippling.com/careers/open-roles
   render: static
   company: "Rippling"
   enumerates_all: false
   hints: >-
-    Custom careers board. Treat as a windowed crawl unless the generated crawler proves that
-    a same-host API or sitemap enumerates every active posting. Fetch the listing, collect
-    active job detail URLs, then parse each detail page for title, description, location,
-    apply_url, employment_type, posted_at and expires_at when present. Strong match for
+    First-party board on Rippling's OWN ATS, served same-host: /careers/open-roles is the
+    roles list (ats.rippling.com/rippling/jobs redirects here). Do NOT declare or fetch
+    greenhouse/lever/ashby hosts — the board is not backed by any of them; stay on
+    www.rippling.com. Fetch the open-roles listing, collect active job detail URLs, then
+    parse each detail page for title, description, location, apply_url, employment_type,
+    posted_at and expires_at when present. Strong match for
     API/platform backend, identity, payroll/payments adjacent systems, distributed
     application infrastructure and senior/staff roles.
 
@@ -975,15 +977,19 @@
 
 - slug: uniswap_labs
   name: "Uniswap Labs"
-  url: https://careers.uniswap.org/
-  render: browser
+  url: https://api.ashbyhq.com/posting-api/job-board/uniswap?includeCompensation=true
+  render: static
   company: "Uniswap Labs"
-  enumerates_all: false
+  # Ashby serves the machine-readable feed from api.ashbyhq.com (the registry host)
+  # but the human-facing board — the canonical job URL each posting links to — lives
+  # on the sibling host jobs.ashbyhq.com. Authorize it explicitly so a regenerated
+  # crawler may reference/fetch it (§8); a sibling host is not on-domain of api.*.
+  extra_hosts:
+    - jobs.ashbyhq.com
   hints: >-
-    Uniswap Labs careers board. Browser-render open roles, collect engineering/protocol role
-    detail pages, and parse title, location/workplace, full description and apply URL. Treat
-    as windowed. Strong match for DeFi, protocol infrastructure, exchange systems, smart
-    contracts and backend infrastructure roles.
+    Ashby job board API, token `uniswap`. Parse the standard Ashby fields. Strong match
+    for DeFi, protocol infrastructure, exchange systems, smart contracts and backend
+    infrastructure roles.
 
 - slug: dydx
   name: "dYdX"
