@@ -264,13 +264,23 @@ def _float_param(params: Any, name: str) -> float | None:
         return None
 
 
-def _read_filters(params: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+def _read_filters(
+    params: Any, *, default_new_view: bool = False
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """Parse the browse query-string into (``search_positions`` kwargs, raw values).
 
     The raw dict re-populates the filter form so the UI reflects the active query. By
     default dismissed rows are hidden and both lifecycle states are shown (a tracker cares
     about a posting it applied to even after the board closes it).
+
+    ``default_new_view`` opens a BARE request (empty query string) on the operator's
+    working set: stage ``new`` with applied companies hidden. Only a fully-empty query
+    gets the defaults — any form submission carries at least the stage/sort selects, so
+    an explicitly UNchecked checkbox (absent from a non-empty query) is honored rather
+    than re-defaulted, and deep links with their own params stay exactly as written.
     """
+    if default_new_view and not len(params):
+        params = {"track_status": "new", "hide_applied_companies": "1"}
 
     def _s(name: str) -> str | None:
         v = params.get(name)
@@ -670,7 +680,7 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
 
     @app.get("/positions", response_class=HTMLResponse)
     def list_positions(request: Request) -> Response:
-        kwargs, raw = _read_filters(request.query_params)
+        kwargs, raw = _read_filters(request.query_params, default_new_view=True)
         page = max(1, _int_param(request.query_params, "page") or 1)
         rows = store.search_positions(
             **kwargs, limit=_PAGE_SIZE + 1, offset=(page - 1) * _PAGE_SIZE

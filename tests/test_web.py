@@ -168,6 +168,32 @@ async def test_detail_renders_a_mailto_apply_link_clickably() -> None:
         store.close()
 
 
+async def test_positions_default_view_is_new_with_applied_companies_hidden() -> None:
+    # A bare /positions opens on the working set: stage 'new' only, with "Hide
+    # applied companies" pre-checked. Any explicit query — even one that names no
+    # stage — disables the defaults, so an unchecked checkbox on a submitted form
+    # (absent param, non-empty query) is honored rather than re-defaulted.
+    store = _seeded_store()
+    try:
+        async with _client(create_app(store)) as c:
+            beta_pid = encode_pid("beta", "https://beta.test/b")
+            r = await c.post(
+                f"/positions/{beta_pid}/status", data={"track_status": "interested"}
+            )
+            assert r.status_code == 303
+
+            bare = (await c.get("/positions")).text
+            assert "Staff Engineer" in bare  # still stage 'new'
+            assert "Frontend Engineer" not in bare  # moved out of the default view
+            assert 'name="hide_applied_companies" value="1" checked' in bare
+
+            explicit = (await c.get("/positions?sort=score")).text
+            assert "Frontend Engineer" in explicit  # defaults not injected
+            assert 'name="hide_applied_companies" value="1" checked' not in explicit
+    finally:
+        store.close()
+
+
 async def test_rows_link_the_real_position_page_not_the_aggregator() -> None:
     # Aggregator boards (Working Nomads et al.) store their own page as ``url``; the
     # real ATS posting is the captured apply_url behind their "Apply for this
