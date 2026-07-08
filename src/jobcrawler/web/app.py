@@ -892,36 +892,3 @@ class BulkBody(BaseModel):
 
 class CrawlBody(BaseModel):
     slug: str
-
-
-def serve_app(*, host: str | None = None, port: int | None = None) -> int:
-    """Open the store, load the registry best-effort, and run uvicorn (blocking).
-
-    The store path comes from ``JOBCRAWLER_STATE_URL`` (same DB the daemon writes); the
-    registry is optional — if it's missing or invalid the UI still serves (browse/track
-    work; only the crawl-now buttons go dark). ``host``/``port`` override the config
-    defaults so the CLI flags win over env, which wins over the loopback default.
-    """
-    import uvicorn
-
-    from jobcrawler import config
-    from jobcrawler.sites import load_sites
-
-    url = config.state_url()
-    db_path = url.removeprefix("sqlite:///") if url.startswith("sqlite:") else url
-    store = StateStore(db_path)
-
-    sites: list[Any] | None = None
-    try:
-        sites = load_sites(config.sites_path())
-    except Exception as exc:  # registry optional for the UI — noqa: BLE001
-        _log.warning(
-            "serve: site registry unavailable (%s); crawl-now buttons disabled", exc
-        )
-
-    app = create_app(store, sites=sites)
-    bind_host = host if host is not None else config.serve_host()
-    bind_port = port if port is not None else config.serve_port()
-    _log.info("position tracker serving on http://%s:%d", bind_host, bind_port)
-    uvicorn.run(app, host=bind_host, port=bind_port, log_level="info")
-    return 0

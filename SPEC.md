@@ -744,7 +744,7 @@ operates the whole loop itself rather than relying on an external cron.
 
 v1 uses an **in-process async scheduler** (no external broker) — appropriate for a checked-in board
 list; a task queue is a later scale-up (§14). The optional thin HTTP surface (status, manual trigger)
-this reserved is realized by the separate **`jobcrawl serve` tracker (§16)** — a read/write UI over the
+this reserved is realized by the in-process **§16 web tracker** `jobcrawl run` mounts — a read/write UI over the
 same store; it never runs a scheduler or an LLM, only flagging crawl/rescore work for this loop to drain.
 
 ### 4.10 Cloudflare / anti-bot challenge handling
@@ -1104,7 +1104,7 @@ jobcrawler/
     generator_pointer.py adopt_watch.py optimize_job.py trainset.py  # §4.11 versioning/adoption/trainset
     notify.py metrics.py    # operator notifications (§4.7/§4.8/§4.11) + observability (§4.9)
     cli.py cli_generate.py cli_optimize.py  # operator commands (§10)
-    web/                    # `jobcrawl serve` FastAPI tracker over the shared store (§16) — NEW
+    web/                    # §16 FastAPI tracker mounted in-process by `jobcrawl run` over the shared store — NEW
       app.py                #   create_app(store) factory + serve_app(); routes, JSON api, presentation helpers
       templates/            #   Jinja2: base/index/detail/dashboard/applications (browse, funnel, applied pipeline)
       static/               #   app.css (dark theme) + app.js (progressive-enhancement auto-submit)
@@ -1236,8 +1236,7 @@ The central risk is **executing model-written code against the live web**. Mitig
 ## 10. CLI & operations
 | command | does |
 |---|---|
-| `jobcrawl run` | **start the scheduler daemon** — crawl due boards, track lifecycle, match, retry, regenerate (§4.9) |
-| `jobcrawl serve [--host --port]` | **start the web tracker UI** (§16) — browse/search/track positions over the shared store; loopback-bound by default, no scheduler/LLM |
+| `jobcrawl run [--host --port] [--no-web]` | **start the scheduler daemon + the §16 web tracker UI** in one process — crawl due boards, track lifecycle, match, retry, regenerate (§4.9), and serve the UI over the same store (loopback-bound by default; `--no-web` for headless) |
 | `jobcrawl generate <slug> \| --all \| --missing \| --stale` | run RLM, gate (§6), write `crawlers/<slug>.py` (`--missing` = every enabled site with no committed crawler, to drain the §4.2 cold-start backlog operator-side) |
 | `jobcrawl generation-log [site] [-v]` | recent generation attempts (outcome + reason); `-v` dumps each attempt's captured **LLM interaction log** — the durable "why did generation fail" (§4.2) |
 | `jobcrawl validate <slug>` | dry-run a committed script through the §4.4 sandbox, report positions/errors, **no state/match** |
@@ -1292,8 +1291,8 @@ an `openrouter/…` slug billed per token. Selected knobs:
 | `JOBCRAWLER_FX_ENDPOINT` | `open.er-api.com/v6/latest/USD` | §4.6/§4.9 keyless USD-based FX feed; inverted to USD-per-unit for `usd_annual_band` (attribution: exchangerate-api.com) |
 | `JOBCRAWLER_FX_REFRESH_INTERVAL` | `24h` | §4.9 out-of-band FX-rate pull cadence; `off` disables (static `FX_TO_USD` floor then carries conversion) |
 | `JOBCRAWLER_STATE_URL` | `sqlite:///jobcrawler.db` | position/match/run/health/tracking store (§4.7/§16) |
-| `JOBCRAWLER_SERVE_HOST` | `127.0.0.1` | `jobcrawl serve` bind address (§16); **loopback by default** — the UI holds personal application data, so `0.0.0.0` only behind a trusted proxy/auth |
-| `JOBCRAWLER_SERVE_PORT` | `8765` | `jobcrawl serve` listen port (§16) |
+| `JOBCRAWLER_SERVE_HOST` | `127.0.0.1` | `jobcrawl run` web UI bind address (§16; `--host` overrides); **loopback by default** — the UI holds personal application data, so `0.0.0.0` only behind a trusted proxy/auth |
+| `JOBCRAWLER_SERVE_PORT` | `8765` | `jobcrawl run` web UI listen port (§16; `--port` overrides) |
 | `JOBCRAWLER_USER_AGENT` | `jobcrawler/0.1 (+job tracker)` | sent on every request |
 | `JOBCRAWLER_RATE_LIMIT` | `1/s/host` | §4.5 politeness cap |
 | `JOBCRAWLER_MAX_PAGES` | `200` | per-crawl page budget (sized for paginated boards, §4.5) |
@@ -1470,13 +1469,16 @@ domain-agnostic); the posting-domain facts are new.
 - Supporting: **LLM-in-Sandbox** (`#00c82a`), **CodeAct** (`#7a8470`), **Sanjaya** (`#745267`), **JudgeFlow**
   (`#e3bbdd`), **Feedback Descent** (`#244e30`), **TextGrad** (`#be34e3`), **gskill** (`#39b2ab`).
 
-## 16. Web tracker (`jobcrawl serve`)
+## 16. Web tracker (served in-process by `jobcrawl run`)
 
 The crawler *finds* positions (§4.7); the tracker is where an operator *works* them — browse and search the
 standing corpus, then move a posting through a personal application pipeline until it's applied, offered, or
-dropped. It is a small **FastAPI + Jinja2** app (`web/`) served by uvicorn as a **separate `jobcrawl serve`
-process** over the **same WAL SQLite store** the daemon owns. This realizes the "optional thin HTTP surface"
-§4.9 reserved, deliberately kept to the narrowest possible role.
+dropped. It is a small **FastAPI + Jinja2** app (`web/`) **mounted in-process by `jobcrawl run`** — uvicorn
+runs on the scheduler's own event loop, over the very same store instance, and a single SIGINT/SIGTERM
+drains both. This realizes the "optional thin HTTP surface" §4.9 reserved, deliberately kept to the narrowest
+possible role. (Running in-process — not a second `serve` process — is also what makes "crawl now" reliable:
+the button's `request_crawl` is drained by *this* scheduler's `due_sites`, with no cross-process WAL lag and no
+"UI up but no daemon" dead end. `--no-web` runs the scheduler headless.)
 
 **The tracking axis (operator-owned, orthogonal to the crawl lifecycle).** The store's `open`/`closed` state
 is the *crawler's* view (§4.7); the tracker adds a second axis that is entirely the operator's, defined

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import fcntl
 import json
 import logging
@@ -1341,15 +1342,60 @@ def cmd_run(args: argparse.Namespace) -> int:
         recheck_fetch=build_recheck_fetch(),
     )
 
+    # §16 tracker UI runs IN-PROCESS with the scheduler (there is no separate `serve`),
+    # over the SAME store instance — so a "crawl now" button's request_crawl() is drained
+    # by this very scheduler's due_sites(), with no second process and no cross-process WAL
+    # lag. Heavy web deps (fastapi/uvicorn/jinja2) stay lazy so the rest of the CLI never
+    # pays for them; --no-web skips the UI for a headless deploy or when the port is taken.
+    server = None
+    if not args.no_web:
+        import uvicorn
+
+        from jobcrawler.web import create_app
+
+        web_host = args.host if args.host is not None else config.serve_host()
+        web_port = args.port if args.port is not None else config.serve_port()
+        server = uvicorn.Server(
+            uvicorn.Config(
+                create_app(store, sites=sites),
+                host=web_host,
+                port=web_port,
+                log_level="info",
+                lifespan="off",  # the app has no lifespan hooks; skip the protocol
+            )
+        )
+        # The scheduler owns the process's SIGINT/SIGTERM handlers (graceful drain); neutralize
+        # uvicorn's own signal capture (a signal.signal() install that would otherwise clobber
+        # the scheduler's asyncio handlers) so a Ctrl-C drains BOTH via _shutdown below.
+        server.capture_signals = contextlib.nullcontext  # type: ignore[method-assign]
+        _log.info("position tracker UI on http://%s:%d", web_host, web_port)
+
     async def serve() -> None:
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
+
+        def _shutdown() -> None:
+            stop.set()  # drain the scheduler loop
+            if server is not None:
+                server.should_exit = True  # and shut uvicorn down alongside it
+
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
-                loop.add_signal_handler(sig, stop.set)  # graceful drain (§4.9)
+                loop.add_signal_handler(sig, _shutdown)  # graceful drain (§4.9)
             except NotImplementedError:
                 pass  # signal handlers unavailable (e.g. non-Unix); Ctrl-C still works
-        await scheduler.run(stop=stop)
+
+        async def _web() -> None:
+            # A web bind failure (port taken) must not take the crawler down — log it and
+            # let the scheduler run headless.
+            if server is None:
+                return
+            try:
+                await server.serve()
+            except Exception:  # noqa: BLE001
+                _log.exception("web UI failed to start; scheduler continuing headless")
+
+        await asyncio.gather(scheduler.run(stop=stop), _web())
 
     try:
         asyncio.run(serve())
@@ -1357,19 +1403,6 @@ def cmd_run(args: argparse.Namespace) -> int:
         store.close()
         os.close(lock_fd)  # release the single-instance lock (also freed on crash)
     return 0
-
-
-def cmd_serve(args: argparse.Namespace) -> int:
-    _configure_logging()  # the web server must not run silent either (§4.9)
-    # The §16 tracker UI is a second long-running process over the SAME store the daemon
-    # owns; WAL mode (§4.7) makes the shared file safe for concurrent readers + this
-    # writer. FastAPI/uvicorn/jinja2 are heavy and only this command needs them, so import
-    # lazily — the rest of the CLI must not pay startup cost for a UI it never launches.
-    # serve_app resolves host/port (flag > env > config default), opens the store, loads
-    # the site registry best-effort, and blocks in uvicorn until SIGINT/SIGTERM.
-    from jobcrawler.web import serve_app
-
-    return serve_app(host=args.host, port=args.port)
 
 
 def cmd_generate(args: argparse.Namespace) -> int:
@@ -1479,16 +1512,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="jobcrawl", description="RLM job tracker")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("run", help="start the scheduler daemon").set_defaults(func=cmd_run)
-
-    srv = sub.add_parser("serve", help="start the web tracker UI (§16)")
-    srv.add_argument(
-        "--host", help="bind address (default: JOBCRAWLER_SERVE_HOST or 127.0.0.1)"
+    run_p = sub.add_parser(
+        "run", help="start the scheduler daemon + web tracker UI (§16)"
     )
-    srv.add_argument(
-        "--port", type=int, help="listen port (default: JOBCRAWLER_SERVE_PORT or 8765)"
+    run_p.add_argument(
+        "--host", help="web UI bind address (default: JOBCRAWLER_SERVE_HOST or 127.0.0.1)"
     )
-    srv.set_defaults(func=cmd_serve)
+    run_p.add_argument(
+        "--port", type=int, help="web UI port (default: JOBCRAWLER_SERVE_PORT or 8765)"
+    )
+    run_p.add_argument(
+        "--no-web", action="store_true", help="run the scheduler headless (no web UI)"
+    )
+    run_p.set_defaults(func=cmd_run)
 
     gen = sub.add_parser("generate", help="run RLM, gate, write crawlers/<slug>.py")
     target = gen.add_mutually_exclusive_group(required=True)

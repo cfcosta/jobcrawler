@@ -754,43 +754,53 @@ async def test_dashboard_top_matches_hide_applied_positions() -> None:
         store.close()
 
 
-# -- CLI: `jobcrawl serve` wiring --------------------------------------------
+# -- CLI: `jobcrawl run` web wiring ------------------------------------------
 
 
-def test_serve_subcommand_parses() -> None:
-    from jobcrawler.cli import build_parser, cmd_serve
+def test_run_subcommand_parses_web_flags() -> None:
+    # The UI now rides `jobcrawl run` (there is no `serve`), with optional bind overrides.
+    from jobcrawler.cli import build_parser, cmd_run
 
-    args = build_parser().parse_args(["serve", "--host", "0.0.0.0", "--port", "9000"])
-    assert args.func is cmd_serve
-    assert args.host == "0.0.0.0" and args.port == 9000
-    # bare form defers to config defaults (None sentinels)
-    bare = build_parser().parse_args(["serve"])
-    assert bare.host is None and bare.port is None
+    args = build_parser().parse_args(["run", "--host", "0.0.0.0", "--port", "9000"])
+    assert args.func is cmd_run
+    assert args.host == "0.0.0.0" and args.port == 9000 and args.no_web is False
+    bare = build_parser().parse_args(["run"])
+    assert bare.host is None and bare.port is None and bare.no_web is False
+    assert build_parser().parse_args(["run", "--no-web"]).no_web is True
 
 
-def test_serve_app_host_port_precedence(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: object
-) -> None:
-    import uvicorn
+def test_serve_subcommand_is_gone() -> None:
+    # It was removed in favor of the in-process UI; parsing it must fail loudly.
+    from jobcrawler.cli import build_parser
 
-    from jobcrawler.web import serve_app
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["serve"])
 
-    captured: dict[str, object] = {}
 
-    def fake_run(app: object, *, host: str, port: int, log_level: str = "info") -> None:
-        captured["host"] = host
-        captured["port"] = port
+async def test_crawl_now_button_queues_a_request_the_scheduler_drains() -> None:
+    # The shared-store contract behind "crawl now": the UI (mounted in-process on the
+    # scheduler's store by `jobcrawl run`) writes request_crawl(); the scheduler's
+    # due_sites() drains it and dispatches the site even when its cadence hasn't elapsed.
+    from datetime import datetime, timezone
 
-    monkeypatch.setattr(uvicorn, "run", fake_run)
-    monkeypatch.setenv("JOBCRAWLER_STATE_URL", f"sqlite:///{tmp_path}/serve.db")  # type: ignore[str-bytes-safe]
-    monkeypatch.setenv("JOBCRAWLER_SERVE_HOST", "127.0.0.1")
-    monkeypatch.setenv("JOBCRAWLER_SERVE_PORT", "8765")
+    from jobcrawler.schedule import Scheduler, Site
 
-    # explicit CLI args win over env
-    assert serve_app(host="0.0.0.0", port=1234) == 0
-    assert captured == {"host": "0.0.0.0", "port": 1234}
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store = StateStore(":memory:", clock=lambda: now)
+    site = Site(slug="acme", url="https://acme.test")
+    # a run stamped "now" so the 4h cadence has NOT elapsed → not due on its own
+    rid = store.start_run("acme")
+    store.finish_run(rid, items_found=1, new_items=0, errors=0, pages_fetched=1)
 
-    # bare form falls back to env/config
-    captured.clear()
-    assert serve_app() == 0
-    assert captured == {"host": "127.0.0.1", "port": 8765}
+    async def _crawl(s: Site) -> object:  # never invoked by due_sites()
+        raise AssertionError("crawl must not run in this test")
+
+    sched = Scheduler([site], store=store, crawl=_crawl, clock=lambda: now)
+    try:
+        assert sched.due_sites() == []  # not due; drains the (empty) request queue
+        async with _client(create_app(store, sites=[site])) as c:
+            assert (await c.post("/sites/acme/crawl")).status_code == 303
+        # the button's request is now drained by the scheduler → the site is forced due
+        assert [s.slug for s in sched.due_sites()] == ["acme"]
+    finally:
+        store.close()
