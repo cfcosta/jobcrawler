@@ -180,3 +180,75 @@ async def test_build_recheck_fetch_refuses_internal_targets() -> None:
     ):
         with pytest.raises(SsrfError):
             await fetch(url)
+
+
+async def test_build_recheck_fetch_follows_same_host_redirects(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    # Boards commonly locale-redirect EVERY posting URL unconditionally (Coinbase 302s
+    # /careers/positions/<id> to /pt-br/... by egress geography). Stopping at the 3xx
+    # would blind the sweep to the real 200/404 behind it — the terminal answer (here
+    # the 404 closure signal) must come back, not the redirect.
+    monkeypatch.setenv("JOBCRAWLER_RATE_LIMIT", "1000/s/host")  # keep the test fast
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(404)  # no robots → fail open (allow)
+        if request.url.path == "/careers/positions/1":
+            return httpx.Response(
+                302, headers={"location": "/pt-br/careers/positions/1"}
+            )
+        if request.url.path == "/pt-br/careers/positions/1":
+            return httpx.Response(404, text="position closed")
+        return httpx.Response(200, text="unexpected")
+
+    fetch = build_recheck_fetch(client=_client(handler))
+
+    assert await fetch("https://jobs.example/careers/positions/1") == (
+        404,
+        "position closed",
+    )
+
+
+async def test_build_recheck_fetch_surfaces_cross_host_redirects(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    # A cross-host redirect is a MOVED posting — not closure evidence — so the 3xx
+    # itself surfaces (the scheduler keeps the row open) and the off-host target is
+    # never fetched (an unchecked chase would widen the SSRF floor).
+    monkeypatch.setenv("JOBCRAWLER_RATE_LIMIT", "1000/s/host")
+    hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hosts.append(request.url.host)
+        if request.url.path == "/robots.txt":
+            return httpx.Response(404)
+        return httpx.Response(302, headers={"location": "https://elsewhere.example/x"})
+
+    fetch = build_recheck_fetch(client=_client(handler))
+
+    status, _ = await fetch("https://jobs.example/job/1")
+    assert status == 302
+    assert set(hosts) == {"jobs.example"}  # the off-host target was never fetched
+
+
+async def test_build_recheck_fetch_bounds_a_redirect_loop(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    # A same-host redirect loop must terminate at the hop bound and surface the 3xx
+    # (keep-open) rather than spin forever or raise.
+    monkeypatch.setenv("JOBCRAWLER_RATE_LIMIT", "1000/s/host")
+    gets = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal gets
+        if request.url.path == "/robots.txt":
+            return httpx.Response(404)
+        gets += 1
+        return httpx.Response(302, headers={"location": "/loop"})
+
+    fetch = build_recheck_fetch(client=_client(handler))
+
+    status, _ = await fetch("https://jobs.example/loop")
+    assert status == 302
+    assert gets == 6  # the initial GET + 5 followed hops, then surfaced

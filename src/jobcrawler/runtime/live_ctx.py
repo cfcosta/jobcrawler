@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Collection
+from urllib.parse import urljoin
 
 import httpx
 
@@ -103,6 +104,13 @@ def _robots_fetcher(
     return fetch_text
 
 
+# §4.9 recheck redirect policy: statuses whose Location a recheck may follow
+# (same-host only, bounded). The recheck is GET-only, so 303's "see other → GET"
+# downgrade is a no-op here.
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+_RECHECK_MAX_REDIRECTS = 5
+
+
 def build_recheck_fetch(
     *, client: httpx.Client | None = None
 ) -> Callable[[str], Awaitable[tuple[int, str]]]:
@@ -125,9 +133,16 @@ def build_recheck_fetch(
     path likewise raises; the scheduler isolates every raise as "not a closure signal" and
     keeps the row open, so a blip or a refusal never ends a live posting.
 
-    Redirects are not followed: a moved posting (301/302) is not a closure signal, and an
-    unchecked redirect target would slip the SSRF guard. ``client`` is injectable for tests
-    (a MockTransport); production passes ``None`` and the factory builds the proxied,
+    **Same-host** redirects are followed (bounded to ``_RECHECK_MAX_REDIRECTS`` hops):
+    boards commonly locale-redirect every posting URL unconditionally (Coinbase 302s
+    ``/careers/positions/<id>`` to ``/pt-br/...`` by egress geography), so stopping at
+    the 3xx would blind the sweep to the real 200/404/expired body behind it and leave a
+    windowed source's positions permanently unclosable. Each hop re-runs the SSRF check
+    and the robots gate and is paced like any other request, so following never widens
+    the guard. A **cross-host** redirect is still a moved posting — not a closure
+    signal — so the 3xx itself is surfaced (the scheduler keeps the row open) rather
+    than chasing an off-host target. ``client`` is injectable for tests (a
+    MockTransport); production passes ``None`` and the factory builds the proxied,
     UA-stamped client, reused for the daemon's life (closed at process exit).
     """
     ua = config.user_agent()
@@ -141,17 +156,41 @@ def build_recheck_fetch(
     robots = RobotsPolicy(_own_host_robots_fetcher(http), user_agent=ua)
 
     async def fetch(url: str) -> tuple[int, str]:
-        def _get() -> tuple[int, str]:
-            check_url(url, {normalize_host(url)})  # own host ok; internal target refused
-            if not robots.allowed(url):
-                raise RobotsDisallowedError(url)
-            # robots' Crawl-delay raises the floor; the pacer never speeds past our rate.
-            pacer.wait(normalize_host(url), min_interval=robots.crawl_delay(url))
-            resp = http.get(url)
+        def _answer(resp: httpx.Response) -> tuple[int, str]:
             return resp.status_code, resolve_text(
                 resp.content,
                 http_charset_from_content_type(resp.headers.get("content-type")),
             )
+
+        def _get() -> tuple[int, str]:
+            origin_host = normalize_host(url)
+            target = url
+            hops_left = _RECHECK_MAX_REDIRECTS
+            while True:
+                # own host ok; internal target refused — re-run on EVERY hop so a
+                # redirect can never route the sweep somewhere the guard refused.
+                check_url(target, {normalize_host(target)})
+                if not robots.allowed(target):
+                    raise RobotsDisallowedError(target)
+                # robots' Crawl-delay raises the floor; the pacer never speeds past
+                # our rate — each hop paces like any other request.
+                pacer.wait(
+                    normalize_host(target), min_interval=robots.crawl_delay(target)
+                )
+                resp = http.get(target)
+                location = resp.headers.get("location")
+                if (
+                    hops_left == 0
+                    or resp.status_code not in _REDIRECT_STATUSES
+                    or location is None
+                ):
+                    return _answer(resp)
+                nxt = urljoin(target, location)
+                if normalize_host(nxt) != origin_host:
+                    # Cross-host move: not closure evidence — surface the 3xx itself.
+                    return _answer(resp)
+                hops_left -= 1
+                target = nxt
 
         # httpx here is sync; run it off the scheduler's event loop so a paced/slow
         # recheck fetch never blocks the run loop's other cadences.

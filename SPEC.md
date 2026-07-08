@@ -704,7 +704,11 @@ operates the whole loop itself rather than relying on an external cron.
   re-fetches up to `recheck_cap` (default 150, oldest-checked first) standing **open** positions to
   confirm they are still live. This is the **only** closure signal for `enumerates_all: false` sources
   (where the diff is unsound), and it also re-verifies enumerating rows against `expired_markers` /
-  `expires_at` and calls `expire_due()`. Like adaptive cadence it is **observation, not
+  `expires_at` and calls `expire_due()`. The recheck GET follows **same-host** redirects (bounded,
+  each hop SSRF-rechecked, robots-gated and paced — boards commonly locale-redirect every posting
+  URL, which would otherwise blind the sweep to the real 200/404 behind the 3xx); a **cross-host**
+  redirect is a moved posting, not closure evidence, so the 3xx is surfaced and the row stays open.
+  Like adaptive cadence it is **observation, not
   self-modification** — it neither rewrites a crawler nor swaps the generator — so it too is exempt
   from the autonomy brake.
 - **NEW — FX-rate refresh timer.** On `JOBCRAWLER_FX_REFRESH_INTERVAL` (default 24h) the scheduler

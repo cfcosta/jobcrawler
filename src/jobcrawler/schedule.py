@@ -770,9 +770,7 @@ class Scheduler:
         self._regen_incomplete = False
         if self._healer is None:
             return {}
-        assessable = [
-            s for s in self._sites if s.enabled and self._has_crawler(s.slug)
-        ]
+        assessable = [s for s in self._sites if s.enabled and self._has_crawler(s.slug)]
         states: dict[str, HealthState] = {}
         pass_started = self._clock()
         for done, site in enumerate(assessable, start=1):
@@ -898,11 +896,22 @@ class Scheduler:
             for url in urls:
                 try:
                     status, text = await fetch(url)
-                except Exception:
+                except Exception as exc:
                     # A transient fetch failure is not evidence the posting closed — skip
-                    # it (closure is one-way; a blip must never end a live job). Surfaced.
-                    _log.exception(
-                        "recheck fetch failed slug=%s url=%s; skipping", site.slug, url
+                    # it (closure is one-way; a blip must never end a live job). Routine
+                    # (timeouts happen), so one WARNING line; the traceback only at DEBUG.
+                    _log.warning(
+                        "recheck fetch failed slug=%s url=%s (%s: %s); skipping",
+                        site.slug,
+                        url,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    _log.debug(
+                        "recheck fetch failure detail slug=%s url=%s",
+                        site.slug,
+                        url,
+                        exc_info=True,
                     )
                     continue
                 checked += 1
