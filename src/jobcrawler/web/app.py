@@ -826,14 +826,18 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
     def position_detail(request: Request, pid: str) -> Response:
         site, url = decode_pid(pid)
         rec = _require(site, url)
+        # ?partial=1 renders the detail body alone (no base shell) for the list
+        # slide-over; a bare GET renders the full page for deep links / no-JS.
+        partial = request.query_params.get("partial") in {"1", "true"}
         return templates.TemplateResponse(
             request=request,
-            name="detail.html",
+            name="_detail_body.html" if partial else "detail.html",
             context={
                 "nav": "positions",
                 "msg": request.query_params.get("msg"),
                 "p": rec,
                 "pid": pid,
+                "partial": partial,
                 "reasons": reasons_list(rec.match_reasons),
                 "concerns": reasons_list(rec.match_concerns),
                 "crawlable": rec.site in known_slugs,

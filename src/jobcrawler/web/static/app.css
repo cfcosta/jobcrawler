@@ -548,3 +548,41 @@ kbd {
   border: 1px solid var(--line); color: var(--ink); min-width: 18px; text-align: center;
 }
 .kbd-dismiss { color: var(--ink-3); font-size: 12px; margin: 18px 0 0; text-align: center; }
+
+/* ---- detail slide-over -------------------------------------------------------------- */
+
+.slideover { position: fixed; inset: 0; z-index: 45; }
+.slideover[hidden] { display: none; }
+.slideover-backdrop {
+  position: absolute; inset: 0;
+  background: color-mix(in srgb, var(--ink) 32%, transparent);
+  backdrop-filter: blur(2px);
+  animation: fade-in 0.15s ease-out;
+}
+.slideover-panel {
+  position: absolute; top: 0; right: 0; height: 100%;
+  width: min(880px, 92vw);
+  background: var(--page); border-left: 1px solid var(--line);
+  box-shadow: var(--shadow-2);
+  display: flex; flex-direction: column;
+  animation: slide-in 0.18s ease-out;
+}
+@keyframes fade-in { from { opacity: 0; } }
+@keyframes slide-in { from { transform: translateX(24px); opacity: 0; } }
+.slideover-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 16px; border-bottom: 1px solid var(--line);
+  background: var(--surface); flex: none;
+}
+.slideover-bar button, .slideover-full {
+  background: transparent; border: 1px solid var(--line); color: var(--ink-2);
+  border-radius: 8px; padding: 5px 10px; font-size: 13px; font-weight: 500; cursor: pointer;
+}
+.slideover-bar button:hover, .slideover-full:hover {
+  color: var(--ink); border-color: var(--ink-3); filter: none; text-decoration: none;
+}
+.slideover-close { margin-right: auto; }
+.slideover-nav { display: flex; gap: 4px; }
+.slideover-body { flex: 1; overflow: auto; padding: 20px 24px; }
+.slideover-body .detail > .cols:first-of-type { margin-top: 0; }
+.slideover-body h1 { font-size: 18px; }

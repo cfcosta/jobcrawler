@@ -116,6 +116,38 @@ function postForm(path, data) {
     else help.setAttribute("hidden", "");
   }
 
+  // Slide-over: open a position's detail as a panel over the list, keeping context.
+  // ←/→ move between rows without leaving; esc/backdrop close; full page stays for
+  // deep links (and is one click away via "Open full").
+  const over = document.getElementById("slideover");
+  const overBody = document.getElementById("slideover-body");
+  function slideOpen() {
+    return over && !over.hasAttribute("hidden");
+  }
+  function openDetail(row) {
+    if (!over || !row || !row.dataset.detail) return;
+    focusRow(rows().indexOf(row));
+    fetch(row.dataset.detail + "?partial=1", { credentials: "same-origin" })
+      .then((r) => r.text())
+      .then((html) => {
+        overBody.innerHTML = html;
+        overBody.scrollTop = 0;
+        const full = over.querySelector(".slideover-full");
+        if (full) full.setAttribute("href", row.dataset.detail);
+        over.removeAttribute("hidden");
+      });
+  }
+  function closeDetail() {
+    if (over) over.setAttribute("hidden", "");
+  }
+  if (over) {
+    over.addEventListener("click", function (event) {
+      if (event.target.closest("[data-close]")) closeDetail();
+      else if (event.target.closest(".slideover-prev")) focusRow(idx - 1), openDetail(current());
+      else if (event.target.closest(".slideover-next")) focusRow(idx + 1), openDetail(current());
+    });
+  }
+
   function stage(row, value, label) {
     const pid = row.dataset.pid;
     postForm(`/positions/${pid}/status`, { track_status: value }).then(() => {
@@ -148,7 +180,15 @@ function postForm(path, data) {
     if (event.metaKey || event.ctrlKey || event.altKey) return;
 
     if (event.key === "Escape") {
-      toggleHelp(false);
+      if (slideOpen()) closeDetail();
+      else toggleHelp(false);
+      return;
+    }
+    // With the slide-over open, ←/→ page through positions in place.
+    if (slideOpen() && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+      event.preventDefault();
+      focusRow(idx + (event.key === "ArrowRight" ? 1 : -1));
+      openDetail(current());
       return;
     }
     if (typing) return;
@@ -164,7 +204,7 @@ function postForm(path, data) {
         break;
       case "Enter": {
         const row = current();
-        if (row && row.dataset.detail) window.location.href = row.dataset.detail;
+        if (row) openDetail(row);
         break;
       }
       case "o": {
@@ -210,11 +250,18 @@ function postForm(path, data) {
     }
   });
 
-  // Clicking a row body (not a link/control) highlights it, so mouse and keyboard
-  // share one notion of "current".
+  // A plain click on the title link opens the slide-over instead of navigating
+  // (cmd/ctrl/middle-click still open the full page in a new tab). Clicking the row
+  // body elsewhere just highlights it, so mouse and keyboard share one "current".
   document.addEventListener("click", function (event) {
     const row = event.target.closest && event.target.closest("tr.js-row");
     if (!row) return;
+    const titleLink = event.target.closest("a.pos-link");
+    if (titleLink && over && !event.metaKey && !event.ctrlKey && event.button === 0) {
+      event.preventDefault();
+      openDetail(row);
+      return;
+    }
     if (event.target.closest("a, button, select, input, form")) return;
     focusRow(rows().indexOf(row));
   });

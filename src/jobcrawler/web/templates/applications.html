@@ -45,7 +45,7 @@
       <span class="avatar" style="--hue: {{ hue_of(p.hiring_company or p.company) }}" aria-hidden="true">{{ ((p.hiring_company or p.company or '·') | first) | upper }}</span>
       <span class="pos-main">
         <span class="pos-title">
-          <a href="/positions/{{ encode_pid(p.site, p.url) }}">{{ p.title }}</a>
+          <a class="pos-link" href="/positions/{{ encode_pid(p.site, p.url) }}">{{ p.title }}</a>
           <a class="ext row-ext" href="{{ ext_url(p) }}" target="_blank" rel="noopener noreferrer" title="Open the position page (the real ATS posting on aggregator boards)">↗</a>
           {% if p.dismissed %}<span class="tag">dismissed</span>{% endif %}
         </span>

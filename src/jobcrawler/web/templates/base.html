@@ -33,6 +33,21 @@
     {% block content %}{% endblock %}
   </main>
 
+  <div id="slideover" class="slideover" hidden>
+    <div class="slideover-backdrop" data-close></div>
+    <aside class="slideover-panel" role="dialog" aria-label="Position detail" aria-modal="true">
+      <div class="slideover-bar">
+        <button type="button" class="slideover-close" data-close aria-label="Close">✕</button>
+        <span class="slideover-nav">
+          <button type="button" class="slideover-prev" title="Previous (←)" aria-label="Previous">←</button>
+          <button type="button" class="slideover-next" title="Next (→)" aria-label="Next">→</button>
+        </span>
+        <a class="slideover-full" href="#" title="Open the full page">Open full ↗</a>
+      </div>
+      <div class="slideover-body" id="slideover-body"></div>
+    </aside>
+  </div>
+
   <div id="toasts" class="toasts" aria-live="polite"></div>
 
   <div id="kbd-help" class="kbd-help" hidden>
