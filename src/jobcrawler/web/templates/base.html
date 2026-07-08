@@ -33,6 +33,26 @@
     {% block content %}{% endblock %}
   </main>
 
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <div id="kbd-help" class="kbd-help" hidden>
+    <div class="kbd-card">
+      <h2>Keyboard shortcuts</h2>
+      <dl class="kbd-list">
+        <dt><kbd>j</kbd> / <kbd>k</kbd></dt><dd>Next / previous position</dd>
+        <dt><kbd>enter</kbd></dt><dd>Open the highlighted position</dd>
+        <dt><kbd>o</kbd></dt><dd>Open the external posting</dd>
+        <dt><kbd>a</kbd></dt><dd>Mark applied</dd>
+        <dt><kbd>i</kbd></dt><dd>Mark interested</dd>
+        <dt><kbd>d</kbd></dt><dd>Dismiss (with undo)</dd>
+        <dt><kbd>x</kbd></dt><dd>Select / deselect for bulk</dd>
+        <dt><kbd>/</kbd></dt><dd>Focus search</dd>
+        <dt><kbd>?</kbd></dt><dd>Toggle this help</dd>
+      </dl>
+      <p class="kbd-dismiss">Press <kbd>esc</kbd> or <kbd>?</kbd> to close</p>
+    </div>
+  </div>
+
   <footer class="site-footer">
     USD salary estimates use exchange rates
     <a href="https://www.exchangerate-api.com" rel="noopener">powered by Exchange Rate API</a>.

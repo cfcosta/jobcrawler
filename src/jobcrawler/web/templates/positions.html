@@ -63,7 +63,10 @@
   </tr></thead>
   <tbody>
   {% for p in rows %}
-  <tr class="{{ 'dimmed' if p.dismissed else '' }}">
+  <tr class="{{ 'dimmed' if p.dismissed else '' }} js-row" tabindex="-1"
+      data-pid="{{ encode_pid(p.site, p.url) }}"
+      data-detail="/positions/{{ encode_pid(p.site, p.url) }}"
+      data-ext="{{ ext_url(p) }}">
     <td class="sel"><input type="checkbox" class="bulk-check" name="pids" value="{{ encode_pid(p.site, p.url) }}" form="bulk" aria-label="Select this position"></td>
     <td class="score"{% if p.match_score is not none %} title="base fit {{ p.match_score }}, adjusted for freshness"{% endif %}><span class="score-chip band-{{ score_band(p) }}">{{ score_of(p) if score_of(p) is not none else '—' }}</span></td>
     <td class="pos"><div class="pos-wrap">
