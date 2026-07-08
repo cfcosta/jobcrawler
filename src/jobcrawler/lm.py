@@ -350,9 +350,16 @@ def _neuter_litellm_logging_worker() -> None:
     except Exception:  # pragma: no cover - litellm layout changed; nothing to neuter
         return
 
-    def _drop(coroutine: Coroutine[Any, Any, Any]) -> None:
+    def _drop(*coroutines: Any, **named: Any) -> None:
         # Deterministic, warning-free drop: never awaited, never wrapped in a task.
-        coroutine.close()
+        # litellm's call shapes differ per site — ``enqueue(coroutine)`` positional,
+        # ``ensure_initialized_and_enqueue(async_coroutine=...)`` by keyword
+        # (utils.py's _client_async_logging_helper) — so accept anything and close
+        # every coroutine handed in, whatever the parameter was called.
+        for candidate in (*coroutines, *named.values()):
+            close = getattr(candidate, "close", None)
+            if callable(close):
+                close()
 
     GLOBAL_LOGGING_WORKER.ensure_initialized_and_enqueue = _drop  # ty: ignore[invalid-assignment]
     GLOBAL_LOGGING_WORKER.enqueue = _drop  # ty: ignore[invalid-assignment]

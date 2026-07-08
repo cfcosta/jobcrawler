@@ -410,3 +410,33 @@ def test_neutered_global_worker_never_spawns_a_task_in_an_ephemeral_loop() -> No
 
     asyncio.run(ephemeral())
     assert inspect.getcoroutinestate(coro) == "CORO_CLOSED"
+
+
+def test_neutered_worker_accepts_litellms_exact_call_shapes() -> None:
+    # Regression: litellm names the parameter differently per call site —
+    # utils.py's _client_async_logging_helper passes it BY KEYWORD as
+    # ``async_coroutine=...`` while ``enqueue`` calls use ``coroutine``. The first
+    # deploy of the neuter only accepted one positional name and raised TypeError in
+    # production ("got an unexpected keyword argument 'async_coroutine'"), leaking
+    # the coroutine it was supposed to close. Every shape must close, never raise.
+    import inspect
+
+    from litellm.litellm_core_utils.logging_worker import GLOBAL_LOGGING_WORKER
+
+    lm._neuter_litellm_logging_worker()
+
+    async def telemetry() -> None:
+        raise AssertionError("a neutered worker must never execute telemetry")
+
+    by_keyword = telemetry()
+    enqueue_keyword = telemetry()
+    positional = telemetry()
+
+    # The utils.py:1196 shape that broke in production:
+    GLOBAL_LOGGING_WORKER.ensure_initialized_and_enqueue(async_coroutine=by_keyword)
+    GLOBAL_LOGGING_WORKER.enqueue(coroutine=enqueue_keyword)
+    GLOBAL_LOGGING_WORKER.enqueue(positional)
+
+    for coro in (by_keyword, enqueue_keyword, positional):
+        assert inspect.getcoroutinestate(coro) == "CORO_CLOSED"
+    assert GLOBAL_LOGGING_WORKER._worker_task is None
