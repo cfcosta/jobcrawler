@@ -643,6 +643,9 @@ def test_only_strong_matches_notify(monkeypatch: MonkeyPatch) -> None:
     _event, _msg, fields = events[0]
     assert fields["site"] == "s"
     assert fields["url"] == canonicalize_url("https://example.com/strong")
+    # the real position page rides along for aggregator fronts (§4.6); "" when the
+    # posting has no separate apply target
+    assert "apply_url" in fields
     assert fields["title"] == "Senior Backend Engineer"
     assert fields["company"] == "Acme"
     assert fields["score"] == 85
@@ -965,7 +968,8 @@ def test_position_fields_includes_a_source_salary() -> None:
 
     job = _job()
     enriched = replace(
-        enrich(job), salary=SalaryRange(min=150000.0, max=200000.0, currency="USD", period="year")
+        enrich(job),
+        salary=SalaryRange(min=150000.0, max=200000.0, currency="USD", period="year"),
     )
     fields = _position_fields(job, enriched)
     assert fields["salary_min"] == 150000.0 and fields["salary_max"] == 200000.0
@@ -996,15 +1000,25 @@ def test_recrawl_without_salary_keys_preserves_a_backfilled_salary() -> None:
         enriched = enrich(job)
         chash = _content_hash(job)
         store.upsert_position(
-            "example", job.url, fields=_position_fields(job, enriched), content_hash=chash
+            "example",
+            job.url,
+            fields=_position_fields(job, enriched),
+            content_hash=chash,
         )
         assert store.set_salary(
-            "example", job.url, salary_min=120000.0, salary_max=120000.0,
-            salary_currency="EUR", salary_period="year",
+            "example",
+            job.url,
+            salary_min=120000.0,
+            salary_max=120000.0,
+            salary_currency="EUR",
+            salary_period="year",
         )
         # a later unchanged crawl re-upserts the same salary-less fields
         store.upsert_position(
-            "example", job.url, fields=_position_fields(job, enriched), content_hash=chash
+            "example",
+            job.url,
+            fields=_position_fields(job, enriched),
+            content_hash=chash,
         )
         rec = store.open_positions("example")[0]
         assert (rec.salary_min, rec.salary_max) == (120000.0, 120000.0)

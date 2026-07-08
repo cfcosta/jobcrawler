@@ -181,6 +181,20 @@ def _display_score(p: PositionRecord) -> int | None:
     return round(value) if value is not None else None
 
 
+def _ext_url(p: PositionRecord) -> str:
+    """The row-level external link: the real position page, not the aggregator front.
+
+    Aggregator boards (Working Nomads et al.) store their own page as ``url`` — the
+    actual ATS posting lives behind their "Apply for this position" button and is
+    captured as ``apply_url`` (§4.6). A mailto apply channel is not a *page*, so that
+    row links the original posting instead (the email button lives on the detail view).
+    """
+    apply_url = p.apply_url
+    if apply_url and not apply_url.startswith("mailto:"):
+        return apply_url
+    return p.url
+
+
 def _position_dict(p: PositionRecord) -> dict[str, Any]:
     """A JSON-serialisable view of a position for the ``/api`` surface."""
     return {
@@ -438,7 +452,12 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
     jinja_globals["encode_pid"] = encode_pid
     jinja_globals["site_names"] = site_names
     jinja_globals["asset"] = _asset_url
-    jinja_globals["score_of"] = _display_score  # §4.7 freshness-decayed score for display
+    jinja_globals["score_of"] = (
+        _display_score  # §4.7 freshness-decayed score for display
+    )
+    jinja_globals["ext_url"] = (
+        _ext_url  # the real position page (ATS behind aggregators)
+    )
     jinja_filters = cast("dict[str, Any]", templates.env.filters)
     jinja_filters["reasons"] = reasons_list
     jinja_filters["age"] = humanize_age
@@ -485,7 +504,9 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
         """
         status_val: tracking.TrackStatus | None = None
         if action == "status":
-            status_val = tracking.parse(track_status)  # ValueError -> caller maps to 400
+            status_val = tracking.parse(
+                track_status
+            )  # ValueError -> caller maps to 400
         body = note.strip()
         n = 0
         for pid in pids:
@@ -573,7 +594,11 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
                 }
             )
         per_site.sort(
-            key=lambda d: (_COV_RANK.get(str(d["state"]), 9), -int(d["open"]), str(d["name"]).lower())
+            key=lambda d: (
+                _COV_RANK.get(str(d["state"]), 9),
+                -int(d["open"]),
+                str(d["name"]).lower(),
+            )
         )
         # A board is "idle" (folded out of the table into a chip grid) only when it has
         # never surfaced anything: pending health AND zero open positions. Anything with
@@ -582,12 +607,34 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
         idle = [d for d in per_site if d["state"] == "pending" and not d["open"]]
 
         kpis = [
-            {"label": "Open roles", "value": lifecycle["open"], "href": "/positions?status=open"},
-            {"label": "Strong ≥60", "value": strong, "href": "/positions?min_score=60&sort=score", "accent": "success"},
-            {"label": "Scored", "value": lifecycle["matched"], "href": "/positions?sort=score"},
+            {
+                "label": "Open roles",
+                "value": lifecycle["open"],
+                "href": "/positions?status=open",
+            },
+            {
+                "label": "Strong ≥60",
+                "value": strong,
+                "href": "/positions?min_score=60&sort=score",
+                "accent": "success",
+            },
+            {
+                "label": "Scored",
+                "value": lifecycle["matched"],
+                "href": "/positions?sort=score",
+            },
             {"label": "Awaiting score", "value": lifecycle["pending"]},
-            {"label": "Closed", "value": lifecycle["closed"], "href": "/positions?status=closed"},
-            {"label": "Boards live", "value": cov_counts["live"], "sub": len(per_site), "href": "#sites"},
+            {
+                "label": "Closed",
+                "value": lifecycle["closed"],
+                "href": "/positions?status=closed",
+            },
+            {
+                "label": "Boards live",
+                "value": cov_counts["live"],
+                "sub": len(per_site),
+                "href": "#sites",
+            },
         ]
 
         return templates.TemplateResponse(
@@ -610,7 +657,11 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
                 ),
                 "per_site": visible,
                 "idle_sites": idle,
-                "coverage": {"total": len(per_site), "counts": cov_counts, "idle": len(idle)},
+                "coverage": {
+                    "total": len(per_site),
+                    "counts": cov_counts,
+                    "idle": len(idle),
+                },
                 "has_registry": bool(site_list),
             },
         )
@@ -756,7 +807,9 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
         note: str = Form(""),
     ) -> Response:
         if action not in _BULK_ACTIONS:
-            raise HTTPException(status_code=400, detail=f"unknown bulk action {action!r}")
+            raise HTTPException(
+                status_code=400, detail=f"unknown bulk action {action!r}"
+            )
         if not pids:
             return _back(request, "/positions", "No positions selected")
         if action == "note" and not note.strip():

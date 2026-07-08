@@ -61,6 +61,7 @@
           <span class="mt-title">{{ p.title }}</span>
           <span class="mt-sub">{{ p.hiring_company or p.company }}{% if p | salary %} · {{ p | salary }}{% endif %}{% if p.match_verdict %} · {{ p.match_verdict }}{% endif %}</span>
         </a>
+        <a class="ext row-ext" href="{{ ext_url(p) }}" target="_blank" rel="noopener noreferrer" title="Open the position page (the real ATS posting on aggregator boards)">↗</a>
       </li>
       {% endfor %}
     </ul>

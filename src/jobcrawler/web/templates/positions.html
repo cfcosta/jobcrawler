@@ -67,6 +67,7 @@
     <td class="sel"><input type="checkbox" class="bulk-check" name="pids" value="{{ encode_pid(p.site, p.url) }}" form="bulk" aria-label="Select this position"></td>
     <td class="score{{ ' strong' if score_of(p) is not none and score_of(p) >= 60 else '' }}"{% if p.match_score is not none %} title="base fit {{ p.match_score }}, adjusted for freshness"{% endif %}>{{ score_of(p) if score_of(p) is not none else '—' }}</td>
     <td class="title"><a href="/positions/{{ encode_pid(p.site, p.url) }}">{{ p.title }}</a>
+        <a class="ext row-ext" href="{{ ext_url(p) }}" target="_blank" rel="noopener noreferrer" title="Open the position page (the real ATS posting on aggregator boards)">↗</a>
         {% if p.dismissed %}<span class="tag">dismissed</span>{% endif %}</td>
     <td class="company">{% if p.company_canonical %}<a href="/positions?company_canonical={{ p.company_canonical | urlencode }}">{{ p.hiring_company or p.company }}</a>{% else %}{{ p.hiring_company or p.company }}{% endif %}</td>
     <td>{{ p.location_normalized or p.location }}{% if p.workplace %} · {{ p.workplace }}{% if p.remote_scope == 'anywhere' %} <span class="scope scope-anywhere" title="Open to candidates anywhere">anywhere</span>{% elif p.remote_scope == 'restricted' %} <span class="scope scope-restricted" title="Remote but geographically restricted — see location">restricted</span>{% endif %}{% endif %}{% if p.relocation == 'offered' %} <span class="scope scope-relo" title="Relocation or visa support mentioned in the posting">relocation</span>{% endif %}</td>

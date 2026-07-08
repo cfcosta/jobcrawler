@@ -42,6 +42,7 @@
   {% for p in rows %}
   <tr class="{{ 'dimmed' if p.dismissed else '' }}">
     <td class="title"><a href="/positions/{{ encode_pid(p.site, p.url) }}">{{ p.title }}</a>
+        <a class="ext row-ext" href="{{ ext_url(p) }}" target="_blank" rel="noopener noreferrer" title="Open the position page (the real ATS posting on aggregator boards)">↗</a>
         {% if p.dismissed %}<span class="tag">dismissed</span>{% endif %}</td>
     <td class="company">{% if p.company_canonical %}<a href="/positions?company_canonical={{ p.company_canonical | urlencode }}">{{ p.hiring_company or p.company }}</a>{% else %}{{ p.hiring_company or p.company }}{% endif %}</td>
     <td class="nowrap">{{ p | salary }}</td>

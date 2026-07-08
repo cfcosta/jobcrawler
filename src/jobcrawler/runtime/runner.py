@@ -464,6 +464,9 @@ def _match(
             f"{job.title} at {job.company} — {verdict.verdict} ({verdict.score})",
             site=site,
             url=url,
+            # The real position page when the board is an aggregator front (§4.6):
+            # url is the board's own page; this is the ATS posting behind it.
+            apply_url=job.apply_url or "",
             title=job.title,
             company=job.company,
             score=verdict.score,

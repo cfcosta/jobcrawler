@@ -126,8 +126,12 @@ async def test_detail_surfaces_full_record() -> None:
             r = await c.get(f"/positions/{_ACME_PID}")
             body = r.text
             # the four new full-record panels are present
-            for heading in ("Match &amp; scoring", "Classification", "Compensation",
-                            "Provenance"):
+            for heading in (
+                "Match &amp; scoring",
+                "Classification",
+                "Compensation",
+                "Provenance",
+            ):
                 assert heading in body, heading
             # compensation is broken out with thousands separators (source USD range)
             assert "180,000" in body and "220,000" in body
@@ -146,7 +150,8 @@ async def test_detail_renders_a_mailto_apply_link_clickably() -> None:
     store = StateStore(":memory:")
     url = "https://news.ycombinator.com/item?id=1"
     store.upsert_position(
-        "hn", url,
+        "hn",
+        url,
         fields={**FIELDS, "apply_url": "mailto:jobs@acme.com"},
         content_hash="h",
     )
@@ -163,13 +168,47 @@ async def test_detail_renders_a_mailto_apply_link_clickably() -> None:
         store.close()
 
 
+async def test_rows_link_the_real_position_page_not_the_aggregator() -> None:
+    # Aggregator boards (Working Nomads et al.) store their own page as ``url``; the
+    # real ATS posting is the captured apply_url behind their "Apply for this
+    # position" button. Every row surface must offer it as the row's external ↗ link;
+    # a row without one falls back to the original posting, and a mailto apply
+    # channel is not a page, so it never becomes the row link.
+    store = _seeded_store()
+    store.upsert_position(
+        "hn",
+        "https://news.ycombinator.com/item?id=1",
+        fields={**FIELDS, "title": "Email Role", "apply_url": "mailto:jobs@x.com"},
+        content_hash="h3",
+    )
+    try:
+        async with _client(create_app(store)) as c:
+            listing = (await c.get("/positions")).text
+            # acme carries an ATS apply_url → the row ↗ points there, not at acme.test/a
+            assert 'class="ext row-ext" href="https://apply.acme.test/a"' in listing
+            # beta has no apply_url → falls back to the original posting URL
+            assert 'class="ext row-ext" href="https://beta.test/b"' in listing
+            # the mailto row's ↗ is the posting page, never the mailto
+            assert (
+                'class="ext row-ext" href="https://news.ycombinator.com/item?id=1"'
+                in listing
+            )
+            # the dashboard's top-matches list links the ATS page too (acme scored 91)
+            dashboard = (await c.get("/")).text
+            assert 'class="ext row-ext" href="https://apply.acme.test/a"' in dashboard
+    finally:
+        store.close()
+
+
 async def test_effective_score_is_decayed_and_surfaced() -> None:
     # §6: the UI shows the freshness-decayed effective score, with the raw fit alongside.
     from datetime import datetime, timedelta, timezone
 
     store = StateStore(":memory:")
     old = (datetime.now(timezone.utc) - timedelta(days=200)).isoformat()
-    store.upsert_position("b", "u", fields={**FIELDS, "posted_at": old}, content_hash="h")
+    store.upsert_position(
+        "b", "u", fields={**FIELDS, "posted_at": old}, content_hash="h"
+    )
     store.set_match("b", "u", score=90, verdict="strong", reasons="[]")
     pid = encode_pid("b", "u")
     try:
@@ -177,7 +216,9 @@ async def test_effective_score_is_decayed_and_surfaced() -> None:
             body = (await c.get(f"/api/positions/{pid}")).json()
             assert body["match_score"] == 90  # raw fit unchanged
             assert body["effective_score"] < 90  # freshness-decayed
-            assert body["effective_score"] >= 0.6 * 90  # ...but floored (great fit stays)
+            assert (
+                body["effective_score"] >= 0.6 * 90
+            )  # ...but floored (great fit stays)
             # the detail page shows the adjusted score AND the base fit for transparency
             html = (await c.get(f"/positions/{pid}")).text
             assert "base fit 90" in html
@@ -193,8 +234,12 @@ async def test_static_assets_are_cache_busted() -> None:
     try:
         async with _client(create_app(store)) as c:
             body = (await c.get("/positions")).text
-            assert re.search(r'/static/app\.css\?v=\d+', body), "app.css is not cache-busted"
-            assert re.search(r'/static/app\.js\?v=\d+', body), "app.js is not cache-busted"
+            assert re.search(r"/static/app\.css\?v=\d+", body), (
+                "app.css is not cache-busted"
+            )
+            assert re.search(r"/static/app\.js\?v=\d+", body), (
+                "app.js is not cache-busted"
+            )
     finally:
         store.close()
 
