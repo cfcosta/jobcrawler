@@ -1207,6 +1207,74 @@ def test_applied_company_exclusion_is_indexed(store: StateStore) -> None:
     assert "positions_applied_company_key" in detail, f"index not used: {detail}"
 
 
+# -- §6 freshness-decay effective score --------------------------------------
+
+
+def _seed_scored(store: StateStore, url: str, score: int, age_days: float) -> None:
+    now = store._clock()
+    store.upsert_position(
+        "b", url,
+        fields={"title": "T", "company": "Co" + url, "location": "R",
+                "posted_at": (now - timedelta(days=age_days)).isoformat()},
+        content_hash=url,
+    )
+    store.set_match("b", url, score=score, verdict="strong", reasons="[]")
+
+
+def test_effective_score_decays_with_age_but_a_great_fit_stays_represented() -> None:
+    now = datetime(2026, 7, 8, tzinfo=timezone.utc)
+    s = StateStore(":memory:", clock=lambda: now)
+    try:
+        _seed_scored(s, "fresh", 80, 0)
+        _seed_scored(s, "old", 80, 120)
+        _seed_scored(s, "ancient_great", 95, 3650)  # ~10y: floored
+        by = {m.url: m for m in s.matches(0, limit=10)}
+        fresh = by["fresh"].effective_score
+        old = by["old"].effective_score
+        great = by["ancient_great"].effective_score
+        assert fresh is not None and old is not None and great is not None
+        # a fresh posting keeps its full fit; an equally-good older one decays below it
+        assert round(fresh) == 80
+        assert old < fresh
+        assert [m.url for m in s.matches(0, limit=10)][0] == "fresh"  # newer ranks higher
+        # ...but a great fit is still represented: never below floor(0.6) × base
+        assert great >= 0.6 * 95 - 0.01
+    finally:
+        s.close()
+
+
+def test_matches_and_min_score_use_the_effective_score() -> None:
+    # A threshold gates on the freshness-decayed score, so an old strong fit can drop out of
+    # a high-min view while a fresh one of the same base stays — but both remain in matches(0).
+    now = datetime(2026, 7, 8, tzinfo=timezone.utc)
+    s = StateStore(":memory:", clock=lambda: now)
+    try:
+        _seed_scored(s, "fresh85", 85, 0)
+        _seed_scored(s, "old85", 85, 365)
+        assert [m.url for m in s.matches(80, limit=10)] == ["fresh85"]
+        assert {m.url for m in s.matches(0, limit=10)} == {"fresh85", "old85"}
+        # search_positions honors it too (sort + min_score)
+        assert [p.url for p in s.search_positions(sort="score")][0] == "fresh85"
+        assert [p.url for p in s.search_positions(min_score=80)] == ["fresh85"]
+    finally:
+        s.close()
+
+
+def test_score_freshness_floor_of_one_disables_decay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JOBCRAWLER_SCORE_FRESHNESS_FLOOR", "1.0")
+    now = datetime(2026, 7, 8, tzinfo=timezone.utc)
+    s = StateStore(":memory:", clock=lambda: now)
+    try:
+        _seed_scored(s, "old", 90, 365)
+        (m,) = s.matches(0, limit=10)
+        eff = m.effective_score
+        assert eff is not None and round(eff) == 90  # floor 1.0 → effective == base, no decay
+    finally:
+        s.close()
+
+
 # -- §4.2 crawler-generation log ---------------------------------------------
 
 
@@ -1615,7 +1683,10 @@ def test_migration_backfills_lifecycle_and_match_columns(tmp_path: object) -> No
         rec.status == "open" and rec.match_score is None and rec.match_pending is False
     )
     s.set_match("acme", "u", score=90, verdict="strong", reasons="")
-    assert [r.url for r in s.matches(70)] == ["u"]
+    # matches() surfaces the migrated row (min_score 0, since the legacy first_seen is months
+    # old and the §6 freshness decay pulls its effective score below a 70 gate — decay tested
+    # separately; here we only prove the migrated row is matchable).
+    assert [r.url for r in s.matches(0)] == ["u"]
     s.close()
 
 

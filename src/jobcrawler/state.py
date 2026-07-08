@@ -195,6 +195,9 @@ class PositionRecord:
     notes: str | None
     dismissed: bool
     track_updated_at: datetime | None
+    # Not a stored column: the §4.7 freshness-decayed score (base fit × a recency multiplier),
+    # computed in SQL by the display/rank queries. None when the query didn't select it.
+    effective_score: float | None = None
 
 
 _SCHEMA = """
@@ -1148,6 +1151,28 @@ class StateStore:
         ).fetchall()
         return [row["url"] for row in rows]
 
+    def _effective_score_sql(self, *, column: str = "match_score") -> str:
+        """SQL for the §4.7 freshness-decayed effective score: the base ``match_score`` fit
+        scaled by a recency multiplier in ``[floor, 1]`` that decays with the posting's age
+        (from ``posted_at``, else ``first_seen``). So a newer posting outranks an equally-good
+        older one, while the floor keeps a great fit represented (never decays to nothing).
+        NULL when the base is NULL (unscored). ``1.0`` floor disables decay (effective==base).
+
+        Half-life/floor come from config; ``now`` is baked from the store's injected clock as
+        a Julian-day literal so tests control it (``julianday()`` parses the ISO timestamps).
+        Numeric literals only, never user input — matching the store's other f-string SQL.
+        """
+        from jobcrawler import config
+
+        half_life = max(1e-6, config.score_half_life_days())
+        floor = min(1.0, max(0.0, config.score_freshness_floor()))
+        now_jd = 2440587.5 + self._clock().timestamp() / 86400.0
+        age_days = f"max(0.0, {now_jd!r} - julianday(COALESCE(posted_at, first_seen)))"
+        freshness = (
+            f"({floor!r} + {(1.0 - floor)!r} * pow(2.0, -({age_days}) / {half_life!r}))"
+        )
+        return f"{column} * {freshness}"
+
     def matches(
         self,
         min_score: int,
@@ -1157,7 +1182,12 @@ class StateStore:
         exclude_dismissed: bool = False,
         exclude_company_applied: bool = False,
     ) -> list[PositionRecord]:
-        """Open, scored positions at or above ``min_score``, best fit first (§6).
+        """Open, scored positions at or above ``min_score``, best **effective** fit first (§4.7).
+
+        Ranked and thresholded on the freshness-decayed *effective* score (base match fit ×
+        a recency multiplier), not the raw fit — so "top matches" leads with fresh-and-strong
+        while an old great fit slips only as far as the freshness floor. ``min_score`` is
+        compared to the effective score too.
 
         ``exclude_applied`` drops rows you've already applied to — ``applied_at`` is
         stamped for the §16 applied/interviewing/offer/accepted stages — so the
@@ -1185,11 +1215,18 @@ class StateStore:
             )
         if exclude_dismissed:
             clauses += "AND COALESCE(dismissed, 0) = 0 "
+        # Rank + threshold on the §4.7 freshness-decayed score, not the raw fit, so the
+        # dashboard "top matches" leads with fresh-and-good and an old great fit slips only
+        # as far as the floor allows. ``min_score`` is compared against the effective score.
+        eff = self._effective_score_sql()
         rows = self._conn.execute(
-            "SELECT * FROM positions WHERE status = 'open' AND match_score IS NOT NULL "
-            "AND match_score >= ? "
+            f"SELECT *, {eff} AS effective_score FROM positions "
+            "WHERE status = 'open' AND match_score IS NOT NULL "
+            # Threshold on the *rounded* effective score so it matches the integer shown in
+            # the UI (a fresh 80 rounds up from 79.999… instead of just missing an >= 80 gate).
+            f"AND round({eff}) >= ? "
             + clauses
-            + "ORDER BY match_score DESC, matched_at DESC, url LIMIT ?",
+            + "ORDER BY effective_score DESC, matched_at DESC, url LIMIT ?",
             (min_score, limit),
         ).fetchall()
         return [_to_position(r) for r in rows]
@@ -1210,10 +1247,14 @@ class StateStore:
         band_list = list(bands)
         if not band_list:
             return []
-        # lo/hi are trusted ints from the caller's band table (not user input), so the
-        # inline CASE is safe — mirrors the store's other f-string-composed SQL.
+        # Bucket by the §4.7 freshness-decayed score so the histogram matches what the rest of
+        # the dashboard ranks/shows. lo/hi are trusted ints from the caller's band table (not
+        # user input), so the inline CASE is safe — mirrors the store's other f-string SQL.
+        eff = self._effective_score_sql()
+        # round() so a float effective score lands on the integer bands (a fresh 80 →
+        # 79.999… would otherwise fall in the gap between the 60–79 and 80–100 bands).
         cases = " ".join(
-            f"WHEN match_score BETWEEN {int(lo)} AND {int(hi)} THEN {i}"
+            f"WHEN round({eff}) BETWEEN {int(lo)} AND {int(hi)} THEN {i}"
             for i, (lo, hi) in enumerate(band_list)
         )
         rows = self._conn.execute(
@@ -1423,8 +1464,10 @@ class StateStore:
 
     def get_position(self, site: str, url: str) -> PositionRecord | None:
         """One position by identity ``(site, url)``, any lifecycle state, or None."""
+        eff = self._effective_score_sql()  # §4.7 freshness-decayed score for the detail view
         row = self._conn.execute(
-            "SELECT * FROM positions WHERE site = ? AND url = ?", (site, url)
+            f"SELECT *, {eff} AS effective_score FROM positions WHERE site = ? AND url = ?",
+            (site, url),
         ).fetchone()
         return _to_position(row) if row is not None else None
 
@@ -1528,7 +1571,9 @@ class StateStore:
           "remote anywhere" filter; ``'restricted'``/``'unspecified'`` also selectable).
         - ``relocation_offered``  keep only rows whose posting states relocation/visa support
           (``relocation = 'offered'``, §4.6) — the "offers relocation" filter.
-        - ``min_score``  only rows scored at/above it (drops unscored).
+        - ``min_score``  only rows whose **effective** (§4.7 freshness-decayed) score is at/above
+          it (drops unscored); ``sort='score'`` likewise orders by the effective score, so an
+          old great fit ranks below a fresh comparable one but stays above weaker leads.
         - ``min_salary``  ``COALESCE(salary_usd_max, salary_usd_min) >= min_salary``, i.e. an
           annualized-USD floor (§4.6) — drops rows with no resolvable salary/currency.
         - ``dismissed``  ``None`` = both, ``False`` = hide dismissed, ``True`` = only dismissed.
@@ -1581,8 +1626,10 @@ class StateStore:
         if level:
             clauses.append("lower(COALESCE(level, '')) = ?")
             params.append(level.lower())
+        eff = self._effective_score_sql()  # §4.7 freshness-decayed score (min_score + score sort)
         if min_score is not None:
-            clauses.append("match_score IS NOT NULL AND match_score >= ?")
+            # Rounded to match the integer score the UI shows (see matches()).
+            clauses.append(f"match_score IS NOT NULL AND round({eff}) >= ?")
             params.append(min_score)
         if min_salary is not None:
             clauses.append("COALESCE(salary_usd_max, salary_usd_min) >= ?")
@@ -1606,14 +1653,15 @@ class StateStore:
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         order = {
             "recent": "first_seen DESC, site, url",
-            "score": "match_score DESC, matched_at DESC, url",
+            "score": "effective_score DESC, matched_at DESC, url",
             "updated": "track_updated_at DESC, first_seen DESC, url",
             "salary": "COALESCE(salary_usd_max, salary_usd_min) DESC, url",
             "title": "lower(title) ASC, url",
             "applied": "applied_at DESC, track_updated_at DESC, url",
         }.get(sort, "first_seen DESC, site, url")
         rows = self._conn.execute(
-            f"SELECT * FROM positions{where} ORDER BY {order} LIMIT ? OFFSET ?",
+            f"SELECT *, {eff} AS effective_score FROM positions{where} "
+            f"ORDER BY {order} LIMIT ? OFFSET ?",
             [*params, limit, offset],
         ).fetchall()
         return [_to_position(r) for r in rows]
@@ -2138,4 +2186,8 @@ def _to_position(row: sqlite3.Row) -> PositionRecord:
         notes=row["notes"],
         dismissed=bool(row["dismissed"]),
         track_updated_at=_dt("track_updated_at"),
+        # Present only when the query computed it (matches/search/get_position, §6).
+        effective_score=(
+            row["effective_score"] if "effective_score" in row.keys() else None
+        ),
     )

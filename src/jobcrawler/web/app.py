@@ -174,6 +174,13 @@ def format_salary(p: PositionRecord) -> str:
     return out
 
 
+def _display_score(p: PositionRecord) -> int | None:
+    """The score shown in the UI: the §4.7 freshness-decayed *effective* score (rounded), or
+    the raw match fit when a query didn't compute the effective one, or None if unscored."""
+    value = p.effective_score if p.effective_score is not None else p.match_score
+    return round(value) if value is not None else None
+
+
 def _position_dict(p: PositionRecord) -> dict[str, Any]:
     """A JSON-serialisable view of a position for the ``/api`` surface."""
     return {
@@ -205,6 +212,9 @@ def _position_dict(p: PositionRecord) -> dict[str, Any]:
         "status": p.status,
         "closed_at": _iso(p.closed_at),
         "match_score": p.match_score,
+        "effective_score": (
+            round(p.effective_score, 1) if p.effective_score is not None else None
+        ),
         "match_verdict": p.match_verdict,
         "match_reasons": reasons_list(p.match_reasons),
         "matched_at": _iso(p.matched_at),
@@ -428,6 +438,7 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
     jinja_globals["encode_pid"] = encode_pid
     jinja_globals["site_names"] = site_names
     jinja_globals["asset"] = _asset_url
+    jinja_globals["score_of"] = _display_score  # §4.7 freshness-decayed score for display
     jinja_filters = cast("dict[str, Any]", templates.env.filters)
     jinja_filters["reasons"] = reasons_list
     jinja_filters["age"] = humanize_age

@@ -263,7 +263,7 @@ def _positions_block(store: StateStore) -> list[str]:
     top = store.matches(config.match_min_score(), limit=1)
     if top:
         best = top[0]
-        lines.append(f"top match: [{best.match_score}] {best.title} @ {best.company}")
+        lines.append(f"top match: [{_display_score(best)}] {best.title} @ {best.company}")
     else:
         lines.append("top match: none")
     return lines
@@ -361,15 +361,23 @@ def _humanize_age(dt: datetime | None, *, now: datetime | None = None) -> str:
     return _humanize_secs(max(0.0, secs))
 
 
+def _display_score(p: PositionRecord) -> int | None:
+    """The score shown in the CLI: the §4.7 freshness-decayed effective score (rounded), else
+    the raw fit when a query didn't compute it, else None — mirrors the web ``score_of``."""
+    value = p.effective_score if p.effective_score is not None else p.match_score
+    return round(value) if value is not None else None
+
+
 def render_positions(rows: Sequence[PositionRecord]) -> list[str]:
     """Aligned columns — score, title, company, location, workplace, age — one per job.
 
-    ``score`` is the §4.7 match score (``-`` when unscored); ``age`` counts from the
-    posting's ``posted_at`` when the source stated one, else from ``first_seen``.
+    ``score`` is the §4.7 freshness-decayed effective score (``-`` when unscored); ``age``
+    counts from the posting's ``posted_at`` when the source stated one, else ``first_seen``.
     """
     out: list[str] = []
     for p in rows:
-        score = "-" if p.match_score is None else str(p.match_score)
+        s = _display_score(p)
+        score = "-" if s is None else str(s)
         out.append(
             f"{score:>4}  {_trunc(p.title, 34):34}  {_trunc(p.company, 20):20}  "
             f"{_trunc(p.location, 18):18}  {(p.workplace or '-'):8}  "
@@ -397,7 +405,7 @@ def render_matches(rows: Sequence[PositionRecord]) -> list[str]:
     for p in rows:
         reasons = _reasons_text(p.match_reasons)
         head = (
-            f"[{p.match_score:>3}] {(p.match_verdict or '-'):7} "
+            f"[{(_display_score(p) or 0):>3}] {(p.match_verdict or '-'):7} "
             f"{_trunc(p.title, 40)} @ {p.company}"
         )
         out.append(head + (f"  — {reasons}" if reasons else ""))

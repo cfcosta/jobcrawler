@@ -163,6 +163,28 @@ async def test_detail_renders_a_mailto_apply_link_clickably() -> None:
         store.close()
 
 
+async def test_effective_score_is_decayed_and_surfaced() -> None:
+    # §6: the UI shows the freshness-decayed effective score, with the raw fit alongside.
+    from datetime import datetime, timedelta, timezone
+
+    store = StateStore(":memory:")
+    old = (datetime.now(timezone.utc) - timedelta(days=200)).isoformat()
+    store.upsert_position("b", "u", fields={**FIELDS, "posted_at": old}, content_hash="h")
+    store.set_match("b", "u", score=90, verdict="strong", reasons="[]")
+    pid = encode_pid("b", "u")
+    try:
+        async with _client(create_app(store)) as c:
+            body = (await c.get(f"/api/positions/{pid}")).json()
+            assert body["match_score"] == 90  # raw fit unchanged
+            assert body["effective_score"] < 90  # freshness-decayed
+            assert body["effective_score"] >= 0.6 * 90  # ...but floored (great fit stays)
+            # the detail page shows the adjusted score AND the base fit for transparency
+            html = (await c.get(f"/positions/{pid}")).text
+            assert "base fit 90" in html
+    finally:
+        store.close()
+
+
 async def test_static_assets_are_cache_busted() -> None:
     # base.html must stamp app.css/app.js with a ?v=<mtime> cache-buster so an edited
     # asset is refetched instead of a browser silently running a stale copy (the bug where

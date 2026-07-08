@@ -65,7 +65,7 @@
   {% for p in rows %}
   <tr class="{{ 'dimmed' if p.dismissed else '' }}">
     <td class="sel"><input type="checkbox" class="bulk-check" name="pids" value="{{ encode_pid(p.site, p.url) }}" form="bulk" aria-label="Select this position"></td>
-    <td class="score{{ ' strong' if p.match_score is not none and p.match_score >= 60 else '' }}">{{ p.match_score if p.match_score is not none else '—' }}</td>
+    <td class="score{{ ' strong' if score_of(p) is not none and score_of(p) >= 60 else '' }}"{% if p.match_score is not none %} title="base fit {{ p.match_score }}, adjusted for freshness"{% endif %}>{{ score_of(p) if score_of(p) is not none else '—' }}</td>
     <td class="title"><a href="/positions/{{ encode_pid(p.site, p.url) }}">{{ p.title }}</a>
         {% if p.dismissed %}<span class="tag">dismissed</span>{% endif %}</td>
     <td class="company">{% if p.company_canonical %}<a href="/positions?company_canonical={{ p.company_canonical | urlencode }}">{{ p.hiring_company or p.company }}</a>{% else %}{{ p.hiring_company or p.company }}{% endif %}</td>

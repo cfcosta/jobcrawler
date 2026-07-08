@@ -565,6 +565,20 @@ the verdict; the notify boundary is the runner's, keeping the decision threshold
 surface (§8). `pending_matches(*, limit)` and `matches(...)` back the drain and the operator's
 match view.
 
+**Freshness decay (the effective score).** The stored `match_score` is the matcher's raw *fit*;
+what the operator ranks, filters, and sees is an **effective score** = `match_score` × a recency
+multiplier in `[floor, 1]` that decays with the posting's age (from `posted_at`, else
+`first_seen`), computed in SQL at read time (never stored — age changes continuously). So a newer
+posting outranks an equally-good older one, while the **floor** (`JOBCRAWLER_SCORE_FRESHNESS_FLOOR`,
+default 0.6) keeps a great fit represented — a base-90 fit never falls below 54, so it stays in the
+browse even after it drops out of a high-`min_score` cut. Half-life is `JOBCRAWLER_SCORE_HALF_LIFE_DAYS`
+(default 30; `floor = 1.0` disables decay). It is applied **everywhere the score surfaces** — `matches()`
+ordering + `min_score` threshold, `search_positions()` `sort='score'` + `min_score`, the dashboard
+`score_histogram` bands and "top matches", and the list/detail/CLI display (rounded, with the raw fit
+shown alongside on the detail page). The §4.9 **notify** gate stays on the raw verdict: a match is
+scored at discovery when age ≈ 0, so decay is a no-op there — decay is a browse/ranking lens, not a
+re-litigation of whether the fresh find was worth a ping.
+
 **Profile edits & the store-side drain.** Crawling and matching are fully decoupled: every
 position is persisted at crawl time regardless of any verdict, and rescoring works from the
 store. The persisted `meta.profile_hash` records the hash verdicts were last applied under.
@@ -1269,6 +1283,8 @@ an `openrouter/…` slug billed per token. Selected knobs:
 | `JOBCRAWLER_AUTH_DIR` | `~/.config/jobcrawler/chatgpt` | store for the ChatGPT-subscription OAuth token a `chatgpt/*` slug uses (§9); `jobcrawl login` writes it, litellm reads+refreshes it. Falls back to `CHATGPT_TOKEN_DIR`. A token store, not an API key |
 | `JOBCRAWLER_MATCH_BATCH` | `10` | jobs per `dspy.Predict(MatchJobs)` call (§4.7) |
 | `JOBCRAWLER_MATCH_MIN_SCORE` | `70` | 0–100 score at/above which a match notifies (surface threshold, not a drop) |
+| `JOBCRAWLER_SCORE_HALF_LIFE_DAYS` | `30` | §4.7 freshness decay: the *effective* score's bonus above the floor halves every this-many days of posting age (from `posted_at`, else `first_seen`), so a newer posting outranks an equally-good older one |
+| `JOBCRAWLER_SCORE_FRESHNESS_FLOOR` | `0.6` | §4.7 freshness-decay floor in [0,1]: the smallest recency multiplier, so a great fit stays represented (never below 60% of its raw score); `1.0` disables decay |
 | `JOBCRAWLER_MATCH_DAILY_CAP` | `400` | hard per-UTC-day LLM-scored jobs; cache hits free; overflow → `match_pending` |
 | `JOBCRAWLER_MATCH_DRAIN_FLOOR` | `80` | §4.7 slice of the daily cap fresh scoring holds back for the backlog drain (fresh spends ≤ `cap − floor`; drain spends the floor + fresh's leftover); `0` = one shared budget |
 | `JOBCRAWLER_MATCH_RATE` | `10/m` | governor pacing for match LLM calls (≠ the daily volume cap) |

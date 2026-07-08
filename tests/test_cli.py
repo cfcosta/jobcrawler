@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -68,6 +69,15 @@ from jobcrawler.trainset import load_records
 
 # A minimal but *valid* profile (frontmatter enums from the §4.6 vocabulary + a body),
 # and a malformed one (an unknown discipline) that load_profile rejects loudly.
+def _repeat_last(times: list[datetime]) -> Iterator[datetime]:
+    """A never-exhausting store clock sequence: yield each time in order, then repeat the
+    last. render_status() now reads the clock one extra time (the §6 effective-score SQL in
+    matches()), which would StopIteration a bare ``iter([...])`` sized to the health events."""
+    yield from times
+    while True:
+        yield times[-1]
+
+
 _VALID_PROFILE = "---\ndisciplines:\n  - backend\nworkplace:\n  - remote\n---\n\nSenior backend engineer.\n"
 _MALFORMED_PROFILE = "---\ndisciplines:\n  - not_a_real_discipline\n---\n\nbody\n"
 
@@ -700,7 +710,7 @@ def test_render_status_prefers_measured_mttr_from_transition_log() -> None:
     # When the durable health-transition log has data, `status` reports the *measured*
     # §4.8 MTTR (dark onset → return to healthy), dropping the reconstructed "(observed)"
     # qualifier it uses when only run history is available.
-    times = iter(
+    times = _repeat_last(
         [
             datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc),  # None -> healthy
             datetime(2026, 1, 1, 1, 0, tzinfo=timezone.utc),  # healthy -> stale (dark)
@@ -805,7 +815,7 @@ def test_render_status_top_match_reads_none_when_nothing_scored(
 def test_render_status_shows_per_site_transition_count() -> None:
     # Each per-site line carries how many health-log rows the site has accrued — its
     # drift churn — so a repeatedly-flapping site is visible at a glance.
-    times = iter(
+    times = _repeat_last(
         [
             datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc),  # None -> healthy
             datetime(2026, 1, 1, 1, 0, tzinfo=timezone.utc),  # healthy -> stale

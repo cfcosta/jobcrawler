@@ -244,6 +244,23 @@ def match_min_score() -> int:
     return _int("JOBCRAWLER_MATCH_MIN_SCORE", 70)
 
 
+def score_half_life_days() -> float:
+    """§4.7 freshness decay: the *effective* position score is the base match fit scaled by a
+    recency multiplier that decays with the posting's age (from ``posted_at``, else
+    ``first_seen``). This is the half-life in days — the multiplier's bonus above the floor
+    halves every this-many days — so a newer posting outranks an equally-good older one.
+    Larger = slower decay. Default 30d."""
+    return _float("JOBCRAWLER_SCORE_HALF_LIFE_DAYS", 30.0)
+
+
+def score_freshness_floor() -> float:
+    """§4.7 freshness-decay floor in [0,1]: the smallest recency multiplier, so even a very old
+    posting keeps this fraction of its fit — a **great fit stays represented**, never decaying
+    to nothing. ``1.0`` disables decay (effective == base); ``0.6`` (default) lets a stale
+    posting fall to 60% of its raw score at most."""
+    return _float("JOBCRAWLER_SCORE_FRESHNESS_FLOOR", 0.6)
+
+
 def match_daily_cap() -> int:
     """Hard per-UTC-day ceiling on the number of jobs sent to the match LM — the
     token-budget backstop (§4.7/§8). Only *LLM-scored* jobs count: a cache hit (a job
