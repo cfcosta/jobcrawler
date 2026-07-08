@@ -1,7 +1,16 @@
 {% extends "base.html" %}
 {% block title %}Positions · Position tracker{% endblock %}
 {% block content %}
-<h1>Positions</h1>
+<div class="page-head">
+  <h1>Positions</h1>
+  {% if new_since %}<a class="new-badge" href="/positions?sort=recent" title="Positions first seen since your last visit">{{ new_since }} new since last visit</a>{% endif %}
+</div>
+
+<div class="views">
+  {% for v in saved_views %}
+  <a class="view-pill{{ ' is-active' if active_view == v.key else '' }}" href="{{ v.href }}">{{ v.label }}</a>
+  {% endfor %}
+</div>
 
 {% if filters.company_canonical or filters.site %}
 <div class="context">

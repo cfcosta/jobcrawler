@@ -200,6 +200,33 @@ async def test_positions_default_view_is_new_with_applied_companies_hidden() -> 
         store.close()
 
 
+async def test_saved_views_and_new_since_last_visit() -> None:
+    # Quick-view pills render and mark the active one; the "new since last visit" badge
+    # is driven by the jc_seen cookie — absent on a first visit, then counting arrivals.
+    store = _seeded_store()
+    try:
+        async with _client(create_app(store)) as c:
+            bare = await c.get("/positions")
+            assert 'class="view-pill is-active"' in bare.text  # New view is active
+            assert "Strong ≥ 80" in bare.text
+            # first visit sets the cookie but shows no badge yet
+            assert "since last visit" not in bare.text
+            assert c.cookies.get("jc_seen")
+
+            # a second visit with a far-past cookie counts everything as new
+            r = await c.get(
+                "/positions", headers={"cookie": "jc_seen=2000-01-01T00:00:00+00:00"}
+            )
+            assert "since last visit" in r.text
+
+            # the strong pill is active on its own query
+            strong = await c.get("/positions?min_score=80&sort=score")
+            assert strong.text.count('class="view-pill is-active"') == 1
+            assert "Strong ≥ 80" in strong.text
+    finally:
+        store.close()
+
+
 async def test_rows_link_the_real_position_page_not_the_aggregator() -> None:
     # Aggregator boards (Working Nomads et al.) store their own page as ``url``; the
     # real ATS posting is the captured apply_url behind their "Apply for this

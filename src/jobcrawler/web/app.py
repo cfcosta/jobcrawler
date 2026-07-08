@@ -75,6 +75,23 @@ def _asset_url(name: str) -> str:
 _PAGE_SIZE = 50
 _BULK_ACTIONS = frozenset({"dismiss", "restore", "status", "note"})
 
+# Cookie holding the last-visited timestamp, for the "new since last visit" badge (§16).
+_SEEN_COOKIE = "jc_seen"
+
+# Saved-view pills on the positions page — one-tap presets over the filter grammar.
+# "New" is the bare default (stage new + applied companies hidden, via default_new_view);
+# the others are explicit query strings. "Applied" jumps to the dedicated tracker page.
+SAVED_VIEWS = (
+    {"key": "new", "label": "New", "href": "/positions"},
+    {
+        "key": "strong",
+        "label": "Strong ≥ 80",
+        "href": "/positions?min_score=80&sort=score",
+    },
+    {"key": "all", "label": "Everything", "href": "/positions?sort=score&status="},
+    {"key": "applied", "label": "Applied", "href": "/applications"},
+)
+
 
 # -- identity encoding ------------------------------------------------------
 #
@@ -743,6 +760,20 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
 
     # -- HTML: browse / search / filter -------------------------------------
 
+    def _active_view(params: Any) -> str:
+        """Which saved-view pill is active for this query (see SAVED_VIEWS)."""
+        if not len(params):
+            return "new"  # the bare default view
+        if params.get("min_score") == "80" and not params.get("track_status"):
+            return "strong"
+        if (
+            params.get("sort") == "score"
+            and params.get("status") == ""
+            and (len(params) <= 2)
+        ):
+            return "all"
+        return ""
+
     @app.get("/positions", response_class=HTMLResponse)
     def list_positions(request: Request) -> Response:
         kwargs, raw = _read_filters(request.query_params, default_new_view=True)
@@ -753,7 +784,12 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
         has_next = len(rows) > _PAGE_SIZE
         rows = rows[:_PAGE_SIZE]
         url = request.url
-        return templates.TemplateResponse(
+        # "New since last visit": count first_seen after the cookie's timestamp, then
+        # stamp now — so the badge reflects arrivals between visits (0 on a refresh).
+        seen = request.cookies.get(_SEEN_COOKIE)
+        new_since = store.new_positions_since(seen) if seen else None
+        now_iso = datetime.now(timezone.utc).isoformat()
+        response = templates.TemplateResponse(
             request=request,
             name="positions.html",
             context={
@@ -764,6 +800,9 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
                 "sites": site_list,
                 "page": page,
                 "has_next": has_next,
+                "saved_views": SAVED_VIEWS,
+                "active_view": _active_view(request.query_params),
+                "new_since": new_since,
                 "prev_url": str(url.include_query_params(page=page - 1))
                 if page > 1
                 else None,
@@ -772,6 +811,10 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
                 else None,
             },
         )
+        response.set_cookie(
+            _SEEN_COOKIE, now_iso, max_age=60 * 60 * 24 * 90, samesite="lax"
+        )
+        return response
 
     @app.get("/applications", response_class=HTMLResponse)
     def applications(request: Request) -> Response:
