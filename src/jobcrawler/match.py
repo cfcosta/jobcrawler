@@ -56,6 +56,7 @@ import dspy
 
 from jobcrawler.lm import build_lm
 from jobcrawler.profile import Profile, ProfilePrefs
+from jobcrawler.runtime.normalize import normalize_location
 
 if (
     TYPE_CHECKING
@@ -68,7 +69,7 @@ _log = logging.getLogger("jobcrawler.match")
 # the four cache keys, so bumping it invalidates every prior verdict (a new rubric can
 # score the same job differently, so old verdicts must not be reused). Never reuse a
 # version string for a different prompt.
-PROMPT_VERSION = "match-v1"
+PROMPT_VERSION = "match-v2"  # v2: location eligibility became a hard gate in MatchJobs
 
 # The extraction cache version (§4.7 match-time salary/employer mining). Keyed WITHOUT a
 # profile hash — salary and employer are properties of the posting, not of the profile — so
@@ -177,6 +178,14 @@ class MatchJobs(dspy.Signature):
       * reject (0-39):    not a fit (wrong discipline, seniority, onsite vs remote-only,
                           excluded domain, or non-engineering).
 
+    Location eligibility is a hard gate, not a tiebreaker. A remote role whose stated
+    location or hiring scope is restricted to a country/region the profile cannot work
+    from (e.g. "USA"/"United States" remote for a Brazil-based profile) is a reject
+    (0-39) no matter how strong the technical fit. When the posting leaves remote
+    eligibility for the profile's location unverifiable, cap the score below 60 (weak
+    at best) and name the doubt in concerns — never award strong/good on fit alone
+    while eligibility is unknown.
+
     Be conservative: a vague or under-specified posting is not automatically a strong
     fit. Do not reward keyword overlap alone. Keep reasons and concerns to a few short
     phrases each, grounded in specifics from the job and profile.
@@ -278,13 +287,21 @@ def prefilter(enriched: _Enriched, prefs: ProfilePrefs) -> tuple[bool, str]:
     # profile (PROFILE.md "What to reject"). ``exclude_locations`` holds the lock markers
     # ("remote, us", "united states", "remote (canada)", …), matched against the
     # posting's location only — a worldwide marker ("anywhere in the world", "remote")
-    # never contains one, so a globally-open role passes. Gated to ``remote`` because on
-    # an onsite/hybrid posting a country name is the office address, not a remote-
-    # eligibility lock, and that axis is judged above / by the LLM.
+    # never contains one, so a globally-open role passes. The markers are tested against
+    # BOTH the raw location and its §4.6-normalized form: boards abbreviate ("USA",
+    # "EUA", "U.S.") while the profile writes markers out ("united states"), and the
+    # synonym map already bridges the two — without it, every Working Nomads
+    # "USA"-tagged remote role sailed past the lock and burned a match token. Gated to
+    # ``remote`` because on an onsite/hybrid posting a country name is the office
+    # address, not a remote-eligibility lock, and that axis is judged above / by the LLM.
     if prefs.exclude_locations and enriched.workplace == "remote":
-        location_lower = (job.location or "").lower()
+        raw_location = (job.location or "").lower()
+        normalized_location = normalize_location(job.location or "").lower()
         for marker in prefs.exclude_locations:
-            if marker and marker.lower() in location_lower:
+            marker_lower = marker.lower()
+            if marker_lower and (
+                marker_lower in raw_location or marker_lower in normalized_location
+            ):
                 return (False, f"remote role locked to excluded location ({marker!r})")
 
     return (True, "")
@@ -546,9 +563,7 @@ class Matcher:
 
     # -- match-time extraction (§4.7) ---------------------------------------
 
-    def _extract_missing(
-        self, candidates: Sequence[tuple[str, str, _Enriched]]
-    ) -> int:
+    def _extract_missing(self, candidates: Sequence[tuple[str, str, _Enriched]]) -> int:
         """Backfill salary/employer for salary-less matched jobs; return rows updated.
 
         Cache lookup first — a hit re-applies for free (keeping salary and the §16 employer
@@ -572,7 +587,9 @@ class Matcher:
             self._governor.pace()
             try:
                 applied += self._extract_batch(batch)
-            except Exception as exc:  # fail-open — a bad extract batch is skipped, not fatal
+            except (
+                Exception
+            ) as exc:  # fail-open — a bad extract batch is skipped, not fatal
                 _log.warning(
                     "extract batch of %d job(s) failed, skipping: %s: %s",
                     len(batch),
@@ -581,9 +598,7 @@ class Matcher:
                 )
         return applied
 
-    def _extract_batch(
-        self, batch: Sequence[tuple[str, str, _Enriched, str]]
-    ) -> int:
+    def _extract_batch(self, batch: Sequence[tuple[str, str, _Enriched, str]]) -> int:
         """LLM-extract one batch; cache + apply each entry; return rows updated.
 
         Raises on an LLM/parse failure so the caller skips the batch (fail-open). Every

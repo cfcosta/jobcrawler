@@ -390,6 +390,35 @@ def test_prefilter_country_lock_is_case_insensitive() -> None:
     assert keep is False
 
 
+def test_prefilter_country_lock_sees_the_normalized_location() -> None:
+    # The Working Nomads regression: the board tags US-only remote roles with the bare
+    # abbreviation "USA", which contains none of the written-out profile markers — 63
+    # Netflix/HubSpot US-only roles sailed past the lock and 8 reached the
+    # recommendations. The §4.6 normalizer already maps USA/EUA/U.S. → "United States",
+    # so the lock must test the normalized form too.
+    prefs = _prefs(exclude_locations=("united states",))
+    for board_location in ("USA", "Remoto, EUA", "U.S."):
+        enriched = FakeEnriched(
+            job=FakeJob(location=board_location), workplace="remote"
+        )
+        keep, reason = prefilter(enriched, prefs)
+        assert keep is False, f"{board_location!r} must hit the normalized lock"
+        assert "location" in reason
+
+
+def test_match_prompt_hard_gates_location_eligibility() -> None:
+    # The v1 rubric let the LLM score US-locked remote roles 86-88 'strong' while
+    # writing the eligibility doubt into concerns. The rubric must state the gate —
+    # restricted-region remote ⇒ reject; unverifiable eligibility ⇒ capped below 60 —
+    # and any rubric change must ride a new PROMPT_VERSION so stale verdicts die.
+    from jobcrawler.match import PROMPT_VERSION, MatchJobs
+
+    doc = MatchJobs.__doc__ or ""
+    assert "Location eligibility is a hard gate" in doc
+    assert "reject" in doc
+    assert PROMPT_VERSION != "match-v1"
+
+
 def test_prefilter_keeps_worldwide_remote_despite_lock_list() -> None:
     # A globally-open remote role contains no lock marker, so it passes to the LLM.
     enriched = FakeEnriched(
@@ -587,7 +616,9 @@ def test_drain_may_spend_fresh_leftover_above_its_floor() -> None:
     assert fresh["scored"] == 2
 
     drained = matcher.score_new(_disjoint_cands("drain", 20), drain=True)
-    assert drained["scored"] == 8  # floor 4 + the 4 fresh left unused, not just the floor
+    assert (
+        drained["scored"] == 8
+    )  # floor 4 + the 4 fresh left unused, not just the floor
 
 
 def test_drain_floor_clamped_to_cap_never_reserves_below_zero() -> None:
@@ -598,10 +629,16 @@ def test_drain_floor_clamped_to_cap_never_reserves_below_zero() -> None:
     matcher._predict = FakePredictor(_all_score())
 
     fresh = matcher.score_new(_disjoint_cands("fresh", 3))
-    assert (fresh["scored"], fresh["pending"]) == (0, 3)  # floor==cap → fresh gets nothing
+    assert (fresh["scored"], fresh["pending"]) == (
+        0,
+        3,
+    )  # floor==cap → fresh gets nothing
 
     drained = matcher.score_new(_disjoint_cands("drain", 8), drain=True)
-    assert (drained["scored"], drained["pending"]) == (5, 3)  # drain spends the full cap
+    assert (drained["scored"], drained["pending"]) == (
+        5,
+        3,
+    )  # drain spends the full cap
 
 
 def test_malformed_llm_output_parks_pending_and_does_not_crash() -> None:
@@ -802,7 +839,10 @@ def test_digest_falls_back_to_raw_salary_text_when_unparsed() -> None:
 
 
 def test_prompt_version_is_pinned() -> None:
-    assert PROMPT_VERSION == "match-v1"
+    # v2: location eligibility became a hard gate in the rubric. Any future MatchJobs
+    # edit must bump this again — the version is a cache key, so a silent prompt change
+    # would otherwise reuse verdicts scored under the old rubric.
+    assert PROMPT_VERSION == "match-v2"
 
 
 def test_match_jobs_signature_fields() -> None:
@@ -921,12 +961,19 @@ def test_pending_matches_with_description_only_excludes_unscorable_rows() -> Non
     store.upsert_position(
         "acme",
         "https://acme.example/empty-desc",
-        fields={"title": "T", "company": "Acme", "location": "Remote", "description": ""},
+        fields={
+            "title": "T",
+            "company": "Acme",
+            "location": "Remote",
+            "description": "",
+        },
         content_hash="h-empty",
     )
     store.set_match_pending("acme", "https://acme.example/empty-desc")
 
-    kept = {rec.url for rec in store.pending_matches(limit=10, with_description_only=True)}
+    kept = {
+        rec.url for rec in store.pending_matches(limit=10, with_description_only=True)
+    }
     assert kept == {"https://acme.example/has-desc"}
     # The unfiltered cache-drain keeps every parked row (scores by content_hash alone).
     assert len(store.pending_matches(limit=10)) == 3
@@ -1144,7 +1191,9 @@ def test_extraction_skips_jobs_that_already_have_structured_salary() -> None:
     store = FakeStore()
     matcher = _matcher(store, extract_model="openrouter/test/model")
     matcher._predict = FakePredictor(_all_score(90))
-    ep = FakeExtractPredictor(_extract_all(salary={"min": 1, "max": 2, "currency": "USD"}))
+    ep = FakeExtractPredictor(
+        _extract_all(salary={"min": 1, "max": 2, "currency": "USD"})
+    )
     matcher._extract_predict = ep
     # candidates arrive already carrying a §4.6 structured salary.
     cands = [
@@ -1153,7 +1202,9 @@ def test_extraction_skips_jobs_that_already_have_structured_salary() -> None:
             f"https://acme.example/job/{i}",
             FakeEnriched(
                 job=FakeJob(title=f"Senior Backend Engineer {i}"),
-                salary=FakeSalaryRange(min=90000, max=90000, currency="USD", period="year"),
+                salary=FakeSalaryRange(
+                    min=90000, max=90000, currency="USD", period="year"
+                ),
             ),
         )
         for i in range(2)
@@ -1167,9 +1218,13 @@ def test_extraction_skips_jobs_that_already_have_structured_salary() -> None:
 
 def test_extraction_skips_matches_below_min_score() -> None:
     store = FakeStore()
-    matcher = _matcher(store, extract_model="openrouter/test/model", extract_min_score=60)
+    matcher = _matcher(
+        store, extract_model="openrouter/test/model", extract_min_score=60
+    )
     matcher._predict = FakePredictor(_all_score(50))  # below the 60 gate
-    ep = FakeExtractPredictor(_extract_all(salary={"min": 1, "max": 2, "currency": "USD"}))
+    ep = FakeExtractPredictor(
+        _extract_all(salary={"min": 1, "max": 2, "currency": "USD"})
+    )
     matcher._extract_predict = ep
     summary = matcher.score_new(_candidates(3))
 
@@ -1181,7 +1236,9 @@ def test_extraction_is_off_without_an_extract_model() -> None:
     store = FakeStore()
     matcher = _matcher(store)  # extract_model=None (default)
     matcher._predict = FakePredictor(_all_score(95))
-    ep = FakeExtractPredictor(_extract_all(salary={"min": 1, "max": 2, "currency": "USD"}))
+    ep = FakeExtractPredictor(
+        _extract_all(salary={"min": 1, "max": 2, "currency": "USD"})
+    )
     matcher._extract_predict = ep
     summary = matcher.score_new(_candidates(2))
 
@@ -1271,12 +1328,22 @@ def test_extraction_set_salary_guard_blocks_a_second_fill() -> None:
 def test_to_extraction_keeps_amount_with_currency_and_mirrors_single_figure() -> None:
     full = _to_extraction(
         {
-            "salary": {"min": 100000, "max": 120000, "currency": "usd", "period": "year"},
+            "salary": {
+                "min": 100000,
+                "max": 120000,
+                "currency": "usd",
+                "period": "year",
+            },
             "hiring_company": "Foo",
         }
     )
     assert full is not None
-    assert (full.salary_min, full.salary_max, full.salary_currency, full.salary_period) == (
+    assert (
+        full.salary_min,
+        full.salary_max,
+        full.salary_currency,
+        full.salary_period,
+    ) == (
         100000.0,
         120000.0,
         "USD",
@@ -1284,7 +1351,9 @@ def test_to_extraction_keeps_amount_with_currency_and_mirrors_single_figure() ->
     )
     assert full.hiring_company == "Foo"
 
-    single = _to_extraction({"salary": {"min": 90000, "currency": "EUR", "period": "month"}})
+    single = _to_extraction(
+        {"salary": {"min": 90000, "currency": "EUR", "period": "month"}}
+    )
     assert single is not None
     assert single.salary_min == single.salary_max == 90000.0
 
@@ -1297,7 +1366,14 @@ def test_to_extraction_drops_ambiguous_or_missing_salary() -> None:
 
     # unrecognised period is dropped, but a well-formed salary is still kept.
     odd_period = _to_extraction(
-        {"salary": {"min": 90000, "max": 90000, "currency": "USD", "period": "fortnight"}}
+        {
+            "salary": {
+                "min": 90000,
+                "max": 90000,
+                "currency": "USD",
+                "period": "fortnight",
+            }
+        }
     )
     assert odd_period is not None
     assert odd_period.salary_min == 90000.0 and odd_period.salary_period is None
