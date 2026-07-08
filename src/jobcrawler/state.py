@@ -317,6 +317,17 @@ CREATE TABLE IF NOT EXISTS fx_rates (
     rate_to_usd REAL NOT NULL,
     updated_at  TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS generation_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    site       TEXT NOT NULL,
+    ts         TEXT NOT NULL,
+    outcome    TEXT NOT NULL,
+    reason     TEXT,
+    score      REAL,
+    llm_calls  INTEGER NOT NULL DEFAULT 0,
+    llm_log    TEXT
+);
+CREATE INDEX IF NOT EXISTS generation_log_by_site ON generation_log (site, id DESC);
 """
 
 # Columns of ``positions`` the runner supplies per crawl via ``upsert_position(fields=)``.
@@ -1625,6 +1636,70 @@ class StateStore:
             "WHERE applied_at IS NOT NULL GROUP BY track_status"
         ).fetchall()
         return {row["track_status"]: int(row["n"]) for row in rows}
+
+    # -- crawler-generation log (§4.2) -----------------------------------------
+    #
+    # One row per generation *attempt* — its outcome plus the captured LLM interaction
+    # log (generation is LLM-gated, so the model I/O is the record worth keeping). The
+    # daemon's stdout dies with its terminal; this makes the "why did generation fail"
+    # answer durable and queryable long after the run (the pain the 119-failure triage hit).
+
+    def record_generation(
+        self,
+        site: str,
+        *,
+        outcome: str,
+        reason: str | None = None,
+        score: float | None = None,
+        llm_log: list[dict[str, object]] | None = None,
+        retain: int = 500,
+    ) -> None:
+        """Persist one §4.2 generation attempt: outcome + the captured LLM interaction log.
+
+        ``outcome`` is ``promoted`` | ``staged`` | ``failed``; ``reason`` the top-level why
+        (a gate reason, ``"no candidate produced"``, or an exception); ``score`` the winner's
+        graded scalar (``None`` on failure); ``llm_log`` the list of ``{model, prompt,
+        completion, error}`` interactions captured for the attempt, stored as JSON. ``retain``
+        bounds table growth: rows older than the newest ``retain`` are pruned on insert (0 =
+        keep everything). Recording is best-effort at the call site — it must never break a crawl.
+        """
+        calls = len(llm_log) if llm_log else 0
+        payload = json.dumps(llm_log) if llm_log else None
+        now = self._clock().isoformat()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO generation_log "
+                "(site, ts, outcome, reason, score, llm_calls, llm_log) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (site, now, outcome, reason, score, calls, payload),
+            )
+            if retain:
+                self._conn.execute(
+                    "DELETE FROM generation_log WHERE id <= "
+                    "(SELECT MAX(id) FROM generation_log) - ?",
+                    (retain,),
+                )
+            self._conn.commit()
+
+    def generation_log(
+        self, site: str | None = None, *, limit: int = 50
+    ) -> list[dict[str, object]]:
+        """Recent §4.2 generation attempts, newest first; optionally filtered to one ``site``.
+
+        Each row is a dict of the stored columns (``llm_log`` is the JSON string as persisted —
+        the caller decodes it when it wants the interactions). Read-only; used by the
+        ``jobcrawl generation-log`` reader.
+        """
+        if site is not None:
+            rows = self._conn.execute(
+                "SELECT * FROM generation_log WHERE site = ? ORDER BY id DESC LIMIT ?",
+                (site, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM generation_log ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     # -- manual crawl requests (§16 crawl-now button) --------------------------
     #

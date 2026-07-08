@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -23,6 +24,11 @@ from jobcrawler.cli_generate import (
 )
 from jobcrawler.health import RegenOutcome
 from jobcrawler.schedule import Site
+from jobcrawler.state import StateStore
+
+# The generation LMs are irrelevant when _run_generation is stubbed; a typed None keeps
+# the direct _generate_one calls (which expect dspy.LM) free of type noise.
+_NO_LM: Any = None
 
 _GOOD = (
     "from jobcrawler.runtime.contract import Job\n"
@@ -324,9 +330,15 @@ def _fake_generation(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
     seen: dict[str, object] = {}
 
     async def fake_generate_one(
-        site: Site, root_lm: object, sub_lm: object, *, mode: str = "off"
+        site: Site,
+        root_lm: object,
+        sub_lm: object,
+        *,
+        mode: str = "off",
+        store: object = None,
     ) -> RegenOutcome:
         seen["mode"] = mode
+        seen["store"] = store
         return RegenOutcome.STAGED if mode == "on" else RegenOutcome.PROMOTED
 
     monkeypatch.setattr(
@@ -364,6 +376,86 @@ def test_regenerate_one_goes_live_when_review_gate_off(
     monkeypatch.setenv("JOBCRAWLER_REVIEW_GATE", "off")
     assert regenerate_one("acme") is RegenOutcome.PROMOTED
     assert seen["mode"] == "off"
+
+
+def test_regenerate_one_threads_the_store_into_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The self-healer passes the daemon's store so the attempt is recorded (§4.2).
+    seen = _fake_generation(monkeypatch)
+    store = StateStore(":memory:")
+    try:
+        regenerate_one("acme", store=store)
+        assert seen["store"] is store
+    finally:
+        store.close()
+
+
+# -- §4.2 generation-log recording (the capture/persist wrapper) --------------
+
+
+async def test_generate_one_records_the_attempt_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # _generate_one wraps _run_generation: whatever triple it returns is persisted once,
+    # with the captured (here empty) LLM log, so a failure's reason is durable.
+    async def fake_run(
+        site: Site, root_lm: object, sub_lm: object, *, mode: str
+    ) -> tuple[RegenOutcome, str, float | None]:
+        return RegenOutcome.FAILED, "no candidate produced", None
+
+    monkeypatch.setattr(cli_generate, "_run_generation", fake_run)
+    store = StateStore(":memory:")
+    try:
+        out = await cli_generate._generate_one(
+            Site(slug="acme", url="https://acme.com"), _NO_LM, _NO_LM, store=store
+        )
+        assert out is RegenOutcome.FAILED
+        (row,) = store.generation_log("acme")
+        assert row["outcome"] == "failed"
+        assert row["reason"] == "no candidate produced"
+    finally:
+        store.close()
+
+
+async def test_generate_one_records_and_reraises_on_unexpected_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An unexpected raise (e.g. Deno/network) is still recorded as a failed attempt with the
+    # exception as the reason, then re-raised so the healer sees the failure.
+    async def boom(
+        site: Site, root_lm: object, sub_lm: object, *, mode: str
+    ) -> tuple[RegenOutcome, str, float | None]:
+        raise RuntimeError("deno exploded")
+
+    monkeypatch.setattr(cli_generate, "_run_generation", boom)
+    store = StateStore(":memory:")
+    try:
+        with pytest.raises(RuntimeError, match="deno exploded"):
+            await cli_generate._generate_one(
+                Site(slug="acme", url="https://acme.com"), _NO_LM, _NO_LM, store=store
+            )
+        (row,) = store.generation_log("acme")
+        assert row["outcome"] == "failed"
+        assert "deno exploded" in str(row["reason"])
+    finally:
+        store.close()
+
+
+async def test_generate_one_without_a_store_records_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_run(
+        site: Site, root_lm: object, sub_lm: object, *, mode: str
+    ) -> tuple[RegenOutcome, str, float | None]:
+        return RegenOutcome.PROMOTED, "ok", 0.9
+
+    monkeypatch.setattr(cli_generate, "_run_generation", fake_run)
+    # store=None (the operator-less path / tests) must be a clean no-op, not an error.
+    out = await cli_generate._generate_one(
+        Site(slug="acme", url="https://acme.com"), _NO_LM, _NO_LM
+    )
+    assert out is RegenOutcome.PROMOTED
 
 
 def test_crawlers_dir_default_is_config_driven() -> None:

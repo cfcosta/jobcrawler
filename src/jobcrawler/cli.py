@@ -900,6 +900,45 @@ def cmd_fx_refresh(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_generation_log(args: argparse.Namespace) -> int:
+    """Show recent crawler-generation attempts; ``-v`` dumps each attempt's LLM log (§4.2).
+
+    The durable answer to "why did generation fail for <site>" — one row per attempt with
+    its outcome and reason, and (verbose) the captured prompt/completion of every LM call,
+    which is what actually decides an LLM-gated generation. Survives the daemon's terminal.
+    """
+    store = StateStore(_db_path())
+    try:
+        rows = store.generation_log(args.site, limit=args.limit)
+        if not rows:
+            where = f" for {args.site!r}" if args.site else ""
+            print(f"no generation attempts recorded{where} yet")
+            return 0
+        for row in rows:
+            ts = str(row["ts"])[:19].replace("T", " ")
+            score = f" score={row['score']:.2f}" if row["score"] is not None else ""
+            reason = f" — {row['reason']}" if row["reason"] else ""
+            print(
+                f"{ts}  {str(row['site']):26} {str(row['outcome']).upper():8} "
+                f"calls={row['llm_calls']}{score}{reason}"
+            )
+            if args.verbose and row["llm_log"]:
+                for i, call in enumerate(json.loads(str(row["llm_log"]))):
+                    body = call.get("error") or call.get("completion") or ""
+                    print(f"    [{i}] {call.get('model', '?')}")
+                    print(_block("prompt", call.get("prompt", "")))
+                    print(_block("error" if call.get("error") else "completion", body))
+    finally:
+        store.close()
+    return 0
+
+
+def _block(label: str, text: str) -> str:
+    """Indent a captured prompt/completion under a label for the verbose generation log."""
+    indented = "\n".join("      " + line for line in str(text).splitlines()) or "      —"
+    return f"    · {label}:\n{indented}"
+
+
 def _run_rematch(store: StateStore) -> int:
     """Re-score the tracked backlog against the CURRENT profile, from the store (§4.7).
 
@@ -1200,7 +1239,9 @@ def _build_healer(
         # regenerate_one honors the tri-state JOBCRAWLER_REVIEW_GATE: `on` (default)
         # stages the crawler (RegenOutcome.STAGED → pending-review, §14.2); `auto`
         # backs up + promotes it live (reversible); `off` writes live with no backup.
-        return await asyncio.to_thread(regenerate_one, slug)
+        # Pass the daemon's store so each attempt's outcome + LLM log lands in
+        # generation_log (§4.2) — durable past the daemon's terminal.
+        return await asyncio.to_thread(regenerate_one, slug, store=store)
 
     async def promote(slug: str) -> bool:
         # Auto-clear a pending-review strand (§4.8): move the staged crawler live when
@@ -1536,6 +1577,17 @@ def build_parser() -> argparse.ArgumentParser:
         "fx-refresh",
         help="fetch live currency exchange rates and store them for salary→USD conversion",
     ).set_defaults(func=cmd_fx_refresh)
+
+    genlog = sub.add_parser(
+        "generation-log",
+        help="show recent crawler-generation attempts and their captured LLM logs (§4.2)",
+    )
+    genlog.add_argument("site", nargs="?", help="filter to one site slug")
+    genlog.add_argument("--limit", type=int, default=20)
+    genlog.add_argument(
+        "-v", "--verbose", action="store_true", help="dump each attempt's LLM prompts/completions"
+    )
+    genlog.set_defaults(func=cmd_generation_log)
 
     prof = sub.add_parser(
         "profile", help="show the active candidate profile (prefs + hash)"

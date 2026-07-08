@@ -46,6 +46,7 @@ from jobcrawler.generate.gates import (
 )
 from jobcrawler.generate.adversarial import cross_validate
 from jobcrawler.generate.budget import CappedLM
+from jobcrawler.generate.lm_capture import begin_capture, capture_callback, end_capture
 from jobcrawler.lm import build_lm
 from jobcrawler.generate.generator import best_of_n, load_generator
 from jobcrawler.generate.scoring import CandidateResult, make_reward_fn
@@ -59,6 +60,7 @@ from jobcrawler.runtime.sandbox import validate_crawler
 from jobcrawler.runtime.ssrf import check_url
 from jobcrawler.schedule import Site
 from jobcrawler.sites import find_site, load_sites
+from jobcrawler.state import StateStore
 from jobcrawler.trainset import append_record, make_example
 from jobcrawler.urls import host_on_domain, normalize_host
 
@@ -73,10 +75,14 @@ def generate_command(args: argparse.Namespace) -> int:
     if not targets:
         print("no matching sites to generate")
         return 1
-    return asyncio.run(_run(targets))
+    store = _open_store()  # record each attempt's outcome + LLM log to generation_log (§4.2)
+    try:
+        return asyncio.run(_run(targets, store))
+    finally:
+        store.close()
 
 
-def regenerate_one(slug: str) -> RegenOutcome:
+def regenerate_one(slug: str, *, store: StateStore | None = None) -> RegenOutcome:
     """Regenerate one site's crawler, reporting how it was delivered (§4.8, §14.2).
 
     The self-healing entry point — the scheduler's regen timer calls this for a
@@ -85,12 +91,17 @@ def regenerate_one(slug: str) -> RegenOutcome:
     crawlers/_pending/<slug>.py for human promotion rather than overwriting the live
     crawler the daemon is running. With the gate off it goes live (auto-heal). A
     missing site or an exhausted generation reports ``FAILED``.
+
+    ``store`` (the daemon's, passed by the self-healer) persists the attempt's outcome
+    and captured LLM log to ``generation_log`` (§4.2); ``None`` skips recording.
     """
     site = find_site(load_sites(config.sites_path()), slug)
     if site is None:
         return RegenOutcome.FAILED
     root_lm, sub_lm = _build_lms()
-    return asyncio.run(_generate_one(site, root_lm, sub_lm, mode=config.review_gate()))
+    return asyncio.run(
+        _generate_one(site, root_lm, sub_lm, mode=config.review_gate(), store=store)
+    )
 
 
 def _build_lms() -> tuple[dspy.LM, dspy.LM]:
@@ -105,12 +116,17 @@ def _build_lms() -> tuple[dspy.LM, dspy.LM]:
     # build_lm routes a chatgpt/* slug to the Codex Responses backend (§9); an
     # openrouter/... slug is constructed exactly as before. CappedLM rides through the
     # same routing via cls= so the §4.2 sub-call kill still wraps the sub_lm.
-    root_lm = build_lm(config.require_model(), max_tokens=max_tokens)
+    # Attach the §4.2 LLM-log capture to both LMs (and, via dspy's deep-copying copy(),
+    # to every per-candidate rollout copy): each call routes into the per-attempt buffer
+    # begin_capture() activates. A no-op for any LM used outside a generation attempt.
+    capture = [capture_callback()]
+    root_lm = build_lm(config.require_model(), max_tokens=max_tokens, callbacks=capture)
     sub_lm = build_lm(
         config.require_sub_model(),
         cls=CappedLM,
         max_subcalls=config.max_subcalls(),
         max_tokens=max_tokens,
+        callbacks=capture,
     )
     return root_lm, sub_lm
 
@@ -145,20 +161,56 @@ def _select(sites: list[Site], args: argparse.Namespace) -> list[Site]:
     return [site] if site is not None else []
 
 
-async def _run(targets: list[Site]) -> int:
+async def _run(targets: list[Site], store: StateStore | None = None) -> int:
     root_lm, sub_lm = _build_lms()
     failures = 0
     for site in targets:
         # Operator-run generate writes live (stage defaults off); only a generation
         # that produced no gate-passing crawler counts as a failure.
-        if await _generate_one(site, root_lm, sub_lm) is RegenOutcome.FAILED:
+        if await _generate_one(site, root_lm, sub_lm, store=store) is RegenOutcome.FAILED:
             failures += 1
     return 1 if failures else 0
 
 
 async def _generate_one(
-    site: Site, root_lm: dspy.LM, sub_lm: dspy.LM, *, mode: str = "off"
+    site: Site,
+    root_lm: dspy.LM,
+    sub_lm: dspy.LM,
+    *,
+    mode: str = "off",
+    store: StateStore | None = None,
 ) -> RegenOutcome:
+    # §4.2 generation is LLM-gated, and the daemon's stdout dies with its terminal, so
+    # (when a store is wired) capture the attempt's LLM interaction log and persist the
+    # outcome once at the end — success or failure, even on an unexpected raise. The
+    # capture is thread-scoped, so concurrent self-heals don't cross-contaminate.
+    if store is not None:
+        begin_capture()
+    result = RegenOutcome.FAILED
+    attempt_reason = "generation did not complete"
+    attempt_score: float | None = None
+    try:
+        result, attempt_reason, attempt_score = await _run_generation(site, root_lm, sub_lm, mode=mode)
+        return result
+    except Exception as exc:  # enrich the record, then let the healer see the failure
+        attempt_reason = f"{type(exc).__name__}: {exc}"[:500]
+        raise
+    finally:
+        if store is not None:
+            _persist_attempt(
+                store, site.slug, result, attempt_reason, attempt_score, end_capture()
+            )
+
+
+async def _run_generation(
+    site: Site, root_lm: dspy.LM, sub_lm: dspy.LM, *, mode: str
+) -> tuple[RegenOutcome, str, float | None]:
+    """Run one §6 generation and report ``(outcome, reason, score)`` for the attempt record.
+
+    Split from :func:`_generate_one` so the capture/persist wrapper stays a thin,
+    single-exit shell: this returns the structured triple at every decision point instead
+    of leaving the "why" only in the ``print`` lines.
+    """
     registry_hosts = {normalize_host(site.url)}
     boot = Ctx(registry_hosts)
     corpus = prefetch_corpus(site.url, boot)
@@ -239,7 +291,7 @@ async def _generate_one(
     )
     if best is None:
         print(f"FAIL {site.slug}: no candidate produced")
-        return RegenOutcome.FAILED
+        return RegenOutcome.FAILED, "no candidate produced", None
 
     source = _source_text(best)
     # The enumeration *count* floor is NOT applied here: the 10s validation sandbox
@@ -254,7 +306,7 @@ async def _generate_one(
     )
     if not ok:
         print(f"FAIL {site.slug}: {reason}")
-        return RegenOutcome.FAILED
+        return RegenOutcome.FAILED, reason, None
     outcome = _deliver(site.slug, source, mode=mode)
     if outcome is RegenOutcome.STAGED:
         print(
@@ -278,7 +330,35 @@ async def _generate_one(
         _committed_hosts(source, registry_hosts),
         url_evidence=observed,
     )
-    return outcome
+    return outcome, "ok", score
+
+
+def _persist_attempt(
+    store: StateStore,
+    slug: str,
+    outcome: RegenOutcome,
+    reason: str,
+    score: float | None,
+    llm_log: list[dict[str, object]],
+) -> None:
+    """Write one generation attempt to the store; never raise into the generation path."""
+    try:
+        store.record_generation(
+            slug,
+            outcome=outcome.name.lower(),  # promoted | staged | failed
+            reason=reason,
+            score=score,
+            llm_log=llm_log,
+        )
+    except Exception as exc:  # noqa: BLE001 - logging must not break a self-heal
+        print(f"  generation log not persisted for {slug}: {exc}")
+
+
+def _open_store() -> StateStore:
+    """Open the shared §4.7 store from config (the operator ``generate`` path's own handle)."""
+    url = config.state_url()
+    db_path = url.removeprefix("sqlite:///") if url.startswith("sqlite:") else url
+    return StateStore(db_path)
 
 
 # Robots probes per generation — an upper bound on how many declared extra hosts an

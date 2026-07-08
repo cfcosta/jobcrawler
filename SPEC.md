@@ -656,6 +656,17 @@ not die**, when the registry URL refuses a bare GET (an API index wanting auth h
 wall): the refusal is recorded in-band in the corpus as a fact for the generator — the operator
 hints carry the recipe for exactly such boards, and the §6 gate still proves the result live.
 
+**Generation log (durable "why", §4.2).** Because generation is **LLM-gated** — whether a candidate is
+produced, and why a fan-out came up empty, is decided by what the model was asked and returned — each
+attempt records a row to the `generation_log` store: its `outcome` (`promoted`/`staged`/`failed`), the
+top-level `reason` (a §6 gate reason, `"no candidate produced"`, or an escaping exception), the winner's
+`score`, and — the substance — the captured **LLM interaction log** (each call's prompt/completion, or
+the error that aborted it). The daemon's stdout dies with its terminal, so this is what makes a
+post-mortem answerable after the fact (the trigger was a fleet-wide generation failure whose cause
+lived only in a since-closed terminal). Capture is a per-attempt, thread-scoped dspy callback on the
+generation LMs (so concurrent self-heals don't cross-contaminate) and is best-effort — recording never
+breaks a crawl. Rows are bounded by a retain cap; read back with `jobcrawl generation-log [site] [-v]`.
+
 Track **drift-MTTR** — median time from a previously-healthy board going dark to a gate-passing
 replacement being *enabled* (detection + regeneration + review gate) — as an **observability metric**
 (`jobcrawl status`), preferring the durable health-transition log and falling back to run-history
@@ -1228,6 +1239,7 @@ The central risk is **executing model-written code against the live web**. Mitig
 | `jobcrawl run` | **start the scheduler daemon** — crawl due boards, track lifecycle, match, retry, regenerate (§4.9) |
 | `jobcrawl serve [--host --port]` | **start the web tracker UI** (§16) — browse/search/track positions over the shared store; loopback-bound by default, no scheduler/LLM |
 | `jobcrawl generate <slug> \| --all \| --missing \| --stale` | run RLM, gate (§6), write `crawlers/<slug>.py` (`--missing` = every enabled site with no committed crawler, to drain the §4.2 cold-start backlog operator-side) |
+| `jobcrawl generation-log [site] [-v]` | recent generation attempts (outcome + reason); `-v` dumps each attempt's captured **LLM interaction log** — the durable "why did generation fail" (§4.2) |
 | `jobcrawl validate <slug>` | dry-run a committed script through the §4.4 sandbox, report positions/errors, **no state/match** |
 | `jobcrawl crawl <slug> \| --all` | run committed scripts, dedup, track positions, match new/changed |
 | `jobcrawl promote <slug>` | move a self-heal crawler staged under `crawlers/_pending` (§8) to live |

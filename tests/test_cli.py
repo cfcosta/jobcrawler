@@ -36,6 +36,7 @@ from jobcrawler.cli import (
     cmd_crawl,
     cmd_fx_refresh,
     cmd_generate,
+    cmd_generation_log,
     cmd_list,
     cmd_login,
     cmd_matches,
@@ -1211,6 +1212,52 @@ def test_cmd_fx_refresh_reports_a_fetch_failure_and_exits_one(
     monkeypatch.setattr(fx.httpx, "get", boom)
     assert cmd_fx_refresh(build_parser().parse_args(["fx-refresh"])) == 1
     assert "could not fetch" in capsys.readouterr().out
+
+
+# -- generation-log (§4.2): durable crawler-generation attempts + LLM logs ----
+
+
+def test_cmd_generation_log_is_registered() -> None:
+    assert build_parser().parse_args(["generation-log"]).func is cmd_generation_log
+
+
+def test_cmd_generation_log_shows_attempts_and_dumps_the_llm_log(
+    tmp_path: Path, monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db = tmp_path / "state.db"
+    monkeypatch.setenv("JOBCRAWLER_STATE_URL", str(db))
+    store = StateStore(str(db))
+    store.record_generation(
+        "rustjobs",
+        outcome="failed",
+        reason="no candidate produced",
+        llm_log=[
+            {"model": "openrouter/x", "prompt": "generate a crawler",
+             "completion": None, "error": "OSError: [Errno 24] Too many open files"},
+        ],
+    )
+    store.close()
+
+    # summary line
+    assert cmd_generation_log(build_parser().parse_args(["generation-log"])) == 0
+    out = capsys.readouterr().out
+    assert "rustjobs" in out and "FAILED" in out and "no candidate produced" in out
+
+    # -v dumps the captured LLM interaction (prompt + the error behind the failure)
+    assert (
+        cmd_generation_log(build_parser().parse_args(["generation-log", "rustjobs", "-v"]))
+        == 0
+    )
+    verbose = capsys.readouterr().out
+    assert "generate a crawler" in verbose and "Too many open files" in verbose
+
+
+def test_cmd_generation_log_empty_is_clean(
+    tmp_path: Path, monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("JOBCRAWLER_STATE_URL", str(tmp_path / "state.db"))
+    assert cmd_generation_log(build_parser().parse_args(["generation-log"])) == 0
+    assert "no generation attempts" in capsys.readouterr().out
 
 
 # -- profile view (§6) -------------------------------------------------------

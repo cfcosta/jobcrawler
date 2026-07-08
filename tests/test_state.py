@@ -11,6 +11,7 @@ per-UTC-day spend counter) that make LLM matching idempotent and budget-bounded.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from collections.abc import Iterator
@@ -1178,6 +1179,43 @@ def test_applied_counts_breaks_down_only_applied_rows(store: StateStore) -> None
     counts = store.applied_counts()
     assert counts == {"applied": 1, "interviewing": 2}
     assert sum(counts.values()) == len(store.search_positions(applied=True))
+
+
+# -- §4.2 crawler-generation log ---------------------------------------------
+
+
+def test_generation_log_records_and_reads_back(store: StateStore) -> None:
+    store.record_generation(
+        "acme",
+        outcome="failed",
+        reason="no candidate produced",
+        llm_log=[
+            {"model": "m", "prompt": "generate", "completion": None,
+             "error": "OSError: [Errno 24] Too many open files"},
+        ],
+    )
+    store.record_generation("beta", outcome="promoted", reason="ok", score=0.94)
+
+    rows = store.generation_log()
+    assert [r["site"] for r in rows] == ["beta", "acme"]  # newest first
+    (acme,) = store.generation_log("acme")
+    assert acme["outcome"] == "failed"
+    assert acme["reason"] == "no candidate produced"
+    assert acme["llm_calls"] == 1
+    # the captured LLM interaction round-trips as JSON, error and all
+    (call,) = json.loads(str(acme["llm_log"]))
+    assert call["error"].endswith("Too many open files")
+    # a clean success carries its score and no log
+    (beta,) = store.generation_log("beta")
+    assert beta["score"] == 0.94 and beta["llm_calls"] == 0
+
+
+def test_generation_log_retention_prunes_oldest(store: StateStore) -> None:
+    for i in range(6):
+        store.record_generation(f"s{i}", outcome="failed", retain=3)
+    rows = store.generation_log(limit=100)
+    assert len(rows) == 3  # only the newest 3 survive
+    assert [r["site"] for r in rows] == ["s5", "s4", "s3"]
 
 
 # -- §4.7 LLM extraction setters + cache -------------------------------------
