@@ -623,6 +623,14 @@ def test_recheck_cap_defaults_to_300(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.recheck_cap() == 300
 
 
+def test_assess_timeout_defaults_to_30m(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The §4.9 liveness watchdog: one wedged generation must not freeze the loop.
+    monkeypatch.delenv("JOBCRAWLER_ASSESS_TIMEOUT", raising=False)
+    assert config.assess_timeout() == 30 * 60
+    monkeypatch.setenv("JOBCRAWLER_ASSESS_TIMEOUT", "0s")
+    assert config.assess_timeout() == 0.0  # 0s disables the bound
+
+
 def test_recheck_cap_parses_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("JOBCRAWLER_RECHECK_CAP", "500")
     assert config.recheck_cap() == 500

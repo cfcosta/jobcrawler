@@ -783,6 +783,20 @@ def regen_budget() -> float:
     return _duration_secs("JOBCRAWLER_REGEN_BUDGET", "2m")
 
 
+def assess_timeout() -> float:
+    """Liveness watchdog (seconds) for ONE §4.2/§4.8 generation assess (§4.9).
+
+    The tick awaits each assess in-band, so without a bound a single wedged
+    generation — a stuck sandbox subprocess, a hung network read — freezes crawling,
+    recheck and matching fleet-wide (observed live: a 50-minute total stall with a
+    zombie sandbox child). On expiry the scheduler abandons that assess — the worker
+    thread keeps running detached and its eventual store writes still land; it just
+    can't hold the loop hostage — and the pass moves on. Generous by default: a
+    legitimate best-of-N generation with self-heal rounds runs 10-25 minutes.
+    ``0s`` disables the watchdog."""
+    return _duration_secs("JOBCRAWLER_ASSESS_TIMEOUT", "30m")
+
+
 def adaptive_default() -> bool:
     """When true, a site with no explicit ``schedule`` is adaptive rather than using
     the fixed ``default_schedule``. Default true — the fleet self-tunes each source's

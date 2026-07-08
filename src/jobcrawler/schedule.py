@@ -247,6 +247,7 @@ class Scheduler:
         bootstrap_budget: float | None = None,
         bootstrap_concurrency: int | None = None,
         regen_budget: float | None = None,
+        assess_timeout: float | None = None,
         reload_sites: Callable[[], Iterable[Site] | None] | None = None,
     ) -> None:
         self._sites = list(sites)
@@ -382,6 +383,11 @@ class Scheduler:
         # a budget-deferred sweep stay due next tick instead of waiting a full interval.
         self._regen_budget = (
             regen_budget if regen_budget is not None else config.regen_budget()
+        )
+        # §4.9 liveness watchdog: the longest ONE generation assess may hold the loop
+        # before being abandoned (see _assess_bounded). 0 disables the bound.
+        self._assess_timeout = (
+            assess_timeout if assess_timeout is not None else config.assess_timeout()
         )
         self._regen_incomplete = False
         # §4.1 hot-reload: an optional probe that returns the freshly-parsed registry when
@@ -546,12 +552,36 @@ class Scheduler:
         states: dict[str, HealthState] = {}
         for slug in slugs:
             try:
-                states[slug] = await healer.assess(slug)
+                state = await self._assess_bounded(healer, slug)
+                if state is not None:
+                    states[slug] = state
             except Exception:
                 _log.exception("event-driven heal failed for %s; skipping", slug)
         if states:
             _log.info("event heal assessed=%d %s", len(states), _state_summary(states))
         return states
+
+    async def _assess_bounded(self, healer: Healer, slug: str) -> HealthState | None:
+        """One ``healer.assess`` under the §4.9 liveness watchdog; ``None`` on expiry.
+
+        The tick awaits every assess in-band, so an unbounded await lets a single
+        wedged generation (a stuck sandbox subprocess, a hung network read) freeze
+        crawling, recheck and matching fleet-wide. On expiry the await is abandoned —
+        the underlying worker thread keeps running detached and its eventual store
+        writes still land; it just can't hold the loop hostage — the site is skipped
+        for this pass, and the health state machine retries it like any other failure.
+        """
+        timeout = self._assess_timeout or None
+        try:
+            return await asyncio.wait_for(healer.assess(slug), timeout)
+        except TimeoutError:
+            _log.error(
+                "generation watchdog: assess slug=%s exceeded %.0fs — abandoning the "
+                "worker and resuming the loop",
+                slug,
+                timeout or 0.0,
+            )
+            return None
 
     async def _bootstrap_missing(
         self, sites: list[Site], forced: frozenset[str] = frozenset()
@@ -600,7 +630,9 @@ class Scheduler:
         async def _assess(slug: str) -> None:
             # Isolated like the heal path: one generation raising can't abort the wave.
             try:
-                states[slug] = await healer.assess(slug)
+                state = await self._assess_bounded(healer, slug)
+                if state is not None:
+                    states[slug] = state
             except Exception:
                 _log.exception("cold-start bootstrap failed for %s; skipping", slug)
 
@@ -793,7 +825,9 @@ class Scheduler:
         pass_started = self._clock()
         for done, site in enumerate(assessable, start=1):
             try:
-                states[site.slug] = await self._healer.assess(site.slug)
+                state = await self._assess_bounded(self._healer, site.slug)
+                if state is not None:
+                    states[site.slug] = state
             except Exception:
                 # One site's regenerate (LM / Deno / network) raising must not abort
                 # the sweep or the daemon — isolate it, log, and assess the rest (§4.8).

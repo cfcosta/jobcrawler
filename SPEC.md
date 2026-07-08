@@ -1335,6 +1335,7 @@ an `openrouter/…` slug billed per token. Selected knobs:
 | `JOBCRAWLER_FANOUT_RETRIES` | `= FANOUT_N` | §6 redraws for LM/adapter-dead attempts (a failure never eats a comparison slot; attempts ≤ 2N) |
 | `JOBCRAWLER_BOOTSTRAP_BUDGET` | `2m` | §4.9 per-tick time budget for the cold-start bootstrap pass (over budget → roster defers to next tick) |
 | `JOBCRAWLER_BOOTSTRAP_CONCURRENCY` | `6` | §4.9 max cold-start generations run in parallel per wave (1 = sequential; caps concurrent LM spend/rate) |
+| `JOBCRAWLER_ASSESS_TIMEOUT` | `30m` | §4.9 liveness watchdog: max wall-clock ONE generation assess may hold the loop; on expiry the assess is abandoned (worker detached, its store writes still land) and the tick resumes — a wedged generation can't freeze crawling/recheck/matching. `0s` disables |
 | `JOBCRAWLER_SOLVER` / `FLARESOLVERR_URL` / `JOBCRAWLER_CLEARANCE_TTL` / `JOBCRAWLER_EGRESS_PROXY` | `none` / — / `30m` / — | §4.10 challenge backend + clearance + IP/UA-pinned egress |
 | `JOBCRAWLER_NOTIFY_WEBHOOK` / `NOTIFY_TIMEOUT` | — / `10s` | optional operator webhook for autonomous actions + match alerts (§4.7/§4.9) |
 

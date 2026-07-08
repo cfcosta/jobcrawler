@@ -1315,6 +1315,41 @@ async def test_bootstrap_over_budget_defers_and_the_next_tick_crawls_the_promote
     assert healer.assessed == ["a", "b"]  # then the roster continues
 
 
+async def test_generation_watchdog_unwedges_the_tick() -> None:
+    # A wedged generation (stuck sandbox subprocess, hung network read) used to hold
+    # the single-process loop hostage — observed live as a 50-minute fleet-wide stall
+    # with a zombie sandbox child. The watchdog abandons the assess at the bound and
+    # the pass moves on to the next site; the tick itself completes.
+    clock = _Clock(T0)
+    hung = asyncio.Event()  # never set: slug "a" wedges forever
+
+    class _WedgedHealer(_RecordingHealer):
+        async def assess(self, slug: str) -> HealthState:
+            await super().assess(slug)
+            if slug == "a":
+                await hung.wait()
+            return HealthState.HEALTHY
+
+    healer = _WedgedHealer()
+    sched = Scheduler(
+        [Site(slug="a", url="https://a.com"), Site(slug="b", url="https://b.com")],
+        store=StateStore(":memory:"),
+        crawl=_ok_crawl,
+        healer=healer,
+        has_crawler=lambda slug: False,
+        autonomy=True,
+        regen_check="off",
+        heal_cooldown="off",
+        clock=clock,
+        bootstrap_budget=1000.0,
+        bootstrap_concurrency=1,
+        assess_timeout=0.05,
+    )
+
+    await asyncio.wait_for(sched.tick(), timeout=5.0)  # the tick must complete
+    assert healer.assessed == ["a", "b"]  # b still ran after a's watchdog fired
+
+
 async def test_bootstrap_retries_least_recently_attempted_first() -> None:
     # The starvation regression: the pass restarts from the head of its list every
     # tick and the budget defers the rest, so REGISTRY order let head-of-roster sites
