@@ -101,6 +101,30 @@ def test_scrape_without_consulting_feeds_fails() -> None:
     assert not ok and "must-observe" in reason
 
 
+def test_scrape_passes_when_snapshot_already_surfaced_discovery() -> None:
+    # The prefetched snapshot always runs feed/sitemap/API discovery and hands it to the
+    # model in the corpus, so a candidate that read it and chose scrape HAS consulted —
+    # gate 2(a) must not reject it for skipping a redundant in-trajectory find_feeds call.
+    # Same pred as test_scrape_without_consulting_feeds_fails, now with the harness credit.
+    ok, reason = gate_winner(
+        _pred(trajectory="called validate_crawler", discovery_method="scrape"),
+        _GOOD,
+        _HOSTS,
+        discovery_prefetched=True,
+    )
+    assert ok, reason
+
+
+def test_snapshot_surfaced_discovery_recognizes_a_prefetched_corpus() -> None:
+    from jobcrawler.generate.snapshot import build_corpus
+
+    # A real prefetched corpus always carries feeds/sitemap/apis → discovery was surfaced.
+    assert cli_generate._snapshot_surfaced_discovery(build_corpus(homepage="<html/>"))
+    # A non-mapping or a bare dict that skipped discovery gets no credit.
+    assert not cli_generate._snapshot_surfaced_discovery(None)
+    assert not cli_generate._snapshot_surfaced_discovery({"homepage": "x"})
+
+
 def test_under_enumeration_fails_when_expected_count_known() -> None:
     # _GOOD yields 8 items; a site with ~40 recent articles → 8 < ceil(0.5 * 40) = 20,
     # so the enumeration floor rejects the feed-sized sample (§6).

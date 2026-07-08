@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import argparse
 import re
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from pathlib import Path
 
 import dspy
@@ -308,7 +308,12 @@ async def _run_generation(
     # expected_recent) and the must-observe "consult the sitemap" gate; the
     # count-based floor belongs at runtime, over a full crawl.
     ok, reason = gate_winner(
-        best, source, registry_hosts, extra_evidence=authorized, url_evidence=observed
+        best,
+        source,
+        registry_hosts,
+        extra_evidence=authorized,
+        url_evidence=observed,
+        discovery_prefetched=_snapshot_surfaced_discovery(corpus),
     )
     if not ok:
         print(f"FAIL {site.slug}: {reason}")
@@ -562,6 +567,7 @@ def gate_winner(
     extra_evidence: Collection[str] = (),
     url_evidence: Collection[str] = (),
     expected_items: int | None = None,
+    discovery_prefetched: bool = False,
 ) -> tuple[bool, str]:
     """The full §6 gate set on the selected winner; returns (passed, reason).
 
@@ -582,6 +588,10 @@ def gate_winner(
     ``expected_items`` (the site's open-posting count, from its listing/sitemap)
     activates the enumeration floor — a feed-sized sample of a far larger board is
     rejected as under-enumeration (§6).
+
+    ``discovery_prefetched`` records that the snapshot already performed and surfaced
+    feed/sitemap/API discovery (``_snapshot_surfaced_discovery``), which the gate 2(a)
+    ``consulted_discovery`` evidence counts — see the must-observe block below.
     """
     ast_result = check_ast(source)
     if not ast_result.passed:
@@ -597,10 +607,21 @@ def gate_winner(
         return False, f"host admission: {admission.reason}"
     run_hosts = _committed_hosts(source, hosts)
 
+    # ``consulted_discovery`` credits the harness's own prefetch, not just an in-trajectory
+    # tool call: ``prefetch_corpus`` always probes homepage feeds + robots/jobs-sitemap +
+    # ATS APIs and surfaces them in the ``corpus`` the model reads FROM, so a candidate that
+    # read that and still chose ``scrape`` HAS observed the discovery surface — demanding a
+    # redundant ``find_feeds``/``get_sitemap`` call only burned a full trajectory before this
+    # deterministic reject. The enum-floor (``expected_items``) still guards a scrape that
+    # under-enumerates a known-larger board; the validate-before-SUBMIT half is untouched.
     must_observe = must_observe_failure(
         validated=_called(pred, "validate_crawler"),
         discovery_method=_discovery(pred),
-        consulted_discovery=_called(pred, "find_feeds") or _called(pred, "get_sitemap"),
+        consulted_discovery=(
+            discovery_prefetched
+            or _called(pred, "find_feeds")
+            or _called(pred, "get_sitemap")
+        ),
     )
     if must_observe is not None:
         return False, f"must-observe: {must_observe}"
@@ -677,6 +698,20 @@ def _called(pred: object, tool: str) -> bool:
 
 def _discovery(pred: object) -> str:
     return str(getattr(pred, "discovery_method", "scrape"))
+
+
+def _snapshot_surfaced_discovery(corpus: object) -> bool:
+    """Did the prefetched snapshot already perform feed/sitemap/API discovery? (§4.2)
+
+    ``prefetch_corpus`` always probes homepage feeds, robots + jobs sitemap, and ATS API
+    candidates, and ``build_corpus`` surfaces them (``feeds``/``sitemap``/``apis``) in the
+    ``corpus`` the model reasons FROM — so the consultation gate 2(a) demands has already
+    happened, in the model's hand, before it writes a line. A real prefetched corpus always
+    carries those keys; a bare/hand-built one that skipped discovery does not, and gets no
+    credit (the gate's strict in-trajectory check still applies)."""
+    if not isinstance(corpus, Mapping):
+        return False
+    return {"feeds", "sitemap", "apis"} <= corpus.keys()
 
 
 def _source_text(pred: object) -> str:
