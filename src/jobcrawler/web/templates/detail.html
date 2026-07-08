@@ -18,7 +18,13 @@
       {% if p.department %}<span class="tag">{{ p.department }}</span>{% endif %}
     </p>
     <p class="links">
-      {% if p.apply_url and p.apply_url != p.url %}<a class="ext apply" href="{{ p.apply_url }}" target="_blank" rel="noopener noreferrer">Apply ↗</a>{% endif %}
+      {% if p.apply_url and p.apply_url != p.url %}
+        {% if p.apply_url.startswith('mailto:') %}
+      <a class="apply mailto" href="{{ p.apply_url }}">✉ Email to apply</a>
+        {% else %}
+      <a class="ext apply" href="{{ p.apply_url }}" target="_blank" rel="noopener noreferrer">Apply ↗</a>
+        {% endif %}
+      {% endif %}
       <a class="ext" href="{{ p.url }}" target="_blank" rel="noopener noreferrer">Open original posting ↗</a>
     </p>
   </header>
@@ -116,7 +122,7 @@
       <dt>Source board</dt><dd>{{ site_names.get(p.site, p.site) }} <span class="mono">({{ p.site }})</span></dd>
       <dt>Lifecycle</dt><dd><span class="lifecycle lc-{{ p.status }}">{{ p.status }}</span></dd>
       <dt>Listing URL</dt><dd class="mono"><a href="{{ p.url }}" target="_blank" rel="noopener noreferrer">{{ p.url }}</a></dd>
-      <dt>Apply URL</dt><dd class="mono">{% if p.apply_url %}<a href="{{ p.apply_url }}" target="_blank" rel="noopener noreferrer">{{ p.apply_url }}</a>{% else %}—{% endif %}</dd>
+      <dt>Apply URL</dt><dd class="mono">{% if p.apply_url %}{% if p.apply_url.startswith('mailto:') %}<a href="{{ p.apply_url }}">{{ p.apply_url[7:] }}</a>{% else %}<a href="{{ p.apply_url }}" target="_blank" rel="noopener noreferrer">{{ p.apply_url }}</a>{% endif %}{% else %}—{% endif %}</dd>
       <dt>External id</dt><dd class="mono">{{ p.external_id or '—' }}</dd>
       <dt>Content hash</dt><dd class="mono">{{ p.content_hash }}</dd>
       <dt>Company (raw)</dt><dd>{{ p.company }}</dd>

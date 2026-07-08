@@ -139,6 +139,30 @@ async def test_detail_surfaces_full_record() -> None:
         store.close()
 
 
+async def test_detail_renders_a_mailto_apply_link_clickably() -> None:
+    # HN-style postings apply by email: apply_url is a mailto:, and the UI must render it as
+    # a real clickable mail link (not text) — and without target=_blank, which on a mailto
+    # opens a dead blank tab instead of the mail client.
+    store = StateStore(":memory:")
+    url = "https://news.ycombinator.com/item?id=1"
+    store.upsert_position(
+        "hn", url,
+        fields={**FIELDS, "apply_url": "mailto:jobs@acme.com"},
+        content_hash="h",
+    )
+    pid = encode_pid("hn", url)
+    try:
+        async with _client(create_app(store)) as c:
+            body = (await c.get(f"/positions/{pid}")).text
+            assert 'href="mailto:jobs@acme.com"' in body
+            assert "Email to apply" in body  # mailto-specific label, not "Apply ↗"
+            # the Apply control must not carry target=_blank (dead blank tab on a mailto)
+            after = body.split('href="mailto:jobs@acme.com"', 1)[1][:40]
+            assert "target=" not in after
+    finally:
+        store.close()
+
+
 async def test_static_assets_are_cache_busted() -> None:
     # base.html must stamp app.css/app.js with a ?v=<mtime> cache-buster so an edited
     # asset is refetched instead of a browser silently running a stale copy (the bug where

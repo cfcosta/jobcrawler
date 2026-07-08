@@ -10,6 +10,16 @@ _MONTHLY_RE = re.compile(r"^Ask HN:\s*Who is hiring\?\s*\([^)]+\)\s*$", re.I)
 _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
 _URL_RE = re.compile(r"https?://[^\s<>()\"']+")
+_HREF_RE = re.compile(r'href="([^"]+)"', re.I)
+# A "how to apply" URL — an ATS/careers/form link is a direct application channel.
+_APPLY_RE = re.compile(
+    r"(?i)(career|/jobs?\b|jobs?\.|apply|lever|greenhouse|ashby|workable|gupy|"
+    r"smartrecruiters|breezy|recruitee|wellfound|forms\.gle|docs\.google\.com/forms|typeform)"
+)
+# HN posters overwhelmingly say "email us at ...", often lightly obfuscated to dodge scrapers.
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+_OBFUS_AT = re.compile(r"\s*[\[({<]\s*at\s*[\])}>]\s*", re.I)
+_OBFUS_DOT = re.compile(r"\s*[\[({<]\s*dot\s*[\])}>]\s*", re.I)
 _SALARY_RE = re.compile(r"(?i)(?:[$€£]\s?\d[\d,.]*(?:\s?[kKmM])?(?:\s?[-–]\s?[$€£]?\s?\d[\d,.]*(?:\s?[kKmM])?)?(?:\s?(?:/|per)\s?(?:year|yr|hour|hr))?|(?:salary|compensation|pay)\s*[:\-]\s*[^.|;\n]{3,80})")
 
 def _clean(value):
@@ -67,12 +77,37 @@ def _salary(text):
 def _is_salary_part(part):
     return bool(_SALARY_RE.search(part or ""))
 
-def _apply_url(text):
-    urls = _URL_RE.findall(text or "")
-    if not urls:
-        return None
-    preferred = [u for u in urls if re.search(r"(?i)(career|job|apply|lever|greenhouse|ashby|workable|notion)", u)]
-    return (preferred or urls)[0].rstrip(".,;")
+def _find_email(*texts):
+    # Plain address first; then de-obfuscate the common HN "user [at] host [dot] com" forms.
+    for raw in texts:
+        if not raw:
+            continue
+        m = _EMAIL_RE.search(raw)
+        if m:
+            return m.group(0).rstrip(".,;:)")
+        deob = _OBFUS_DOT.sub(".", _OBFUS_AT.sub("@", raw))
+        m = _EMAIL_RE.search(deob)
+        if m:
+            return m.group(0).rstrip(".,;:)")
+    return None
+
+def _apply_link(raw_html, text):
+    # Applications on HN are usually an email; when there's no direct ATS/careers link, the
+    # apply link should be a mailto: to that address rather than the HN item URL.
+    hrefs = _HREF_RE.findall(raw_html or "")
+    urls = [h.rstrip(".,;)") for h in hrefs if h.lower().startswith("http")]
+    urls += [u.rstrip(".,;)") for u in _URL_RE.findall(text or "") if u.rstrip(".,;)") not in urls]
+
+    ats = [u for u in urls if _APPLY_RE.search(u)]
+    if ats:
+        return ats[0]  # a real application form beats an email
+
+    mailto = next((h for h in hrefs if h.lower().startswith("mailto:")), None)
+    email = mailto[len("mailto:"):].split("?")[0] if mailto else _find_email(text, raw_html)
+    if email:
+        return "mailto:" + email
+
+    return urls[0] if urls else None
 
 def _make_job(**kwargs):
     try:
@@ -132,7 +167,8 @@ def crawl(ctx):
 
     seen = set()
     for comment in item.get("children") or []:
-        text = _clean(comment.get("text"))
+        raw = comment.get("text")
+        text = _clean(raw)
         cid = str(comment.get("id") or "")
         if not text or not cid or cid in seen:
             continue
@@ -142,7 +178,9 @@ def crawl(ctx):
         company, title, location, employment_type = _parse_header(parts, comment.get("author"))
 
         job = {
-            "url": "https://hn.algolia.com/api/v1/items/" + cid,
+            # The human-facing HN comment permalink, not the JSON API endpoint — this is the
+            # posting's canonical link (and its recheckable/dedup identity).
+            "url": "https://news.ycombinator.com/item?id=" + cid,
             "title": title,
             "company": company,
             "location": location,
@@ -166,7 +204,9 @@ def crawl(ctx):
         if sal:
             job["salary"] = sal
 
-        apply = _apply_url(text)
+        # How to apply — an ATS/careers URL if given, otherwise a mailto: to the posted
+        # email (the usual HN channel), so the tracker's Apply link opens a draft email.
+        apply = _apply_link(raw, text)
         if apply:
             job["apply_url"] = apply
 
