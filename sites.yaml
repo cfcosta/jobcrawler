@@ -3009,3 +3009,27 @@
     (no `baseSalary`); when present it is EUR/year. Multi-company aggregator (Quantum-systems,
     Delivery Hero, Axel Springer, SQUER, IABG, ...), so each posting names its own company. Fit:
     Rust-tagged developer/engineer roles based in Germany.
+
+- slug: lemon_io
+  name: "Lemon.io"
+  url: https://lemon.io/for-developers/
+  render: static
+  company: "Lemon.io"
+  enumerates_all: false
+  hints: >-
+    Vetted-developer marketplace (Toptal-style); clients are anonymized, so the hiring
+    company is Lemon.io itself. From /for-developers/ collect the same-host
+    /for-developers/<skill>-jobs/ landing pages (python, front-end, devops, blockchain,
+    data, ai/ml, ...) and parse each page's embedded `application/ld+json` JobPosting
+    objects (~10 per page, server-rendered WordPress — no JS needed): title,
+    description, datePosted, validThrough → expires_at, employmentType, jobLocationType
+    TELECOMMUTE (remote), applicantLocationRequirements, and baseSalary (USD HOURLY
+    min/max — keep the hourly unit as the salary period). Postings have NO individual
+    detail pages — the JSON-LD `url` is the landing page itself and `identifier` is
+    null — so synthesize a stable per-posting url as
+    `<landing-page>?job=<slugified title>-<datePosted date>` (a QUERY PARAM, never a
+    #fragment: canonicalization strips fragments and would collapse every posting into
+    one row), and dedupe the same posting appearing on several skill pages by
+    title+datePosted. Closure rides validThrough expiry, not the enumerate-diff. Fit:
+    senior remote backend/full-stack contract work (Rust, Go, Python, Node) at hourly
+    marketplace rates; worldwide-friendly, aligned with a contractor/PJ profile.
