@@ -9,6 +9,7 @@
   <a class="kpi kpi-{{ k.accent or 'plain' }}" href="{{ k.href }}">
     <span class="kpi-n">{{ k.value }}{% if k.sub is defined %}<span class="kpi-sub">/ {{ k.sub }}</span>{% endif %}</span>
     <span class="kpi-k">{{ k.label }}</span>
+    {% if k.delta is defined %}<span class="kpi-delta{{ ' zero' if not k.delta }}">{% if k.delta %}+{{ k.delta }} today{% else %}— today{% endif %}</span>{% endif %}
   </a>
   {% else %}
   <div class="kpi kpi-{{ k.accent or 'plain' }}">
@@ -21,18 +22,27 @@
 
 <section class="panel">
   <h2>Your pipeline</h2>
-  <div class="funnel">
-    {% for st in funnel %}
-    <a class="stage badge-{{ st.token }}{{ ' terminal' if st.terminal else '' }}"
-       href="/positions?track_status={{ st.value }}">
+  <div class="pipeline">
+    {% for st in funnel if st.value == 'new' %}
+    <a class="pipe-inbox" href="/positions" title="Untouched positions awaiting triage">
       <span class="stage-count">{{ st.count }}</span>
-      <span class="stage-label">{{ st.label }}</span>
+      <span class="stage-label">New — in triage</span>
     </a>
     {% endfor %}
-    <a class="stage badge-muted" href="/positions?show_dismissed=1">
-      <span class="stage-count">{{ dismissed }}</span>
-      <span class="stage-label">Dismissed</span>
-    </a>
+    <div class="funnel">
+      {% for st in funnel if st.value != 'new' and not st.terminal %}
+      <a class="stage{{ ' zero' if not st.count }}" href="/positions?track_status={{ st.value }}">
+        <span class="stage-count">{{ st.count }}</span>
+        <span class="stage-label">{{ st.label }}</span>
+      </a>
+      {% endfor %}
+    </div>
+    <div class="pipe-terminals">
+      {% for st in funnel if st.terminal %}
+      <a class="tag" href="/positions?track_status={{ st.value }}">{{ st.label }} · {{ st.count }}</a>
+      {% endfor %}
+      <a class="tag" href="/positions?show_dismissed=1">Dismissed · {{ dismissed }}</a>
+    </div>
   </div>
 </section>
 
@@ -43,7 +53,7 @@
       {% for b in distribution %}
       <a class="dist-row" href="/positions?min_score={{ b.low }}&amp;sort=score" title="Browse positions scoring {{ b.label }}">
         <span class="dist-label">{{ b.label }}</span>
-        <span class="dist-bar"><span class="dist-fill{{ ' strong' if b.strong else '' }}" style="width: {{ b.pct }}%"></span></span>
+        <span class="dist-bar"><span class="dist-fill band-{{ 'strong' if b.low >= 80 else 'solid' if b.low >= 60 else 'mid' if b.low >= 40 else 'low' }}" style="width: {{ b.pct }}%"></span></span>
         <span class="dist-n">{{ b.count }}</span>
       </a>
       {% endfor %}
@@ -57,6 +67,7 @@
       {% for p in top_matches %}
       <li>
         <span class="score-chip band-{{ score_band(p) }}"{% if p.match_score is not none %} title="base fit {{ p.match_score }}, adjusted for freshness"{% endif %}>{{ score_of(p) if score_of(p) is not none else '—' }}</span>
+        <span class="avatar" style="--hue: {{ hue_of(p.hiring_company or p.company) }}" aria-hidden="true">{{ ((p.hiring_company or p.company or '·') | first) | upper }}</span>
         <a class="mt" href="/positions/{{ encode_pid(p.site, p.url) }}">
           <span class="mt-title">{{ p.title }}</span>
           <span class="mt-sub">{{ p.hiring_company or p.company }}{% if p | salary %} · {{ p | salary }}{% endif %}{% if p.match_verdict %} · {{ p.match_verdict }}{% endif %}</span>
@@ -69,61 +80,18 @@
   </section>
 </div>
 
-<section class="panel" id="sites">
-  <div class="panel-head">
-    <h2>Crawler coverage</h2>
-    {% if has_registry %}
-    <form method="post" action="/recrawl-all"
-          onsubmit="return confirm('Force a re-crawl of every enabled site and rescore all open positions?');">
-      <button type="submit" class="small secondary"
-              title="Queue a forced re-crawl of every enabled site and requeue all open positions for rescoring">Re-crawl &amp; rescore all</button>
-    </form>
-    {% endif %}
-  </div>
-  {% if has_registry %}
+{% if has_registry %}
+<section class="panel healthline">
+  <h2>Boards</h2>
   <div class="cov-legend">
     <span class="cov-pill cov-live">{{ coverage.counts.live }} live</span>
-    <span class="cov-pill cov-stale">{{ coverage.counts.stale }} stale</span>
-    <span class="cov-pill cov-review">{{ coverage.counts.review }} review</span>
-    <span class="cov-pill cov-failed">{{ coverage.counts.failed }} failed</span>
-    <span class="cov-pill cov-disabled">{{ coverage.counts.disabled }} off</span>
-    <span class="cov-pill cov-pending">{{ coverage.counts.pending }} pending</span>
-    <span class="cov-total">{{ coverage.total }} boards</span>
+    {% if coverage.counts.stale %}<span class="cov-pill cov-stale">{{ coverage.counts.stale }} stale</span>{% endif %}
+    {% if coverage.counts.review %}<span class="cov-pill cov-review">{{ coverage.counts.review }} review</span>{% endif %}
+    {% if coverage.counts.failed %}<span class="cov-pill cov-failed">{{ coverage.counts.failed }} failed</span>{% endif %}
+    {% if coverage.counts.disabled %}<span class="cov-pill cov-disabled">{{ coverage.counts.disabled }} off</span>{% endif %}
+    {% if coverage.counts.pending %}<span class="cov-pill cov-pending">{{ coverage.counts.pending }} pending</span>{% endif %}
+    <span class="cov-total">{{ coverage.total }} boards · <a href="/boards">Manage boards →</a></span>
   </div>
-  {% if per_site %}
-  <table class="grid">
-    <thead><tr><th>Site</th><th class="num">Open</th><th>Coverage</th><th>Last run</th><th></th></tr></thead>
-    <tbody>
-    {% for s in per_site %}
-    <tr>
-      <td><a href="/positions?site={{ s.slug }}">{{ s.name }}</a>{% if not s.enabled %} <span class="tag">off</span>{% endif %}</td>
-      <td class="num">{{ s.open }}</td>
-      <td><span class="cov-pill cov-{{ s.state }}">{{ s.state }}</span></td>
-      <td>{% if s.last_run %}{{ s.last_run.started | age }} ago{% else %}—{% endif %}</td>
-      <td>
-        <form method="post" action="/sites/{{ s.slug }}/crawl">
-          <button type="submit" class="small"{{ ' disabled' if not s.enabled else '' }}>Crawl now</button>
-        </form>
-      </td>
-    </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  {% endif %}
-  {% if idle_sites %}
-  <details class="cov-more">
-    <summary>{{ coverage.idle }} boards awaiting a first crawl</summary>
-    <div class="cov-chips">
-      {% for s in idle_sites %}
-      <form method="post" action="/sites/{{ s.slug }}/crawl" class="cov-chip">
-        <button type="submit" class="chip-btn"{{ ' disabled' if not s.enabled else '' }} title="Crawl {{ s.name }} now">{{ s.name }}</button>
-      </form>
-      {% endfor %}
-    </div>
-  </details>
-  {% endif %}
-  {% else %}
-  <p class="empty">Site registry unavailable — crawl triggers disabled.</p>
-  {% endif %}
 </section>
+{% endif %}
 {% endblock %}

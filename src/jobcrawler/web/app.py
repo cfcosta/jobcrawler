@@ -591,25 +591,17 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
 
     # -- HTML: dashboard ----------------------------------------------------
 
-    @app.get("/", response_class=HTMLResponse)
-    def dashboard(request: Request) -> Response:
-        tcounts = store.track_counts()
-        funnel = [
-            {
-                "value": s.value,
-                "label": tracking.LABELS[s],
-                "token": tracking.CSS_TOKENS[s],
-                "count": tcounts.get(s.value, 0),
-                "terminal": s in tracking.TERMINAL,
-            }
-            for s in tracking.ORDER
-        ]
-        lifecycle = store.position_counts()
-        distribution = _score_distribution(store)
-        strong = sum(b["count"] for b in distribution if b["strong"])
+    def _board_rows() -> tuple[
+        list[dict[str, Any]], list[dict[str, Any]], dict[str, int]
+    ]:
+        """Per-board coverage rows: (visible, idle, bucket counts).
 
-        # One query each for open counts / health / latest run, instead of a per-site
-        # loop that fired hundreds of queries against a full registry.
+        One query each for open counts / health / latest run, instead of a per-site
+        loop that fired hundreds of queries against a full registry. A board is
+        "idle" (folded out of the table into a chip grid) only when it has never
+        surfaced anything: pending health AND zero open positions — anything with
+        open roles stays in the table so its filtered-list link (#50) is reachable.
+        """
         open_by_site = store.open_counts_by_site()
         health_by_site = store.health_by_site()
         runs_by_site = store.latest_run_by_site()
@@ -639,20 +631,41 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
                 str(d["name"]).lower(),
             )
         )
-        # A board is "idle" (folded out of the table into a chip grid) only when it has
-        # never surfaced anything: pending health AND zero open positions. Anything with
-        # open roles stays in the table so its filtered-list link (#50) is reachable.
         visible = [d for d in per_site if d["state"] != "pending" or d["open"]]
         idle = [d for d in per_site if d["state"] == "pending" and not d["open"]]
+        return visible, idle, cov_counts
+
+    @app.get("/", response_class=HTMLResponse)
+    def dashboard(request: Request) -> Response:
+        tcounts = store.track_counts()
+        funnel = [
+            {
+                "value": s.value,
+                "label": tracking.LABELS[s],
+                "token": tracking.CSS_TOKENS[s],
+                "count": tcounts.get(s.value, 0),
+                "terminal": s in tracking.TERMINAL,
+            }
+            for s in tracking.ORDER
+        ]
+        lifecycle = store.position_counts()
+        distribution = _score_distribution(store)
+        strong = sum(b["count"] for b in distribution if b["strong"])
+        visible, idle, cov_counts = _board_rows()
+        today = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        new_today = store.new_positions_since(today.isoformat())
 
         kpis = [
             {
                 "label": "Open roles",
                 "value": lifecycle["open"],
                 "href": "/positions?status=open",
+                "delta": new_today,
             },
             {
-                "label": "Strong ≥60",
+                "label": "Match ≥60",
                 "value": strong,
                 "href": "/positions?min_score=60&sort=score",
                 "accent": "success",
@@ -671,8 +684,8 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
             {
                 "label": "Boards live",
                 "value": cov_counts["live"],
-                "sub": len(per_site),
-                "href": "#sites",
+                "sub": len(visible) + len(idle),
+                "href": "/boards",
             },
         ]
 
@@ -694,10 +707,33 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
                     exclude_dismissed=True,
                     exclude_company_applied=True,
                 ),
+                "coverage": {
+                    "total": len(visible) + len(idle),
+                    "counts": cov_counts,
+                    "idle": len(idle),
+                },
+                "has_registry": bool(site_list),
+            },
+        )
+
+    @app.get("/boards", response_class=HTMLResponse)
+    def boards(request: Request) -> Response:
+        """The board-fleet ops page — coverage, health, and crawl triggers (§16).
+
+        Deliberately its own surface: crawler coverage is operational admin, and on
+        the dashboard it buried the product (matches, pipeline) under a 200-row table.
+        """
+        visible, idle, cov_counts = _board_rows()
+        return templates.TemplateResponse(
+            request=request,
+            name="boards.html",
+            context={
+                "nav": "boards",
+                "msg": request.query_params.get("msg"),
                 "per_site": visible,
                 "idle_sites": idle,
                 "coverage": {
-                    "total": len(per_site),
+                    "total": len(visible) + len(idle),
                     "counts": cov_counts,
                     "idle": len(idle),
                 },

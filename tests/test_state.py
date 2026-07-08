@@ -188,6 +188,18 @@ def test_set_health_overwrites_prior_state(store: StateStore) -> None:
     assert store.get_health("acme") == "generation_failed"
 
 
+def test_new_positions_since_counts_first_seen(store: StateStore) -> None:
+    # The §16 dashboard "new today" delta: a single COUNT over first_seen.
+    store.upsert_position(
+        "s",
+        "https://x.test/a",
+        fields={"title": "t", "company": "c", "location": "l"},
+        content_hash="h1",
+    )
+    assert store.new_positions_since("2000-01-01T00:00:00+00:00") == 1
+    assert store.new_positions_since("2999-01-01T00:00:00+00:00") == 0
+
+
 def test_health_updated_by_site_maps_latest_attempt_times() -> None:
     # The §4.2/§4.8 sweep-fairness key: one bulk query of each site's latest health
     # timestamp, bumped on every re-attempt, absent for never-attempted sites.

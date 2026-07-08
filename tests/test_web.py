@@ -95,7 +95,13 @@ async def test_html_pages_render() -> None:
     store = _seeded_store()
     try:
         async with _client(create_app(store)) as c:
-            for path in ("/", "/positions", "/applications", f"/positions/{_ACME_PID}"):
+            for path in (
+                "/",
+                "/positions",
+                "/applications",
+                "/boards",
+                f"/positions/{_ACME_PID}",
+            ):
                 r = await c.get(path)
                 assert r.status_code == 200, path
                 assert "text/html" in r.headers["content-type"]
@@ -810,18 +816,24 @@ async def test_form_notes_and_dismiss_redirect() -> None:
         store.close()
 
 
-async def test_dashboard_with_registry_renders_per_site() -> None:
+async def test_boards_page_renders_per_site_and_dashboard_links_it() -> None:
+    # Coverage is ops admin, so it lives on its own /boards page; the dashboard keeps
+    # only the one-line health summary linking there.
     store = _seeded_store()
     sites = [
         SimpleNamespace(slug="acme", company="Acme Corp", name="acme", enabled=True)
     ]
     try:
         async with _client(create_app(store, sites=sites)) as c:
-            r = await c.get("/")
+            r = await c.get("/boards")
             assert r.status_code == 200
-            assert "Acme Corp" in r.text  # per-site panel row
+            assert "Acme Corp" in r.text  # per-site row
             # the site name links to that site's filtered position list (#50)
             assert 'href="/positions?site=acme"' in r.text
+
+            dash = (await c.get("/")).text
+            assert 'href="/boards"' in dash  # health line links the ops page
+            assert 'href="/positions?site=acme"' not in dash  # table moved off
     finally:
         store.close()
 

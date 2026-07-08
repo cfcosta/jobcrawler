@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Boards · Position tracker{% endblock %}
+{% block content %}
+<h1>Boards</h1>
+<p class="subtitle">The crawler fleet — coverage, health, and manual crawl triggers.</p>
+
+<section class="panel" id="sites">
+  <div class="panel-head">
+    <h2>Crawler coverage</h2>
+    {% if has_registry %}
+    <form method="post" action="/recrawl-all"
+          onsubmit="return confirm('Force a re-crawl of every enabled site and rescore all open positions?');">
+      <button type="submit" class="small secondary"
+              title="Queue a forced re-crawl of every enabled site and requeue all open positions for rescoring">Re-crawl &amp; rescore all</button>
+    </form>
+    {% endif %}
+  </div>
+  {% if has_registry %}
+  <div class="cov-legend">
+    <span class="cov-pill cov-live">{{ coverage.counts.live }} live</span>
+    <span class="cov-pill cov-stale">{{ coverage.counts.stale }} stale</span>
+    <span class="cov-pill cov-review">{{ coverage.counts.review }} review</span>
+    <span class="cov-pill cov-failed">{{ coverage.counts.failed }} failed</span>
+    <span class="cov-pill cov-disabled">{{ coverage.counts.disabled }} off</span>
+    <span class="cov-pill cov-pending">{{ coverage.counts.pending }} pending</span>
+    <span class="cov-total">{{ coverage.total }} boards</span>
+  </div>
+  {% if per_site %}
+  <table class="grid">
+    <thead><tr><th>Site</th><th class="num">Open</th><th>Coverage</th><th>Last run</th><th></th></tr></thead>
+    <tbody>
+    {% for s in per_site %}
+    <tr>
+      <td><a href="/positions?site={{ s.slug }}">{{ s.name }}</a>{% if not s.enabled %} <span class="tag">off</span>{% endif %}</td>
+      <td class="num">{{ s.open }}</td>
+      <td><span class="cov-pill cov-{{ s.state }}">{{ s.state }}</span></td>
+      <td>{% if s.last_run %}{{ s.last_run.started | age }} ago{% else %}—{% endif %}</td>
+      <td class="num">
+        <form method="post" action="/sites/{{ s.slug }}/crawl">
+          <button type="submit" class="chip-btn"{{ ' disabled' if not s.enabled else '' }}>Crawl now</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  {% if idle_sites %}
+  <details class="cov-more">
+    <summary>{{ coverage.idle }} boards awaiting a first crawl</summary>
+    <div class="cov-chips">
+      {% for s in idle_sites %}
+      <form method="post" action="/sites/{{ s.slug }}/crawl" class="cov-chip">
+        <button type="submit" class="chip-btn"{{ ' disabled' if not s.enabled else '' }} title="Crawl {{ s.name }} now">{{ s.name }}</button>
+      </form>
+      {% endfor %}
+    </div>
+  </details>
+  {% endif %}
+  {% else %}
+  <p class="empty">Site registry unavailable — crawl triggers disabled.</p>
+  {% endif %}
+</section>
+{% endblock %}

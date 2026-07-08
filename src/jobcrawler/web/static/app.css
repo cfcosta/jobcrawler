@@ -235,8 +235,27 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .stage-count { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .stage-label { font-size: 12px; color: var(--ink-2); }
 .stage.is-active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.stage.zero { opacity: 0.55; }
 .subtitle { color: var(--ink-2); font-size: 13px; margin: -8px 0 18px; }
 .push-right { margin-left: auto; }
+
+/* dashboard pipeline strip: inbox → active funnel → terminal chips */
+.pipeline { display: flex; align-items: stretch; gap: 12px; flex-wrap: wrap; }
+.pipe-inbox {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+  min-width: 130px; padding: 12px 18px; border-radius: var(--r-m);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  color: var(--ink);
+}
+.pipe-inbox:hover { text-decoration: none; border-color: var(--accent); }
+.pipe-inbox .stage-count { color: var(--accent-strong); }
+.pipeline .funnel { flex: 1; }
+.pipe-terminals {
+  display: flex; flex-direction: column; justify-content: center; gap: 6px;
+  align-items: flex-start;
+}
+.pipe-terminals .tag:hover { text-decoration: none; color: var(--ink); }
 
 /* ---- stats / KPIs -------------------------------------------------------- */
 
@@ -318,6 +337,7 @@ td.pos { max-width: 0; width: 55%; }
 .matches .mt-title { font-weight: 600; font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .matches .mt-sub { font-size: 12px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .matches .verdict { font-size: 12px; color: var(--ink-3); margin-left: auto; }
+.matches .avatar { width: 26px; height: 26px; font-size: 11.5px; border-radius: 8px; }
 
 /* ---- tables ---------------------------------------------------------------- */
 
@@ -394,8 +414,11 @@ select.badge-warn { color: var(--warning); border-color: color-mix(in srgb, var(
 .dist-row { display: grid; grid-template-columns: 56px 1fr 44px; align-items: center; gap: 10px; }
 .dist-label { font-size: 12.5px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
 .dist-bar { background: var(--raised); border-radius: 4px; height: 12px; overflow: hidden; }
-.dist-fill { display: block; height: 100%; background: var(--band-mid); border-radius: 0 4px 4px 0; }
-.dist-fill.strong { background: var(--band-strong); }
+.dist-fill { display: block; height: 100%; border-radius: 0 4px 4px 0; }
+.dist-fill.band-strong { background: var(--band-strong); }
+.dist-fill.band-solid { background: var(--band-solid); }
+.dist-fill.band-mid { background: var(--band-mid); }
+.dist-fill.band-low { background: var(--band-low); }
 .dist-n { text-align: right; font-variant-numeric: tabular-nums; color: var(--ink-3); font-size: 12.5px; }
 a.dist-row { text-decoration: none; }
 a.dist-row:hover .dist-label, a.dist-row:hover .dist-n { color: var(--ink); }

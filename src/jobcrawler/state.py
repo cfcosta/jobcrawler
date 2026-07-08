@@ -1953,6 +1953,13 @@ class StateStore:
         rows = self._conn.execute("SELECT site, state FROM site_health").fetchall()
         return {row["site"]: row["state"] for row in rows}
 
+    def new_positions_since(self, since_iso: str) -> int:
+        """Positions first seen at/after ``since_iso`` (§16 dashboard "new today" delta)."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM positions WHERE first_seen >= ?", (since_iso,)
+        ).fetchone()
+        return int(row["n"])
+
     def health_updated_by_site(self) -> dict[str, str]:
         """Latest §4.8 health-state timestamp (ISO) per site slug, in one query.
 
