@@ -1889,18 +1889,6 @@
     backend, Rust/Go, infrastructure and remote startup roles; do not close jobs solely
     because they rotate out of the monthly window.
 
-- slug: electric_capital_portfolio_jobs
-  name: "Electric Capital Portfolio Jobs"
-  url: https://jobs.electriccapital.com/jobs
-  render: static
-  enumerates_all: false
-  hints: >-
-    Getro-powered Electric Capital portfolio board. Windowed portfolio crawl: fetch the jobs
-    listing and freshest company/job detail pages; parse server-rendered payload or embedded
-    data for title, company, locations, employment types, posted/expiry markers, full
-    description and external ATS apply URL. Strong Web3/protocol-infrastructure source; keep
-    enumerates_all:false unless a same-host sitemap/API proves complete.
-
 - slug: cryptocurrencyjobs_engineering
   name: "CryptocurrencyJobs — Engineering"
   url: https://cryptocurrencyjobs.co/engineering/
