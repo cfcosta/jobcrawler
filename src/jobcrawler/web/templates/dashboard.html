@@ -72,6 +72,7 @@
           <span class="mt-title">{{ p.title }}</span>
           <span class="mt-sub">{{ p.hiring_company or p.company }}{% if p | salary %} · {{ p | salary }}{% endif %}{% if p.match_verdict %} · {{ p.match_verdict }}{% endif %}</span>
         </a>
+        {% if p.remote_scope == 'anywhere' %}<span class="scope scope-anywhere" title="Open to candidates anywhere">anywhere</span>{% elif p.remote_scope == 'restricted' %}<span class="scope scope-restricted" title="Remote but geographically restricted — see location">restricted</span>{% endif %}
         <a class="ext row-ext" href="{{ ext_url(p) }}" target="_blank" rel="noopener noreferrer" title="Open the position page (the real ATS posting on aggregator boards)">↗</a>
       </li>
       {% endfor %}
