@@ -540,9 +540,18 @@ def _match(
         if ledger_on and not store.notify_gate(site, url, tiers=tiers):
             continue
         job = e.job
+        # A ping the operator acts on says what the role pays when the posting
+        # does (§4.6 enrichment — source figures only, never an LLM guess here).
+        salary_text = ""
+        if e.salary is not None:
+            salary_text = (
+                f"{e.salary.currency} {e.salary.min:,.0f}–{e.salary.max:,.0f}"
+                f"/{e.salary.period}"
+            )
         notify.notify(
             "match",
-            f"{job.title} at {job.company} — {verdict.verdict} ({verdict.score})",
+            f"{job.title} at {job.company} — {verdict.verdict} ({verdict.score})"
+            + (f" · {salary_text}" if salary_text else ""),
             site=site,
             url=url,
             # The real position page when the board is an aggregator front (§4.6):
@@ -552,6 +561,7 @@ def _match(
             company=job.company,
             score=verdict.score,
             reasons="; ".join(verdict.reasons),
+            salary=salary_text,
         )
         if ledger_on:
             store.record_notified("match", site, url)

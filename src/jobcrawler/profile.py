@@ -90,9 +90,13 @@ class ProfileNotFound(FileNotFoundError):
 class SalaryFloor:
     """A minimum-compensation preference: amount in a currency over a period.
 
-    Kept structured (not free text) because the prefilter/matcher compare it against
-    a job's *parsed* :class:`~jobcrawler.runtime.normalize.SalaryRange`; comparing a
-    number to a number needs no NL parsing. ``period`` is one of year/month/hour.
+    Kept structured (not free text) so a numeric comparison against a job's *parsed*
+    :class:`~jobcrawler.runtime.normalize.SalaryRange` needs no NL parsing.
+    ``period`` is one of year/month/hour. Parsed and displayed today — deliberately
+    NOT enforced by the §4.7 prefilter (most postings state no pay, so a hard drop
+    would discard the corpus): the operator floor is the §16 ``min_salary`` browse
+    filter over the annualized-USD band; prefilter wiring is a named follow-up
+    (SPEC §5a).
     """
 
     amount: float

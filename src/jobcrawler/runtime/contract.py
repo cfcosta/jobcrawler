@@ -11,7 +11,7 @@ description is not a job we can track, match, or de-dupe, so it never validates
 (the §6 gates layer the stricter length/quality checks on top). Everything else
 is *optional*: a crawler fills a field only when the source actually states it,
 leaving it ``None`` otherwise. That split is deliberate — ATS boards differ
-wildly in what they expose (Greenhouse has no salary/employment fields at all;
+wildly in what they expose (Greenhouse serves pay only behind ``pay_transparency=true``;
 Lever always has ``workplaceType``; Ashby has structured compensation ~70% of
 the time) — so the optional fields are opportunistic enrichment, never a
 contract the generator must satisfy.

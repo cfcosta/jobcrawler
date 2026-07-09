@@ -693,6 +693,36 @@ def test_only_strong_matches_notify(monkeypatch: MonkeyPatch) -> None:
     store.close()
 
 
+def test_match_notify_carries_the_stated_salary(monkeypatch: MonkeyPatch) -> None:
+    # A ping the operator acts on should say what the role pays when the posting
+    # does; salary-less matches keep the old message exactly.
+    events = _capture_notify(monkeypatch)
+    store = StateStore(":memory:")
+    paid = _job(
+        "https://example.com/paid",
+        title="Senior Backend Engineer",
+        salary_min=150000.0,
+        salary_max=200000.0,
+        salary_currency="USD",
+        salary_period="year",
+    )
+    matcher = _matcher(store, _all_score(85))
+    crawl_site("s", _crawl(paid), _ctx(), store, matcher=matcher)
+    assert len(events) == 1
+    _event, message, fields = events[0]
+    assert "USD 150,000–200,000/year" in message
+    assert fields["salary"] == "USD 150,000–200,000/year"
+
+    events.clear()
+    bare = _job("https://example.com/bare", title="Senior Backend Engineer")
+    crawl_site("s2", _crawl(bare), _ctx(), store, matcher=_matcher(store, _all_score(85)))
+    assert len(events) == 1
+    _event, message, fields = events[0]
+    assert "USD" not in message
+    assert fields["salary"] == ""
+    store.close()
+
+
 def test_prefilter_drops_before_scoring() -> None:
     # An excluded-keyword posting is tracked but never reaches the LLM (§6 token economy).
     store = StateStore(":memory:")

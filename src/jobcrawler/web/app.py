@@ -276,6 +276,11 @@ def _position_dict(p: PositionRecord) -> dict[str, Any]:
         "salary_period": p.salary_period,
         "salary_usd_min": p.salary_usd_min,
         "salary_usd_max": p.salary_usd_max,
+        # §4.6 provenance: where the figures came from ('structured' | 'text' |
+        # 'llm'; null = pre-provenance row) and the printed text as the board
+        # served it (kept even when the parse refused it).
+        "salary_source": p.salary_source,
+        "salary_raw": p.salary_raw,
         "description": p.description,
         "status": p.status,
         "closed_at": _iso(p.closed_at),

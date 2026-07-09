@@ -157,7 +157,7 @@
     <section class="panel">
       <h2>Compensation</h2>
       {% if p.salary_min is not none or p.salary_max is not none %}
-      <p class="badges"><span class="tag">{{ p | salary }}</span></p>
+      <p class="badges"><span class="tag">{{ p | salary }}</span>{% if p.salary_source == 'llm' %}<span class="tag tag-pending" title="Mined from the description by the §4.7 extract pass — not source-structured data">LLM-extracted</span>{% endif %}</p>
       <dl class="kv">
         <dt>Currency</dt><dd>{{ p.salary_currency or '—' }}</dd>
         <dt>Min</dt><dd>{% if p.salary_min is not none %}{{ "{:,.0f}".format(p.salary_min) }}{% else %}—{% endif %}</dd>
@@ -165,9 +165,12 @@
         <dt>Period</dt><dd>{{ p.salary_period or '—' }}</dd>
         <dt>USD min/yr</dt><dd>{% if p.salary_usd_min is not none %}{{ "${:,.0f}".format(p.salary_usd_min) }}{% else %}—{% endif %}</dd>
         <dt>USD max/yr</dt><dd>{% if p.salary_usd_max is not none %}{{ "${:,.0f}".format(p.salary_usd_max) }}{% else %}—{% endif %}</dd>
+        <dt>Source</dt><dd>{{ {'structured': 'source data', 'text': 'printed text', 'llm': 'LLM-extracted'}.get(p.salary_source, '—') }}</dd>
+        <dt>As printed</dt><dd>{{ p.salary_raw or '—' }}</dd>
       </dl>
       {% else %}
       <p class="empty">No compensation stated in the posting.</p>
+      {% if p.salary_raw %}<p class="empty">The board printed “{{ p.salary_raw }}”, which the parser refused to read as a figure.</p>{% endif %}
       {% endif %}
     </section>
   </div>

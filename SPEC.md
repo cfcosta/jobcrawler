@@ -172,8 +172,12 @@ is wrong on two of the four backends:
 - **Greenhouse** — `boards-api.greenhouse.io/v1/boards/<token>/jobs?content=true` returns the
   **whole board in one call** with a `meta.total` count (the §6 enum-floor oracle). `content`
   is the **full** description but **HTML-entity-escaped** — the crawler must `html.unescape`
-  *then* strip tags, or every posting is mojibake. No salary/employment fields;
-  `location.name` is one flattened string; `first_published` is always present (→ `posted_at`).
+  *then* strip tags, or every posting is mojibake. No employment fields, but appending
+  `&pay_transparency=true` to the SAME call serves per-job `pay_input_ranges`
+  `[{min_cents, max_cents, currency_type}]` on many boards (2026-07 fleet probe: 21 of our 60
+  boards populated, 2,235 jobs — anthropic 341/401, remotecom 258/279, reddit 124/179; map
+  cents/100, single-currency boards only). `location.name` is one flattened string;
+  `first_published` is always present (→ `posted_at`).
 - **Lever** — `api.lever.co/v0/postings/<token>?mode=json`. The `description` field is the
   **intro only**; the full text is `description + lists[].content + additional` concatenated
   — a crawler that reads `description` alone yields truncated postings that fail the §6
@@ -376,8 +380,9 @@ User-Agent** for its `/api` — a per-board UA override rides on the fetch tier,
 Jobs yielded by scripts are validated against a Pydantic model (`runtime/contract.py`). The
 split is deliberate and load-bearing: a small set of **required, non-empty** identity/content
 fields, and a wide set of **optional, extract-when-present** fields — because ATS boards differ
-wildly in what they expose (Greenhouse has no salary/employment fields at all; Lever always has
-`workplaceType`; Ashby has structured compensation ~70% of the time). The optional fields are
+wildly in what they expose (Greenhouse serves pay only behind `pay_transparency=true` and no
+employment fields; Lever always has `workplaceType`; Ashby has structured compensation ~70% of
+the time). The optional fields are
 opportunistic enrichment, **never** a contract the generator must satisfy.
 
 | field | type | required | notes |
@@ -453,13 +458,32 @@ tests. The enrichment (`enrich(job) -> EnrichedJob`, a frozen dataclass of `job`
   LIKE target, so its output contract is frozen (tests pin it); the *structural* parse that
   preserves multi-location boundaries is §4.12's `parse_location`, a different function on the
   RAW string.
-- `parse_salary(raw, description='')` → `SalaryRange(min, max, currency, period) | None`.
-  Handles `$152,800 — $259,200 USD`, `$189K – $330K`, `R$ 8.000 - R$ 12.000`, `€60k–80k`. A
-  **currency anchor is mandatory** and numbers come **only from `raw`** (never mined from the
+- `parse_salary(raw, description='')` → `SalaryRange(min, max, currency, period) | None` —
+  **recognize-or-refuse**, versioned by `SALARY_PARSER_VERSION`. Recognizes printed notation:
+  `$152,800 — $259,200 USD`, `$189K – $330K`, `R$ 8.000 - R$ 12.000`, `€60k–80k`, HTML
+  entities, dollar-family prefixes (`CA$`/`A$`/`S$`… are that currency, never USD), ISO codes
+  beyond the majors (CAD/AUD/SGD/PLN/CHF/INR…, an explicit code overriding a bare `$`),
+  shared-magnitude shorthand (`$80-100k` = 80k–100k), and Ashby's `/ 1 HOUR` interval wording.
+  A **currency anchor is mandatory** and numbers come **only from `raw`** (never mined from the
   description — a JD's "$5M in funding" can't leak in). Period defaults by currency convention
   (USD/EUR/GBP → year, BRL → month), overridden by an explicit `/hour` `/mês` `/ano` `per year`
-  marker. **Conservative:** `None` when ambiguous; never invents a figure. `enrich` prefers the
-  crawler's structured salary fields when set, else parses the verbatim `salary` text.
+  marker in `raw`, else a **boundary-guarded** slash marker in the description (a digit-adjacent
+  `$45/hr` reads; `ERP/HRIS`, `People/HR`, and URL paths never do). **Refusals — never guesses:**
+  day/week rates (no honest annualization factor), b/trillion magnitudes (funding figures),
+  ambiguous symbols (`¥`, `kr`), two different ISO codes, zero/negative bounds, and periods the
+  figures contradict (no major currency prints 700/hour or 150,000/month). `enrich` prefers the
+  crawler's structured salary fields when set (stated period wordings map through a closed
+  vocabulary; an unmappable one refuses the figure), else parses the verbatim `salary` text —
+  and stamps `salary_origin` ('structured' | 'text').
+- **Salary provenance + repair (§4.6).** The verbatim printed text persists as `salary_raw`
+  (crawler-owned, always refreshed, out of `content_hash`) and `salary_source` records where
+  the figures came from (`structured` | `text` | `llm`; NULL = pre-provenance row). A
+  store-open sweep, meta-gated on `SALARY_PARSER_VERSION`, re-parses `salary_raw` under the
+  current grammar and heals the measured corruption classes — zeros-as-figures, yearly figures
+  mislabeled hour/month, half-k shorthand mins, sub-$10k annual bands in majors, funding-scale
+  magnitudes — flipping only when the flipped reading is plausible and otherwise clearing to
+  honest absence (the untouched `set_salary` NULL-guard then lets the §4.7 extract arm
+  re-fill). LLM-sourced rows are never swept; `salary_raw` is never erased.
 - `usd_annual_band(min, max, currency, period, *, fx_rates=None)` → `(usd_min, usd_max)`. A
   **derived comparison band**, not a claim about the posting: it converts the parsed figure to a
   common annualized-USD scale (period → year by ×2080/×12; currency → USD by a rate factor) so
@@ -570,12 +594,19 @@ dropping a job**:
    because salary, employer, and geography are properties of the posting, not the profile — and
    a cache hit re-applies for free on every run (which also re-heals the §16 dedup key a crawl
    upsert reverted). Fresh (cache-miss) extractions are bounded to `extract_cap` (default 50)
-   per run so a first pass over a big backlog can't spike spend; the overflow simply waits for
-   the next run (nothing is parked). It is strictly additive and conservative: `set_salary` only
+   per run so a first pass over a big backlog can't spike spend; the overflow **re-parks**
+   (`set_match_pending`) so the drain re-presents those rows next tick — the verdict re-applies
+   from cache for free and extraction takes a fresh slot. Long descriptions send **head (2000)
+   + tail (4000)** chars — pay lives in footers: on the measured gate pool, 0/88 stated ranges
+   sat inside a head-only window and 88/88 inside head+tail (`extract-v3`). It is strictly
+   additive and conservative: `set_salary` only
    fills a row that has **none** (a source salary always wins and is never clobbered — this is
    why `_position_fields` **omits** the salary columns on a salary-less crawl rather than sending
-   NULLs), the extractor returns `null` unless the description *literally* states pay **with a
-   currency** (never inferring from seniority/market/location), `set_hiring_company` records
+   NULLs), defaults a model-omitted period by the §4.6 currency convention (so LLM fills never
+   mint permanently-NULL USD bands), and stamps `salary_source = 'llm'`; the extractor returns
+   `null` unless the description *literally* states pay **with a
+   currency** (never inferring from seniority/market/location) and refuses whole figures under
+   a stated period outside `year|month|hour` or a non-ISO currency; `set_hiring_company` records
    the cleaner name and repoints the §16 `company_canonical` dedup key at the real employer,
    and the geo answer routes by string class — tail strings fill the §4.12 value ledger,
    marker rows get posting-local fence rows, both first-writer-wins, and `loc_llm_at` stamps
@@ -1048,7 +1079,8 @@ untouched). §17 stays frozen: role-group buckets and the T5 gate keep reading
 - **`Profile` / `ProfilePrefs`** — §5 profile (below); `profile_hash` keys the match cache.
 - **`MatchVerdict`** — `score: int` (0–100 clamped), `verdict: strong|good|weak|reject`, `reasons`,
   `concerns` (§4.7). `PROMPT_VERSION = 'match-v2'`. The match-time extractor (§4.7) is a separate
-  signature cached under `EXTRACT_VERSION = 'extract-v2'` (v2 added §4.12's `location_geo`) —
+  signature cached under `EXTRACT_VERSION = 'extract-v3'` (v2 added §4.12's `location_geo`;
+  v3 the head+tail digest window) —
   keyed on `(content_hash, model)` with **no** `profile_hash`, since salary/employer/geography
   are properties of the posting, not the profile.
 - **Run record** (canonical) — `{site, started, finished, positions_found, new_positions, errors,
@@ -1076,8 +1108,11 @@ the part they need:
   (free-text tuples — the last drops a *remote* posting whose stated location is scoped to a region
   needing work authorization the operator lacks, e.g. `remote, us`; matched case-insensitively against
   the location and gated to remote so worldwide/timezone-overlap roles still pass), and
-  `min_salary: SalaryFloor(amount, currency, period)` (structured, so the
-  comparison against a job's parsed salary needs no NL parsing).
+  `min_salary: SalaryFloor(amount, currency, period)` (structured, so a
+  comparison against a job's parsed salary needs no NL parsing; **parsed and displayed today —
+  prefilter enforcement is deliberately unwired**: dropping salary-less postings would discard
+  the majority of the corpus, so the operator floor is the §16 `min_salary` browse filter over
+  the USD band; wiring the pref into the prefilter is a named follow-up).
 - **free markdown body** → the rich narrative (skills, domains, what to reject) handed **verbatim** to
   the matcher LM as context.
 
@@ -1460,6 +1495,11 @@ an `openrouter/…` slug billed per token. Selected knobs:
   pt-BR**: role-shape-outranks-IC precedence, `eng_other`/`non_eng` recall-safety, structured-workplace
   precedence, and conservative salary (`$189K–$330K`, `R$ 8.000 - R$ 12.000`, `€60k–80k`, ambiguous →
   `None`, BRL-defaults-monthly).
+- **Salary parser v2 (§4.6)** — the widened-recognition table (dollar-family prefixes, ISO codes,
+  shared-magnitude shorthand, entity dashes, Ashby intervals) and the refusal table (day/week rates,
+  magnitude poison, ambiguous symbols, contradictory periods, zeros) pinned as unit tests alongside
+  the original empirical/ambiguous tables (which pass unmodified — the conservatism contract);
+  store-side: the repair-sweep classes each with idempotence + llm-untouched pins.
 - **Geo parser (§4.12)** — the adversarial corpus pinned as unit tests: fence vs place derivation
   (`Remote - US` fences, `Cardiff, London or Remote (UK)` mixes), comma-list absorption, prefix-code
   disambiguation (`IN - Bangalore`→India, `Toronto, CA`→Canada), the documented `Georgia`/`Washington`
@@ -1541,9 +1581,10 @@ an `openrouter/…` slug billed per token. Selected knobs:
 3. **Salary inference confidence.** `parse_salary` is deliberately conservative (§4.6). The **FX-normalized
    comparison shipped** — `usd_annual_band` derives a `salary_usd_min/max` sort key over a static majors
    floor overlaid with a daily out-of-band live-rate pull (§4.6/§4.9), without touching the verbatim source
-   figure. Open: do we also surface a *confidence band* on the parsed figure, and how do we keep either
-   affordance from becoming the "invent a number" the never-invent rule forbids (the USD band already guards
-   this by returning `(None, None)`, i.e. simply not ranking, for a currency it can't convert)?
+   figure. ~~Open: do we also surface a *confidence band* on the parsed figure?~~ **Answered with
+   provenance instead of confidence** (§4.6): `salary_source` ('structured' | 'text' | 'llm') plus the
+   as-printed `salary_raw` on every surface — the operator sees *where* a figure came from, and an
+   LLM-mined band is badged; a numeric confidence would itself be an invented number.
 4. **Per-source match budgets.** `match_daily_cap` is global. The fresh-vs-drain axis is handled — a
    `JOBCRAWLER_MATCH_DRAIN_FLOOR` slice is reserved so heavy new inflow can't starve the backlog drain
    (§4.7) — but *within* the fresh budget a noisy aggregator (RemoteOK) can still crowd out a high-signal

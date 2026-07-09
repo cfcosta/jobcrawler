@@ -1284,6 +1284,58 @@ async def test_api_carries_structured_location_keys() -> None:
         store.close()
 
 
+async def test_salary_provenance_reaches_api_and_detail() -> None:
+    # The operator can see WHERE a figure came from: source data, the printed
+    # text, or the §4.7 LLM backfill (badged) — and the as-printed string rides
+    # along for rows whose parse was refused.
+    s = StateStore(":memory:")
+    try:
+        s.upsert_position(
+            "acme",
+            "https://acme.test/paid",
+            fields={
+                **FIELDS,
+                "title": "Paid Engineer",
+                "salary_min": 150000,
+                "salary_max": 200000,
+                "salary_currency": "USD",
+                "salary_period": "year",
+                "salary_raw": "$150K – $200K",
+                "salary_source": "text",
+            },
+            content_hash="h1",
+        )
+        s.upsert_position(
+            "acme",
+            "https://acme.test/mined",
+            fields={**FIELDS, "title": "Mined Engineer"},
+            content_hash="h2",
+        )
+        s.set_salary(
+            "acme",
+            "https://acme.test/mined",
+            salary_min=90000.0,
+            salary_max=90000.0,
+            salary_currency="USD",
+            salary_period="year",
+        )
+        async with _client(create_app(s)) as c:
+            rows = (await c.get("/api/positions")).json()
+            by_title = {r["title"]: r for r in rows}
+            assert by_title["Paid Engineer"]["salary_source"] == "text"
+            assert by_title["Paid Engineer"]["salary_raw"] == "$150K – $200K"
+            assert by_title["Mined Engineer"]["salary_source"] == "llm"
+
+            pid = by_title["Mined Engineer"]["pid"]
+            html = (await c.get(f"/positions/{pid}")).text
+            assert "LLM-extracted" in html  # the mined figure is badged
+            pid = by_title["Paid Engineer"]["pid"]
+            html = (await c.get(f"/positions/{pid}")).text
+            assert "$150K – $200K" in html  # as printed
+    finally:
+        s.close()
+
+
 async def test_detail_page_shows_locations_panel_and_display_provenance() -> None:
     store = _loc_store()
     try:
