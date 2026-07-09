@@ -52,6 +52,44 @@ def _salary(job):
         pieces.append(period)
     return " ".join(pieces) or None
 
+def _positive_amount(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str):
+        try:
+            number = float(value.replace(",", "").strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    return number if number > 0 else None
+
+def _salary_fields(job):
+    """Jobicy serves salaryMin/salaryMax/salaryCurrency/salaryPeriod; keep the
+    joined text AND the structured quartet (zero bounds omitted, period passed
+    as stated — the host maps the wording)."""
+    fields = {}
+    text = _salary(job)
+    if text:
+        fields["salary"] = text
+    min_v = _positive_amount(job.get("salaryMin"))
+    max_v = _positive_amount(job.get("salaryMax"))
+    if min_v is not None:
+        fields["salary_min"] = min_v
+    if max_v is not None:
+        fields["salary_max"] = max_v
+    if min_v is None and max_v is None:
+        return fields
+    currency = _first_text(job.get("salaryCurrency"))
+    if currency:
+        fields["salary_currency"] = currency
+    period = _first_text(job.get("salaryPeriod"))
+    if period:
+        fields["salary_period"] = period
+    return fields
+
 def crawl(ctx):
     raw = ctx.fetch(SITE)
     data = json.loads(raw)
@@ -81,8 +119,9 @@ def crawl(ctx):
             "posted_at": _first_text(job.get("pubDate") or job.get("publishedAt") or job.get("datePosted")),
             "external_id": _first_text(job.get("id") or job.get("jobSlug")),
             "apply_url": _first_text(job.get("url")),
-            "salary": _salary(job),
         }
+        for key, value in _salary_fields(job).items():
+            optional[key] = value
         # Jobicy's filtered remote feed represents remote roles; keep the source wording when present.
         if location and "remote" in location.lower():
             optional["workplace_type"] = "Remote"

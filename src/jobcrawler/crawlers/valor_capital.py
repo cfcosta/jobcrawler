@@ -123,6 +123,52 @@ def salary_from_jsonld(data):
         return value_text + " " + currency
     return value_text
 
+def positive_number(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str):
+        try:
+            number = float(value.replace(",", "").strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    return number if number > 0 else None
+
+def salary_fields_from_jsonld(data):
+    """Keep the flattened JSON-LD baseSalary text AND the structured quartet.
+
+    unitText ('YEAR'/'MONTH'/'HOUR'...) passes as stated into salary_period —
+    the host maps the wording. Zero/absent bounds are omitted as unstated.
+    """
+    text = salary_from_jsonld(data)
+    if not text:
+        return {}
+    fields = {"salary": text}
+    salary = data.get("baseSalary")
+    if not isinstance(salary, dict):
+        return fields
+    value = salary.get("value")
+    if not isinstance(value, dict):
+        return fields
+    low = positive_number(value.get("minValue"))
+    high = positive_number(value.get("maxValue"))
+    if low is not None:
+        fields["salary_min"] = low
+    if high is not None:
+        fields["salary_max"] = high
+    if low is None and high is None:
+        return fields
+    currency = first_text(salary.get("currency"))
+    if currency:
+        fields["salary_currency"] = currency
+    unit = first_text(value.get("unitText"))
+    if unit:
+        fields["salary_period"] = unit
+    return fields
+
 def crawl(ctx):
     xml = ctx.fetch("https://jobs.valorcapitalgroup.com/sitemap.xml")
     seen = set()
@@ -174,9 +220,8 @@ def crawl(ctx):
         if external_id:
             job["external_id"] = external_id
 
-        salary = salary_from_jsonld(data)
-        if salary:
-            job["salary"] = salary
+        for key, value in salary_fields_from_jsonld(data).items():
+            job[key] = value
 
         yielded += 1
         yield job

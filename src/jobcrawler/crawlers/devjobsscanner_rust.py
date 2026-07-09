@@ -14,6 +14,20 @@ def _clean(value):
         return value or None
     return value
 
+def _positive_amount(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str):
+        try:
+            number = float(value.replace(",", "").strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    return number if number > 0 else None
+
 def _description(job):
     parts = []
     title = _clean(job.get("title"))
@@ -111,6 +125,17 @@ def crawl(ctx):
                     lo = int(minv) if float(minv).is_integer() else minv
                     hi = int(maxv) if float(maxv).is_integer() else maxv
                     job["salary"] = f"{cur} {lo}-{hi}"
+
+            # Structured quartet: the API sends salaryMin=0 for "unstated", so a
+            # zero/absent bound is omitted rather than minting 0-X rows.
+            min_bound = _positive_amount(minv)
+            max_bound = _positive_amount(maxv)
+            if min_bound is not None:
+                job["salary_min"] = min_bound
+            if max_bound is not None:
+                job["salary_max"] = max_bound
+            if isinstance(cur, str) and cur and (min_bound is not None or max_bound is not None):
+                job["salary_currency"] = cur
 
             yield job
 

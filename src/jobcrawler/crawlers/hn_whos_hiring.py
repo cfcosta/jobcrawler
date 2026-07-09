@@ -20,7 +20,21 @@ _APPLY_RE = re.compile(
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 _OBFUS_AT = re.compile(r"\s*[\[({<]\s*at\s*[\])}>]\s*", re.I)
 _OBFUS_DOT = re.compile(r"\s*[\[({<]\s*dot\s*[\])}>]\s*", re.I)
-_SALARY_RE = re.compile(r"(?i)(?:[$€£]\s?\d[\d,.]*(?:\s?[kKmM])?(?:\s?[-–]\s?[$€£]?\s?\d[\d,.]*(?:\s?[kKmM])?)?(?:\s?(?:/|per)\s?(?:year|yr|hour|hr))?|(?:salary|compensation|pay)\s*[:\-]\s*[^.|;\n]{3,80})")
+# A printed comp figure is k-suffixed ($150k), part of an explicit range
+# ($150,000 - $200,000, $80-100k), or a lone comma-formatted amount ($150,000).
+# Funding/GMV magnitudes ($3B, $875M/month, $1.6 trillion) must never match:
+# an M/B/bn/billion/trillion suffix vetoes the amount, and a bare number only
+# counts when it opens a range that ends in a real amount.
+_AMOUNT_VETO = r"(?!\d|[.,]\d|\s?(?:[mbt]n?\b|[mb]illion\b|trillion\b))"
+_AMOUNT = (
+    r"(?:\d[\d,]*(?:\.\d+)?\s?k(?![a-z])|\d{1,3}(?:,\d{3})+(?:\.\d+)?" + _AMOUNT_VETO + r")"
+)
+_SALARY_RE = re.compile(
+    r"(?i)(?:[$€£]\s?(?:" + _AMOUNT + r"(?:\s?[-–—]\s?[$€£]?\s?" + _AMOUNT + r")?"
+    r"|\d+(?:\.\d+)?\s?[-–—]\s?[$€£]?\s?" + _AMOUNT + r")"
+    r"(?:\s?(?:/|per)\s?(?:year|yr|hour|hr))?"
+    r"|(?:salary|compensation|pay)\s*[:\-]\s*[^.|;\n]{3,80})"
+)
 
 def _clean(value):
     if value is None:

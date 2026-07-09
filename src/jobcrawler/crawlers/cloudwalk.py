@@ -62,6 +62,72 @@ def _set_if_value(obj, key, value):
         obj[key] = value
 
 
+def _positive_amount(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str):
+        try:
+            number = float(value.replace(",", "").strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    return number if number > 0 else None
+
+
+def _amount_text(number):
+    if number.is_integer():
+        return str(int(number))
+    return ("%f" % number).rstrip("0").rstrip(".")
+
+
+def _salary_fields(salary_range):
+    """Map Lever's salaryRange into the salary contract fields.
+
+    Lever serves salaryRange as an object {min, max, currency, interval}; assigning
+    that dict into the str-typed `salary` field fails contract validation at the
+    runner and drops the whole posting. Strings stay verbatim; objects become the
+    structured quartet plus a readable text. Zero/missing bounds are omitted.
+    """
+    if isinstance(salary_range, str):
+        text = salary_range.strip()
+        return {"salary": text} if text else {}
+    if not isinstance(salary_range, dict):
+        return {}
+
+    low = _positive_amount(salary_range.get("min"))
+    high = _positive_amount(salary_range.get("max"))
+    if low is None and high is None:
+        return {}
+
+    currency = salary_range.get("currency")
+    currency = str(currency).strip() if currency else None
+    interval = salary_range.get("interval")
+    interval = str(interval).strip() if interval else None
+
+    fields = {}
+    if low is not None:
+        fields["salary_min"] = low
+    if high is not None:
+        fields["salary_max"] = high
+    if currency:
+        fields["salary_currency"] = currency
+    if interval:
+        fields["salary_period"] = interval
+
+    if low is not None and high is not None and low != high:
+        amount = _amount_text(low) + " - " + _amount_text(high)
+    else:
+        amount = _amount_text(low if low is not None else high)
+    text = " ".join(bit for bit in (currency, amount) if bit)
+    if interval:
+        text = text + " / " + interval
+    fields["salary"] = text
+    return fields
+
+
 def crawl(ctx):
     postings = json.loads(ctx.fetch(SITE))
     for posting in postings:
@@ -83,8 +149,7 @@ def crawl(ctx):
         _set_if_value(job, "employment_type", categories.get("commitment"))
         _set_if_value(job, "posted_at", _posted_at(posting.get("createdAt")))
 
-        salary = posting.get("salaryRange")
-        if salary:
-            _set_if_value(job, "salary", salary)
+        for key, value in _salary_fields(posting.get("salaryRange")).items():
+            _set_if_value(job, key, value)
 
         yield job

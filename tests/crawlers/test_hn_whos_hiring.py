@@ -113,6 +113,24 @@ def test_parse_header_still_reads_short_location_parts() -> None:
     )
 
 
+def test_salary_captures_ranges_k_suffixes_and_comma_formatted_amounts() -> None:
+    # A comp line is a range, a k-suffixed figure, or a comma-formatted amount.
+    assert hn._salary("We pay $150k-$200k plus equity") == "$150k-$200k"
+    assert hn._salary("Salary: $150,000 - $200,000") == "Salary: $150,000 - $200,000"
+    assert hn._salary("Base of $80-100k depending on level") == "$80-100k"
+    assert hn._salary("Offering $150k for senior roles") == "$150k"
+    assert hn._salary("We offer $150,000 and meaningful equity") == "$150,000"
+
+
+def test_salary_never_fires_on_funding_or_gmv_magnitudes() -> None:
+    # The old regex grabbed the first currency-anchored number anywhere in the
+    # comment, so funding/GMV blurbs became "salaries".
+    assert hn._salary("$3B in annual sales and growing") is None
+    assert hn._salary("we process $875M/month in volume") is None
+    assert hn._salary("$1.6 trillion market opportunity") is None
+    assert hn._salary("we raised $10M from top investors") is None
+
+
 def test_apply_link_unescapes_algolia_entity_escaped_hrefs() -> None:
     # Algolia's comment_text entity-escapes attribute values ("&#x2F;" for "/",
     # "&amp;" for "&"), so each captured href must be unescaped — otherwise the

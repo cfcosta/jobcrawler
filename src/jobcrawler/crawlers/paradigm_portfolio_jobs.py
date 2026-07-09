@@ -75,6 +75,48 @@ def _salary_text(src):
         text += " per " + str(period)
     return text
 
+def _positive_amount(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str):
+        try:
+            number = float(value.replace(",", "").strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    return number if number > 0 else None
+
+def _salary_fields(src):
+    """Getro flattens {minValue, maxValue, currency, period} into text; keep the
+    verbatim text AND the structured quartet (zero/absent bounds omitted, period
+    passed as stated — the host maps the wording)."""
+    text = _salary_text(src)
+    if not text:
+        return {}
+    fields = {"salary": text}
+    lo = _positive_amount(src.get("minValue"))
+    hi = _positive_amount(src.get("maxValue"))
+    if lo is not None:
+        fields["salary_min"] = lo
+    if hi is not None:
+        fields["salary_max"] = hi
+    if lo is None and hi is None:
+        return fields
+    currency = src.get("currency")
+    if isinstance(currency, dict):
+        currency = currency.get("value") or currency.get("label")
+    period = src.get("period")
+    if isinstance(period, dict):
+        period = period.get("value") or period.get("label")
+    if currency:
+        fields["salary_currency"] = str(currency)
+    if period:
+        fields["salary_period"] = str(period)
+    return fields
+
 def crawl(ctx):
     for job_id, company_id in HOSTED_JOBS:
         detail_url = _join("/api-boards/jobs/%s?companyId=%s" % (job_id, company_id))
@@ -115,8 +157,7 @@ def crawl(ctx):
         if expires:
             item["expires_at"] = expires
 
-        salary = _salary_text(job.get("salaryRange"))
-        if salary:
-            item["salary"] = salary
+        for key, value in _salary_fields(job.get("salaryRange")).items():
+            item[key] = value
 
         yield item

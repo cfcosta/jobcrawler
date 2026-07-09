@@ -44,9 +44,27 @@ def _labels(values):
     return labels
 
 
-def _salary(value):
-    if not isinstance(value, dict):
+def _positive_amount(value):
+    if isinstance(value, bool):
         return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str):
+        try:
+            number = float(value.replace(",", "").strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    return number if number > 0 else None
+
+
+def _salary_fields(value):
+    """Getro flattens {minValue, maxValue, currency, period} into text; keep the
+    verbatim joined text AND the structured quartet (zero/absent bounds omitted,
+    period passed as stated — the host maps the wording)."""
+    if not isinstance(value, dict):
+        return {}
 
     currency = value.get("currency")
     if isinstance(currency, dict):
@@ -72,7 +90,24 @@ def _salary(value):
     if period:
         bits.append("per " + str(period))
 
-    return " ".join(bits) or None
+    text = " ".join(bits)
+    if not text:
+        return {}
+
+    fields = {"salary": text}
+    lo_num = _positive_amount(lo)
+    hi_num = _positive_amount(hi)
+    if lo_num is not None:
+        fields["salary_min"] = lo_num
+    if hi_num is not None:
+        fields["salary_max"] = hi_num
+    if lo_num is None and hi_num is None:
+        return fields
+    if currency:
+        fields["salary_currency"] = str(currency)
+    if period:
+        fields["salary_period"] = str(period)
+    return fields
 
 
 def _workplace(job):
@@ -143,8 +178,7 @@ def crawl(ctx):
         if departments:
             item["department"] = ", ".join(departments)
 
-        salary = _salary(job.get("salaryRange"))
-        if salary:
-            item["salary"] = salary
+        for key, value in _salary_fields(job.get("salaryRange")).items():
+            item[key] = value
 
         yield item

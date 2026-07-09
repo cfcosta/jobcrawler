@@ -78,6 +78,38 @@ def _salary(job):
         return "%s %s per year" % (currency, int(low))
     return "%s %s per year" % (currency, int(high))
 
+def _positive_amount(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str):
+        try:
+            number = float(value.replace(",", "").strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    return number if number > 0 else None
+
+def _salary_fields(record):
+    """Keep the flattened text AND the structured quartet. Currency and period
+    mirror the text builder (USD per year); zero bounds are omitted as unstated."""
+    text = _salary(record)
+    if not text:
+        return {}
+    fields = {"salary": text}
+    low = _positive_amount(record.get("salary_min"))
+    high = _positive_amount(record.get("salary_max"))
+    if low is not None:
+        fields["salary_min"] = low
+    if high is not None:
+        fields["salary_max"] = high
+    if low is not None or high is not None:
+        fields["salary_currency"] = "USD"
+        fields["salary_period"] = "year"
+    return fields
+
 def _date(value):
     if not value or not isinstance(value, str):
         return None
@@ -109,9 +141,8 @@ def _job_from_record(record, records):
         "external_id": str(record.get("id") or record.get("uid") or slug),
     }
 
-    salary = _salary(record)
-    if salary:
-        item["salary"] = salary
+    for key, value in _salary_fields(record).items():
+        item[key] = value
     if record.get("type"):
         item["employment_type"] = record.get("type")
     if record.get("is_worldwide") or re.search(r"\b(remote|worldwide)\b", location, re.I):

@@ -21,9 +21,18 @@ _REMOTE_RE = re.compile(r"(?i)fully distributed|fully remote|\bremote\b")
 _EMP_RE = re.compile(
     r"(?i)\bthis is an?\s+(full[- ]time|part[- ]time|contract|internship)\b"
 )
-_COMP_RE = re.compile(
-    r"(?i)compensation range[^\n]*?\bis\s+(.+?)(?:\s+and follows\b|\.\s|\n|$)"
+# Salary mining needs compensation context: a money span only counts when it sits
+# within ~80 chars after a compensation keyword, or is itself an explicit
+# currency+range shape. Funding-scale suffixes (M/B/bn/billion/trillion) veto the
+# amount so investor figures ("raised $12.5M") never read as compensation.
+_COMP_KEYWORD_RE = re.compile(r"(?i)\b(?:salary|compensation|pay|salaire)\b")
+_MONEY_VETO = r"(?!\d|[.,]\d|\s?(?:[mbt]n?\b|[mb]illion\b|trillion\b))"
+_MONEY = (
+    r"(?:[$€£]\s?\d[\d,.]*(?:\s?k)?" + _MONEY_VETO
+    + r"|\d[\d,.]*\s?k(?:\s?[$€£])?" + _MONEY_VETO
+    + r"|\d[\d,.]*" + _MONEY_VETO + r"\s?[$€£])"
 )
+_MONEY_RE = re.compile(r"(?i)" + _MONEY + r"(?:\s?(?:[-–—]|to|and)\s?" + _MONEY + r")?")
 
 _EMPLOYMENT = {
     "full-time": "Full-time",
@@ -85,10 +94,19 @@ def _employment(description):
 
 
 def _salary(description):
-    m = _COMP_RE.search(description)
-    if not m:
-        return None
-    return re.sub(r"\s+", " ", m.group(1)).strip(" .") or None
+    text = description or ""
+    keyword_ends = [m.end() for m in _COMP_KEYWORD_RE.finditer(text)]
+    for match in _MONEY_RE.finditer(text):
+        span = re.sub(r"\s+", " ", match.group(0)).strip(" .,")
+        if not span:
+            continue
+        in_context = any(0 <= match.start() - end <= 80 for end in keyword_ends)
+        explicit_range = any(sep in span for sep in "-–—") and any(
+            symbol in span for symbol in "$€£"
+        )
+        if in_context or explicit_range:
+            return span
+    return None
 
 
 def _apply_url(description):
