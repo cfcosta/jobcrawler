@@ -52,10 +52,11 @@ def _bool(name: str, default: bool) -> bool:
 
 
 def model() -> str | None:
-    """RLM root planner/extractor — a strong, code-capable model. Required: there is
-    no safe default (a placeholder slug fails opaque at the provider), so generation
-    call sites use :func:`require_model`, never a fabricated default."""
-    return _opt("JOBCRAWLER_MODEL")
+    """RLM root planner/extractor — a strong, code-capable model. Defaults to
+    ``chatgpt/gpt-5.6-sol``; set ``JOBCRAWLER_MODEL`` to override. The default is a
+    real provider slug (not the old opaque-failing placeholder), so generation call
+    sites can lean on :func:`require_model` and always get a usable model."""
+    return _opt("JOBCRAWLER_MODEL") or "chatgpt/gpt-5.6-sol"
 
 
 def require_model() -> str:
@@ -77,9 +78,10 @@ def require_model() -> str:
 
 
 def sub_model() -> str | None:
-    """RLM ``sub_lm``. Required: unset ⇒ every ``llm_query`` bills at root rates,
-    so callers must error rather than silently fall back (§4.2)."""
-    return _opt("JOBCRAWLER_SUB_MODEL")
+    """RLM ``sub_lm`` — the cheap in-sandbox model every ``llm_query`` bills against.
+    Defaults to ``chatgpt/gpt-5.6-luna``; set ``JOBCRAWLER_SUB_MODEL`` to override. The
+    default keeps in-sandbox queries off the pricier root planner (§4.2)."""
+    return _opt("JOBCRAWLER_SUB_MODEL") or "chatgpt/gpt-5.6-luna"
 
 
 def require_sub_model() -> str:
@@ -170,11 +172,12 @@ def profile_path() -> str:
 
 
 def match_model() -> str | None:
-    """The host-side §4.7 match LM slug (``JOBCRAWLER_MATCH_MODEL``). Optional: unset,
-    matching falls back to the cheap ``sub_lm`` via :func:`require_match_model` rather
-    than the root planner — so a deployment need only name a dedicated match model when
-    it wants one distinct from ``sub_lm``."""
-    return _opt("JOBCRAWLER_MATCH_MODEL")
+    """The host-side §4.7 match LM slug. Defaults to ``chatgpt/gpt-5.6-luna`` (a cheap
+    model — matching bills tokens per scored job); set ``JOBCRAWLER_MATCH_MODEL`` to
+    override. Because the default is non-``None``, the §4.7 run loop's match gate treats
+    matching as enabled out of the box (a deployment disables it by other means, e.g. no
+    ``PROFILE.md``), rather than requiring an explicit match-model env var."""
+    return _opt("JOBCRAWLER_MATCH_MODEL") or "chatgpt/gpt-5.6-luna"
 
 
 def require_match_model() -> str:
@@ -267,10 +270,10 @@ def match_daily_cap() -> int:
     token-budget backstop (§4.7/§8). Only *LLM-scored* jobs count: a cache hit (a job
     whose ``content_hash`` + ``profile_hash`` was already scored) is FREE and never
     charged against it. Jobs past the cap are ``set_match_pending``, NEVER dropped — a
-    later run or the recheck loop drains them within budget. Default 800: bounds a bad
+    later run or the recheck loop drains them within budget. Default 2000: bounds a bad
     crawl or a fresh-profile rematch storm from blowing the daily spend. Raise it only
     with the token bill in view."""
-    return _int("JOBCRAWLER_MATCH_DAILY_CAP", 800)
+    return _int("JOBCRAWLER_MATCH_DAILY_CAP", 2000)
 
 
 def match_drain_floor() -> int:

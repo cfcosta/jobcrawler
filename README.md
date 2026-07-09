@@ -162,8 +162,8 @@ nix develop
 # Configure the LM (see "Configuration" for the full surface).
 export OPENROUTER_API_KEY=sk-or-...            # read by litellm via the model slug
 export JOBCRAWLER_MODEL=openrouter/<vendor>/<strong-code-model>   # RLM planner
-export JOBCRAWLER_SUB_MODEL=openrouter/<vendor>/<cheap-code-model> # RLM sub_lm + match fallback
-# Optional: a dedicated match model (else the cheap sub_lm is reused).
+export JOBCRAWLER_SUB_MODEL=openrouter/<vendor>/<cheap-code-model> # RLM sub_lm (cheap in-sandbox)
+# Optional overrides (all three default to chatgpt/* slugs when unset — see Configuration).
 export JOBCRAWLER_MATCH_MODEL=openrouter/<vendor>/<cheap-model>
 
 # — or, instead of an OpenRouter key, bill against a ChatGPT subscription (§9).
@@ -251,22 +251,22 @@ starting point.
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `OPENROUTER_API_KEY` | — | Provider key, read by litellm via the model slug's `openrouter/` prefix. Use `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` for those providers. Needed by `generate`/`optimize` and by matching (`run`/`crawl`); the crawl itself needs no LM. **Not needed if every configured slug is `chatgpt/*`** — those authenticate with the Codex OAuth token from `jobcrawl login` (see *ChatGPT subscription* below), not an API key. |
-| `JOBCRAWLER_MODEL` | — | RLM root planner — a strong, code-capable model. No default (errors loud rather than 404-ing deep in the provider). |
-| `JOBCRAWLER_SUB_MODEL` | — | RLM `sub_lm` — a cheaper code model for in-sandbox `llm_query`. Required so it can't silently bill at the root rate. Also the **default match model** when `JOBCRAWLER_MATCH_MODEL` is unset. |
+| `JOBCRAWLER_MODEL` | `chatgpt/gpt-5.6-sol` | RLM root planner — a strong, code-capable model. Override for a different provider/slug (e.g. an `openrouter/<vendor>/<model>`). |
+| `JOBCRAWLER_SUB_MODEL` | `chatgpt/gpt-5.6-luna` | RLM `sub_lm` — a cheaper code model for in-sandbox `llm_query`, kept off the pricier root planner. |
 
-Matching needs a *cheap* model (`JOBCRAWLER_MATCH_MODEL`, else `JOBCRAWLER_SUB_MODEL`) —
-never the root planner. With neither set, positions are still tracked and enriched, just
-not scored.
+Matching runs on a *cheap* model (`JOBCRAWLER_MATCH_MODEL`, default `chatgpt/gpt-5.6-luna`) —
+never the root planner. Matching is on by default; without a `PROFILE.md` positions are still
+tracked and enriched, just not scored.
 
 ### Profile & matching (§4.6) — *the one LLM surface, host-side*
 
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `JOBCRAWLER_PROFILE` | `PROFILE.md` | Path to the YAML-frontmatter + markdown profile every job is scored against. Missing ⇒ a loud create-me hint (no profile ⇒ nothing to match). |
-| `JOBCRAWLER_MATCH_MODEL` | unset | The match LM. Optional: unset, matching borrows the cheap `SUB_MODEL` — never the root planner, whose per-token rate would make scoring the daily fleet ruinous. |
+| `JOBCRAWLER_MATCH_MODEL` | `chatgpt/gpt-5.6-luna` | The match LM — a cheap model (matching bills tokens per scored job); never the root planner, whose per-token rate would make scoring the daily fleet ruinous. |
 | `JOBCRAWLER_MATCH_BATCH` | `10` | Jobs per single `dspy.Predict(MatchJobs)` call. Batching amortizes the profile+rubric prompt prefix; too large and one malformed batch strands more jobs to `pending` on a length mismatch. |
 | `JOBCRAWLER_MATCH_MIN_SCORE` | `70` | The 0–100 score at/above which a match is worth a `match` notification. Purely the notify/`matches` threshold — a 60 still lands in the store, it just doesn't ping. |
-| `JOBCRAWLER_MATCH_DAILY_CAP` | `400` | Hard ceiling on jobs sent to the match LM per UTC day (the token backstop). **Cache hits are free** and never charged. Jobs past the cap are parked `match_pending`, never dropped — a later run drains them. |
+| `JOBCRAWLER_MATCH_DAILY_CAP` | `2000` | Hard ceiling on jobs sent to the match LM per UTC day (the token backstop). **Cache hits are free** and never charged. Jobs past the cap are parked `match_pending`, never dropped — a later run drains them. |
 | `JOBCRAWLER_MATCH_RATE` | `10/m` | Governor pacing for the match LM calls (`requests/interval`) so a big new-position sweep can't burst the provider into rate-limit errors. Paces *calls*; the daily cap bounds *volume*. |
 | `JOBCRAWLER_FIRST_CRAWL_CAP` | `30` | On a board's first position-yielding crawl, only the newest `cap` jobs (by `posted_at`, discovery order as fallback) go to the matcher now; the backlog tail is parked `pending`, so a fresh board can't burn the whole daily cap on stale standing roles. |
 
@@ -455,7 +455,7 @@ is the human-facing payoff — the open positions scored `≥ MATCH_MIN_SCORE`, 
 first; `jobcrawl positions` is the raw tracked inventory.
 
 **Tune matching spend.** The token bill is bounded by four knobs. `JOBCRAWLER_MATCH_DAILY_CAP`
-(default 400) is the hard per-UTC-day ceiling on *LLM-scored* jobs — cache hits are free, so
+(default 2000) is the hard per-UTC-day ceiling on *LLM-scored* jobs — cache hits are free, so
 steady-state re-crawls cost nothing and only genuinely-new/changed postings draw it down.
 Overflow parks as `match_pending` and drains on later runs, never dropped, so a raise is
 safe when you want faster coverage of a big backlog. `JOBCRAWLER_FIRST_CRAWL_CAP` (30) stops
@@ -496,11 +496,11 @@ stay available, so you can drive changes by hand with the daemon's own initiativ
 
 **Troubleshooting.**
 
-- *`JOBCRAWLER_MODEL is required` / `…SUB_MODEL is required`* — set both model slugs;
-  there is intentionally no default.
-- *`no match model configured`* — matching needs `JOBCRAWLER_MATCH_MODEL` or (the fallback)
-  `JOBCRAWLER_SUB_MODEL`; it never uses the root planner. Without one, positions are tracked
-  but unscored.
+- *Wrong model / provider* — the planner, sub, and match models default to `chatgpt/*` slugs
+  (`chatgpt/gpt-5.6-sol` for the planner, `chatgpt/gpt-5.6-luna` for the sub/match LMs), which
+  authenticate via the Codex OAuth token (below). Override any of them with `JOBCRAWLER_MODEL` /
+  `JOBCRAWLER_SUB_MODEL` / `JOBCRAWLER_MATCH_MODEL` (e.g. `openrouter/…` slugs). Matching still
+  never falls back to the root planner.
 - *`no Codex login found` / `token refresh failed`* (a `chatgpt/*` slug) — the ChatGPT-subscription
   OAuth token is missing or dead. Run `codex login` (the official Codex CLI) then `jobcrawl login` to
   import it. `run`/`crawl` preflight surfaces this at startup rather than blocking the daemon on an

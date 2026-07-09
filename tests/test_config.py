@@ -154,19 +154,20 @@ def test_optional_knob_none_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.flaresolverr_url() is None
 
 
-def test_sub_model_required_returns_none_when_unset(
+def test_sub_model_defaults_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A real cheap slug is the default, so an unset sub_lm still bills in-sandbox
+    # queries against a cheap model rather than silently borrowing the root planner.
+    monkeypatch.delenv("JOBCRAWLER_SUB_MODEL", raising=False)
+    assert config.sub_model() == "chatgpt/gpt-5.6-luna"
+
+
+def test_require_sub_model_defaults_when_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("JOBCRAWLER_SUB_MODEL", raising=False)
-    assert config.sub_model() is None
-
-
-def test_require_sub_model_errors_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    # §4.2/§11: an unset sub_lm silently bills every llm_query at root rates, so the
-    # caller must error rather than fall back — never `sub_model() or model()`.
-    monkeypatch.delenv("JOBCRAWLER_SUB_MODEL", raising=False)
-    with pytest.raises(RuntimeError, match="JOBCRAWLER_SUB_MODEL"):
-        config.require_sub_model()
+    assert config.require_sub_model() == "chatgpt/gpt-5.6-luna"
 
 
 def test_require_sub_model_returns_value_when_set(
@@ -260,17 +261,16 @@ def test_solver_defaults_to_none(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.solver() == "none"
 
 
-def test_model_optional_none_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_model_defaults_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    # §4.2/§11: the default is a real provider slug (unlike the old opaque-failing
+    # placeholder), so an unset JOBCRAWLER_MODEL resolves to a usable planner.
     monkeypatch.delenv("JOBCRAWLER_MODEL", raising=False)
-    assert config.model() is None
+    assert config.model() == "chatgpt/gpt-5.6-sol"
 
 
-def test_require_model_errors_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    # §4.2/§11: JOBCRAWLER_MODEL has no safe default (the old one was a non-existent
-    # slug), so the generation/optimize path must error loud rather than fail opaque.
+def test_require_model_defaults_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("JOBCRAWLER_MODEL", raising=False)
-    with pytest.raises(RuntimeError, match="JOBCRAWLER_MODEL"):
-        config.require_model()
+    assert config.require_model() == "chatgpt/gpt-5.6-sol"
 
 
 def test_require_model_returns_value_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -688,9 +688,9 @@ def test_profile_path_honors_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.profile_path() == "/data/me.md"
 
 
-def test_match_model_optional_none_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_match_model_defaults_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("JOBCRAWLER_MATCH_MODEL", raising=False)
-    assert config.match_model() is None
+    assert config.match_model() == "chatgpt/gpt-5.6-luna"
 
 
 def test_match_model_parses_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -707,37 +707,29 @@ def test_require_match_model_prefers_match_model(
     assert config.require_match_model() == "openrouter/cheap/matcher"
 
 
-def test_require_match_model_falls_back_to_sub_model(
+def test_require_match_model_defaults_when_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Matching bills tokens per job, so an unset match model borrows the cheap sub_lm
-    # rather than the expensive root planner.
+    # An unset match model resolves to its own cheap default (a real slug), which
+    # short-circuits the old sub_lm fallback. Matching bills tokens per job, so the
+    # default is deliberately a cheap model.
     monkeypatch.delenv("JOBCRAWLER_MATCH_MODEL", raising=False)
     monkeypatch.setenv("JOBCRAWLER_SUB_MODEL", "openrouter/cheap/sub")
-    assert config.require_match_model() == "openrouter/cheap/sub"
+    assert config.require_match_model() == "chatgpt/gpt-5.6-luna"
 
 
 def test_require_match_model_never_uses_root_planner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # With only the root planner set (no match/sub model), matching must error rather
-    # than fall back to the ruinously-priced planner — the whole point of the fallback
-    # chain stopping at sub_lm.
+    # With only the root planner set (no match/sub model), matching resolves to the
+    # cheap match default rather than the ruinously-priced planner — the invariant the
+    # fallback chain (and now the default) exists to preserve.
     monkeypatch.delenv("JOBCRAWLER_MATCH_MODEL", raising=False)
     monkeypatch.delenv("JOBCRAWLER_SUB_MODEL", raising=False)
     monkeypatch.setenv("JOBCRAWLER_MODEL", "openrouter/expensive/planner")
-    with pytest.raises(RuntimeError, match="JOBCRAWLER_MATCH_MODEL"):
-        config.require_match_model()
-
-
-def test_require_match_model_error_names_sub_model(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # The error names both env vars so an operator knows either one satisfies it.
-    monkeypatch.delenv("JOBCRAWLER_MATCH_MODEL", raising=False)
-    monkeypatch.delenv("JOBCRAWLER_SUB_MODEL", raising=False)
-    with pytest.raises(RuntimeError, match="JOBCRAWLER_SUB_MODEL"):
-        config.require_match_model()
+    resolved = config.require_match_model()
+    assert resolved == "chatgpt/gpt-5.6-luna"
+    assert resolved != "openrouter/expensive/planner"
 
 
 def test_match_batch_defaults_to_ten(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -760,10 +752,10 @@ def test_match_min_score_parses_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.match_min_score() == 85
 
 
-def test_match_daily_cap_defaults_to_800(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_match_daily_cap_defaults_to_2000(monkeypatch: pytest.MonkeyPatch) -> None:
     # The hard token-budget backstop: cache hits are free, only LLM-scored jobs count.
     monkeypatch.delenv("JOBCRAWLER_MATCH_DAILY_CAP", raising=False)
-    assert config.match_daily_cap() == 800
+    assert config.match_daily_cap() == 2000
 
 
 def test_match_daily_cap_parses_env(monkeypatch: pytest.MonkeyPatch) -> None:

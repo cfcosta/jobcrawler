@@ -520,7 +520,7 @@ dropping a job**:
    `profile_hash` and **lazily invalidates** every verdict — rescoring is automatic but pays only
    for jobs actually re-examined, never the whole backlog.
 2. **Daily cap.** `store.match_spent(today)` counts only **LLM-scored** jobs (cache hits are
-   free). Misses beyond `match_daily_cap` (default 800/UTC-day) are `set_match_pending` — **never
+   free). Misses beyond `match_daily_cap` (default 2000/UTC-day) are `set_match_pending` — **never
    dropped** — and drained by later runs / the recheck loop.
 3. **Batched scoring.** Affordable misses are scored `match_batch` (default 10) at a time in **one
    `dspy.Predict(MatchJobs)` call per batch**, under `dspy.context(lm=dspy.LM(model,
@@ -1291,16 +1291,16 @@ an `openrouter/…` slug billed per token. Selected knobs:
 
 | var | default | meaning |
 |---|---|---|
-| `JOBCRAWLER_MODEL` | *(required)* | RLM root planner/extractor — a strong, code-capable model (`require_model` errors if unset) |
-| `JOBCRAWLER_SUB_MODEL` | *(required)* | RLM `sub_lm`; unset ⇒ every `llm_query` bills at root rates (`require_sub_model` errors) |
+| `JOBCRAWLER_MODEL` | `chatgpt/gpt-5.6-sol` | RLM root planner/extractor — a strong, code-capable model; override for a different provider/slug |
+| `JOBCRAWLER_SUB_MODEL` | `chatgpt/gpt-5.6-luna` | RLM `sub_lm` — a cheap model so in-sandbox `llm_query` never bills at root rates |
 | `JOBCRAWLER_REFLECTION_MODEL` | *(required for GEPA)* | GEPA `reflection_lm` (§4.11), ideally a different family |
-| `JOBCRAWLER_MATCH_MODEL` | `sub_model()` fallback | the host-side §4.7 match LM; `require_match_model` falls back to the cheap `sub_lm`, **never** the root planner |
+| `JOBCRAWLER_MATCH_MODEL` | `chatgpt/gpt-5.6-luna` | the host-side §4.7 match LM — a cheap model; `require_match_model` **never** falls back to the root planner |
 | `JOBCRAWLER_AUTH_DIR` | `~/.config/jobcrawler/chatgpt` | store for the ChatGPT-subscription OAuth token a `chatgpt/*` slug uses (§9); `jobcrawl login` writes it, litellm reads+refreshes it. Falls back to `CHATGPT_TOKEN_DIR`. A token store, not an API key |
 | `JOBCRAWLER_MATCH_BATCH` | `10` | jobs per `dspy.Predict(MatchJobs)` call (§4.7) |
 | `JOBCRAWLER_MATCH_MIN_SCORE` | `70` | 0–100 score at/above which a match notifies (surface threshold, not a drop) |
 | `JOBCRAWLER_SCORE_HALF_LIFE_DAYS` | `30` | §4.7 freshness decay: the *effective* score's bonus above the floor halves every this-many days of posting age (from `posted_at`, else `first_seen`), so a newer posting outranks an equally-good older one |
 | `JOBCRAWLER_SCORE_FRESHNESS_FLOOR` | `0.6` | §4.7 freshness-decay floor in [0,1]: the smallest recency multiplier, so a great fit stays represented (never below 60% of its raw score); `1.0` disables decay |
-| `JOBCRAWLER_MATCH_DAILY_CAP` | `800` | hard per-UTC-day LLM-scored jobs; cache hits free; overflow → `match_pending` |
+| `JOBCRAWLER_MATCH_DAILY_CAP` | `2000` | hard per-UTC-day LLM-scored jobs; cache hits free; overflow → `match_pending` |
 | `JOBCRAWLER_MATCH_DRAIN_FLOOR` | `160` | §4.7 slice of the daily cap fresh scoring holds back for the backlog drain (fresh spends ≤ `cap − floor`; drain spends the floor + fresh's leftover); `0` = one shared budget |
 | `JOBCRAWLER_MATCH_RATE` | `20/m` | governor pacing for match LLM calls (≠ the daily volume cap) |
 | `JOBCRAWLER_EXTRACT_MODEL` | `sub_model()` fallback | the §4.7 match-time salary/employer extract LM; `require_extract_model` falls back to the cheap `sub_lm`, **never** the root planner; unset with no `sub_lm` ⇒ extraction is simply **off** |
