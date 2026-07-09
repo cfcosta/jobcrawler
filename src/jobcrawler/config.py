@@ -13,7 +13,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from jobcrawler.durations import parse_duration
-from jobcrawler.urls import DEFAULT_TRACKING_PARAMS
+from jobcrawler.urls import DEFAULT_MARKETPLACE_APPLY_HOSTS, DEFAULT_TRACKING_PARAMS
 
 # This module lives at the package root, so its directory *is* the package dir —
 # used to default the committed-crawlers location to the in-package crawlers/ dir.
@@ -521,6 +521,20 @@ def tracking_param_denylist() -> frozenset[str]:
     if raw is None:
         return DEFAULT_TRACKING_PARAMS
     return frozenset(p.strip() for p in raw.split(",") if p.strip())
+
+
+def marketplace_apply_host_denylist() -> frozenset[str]:
+    """Hosts a posting's effective apply target is dropped for at ingestion (§4.7).
+
+    Talent-marketplace / staffing-pool hosts (Proxify, Lemon, Toptal…) where applying
+    means joining a candidate pool, not a specific employer — so the "job" has no real
+    per-employer link and only pollutes the queue. ``JOBCRAWLER_MARKETPLACE_HOST_DENYLIST``
+    (comma-separated) overrides the curated default; empty string disables the filter.
+    """
+    raw = os.getenv("JOBCRAWLER_MARKETPLACE_HOST_DENYLIST")
+    if raw is None:
+        return DEFAULT_MARKETPLACE_APPLY_HOSTS
+    return frozenset(h.strip().lower() for h in raw.split(",") if h.strip())
 
 
 # --- gate thresholds (§6; M1 placeholders, calibrate per §14 Q8) ------------

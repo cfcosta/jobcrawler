@@ -30,6 +30,41 @@ DEFAULT_TRACKING_PARAMS: frozenset[str] = frozenset(
     }
 )
 
+# Talent-marketplace / staffing-pool hosts where "apply" means joining a candidate
+# pool, not applying to one job: every listing links to the same generic signup, so a
+# posting whose effective apply target lands here carries no real per-employer
+# application. Such a job is dropped at ingestion (JOBCRAWLER_MARKETPLACE_HOST_DENYLIST).
+# NOT here: real ATS/board backends that host many companies but still mint a distinct
+# per-job link (gupy.io, getro.com, greenhouse/lever/ashby) — those are legitimate.
+# Suffix-matched by ``host_on_domain`` (subdomains included, attack-safe).
+DEFAULT_MARKETPLACE_APPLY_HOSTS: frozenset[str] = frozenset(
+    {
+        # Confirmed pools — every observed listing's effective apply target collapses onto
+        # ONE generic signup page (career.proxify.io/apply, lemon.io/for-developers/),
+        # whatever the title. Verified against the tracked corpus, not eyeballed.
+        "proxify.io",
+        "lemon.io",
+        # Well-known "join our talent network" marketplaces (preventive; apply == join the
+        # pool, by business model — no per-job link exists to keep). No corpus rows yet, so
+        # these are unverified insurance; drop any that later prove to mint per-job links.
+        "toptal.com",
+        "turing.com",
+        "gun.io",
+        "usebraintrust.com",
+        "andela.com",
+        "x-team.com",
+        "crossover.com",
+        "revelo.io",
+        "strider.ai",
+        # Aggregator the operator explicitly retired — re-lists others' roles behind its
+        # own signup, no canonical per-employer link.
+        "remoterocketship.com",
+        # Deliberately NOT here, though they surfaced in the same sweep: innovecs.com mints a
+        # distinct Greenhouse per-job link (jobs.innovecs.com/vacancies?gh_jid=…) and arc.dev
+        # links out to per-employer LinkedIn posts — both are real per-job boards, not pools.
+    }
+)
+
 _DEFAULT_PORTS = {"http": "80", "https": "443"}
 _PCT = re.compile(r"%[0-9a-fA-F]{2}")
 

@@ -368,6 +368,46 @@ def test_run_record_carries_body_quality_signal() -> None:
     store.close()
 
 
+def test_marketplace_apply_host_is_dropped(monkeypatch: MonkeyPatch) -> None:
+    # §4.7: a posting whose *effective apply target* is a talent-pool host (apply == "join
+    # our network", not a per-employer application) is dropped before tracking, and the
+    # count surfaces as a run signal. Pinned to an explicit denylist so the test is
+    # independent of the curated default's membership drifting over time.
+    monkeypatch.setenv("JOBCRAWLER_MARKETPLACE_HOST_DENYLIST", "proxify.io")
+    store = StateStore(":memory:")
+    summary = crawl_site(
+        "s",
+        _crawl(
+            _job("https://example.com/pool", apply_url="https://proxify.io/apply"),
+            _job("https://example.com/real", apply_url="https://acme.com/jobs/1"),
+        ),
+        _ctx(),
+        store,
+    )
+    assert summary.new_positions == 1  # only the real per-employer posting tracked
+    assert _open_urls(store, "s") == {canonicalize_url("https://example.com/real")}
+    rec = store.last_run("s")
+    assert rec is not None and rec.signals is not None
+    assert rec.signals["marketplace_skipped"] == 1
+    store.close()
+
+
+def test_marketplace_falls_back_to_posting_url(monkeypatch: MonkeyPatch) -> None:
+    # When a posting carries no absolute apply_url, the *posting url itself* is the
+    # effective apply target — a pool-hosted listing with no apply link is still dropped.
+    monkeypatch.setenv("JOBCRAWLER_MARKETPLACE_HOST_DENYLIST", "proxify.io")
+    store = StateStore(":memory:")
+    summary = crawl_site(
+        "s",
+        _crawl(_job("https://proxify.io/jobs/42", apply_url=None)),
+        _ctx(),
+        store,
+    )
+    assert summary.new_positions == 0
+    assert _open_urls(store, "s") == set()
+    store.close()
+
+
 def test_incomplete_position_stays_untracked_for_re_evaluation() -> None:
     # A stub is not tracked, so once the page carries the full description the next crawl
     # tracks it — no permanent drop.

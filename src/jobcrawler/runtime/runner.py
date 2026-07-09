@@ -76,7 +76,7 @@ from jobcrawler.runtime.normalize import (
 )
 from jobcrawler.runtime.sandbox import collect_crawler
 from jobcrawler.state import StateStore
-from jobcrawler.urls import canonicalize_url
+from jobcrawler.urls import canonicalize_url, host_on_domain, normalize_host
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,6 +243,10 @@ def _process(
     # The operator's denylist (§11) is load-bearing on the dedup key (§4.6): two URLs
     # differing only on a tracking param must collapse to one canonical position.
     drop = config.tracking_param_denylist()
+    # Talent-marketplace / staffing-pool hosts: a posting whose effective apply target
+    # lands here is a "join our pool" link, not a real per-employer application — dropped
+    # below before it is ever tracked, matched, or aged (§4.7).
+    marketplace_hosts = config.marketplace_apply_host_denylist()
     markers = tuple(m.lower() for m in expired_markers)
     # Snapshot the currency→USD table once per crawl (static floor + any live rates, §4.6):
     # the annualized-USD band is a pure function of the job plus these rates, and rates only
@@ -256,6 +260,7 @@ def _process(
     present: set[str] = set()
     seen: set[str] = set()
     incomplete = 0
+    marketplace_skipped = 0
     new_positions = 0
     changed_positions = 0
     new_or_changed: list[tuple[str, EnrichedJob]] = []
@@ -264,6 +269,17 @@ def _process(
     for job in jobs:
         canon = canonicalize_url(job.url, drop_params=drop)
         description = job.description or ""
+        # Marketplace/staffing-pool filter (§4.7): a posting whose *effective apply
+        # target* (apply_url when absolute, else the posting url) is on a pool host is a
+        # "join our talent network" link, not a real per-employer application. Drop it
+        # before ``seen`` — it is not a posting we track, match, or age toward closure.
+        apply_href = job.apply_url or ""
+        apply_target = apply_href if apply_href.startswith("http") else job.url
+        if marketplace_hosts and host_on_domain(
+            normalize_host(apply_target), marketplace_hosts
+        ):
+            marketplace_skipped += 1
+            continue
         # Expired: the board still serves the page but the role is gone (§4.7). Close an
         # open row now (idempotent; a no-op for an untracked posting); never track/match.
         # Kept OUT of ``seen`` so the closure diff ignores it (it's already closed).
@@ -355,6 +371,8 @@ def _process(
     # positions_found stays healthy. Host-side only, never surfaced to the generator (§8);
     # omitted on a zero-yield crawl (the blackout signal is positions_found == 0 itself).
     signals: dict[str, object] = {"incomplete": incomplete}
+    if marketplace_skipped:
+        signals["marketplace_skipped"] = marketplace_skipped
     if positions_found:
         signals["body_quality"] = (positions_found - incomplete) / positions_found
     # §4.8 under-enumeration signal: a known board that came back a slice. Recorded even

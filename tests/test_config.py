@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from jobcrawler import config
+from jobcrawler.urls import DEFAULT_MARKETPLACE_APPLY_HOSTS
 
 
 def test_int_knob_defaults_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -120,6 +121,32 @@ def test_tracking_denylist_parses_csv(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("JOBCRAWLER_TRACKING_PARAM_DENYLIST", "ref, src ,fbclid")
     denylist = config.tracking_param_denylist()
     assert {"ref", "src", "fbclid"} <= denylist
+
+
+def test_marketplace_denylist_defaults_to_curated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("JOBCRAWLER_MARKETPLACE_HOST_DENYLIST", raising=False)
+    hosts = config.marketplace_apply_host_denylist()
+    assert hosts is DEFAULT_MARKETPLACE_APPLY_HOSTS
+    assert "proxify.io" in hosts  # a confirmed pool ships in the default
+
+
+def test_marketplace_denylist_parses_csv(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "JOBCRAWLER_MARKETPLACE_HOST_DENYLIST", "Proxify.io, lemon.io ,turing.com"
+    )
+    assert config.marketplace_apply_host_denylist() == frozenset(
+        {"proxify.io", "lemon.io", "turing.com"}
+    )
+
+
+def test_marketplace_denylist_empty_string_disables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An explicit empty value turns the filter off — distinct from unset (curated default).
+    monkeypatch.setenv("JOBCRAWLER_MARKETPLACE_HOST_DENYLIST", "")
+    assert config.marketplace_apply_host_denylist() == frozenset()
 
 
 def test_optional_knob_none_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
