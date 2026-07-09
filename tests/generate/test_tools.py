@@ -303,6 +303,7 @@ def test_validate_tool_flags_inadmissible_declared_hosts() -> None:
     )
     # api.example.net is operator-evidenced → admitted; evil.example.org is not.
     assert seen["hosts"] == {"example.com", "api.example.net"}
+    out = cast(dict[str, object], out)
     assert out["inadmissible_hosts"] == ("evil.example.org",)
 
 
@@ -323,7 +324,10 @@ def test_validate_tool_reports_no_inadmissible_hosts_for_a_clean_declaration() -
         evidence_hosts=[],
         validate_fn=fake_validate,
     )
-    out = validate('SITE = "https://example.com"\ndef crawl(ctx):\n    yield 1\n')
+    out = cast(
+        dict[str, object],
+        validate('SITE = "https://example.com"\ndef crawl(ctx):\n    yield 1\n'),
+    )
     assert out["inadmissible_hosts"] == ()
 
 

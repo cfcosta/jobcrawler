@@ -8,6 +8,7 @@ delivery helpers (stage vs live + promote) are pure filesystem and tested direct
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -637,5 +638,5 @@ def test_select_missing_returns_enabled_sites_without_a_crawler(
         Site(slug="disabled", url="https://d.com", enabled=False),
     ]
     monkeypatch.setattr(cli_generate, "_committed_slugs", lambda: {"has"})
-    args = SimpleNamespace(all=False, missing=True, stale=False, slug=None)
+    args = argparse.Namespace(all=False, missing=True, stale=False, slug=None)
     assert [s.slug for s in cli_generate._select(sites, args)] == ["cold"]

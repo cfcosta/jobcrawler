@@ -14,6 +14,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -266,10 +267,10 @@ def test_search_remote_scope_filter(store: StateStore) -> None:
     assert len(store.search_positions()) == 3
 
 
-def test_reopen_backfills_remote_scope(tmp_path: object) -> None:
+def test_reopen_backfills_remote_scope(tmp_path: Path) -> None:
     # Rows written before the column existed (remote_scope NULL) get the host-side
     # scope on the next open, from workplace+location — no re-crawl needed (§4.6).
-    path = str(tmp_path / "positions.db")  # type: ignore[operator]
+    path = str(tmp_path / "positions.db")
     first = StateStore(path)
     _seed(
         first,

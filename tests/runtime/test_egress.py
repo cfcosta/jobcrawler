@@ -38,7 +38,7 @@ class _Origin(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def log_message(self, *_: object) -> None:  # silence the test log
+    def log_message(self, format: str, *args: object) -> None:  # silence the test log
         pass
 
 
@@ -48,7 +48,7 @@ def origin() -> Iterator[tuple[str, int]]:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        yield server.server_address[0], server.server_address[1]
+        yield "127.0.0.1", server.server_address[1]
     finally:
         server.shutdown()
         server.server_close()

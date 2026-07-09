@@ -719,7 +719,9 @@ def test_upsert_persists_and_refreshes_apply_url(store: StateStore) -> None:
         fields={**FIELDS, "apply_url": "https://apply.example/acme/42"},
         content_hash="h",
     )
-    assert store.get_position("acme", "u").apply_url == "https://apply.example/acme/42"
+    rec = store.get_position("acme", "u")
+    assert rec is not None
+    assert rec.apply_url == "https://apply.example/acme/42"
     result = store.upsert_position(
         "acme",
         "u",
@@ -727,9 +729,9 @@ def test_upsert_persists_and_refreshes_apply_url(store: StateStore) -> None:
         content_hash="h",
     )
     assert result == "unchanged"
-    assert (
-        store.get_position("acme", "u").apply_url == "https://apply.example/acme/42-v2"
-    )
+    rec = store.get_position("acme", "u")
+    assert rec is not None
+    assert rec.apply_url == "https://apply.example/acme/42-v2"
 
 
 def test_upsert_roundtrips_datetime_fields_as_iso(store: StateStore) -> None:

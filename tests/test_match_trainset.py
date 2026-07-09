@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from typing import cast
 
 from jobcrawler.match import _content_hash, _digest, candidate_from_row
 from jobcrawler.match_trainset import (
@@ -13,9 +14,14 @@ from jobcrawler.match_trainset import (
     load_trainset,
     save_trainset,
 )
-from jobcrawler.state import StateStore
+from jobcrawler.state import PositionRecord, StateStore
 
 _ENGAGED_URL = "https://acme.example/jobs/engaged"
+
+
+def _rec(**attrs: object) -> PositionRecord:
+    """An attribute bag standing in for a stored row; corrected_label only reads attrs."""
+    return cast(PositionRecord, SimpleNamespace(**attrs))
 
 
 def _seed_scored(
@@ -79,7 +85,7 @@ def _scored_rows(store: StateStore) -> list:
 
 
 def test_corrected_label_keeps_the_llm_verdict_without_feedback() -> None:
-    rec = SimpleNamespace(
+    rec = _rec(
         match_score=72,
         match_verdict="good",
         match_reasons='["knows rust"]',
@@ -100,7 +106,7 @@ def test_corrected_label_keeps_the_llm_verdict_without_feedback() -> None:
 def test_corrected_label_dismissed_becomes_a_hard_reject() -> None:
     # The operator dismissing a strong LLM verdict is the correction the whole feature exists
     # to capture: the label must flip to reject, not keep the model's score.
-    rec = SimpleNamespace(
+    rec = _rec(
         match_score=91,
         match_verdict="strong",
         match_reasons='["great fit"]',
@@ -109,13 +115,14 @@ def test_corrected_label_dismissed_becomes_a_hard_reject() -> None:
         dismissed=True,
     )
     label = corrected_label(rec)
+    assert label is not None
     assert label["score"] == 10
     assert label["verdict"] == "reject"
     assert label["concerns"]  # a rationale trace is always present
 
 
 def test_corrected_label_rejected_status_becomes_reject() -> None:
-    rec = SimpleNamespace(
+    rec = _rec(
         match_score=80,
         match_verdict="strong",
         match_reasons="[]",
@@ -123,12 +130,14 @@ def test_corrected_label_rejected_status_becomes_reject() -> None:
         track_status="rejected",
         dismissed=False,
     )
-    assert corrected_label(rec)["verdict"] == "reject"
+    label = corrected_label(rec)
+    assert label is not None
+    assert label["verdict"] == "reject"
 
 
 def test_corrected_label_engaged_status_becomes_strong() -> None:
     # A lukewarm LLM score the operator then applied to is a strong match by revealed pref.
-    rec = SimpleNamespace(
+    rec = _rec(
         match_score=40,
         match_verdict="weak",
         match_reasons="[]",
@@ -137,13 +146,14 @@ def test_corrected_label_engaged_status_becomes_strong() -> None:
         dismissed=False,
     )
     label = corrected_label(rec)
+    assert label is not None
     assert label["score"] == 85  # max(40, 85)
     assert label["verdict"] == "strong"
     assert label["reasons"]
 
 
 def test_corrected_label_none_when_unscored() -> None:
-    rec = SimpleNamespace(
+    rec = _rec(
         match_score=None,
         match_verdict=None,
         match_reasons=None,
@@ -155,7 +165,7 @@ def test_corrected_label_none_when_unscored() -> None:
 
 
 def test_corrected_label_tolerates_garbage_reason_json() -> None:
-    rec = SimpleNamespace(
+    rec = _rec(
         match_score=55,
         match_verdict="good",
         match_reasons="not json",
@@ -164,6 +174,7 @@ def test_corrected_label_tolerates_garbage_reason_json() -> None:
         dismissed=False,
     )
     label = corrected_label(rec)
+    assert label is not None
     assert label["reasons"] == [] and label["concerns"] == []
 
 
@@ -203,6 +214,7 @@ def test_jobs_input_is_byte_identical_to_the_production_digest() -> None:
     (example,) = build_examples([rec], "BODY")
 
     enriched = candidate_from_row(rec)
+    assert enriched is not None
     assert example.jobs == json.dumps([_digest(0, enriched)], ensure_ascii=False)
     store.close()
 
