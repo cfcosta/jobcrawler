@@ -74,7 +74,12 @@ class GenerateCrawler(dspy.Signature):
     Job per open role with url, title,
     company, location, and the FULL description text, plus every structured field
     the source actually states — salary, employment_type, workplace_type,
-    department, posted_at, expires_at, external_id, apply_url. NEVER fabricate a
+    department, posted_at, expires_at, external_id, apply_url. When the source
+    serves a structured multi-location array (Greenhouse offices[].name, Lever
+    categories.allLocations, Ashby location + secondaryLocations[].location,
+    Workable locations[]), pass EVERY element verbatim as ``locations`` (a list
+    of strings) instead of joining them — ``location`` stays the source's primary
+    display string, and the host parses each element (§4.12). NEVER fabricate a
     salary or a date: leave a field unset when the source is silent — unset means
     omitted or None, never an empty string (a "" fails schema validation). On a
     single-company board hard-code ``company`` from the operator hint.

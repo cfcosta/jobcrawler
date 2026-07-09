@@ -39,6 +39,17 @@ def test_job_requires_only_core_fields() -> None:
     assert job.company == "Acme"
 
 
+def test_job_accepts_an_optional_locations_array() -> None:
+    # §4.12: crawlers that see structured multi-location data (Greenhouse offices[],
+    # Lever allLocations, Ashby secondaryLocations) pass it verbatim instead of
+    # flattening; legacy crawlers that never set it keep validating unchanged.
+    job = Job.model_validate(
+        {**_fields(), "locations": ["Berlin, Germany", "Remote - US"]}
+    )
+    assert job.locations == ("Berlin, Germany", "Remote - US")
+    assert Job.model_validate(_fields()).locations is None
+
+
 def test_optional_fields_default_to_none() -> None:
     job = Job.model_validate(_fields())
     for field in (

@@ -56,6 +56,7 @@ Python, and matching is host-side, outside the sandbox.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 from collections.abc import Collection
 from dataclasses import dataclass
@@ -312,13 +313,27 @@ def _process(
         # unchanged posting the drain re-presents when it is still parked pending).
         enriched = enrich(job)
         chash = _content_hash(job)
+        fields = _position_fields(job, enriched, fx_rates=fx_rates)
         outcome = store.upsert_position(
             slug,
             canon,
-            fields=_position_fields(job, enriched, fx_rates=fx_rates),
+            fields=fields,
             content_hash=chash,
         )
         present.add(canon)
+        # §4.12 projection, right after the upsert so structured rows exist before
+        # matching. force skips the one-SELECT fast path on new/changed rows;
+        # purge_llm drops posting-local extract facts with the content that
+        # produced them. upsert_position itself stays byte-stable.
+        store.refresh_position_locations(
+            slug,
+            canon,
+            location=job.location,
+            locations_json=cast("str | None", fields["locations_json"]),
+            workplace=enriched.workplace,
+            force=outcome != "unchanged",
+            purge_llm=outcome == "changed",
+        )
         if outcome == "new":
             new_positions += 1
             new_or_changed.append((canon, enriched))
@@ -686,6 +701,14 @@ def _position_fields(
         "department": job.department,
         "posted_at": job.posted_at,
         "expires_at": job.expires_at,
+        # §4.12 raw multi-location array, verbatim. ALWAYS present (unlike the salary
+        # keys): it is crawler-owned source data, so a crawler that stops serving the
+        # array clears it. Out of ``content_hash`` like every derived/side surface.
+        "locations_json": (
+            json.dumps(list(job.locations), ensure_ascii=False)
+            if job.locations
+            else None
+        ),
     }
     salary = enriched.salary
     if salary is not None:

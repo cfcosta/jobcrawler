@@ -1028,6 +1028,81 @@ def test_position_fields_carries_the_apply_url() -> None:
     assert fields["apply_url"] == "https://boards.example/acme/42"
 
 
+def test_position_fields_always_carries_locations_json() -> None:
+    # §4.12: unlike the omit-when-absent salary keys, locations_json is crawler-owned
+    # raw data — always present so a crawler that stops serving the array clears it.
+    from jobcrawler.runtime.normalize import enrich
+    from jobcrawler.runtime.runner import _position_fields
+
+    bare = _job()
+    fields = _position_fields(bare, enrich(bare))
+    assert "locations_json" in fields and fields["locations_json"] is None
+
+    multi = _job(locations=("Berlin, Germany", "Remote - US"))
+    fields = _position_fields(multi, enrich(multi))
+    assert json.loads(cast(str, fields["locations_json"])) == [
+        "Berlin, Germany",
+        "Remote - US",
+    ]
+
+
+def test_content_hash_ignores_the_locations_array() -> None:
+    # locations_json is derived-surface data: hashing it would re-bill and re-dedup
+    # the corpus every time a crawler starts (or stops) serving the array.
+    from jobcrawler.runtime.runner import _content_hash
+
+    assert _content_hash(_job()) == _content_hash(
+        _job(locations=("Berlin, Germany",))
+    )
+
+
+def test_crawl_projects_locations_and_purges_posting_llm_rows_on_change() -> None:
+    # The runner wires refresh_position_locations right after upsert: projections
+    # exist by the time matching runs, an unchanged re-crawl keeps posting-local
+    # §4.7 fence rows, and a content edit purges them (stale description facts).
+    store = StateStore(":memory:")
+    try:
+        placed = _job(url="https://example.com/b", location="Berlin, Germany")
+        crawl_site("s", _crawl(placed), _ctx(), store)
+        rec = store.open_positions("s")[0]
+        assert rec.location_display == "Berlin, Germany"
+
+        url = "https://example.com/a"
+        job = _job(url=url, location="Remote", workplace_type="remote")
+        crawl_site("s", _crawl(job), _ctx(), store)
+        canon = canonicalize_url(url)
+        assert store.set_position_location_llm(
+            "s", canon, places=[], fence=["US"], remote="fenced", model="m"
+        )
+        store.mark_location_extracted("s", canon)
+
+        crawl_site("s", _crawl(placed, job), _ctx(), store)  # unchanged re-crawl
+        rows = store._conn.execute(
+            "SELECT kind, source FROM position_locations WHERE url = ?", (canon,)
+        ).fetchall()
+        assert [(r["kind"], r["source"]) for r in rows] == [
+            ("remote_fence", "llm_posting")
+        ]
+
+        edited = _job(
+            url=url,
+            location="Remote",
+            workplace_type="remote",
+            description="A completely rewritten posting body. " * 12,
+        )
+        crawl_site("s", _crawl(placed, edited), _ctx(), store)
+        assert (
+            store._conn.execute(
+                "SELECT 1 FROM position_locations WHERE url = ?", (canon,)
+            ).fetchone()
+            is None
+        )
+        by_url = {r.url: r for r in store.open_positions("s")}
+        assert by_url[canon].loc_llm_at is None
+    finally:
+        store.close()
+
+
 def test_recrawl_without_salary_keys_preserves_a_backfilled_salary() -> None:
     # End-to-end clobber guard: a salary-less upsert, then a §4.7 backfill, then an UNCHANGED
     # re-crawl (same content_hash, salary keys omitted) must leave the backfilled salary intact.

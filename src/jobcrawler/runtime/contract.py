@@ -67,6 +67,13 @@ class Job(BaseModel):
     workplace_type: str | None = None  # raw 'remote'/'hybrid'/'onsite' as stated
     department: str | None = None
 
+    # Every posted place, verbatim, when the source serves a structured array
+    # (Greenhouse offices[].name, Lever categories.allLocations, Ashby
+    # location + secondaryLocations) — §4.12 parses each element host-side, so
+    # never join them into one string. ``location`` stays the source's primary
+    # display string; single-location boards leave this unset.
+    locations: tuple[str, ...] | None = None
+
     # Lifecycle timestamps (drive §4.9 recheck + expiry-based closure).
     posted_at: datetime | None = None
     expires_at: datetime | None = None
