@@ -32,10 +32,43 @@ def _parse_date(date_str):
         return None
 
 
+def _apply_url(ctx, page_url):
+    """Return the external application URL for a WWR listing, or None.
+
+    The RSS feed never carries the real per-job apply link — only the WWR listing
+    page and the company's homepage. The apply link is the "Apply now" button on the
+    listing page itself: ``<a id="job-cta-alt" href="https://company-ats/...">``. So
+    fetch the page and read that href. Returns None on any fetch/parse failure, when the
+    button is absent, or when it points back at WWR (an in-house form, not a distinct
+    target). The caller then omits ``apply_url`` entirely, so a transient miss never
+    clobbers a value a previous crawl already stored.
+    """
+    if not page_url:
+        return None
+    try:
+        page = ctx.fetch(page_url)
+    except Exception:
+        return None
+    tag = re.search(r'<a\b[^>]*\bid=["\']job-cta-alt["\'][^>]*>', page, re.IGNORECASE)
+    if not tag:
+        return None
+    href = re.search(r'\bhref=["\']([^"\']+)["\']', tag.group(0), re.IGNORECASE)
+    if not href:
+        return None
+    url = html.unescape(href.group(1)).strip()
+    if not url.lower().startswith(("http://", "https://")):
+        return None
+    if "weworkremotely.com" in url.lower():
+        return None
+    return url
+
+
 def crawl(ctx):
     rss_text = ctx.fetch(SITE)
     root = ET.fromstring(rss_text)
     channel = root.find("channel")
+    if channel is None:
+        return
     items = channel.findall("item")
 
     for item in items:
@@ -105,5 +138,9 @@ def crawl(ctx):
                 job["expires_at"] = parsed
         if guid:
             job["external_id"] = guid
+
+        apply = _apply_url(ctx, link)
+        if apply:
+            job["apply_url"] = apply
 
         yield job
