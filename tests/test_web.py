@@ -39,6 +39,8 @@ def _seeded_store() -> StateStore:
             **FIELDS,
             "company_canonical": "acme",
             "workplace": "remote",
+            # unrestricted remote: the dashboard shortlist only seats attainable rows
+            "remote_scope": "anywhere",
             "level": "staff",
             "salary_min": 180000,
             "salary_max": 220000,
@@ -1050,22 +1052,24 @@ def _role_group_store() -> StateStore:
     from jobcrawler.runtime.dedup import resweep
 
     s = StateStore(":memory:")
+    # relocation-offered so the dashboard shortlist (attainable rows only) seats them
+    base = {**FIELDS, "relocation": "offered"}
     s.upsert_position(
         "board_a",
         "https://acme.test/jobs/ny",
-        fields={**FIELDS, "location": "New York, NY"},
+        fields={**base, "location": "New York, NY"},
         content_hash="r1",
     )
     s.upsert_position(
         "board_b",
         "https://acme.test/jobs/london",
-        fields={**FIELDS, "location": "London"},
+        fields={**base, "location": "London"},
         content_hash="r2",
     )
     s.upsert_position(
         "solo",
         "https://solo.test/jobs/1",
-        fields={**FIELDS, "title": "Data Engineer", "location": "Berlin"},
+        fields={**base, "title": "Data Engineer", "location": "Berlin"},
         content_hash="r3",
     )
     # Only the London variant carries a verdict → it is the group's primary.
@@ -1147,7 +1151,12 @@ async def test_dashboard_top_matches_one_card_per_company() -> None:
         s.upsert_position(
             "board",
             url,
-            fields={**FIELDS, "title": title, "company": company},
+            fields={
+                **FIELDS,
+                "title": title,
+                "company": company,
+                "remote_scope": "anywhere",
+            },
             content_hash=ch,
         )
     for url, score in [
@@ -1166,5 +1175,30 @@ async def test_dashboard_top_matches_one_card_per_company() -> None:
             assert encode_pid("board", "https://beta.test/eng") in html
             assert encode_pid("board", "https://mystery.test/1") in html
             assert encode_pid("board", "https://mystery.test/2") in html
+    finally:
+        s.close()
+
+
+async def test_dashboard_top_matches_only_attainable_rows() -> None:
+    # The shortlist's mobility gate: a geo-fenced remote role without relocation
+    # support never takes a slot, however strong the fit.
+    s = StateStore(":memory:")
+    for url, extra, score in [
+        ("https://a.test/anywhere", {"company": "Alpha", "remote_scope": "anywhere"}, 70),
+        (
+            "https://b.test/relo",
+            {"company": "Beta", "remote_scope": "restricted", "relocation": "offered"},
+            65,
+        ),
+        ("https://c.test/fenced", {"company": "Gamma", "remote_scope": "restricted"}, 95),
+    ]:
+        s.upsert_position("board", url, fields={**FIELDS, **extra}, content_hash=url)
+        s.set_match("board", url, score=score, verdict="strong", reasons="[]")
+    try:
+        async with _client(create_app(s)) as c:
+            html = (await c.get("/")).text
+            assert encode_pid("board", "https://a.test/anywhere") in html
+            assert encode_pid("board", "https://b.test/relo") in html
+            assert encode_pid("board", "https://c.test/fenced") not in html
     finally:
         s.close()

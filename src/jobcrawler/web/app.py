@@ -752,6 +752,8 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
         # company key IS that best; a blank key is an unattributed row and never
         # groups (the applied-company exclusion's convention). limit=64 is
         # bounded over-fetch headroom for prolific employers, not a page size.
+        # attainable_only (remote-anywhere OR relocation-offered) gates in SQL,
+        # not here, so sparse qualifying rows can't under-fill the over-fetch.
         top_matches: list[PositionRecord] = []
         seen_companies: set[str] = set()
         for rec in store.matches(
@@ -760,6 +762,7 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
             exclude_applied=True,
             exclude_dismissed=True,
             exclude_company_applied=True,
+            attainable_only=True,
             collapse_duplicates=ui_on,
             exclude_cluster_handled=ui_on,
             collapse_role_groups=ui_on,

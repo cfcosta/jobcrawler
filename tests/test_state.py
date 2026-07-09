@@ -1074,6 +1074,35 @@ def test_matches_exclude_dismissed_drops_hidden_positions(store: StateStore) -> 
     assert [r.url for r in store.matches(70, exclude_dismissed=True)] == ["b"]
 
 
+def test_matches_attainable_only_wants_anywhere_or_relocation(
+    store: StateStore,
+) -> None:
+    # The dashboard shortlist's mobility gate: a geo-fenced remote role with no
+    # relocation offer is unattainable however well it scores, and a row §4.6 never
+    # classified (NULL remote_scope/relocation) is absence of evidence, not reach.
+    for url, extra, score in [
+        ("anywhere", {"remote_scope": "anywhere"}, 70),
+        ("relo", {"remote_scope": "restricted", "relocation": "offered"}, 65),
+        ("fenced", {"remote_scope": "restricted", "relocation": "unspecified"}, 95),
+        ("silent", {}, 90),
+    ]:
+        store.upsert_position(
+            "acme", url, fields={**FIELDS, **extra}, content_hash=url
+        )
+        store.set_match("acme", url, score=score, verdict="x", reasons="")
+
+    assert [r.url for r in store.matches(0)] == [
+        "fenced",
+        "silent",
+        "anywhere",
+        "relo",
+    ]  # default: unchanged
+    assert [r.url for r in store.matches(0, attainable_only=True)] == [
+        "anywhere",
+        "relo",
+    ]
+
+
 def _upsert_scored(
     store: StateStore, url: str, *, company: str, canonical: str, score: int = 90
 ) -> None:

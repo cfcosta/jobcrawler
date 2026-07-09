@@ -1301,6 +1301,7 @@ class StateStore:
         exclude_applied: bool = False,
         exclude_dismissed: bool = False,
         exclude_company_applied: bool = False,
+        attainable_only: bool = False,
         collapse_duplicates: bool = False,
         exclude_cluster_handled: bool = False,
         collapse_role_groups: bool = False,
@@ -1324,6 +1325,12 @@ class StateStore:
         nothing. ``exclude_dismissed`` additionally drops rows you've hidden with the §16
         dismiss button. All are off by default: the CLI listing and the score histogram
         want the full scored corpus.
+
+        ``attainable_only`` keeps only rows the operator could actually take from where
+        they live: geographically unrestricted remote (``remote_scope = 'anywhere'``) or
+        an explicit relocation/visa offer (``relocation = 'offered'``, both §4.6) — the
+        dashboard shortlist's mobility gate. A row with neither signal drops, including
+        the NULLs of an unclassified posting: absence of a fence is not evidence of reach.
 
         ``collapse_duplicates`` / ``exclude_cluster_handled`` / ``collapse_role_groups``
         are the §17 flags (see :meth:`search_positions`): one row per real-world job,
@@ -1360,6 +1367,9 @@ class StateStore:
             )
         if exclude_dismissed:
             clauses += "AND COALESCE(dismissed, 0) = 0 "
+        if attainable_only:
+            # NULLs fail both arms: an unclassified posting is not attainability evidence.
+            clauses += "AND (remote_scope = 'anywhere' OR relocation = 'offered') "
         # Rank + threshold on the §4.7 freshness-decayed score, not the raw fit, so the
         # dashboard "top matches" leads with fresh-and-good and an old great fit slips only
         # as far as the floor allows. ``min_score`` is compared against the effective score.

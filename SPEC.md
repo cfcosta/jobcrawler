@@ -1575,7 +1575,10 @@ it, exactly like the match `reasons`; only the offline `jobcrawl match-trainset`
   crawlable board — a "crawl now" button), and a **notes** textarea. `pid` is urlsafe-base64 of `(site, url)`
   since the url can't be a path segment.
 - **Dashboard** (`GET /dashboard`) — the pipeline **funnel** (counts per `track_status`), open/closed/matched
-  tallies, the match-score distribution, per-site open counts, and recent run health.
+  tallies, the match-score distribution, per-site open counts, recent run health, and the **top-matches
+  shortlist**: best effective fit first, at most one card per company (the §4.6 hiring-company key), and
+  only rows attainable from anywhere — `remote_scope = 'anywhere'` or `relocation = 'offered'` (`matches
+  (attainable_only=…)`); a fenced or unclassified posting never takes a slot however well it scores.
 - **Manual triggers** — "crawl now" calls `store.request_crawl(slug)` to flag a board for the daemon's
   `due_sites` to pick up (§4.9 single-owner: the UI must **not** run the crawl itself and overlap the board's
   own schedule); "rescore" parks open rows via `requeue_open_matches` for the §4.7 match-drain to flush (no
