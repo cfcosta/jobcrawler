@@ -258,6 +258,7 @@ class Scheduler:
         bootstrap_concurrency: int | None = None,
         regen_budget: float | None = None,
         assess_timeout: float | None = None,
+        recheck_timeout: float | None = None,
         reload_sites: Callable[[], Iterable[Site] | None] | None = None,
     ) -> None:
         self._sites = list(sites)
@@ -409,6 +410,21 @@ class Scheduler:
         # before being abandoned (see _assess_bounded). 0 disables the bound.
         self._assess_timeout = (
             assess_timeout if assess_timeout is not None else config.assess_timeout()
+        )
+        # §4.9 recheck watchdog: the longest ONE recheck fetch may hold the loop before
+        # being abandoned (see recheck_tick). A fetch makes up to a handful of paced,
+        # sequential requests, each already bounded by JOBCRAWLER_FETCH_TIMEOUT, so a
+        # fetch that RAISES (the common transient error) is caught and skipped in-band.
+        # But a connect trapped in the firm egress broker's seccomp USER_NOTIF neither
+        # returns nor raises — the kernel holds the syscall pending the broker, so httpx's
+        # own timeout can't break it. Without this bound one such URL parks the sweep
+        # forever, freezing crawl, regen and match fleet-wide (observed 2026-07-09). The
+        # default sits far above any healthy multi-hop fetch, so it only trips on a true
+        # wedge; 0 disables the bound (mirrors the §4.9 assess watchdog).
+        self._recheck_timeout = (
+            recheck_timeout
+            if recheck_timeout is not None
+            else max(300.0, 15.0 * config.fetch_timeout())
         )
         self._regen_incomplete = False
         # §4.1 hot-reload: an optional probe that returns the freshly-parsed registry when
@@ -968,7 +984,23 @@ class Scheduler:
             site_closed = 0
             for url in urls:
                 try:
-                    status, text = await fetch(url)
+                    status, text = await asyncio.wait_for(
+                        fetch(url), self._recheck_timeout or None
+                    )
+                except TimeoutError:
+                    # The fetch neither returned nor raised within the watchdog ceiling —
+                    # a connect wedged beneath httpx's own timeout (the egress broker),
+                    # not an ordinary httpx timeout (which RAISES and lands below). Skip it
+                    # like any transient error (closure is one-way), but log distinctly so
+                    # a frozen-loop postmortem finds the culprit at once.
+                    _log.error(
+                        "recheck watchdog: fetch slug=%s url=%s exceeded %.0fs — "
+                        "abandoning it and resuming the sweep",
+                        site.slug,
+                        url,
+                        self._recheck_timeout,
+                    )
+                    continue
                 except Exception as exc:
                     # A transient fetch failure is not evidence the posting closed — skip
                     # it (closure is one-way; a blip must never end a live job). Routine

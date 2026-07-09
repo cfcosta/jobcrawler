@@ -1573,6 +1573,7 @@ def _recheck_sched(
     fetch: schedule.RecheckFetch,
     autonomy: bool = True,
     cap: int = 150,
+    recheck_timeout: float | None = None,
 ) -> Scheduler:
     return Scheduler(
         sites,
@@ -1586,6 +1587,7 @@ def _recheck_sched(
         autonomy=autonomy,
         regen_check="off",
         reopt_check="off",
+        recheck_timeout=recheck_timeout,
     )
 
 
@@ -1677,7 +1679,33 @@ async def test_recheck_skips_full_enumeration_sources() -> None:
 
     assert fetched == ["w1"]  # only the windowed source was re-verified
     assert closed == 1
-    assert store.closed == [("windowed", "w1", "recheck http 404")]
+
+
+async def test_recheck_watchdog_unwedges_the_sweep() -> None:
+    # A recheck fetch that neither returns nor raises — a connect wedged beneath httpx's
+    # own timeout inside the firm egress broker (an ordinary httpx timeout RAISES and is
+    # skipped; this one just hangs) — used to park the in-band sweep forever, freezing
+    # crawl/regen/match fleet-wide (observed 2026-07-09). The watchdog abandons the hung
+    # fetch at the bound and the sweep moves on to the next URL; the tick completes.
+    hung = asyncio.Event()  # never set: the first URL wedges forever
+
+    async def fetch(url: str) -> tuple[int, str]:
+        if url == "u_hang":
+            await hung.wait()
+        return (404, "")
+
+    store = _RecheckStore({"windowed": ["u_hang", "u_gone"]})
+    sched = _recheck_sched(
+        store,
+        sites=[Site(slug="windowed", url="https://x.com", enumerates_all=False)],
+        fetch=fetch,
+        recheck_timeout=0.05,
+    )
+
+    closed = await asyncio.wait_for(sched.recheck_tick(), timeout=5.0)  # must complete
+
+    assert closed == 1  # the wedged URL was abandoned; the next one still closed
+    assert store.closed == [("windowed", "u_gone", "recheck http 404")]
 
 
 async def test_recheck_expiry_closes_fleet_wide_and_is_counted() -> None:
@@ -2015,7 +2043,12 @@ async def test_dedup_tick_invokes_the_seam_and_mark_advances_one_interval() -> N
 
     async def sweep() -> dict[str, object]:
         calls.append("sweep")
-        return {"rows": 2, "clusters": 1, "clustered_rows": 2, "collapse_saving_open": 1}
+        return {
+            "rows": 2,
+            "clusters": 1,
+            "clustered_rows": 2,
+            "collapse_saving_open": 1,
+        }
 
     sched = Scheduler(
         [Site(slug="s0", url="https://x.com")],
