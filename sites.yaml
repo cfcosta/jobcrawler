@@ -2370,43 +2370,6 @@
     closure. Fetch detail pages on the same host for the full description. Fit: remote
     blockchain/protocol/backend roles across companies.
 
-- slug: arc_rust
-  name: "Arc — Remote Rust Jobs"
-  url: https://arc.dev/remote-jobs/rust
-  render: static
-  enumerates_all: false
-  hints: >-
-    Job-board listing/search source. Multi-company source; do not stamp a fixed `company`.
-    Parse company from each posting/card/detail page. Treat as a windowed source unless the
-    API explicitly returns all active matching jobs; use detail 404/expired markers for
-    closure. Fetch detail pages on the same host for the full description. Fit: remote Rust
-    engineer roles; broad supplement for systems/backend searches.
-
-- slug: arc_golang
-  name: "Arc — Remote Golang Jobs"
-  url: https://arc.dev/remote-jobs/golang
-  render: static
-  enumerates_all: false
-  hints: >-
-    Job-board listing/search source. Multi-company source; do not stamp a fixed `company`.
-    Parse company from each posting/card/detail page. Treat as a windowed source unless the
-    API explicitly returns all active matching jobs; use detail 404/expired markers for
-    closure. Fetch detail pages on the same host for the full description. Fit: remote
-    Go/Golang engineer roles; broad supplement for backend/platform searches.
-
-- slug: arc_web3
-  name: "Arc — Remote Web3 Jobs"
-  url: https://arc.dev/remote-jobs/blockchain
-  render: static
-  enumerates_all: false
-  hints: >-
-    Job-board listing/search source. Multi-company source; do not stamp a fixed `company`.
-    Parse company from each posting/card/detail page. Treat as a windowed source unless the
-    API explicitly returns all active matching jobs; use detail 404/expired markers for
-    closure. Fetch detail pages on the same host for the full description. Fit: remote
-    blockchain/Web3 developer roles that overlap protocol, wallet and backend
-    infrastructure.
-
 - slug: getonboard_programming
   name: "Get on Board — Programming"
   url: https://www.getonbrd.com/jobs/programming

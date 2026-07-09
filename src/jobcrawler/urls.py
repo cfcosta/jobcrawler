@@ -59,9 +59,15 @@ DEFAULT_MARKETPLACE_APPLY_HOSTS: frozenset[str] = frozenset(
         # Aggregator the operator explicitly retired — re-lists others' roles behind its
         # own signup, no canonical per-employer link.
         "remoterocketship.com",
-        # Deliberately NOT here, though they surfaced in the same sweep: innovecs.com mints a
-        # distinct Greenhouse per-job link (jobs.innovecs.com/vacancies?gh_jid=…) and arc.dev
-        # links out to per-employer LinkedIn posts — both are real per-job boards, not pools.
+        # arc.dev — operator retired it: viewing a posting requires a signup, and its
+        # "Arc Exclusive" listings carry no employer name or apply link at all. Its other
+        # rows just bounce to LinkedIn reposts of roles that live elsewhere, so there's no
+        # per-employer link worth keeping. (Reverses an earlier read of arc.dev as a real
+        # per-job board — the signup wall makes it a pool.)
+        "arc.dev",
+        # Deliberately NOT here, though it surfaced in the same sweep: innovecs.com mints a
+        # distinct Greenhouse per-job link (jobs.innovecs.com/vacancies?gh_jid=…) — a real
+        # per-job board, not a pool.
     }
 )
 
