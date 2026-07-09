@@ -113,12 +113,10 @@
 - slug: alchemy
   name: "Alchemy"
   # Moved off Greenhouse (token `alchemy` is a 404 as of 2026-07): the live board is
-  # Ashby. Feed from api.ashbyhq.com; posting URLs on jobs.ashbyhq.com (§8).
+  # Ashby, feed from api.ashbyhq.com.
   url: https://api.ashbyhq.com/posting-api/job-board/alchemy?includeCompensation=true
   render: static
   company: "Alchemy"
-  extra_hosts:
-    - jobs.ashbyhq.com
   hints: >-
     Ashby job board API, token `alchemy`. Whole board in one JSON GET — parse the standard
     Ashby fields straight from it, keep to a single request, and never authorize a host
@@ -263,12 +261,6 @@
   url: https://api.ashbyhq.com/posting-api/job-board/kraken.com?includeCompensation=true
   render: static
   company: "Kraken"
-  # Ashby serves the machine-readable feed from api.ashbyhq.com (the registry host)
-  # but the human-facing board — the canonical job URL each posting links to — lives
-  # on the sibling host jobs.ashbyhq.com. Authorize it explicitly so a regenerated
-  # crawler may reference/fetch it (§8); a sibling host is not on-domain of api.*.
-  extra_hosts:
-    - jobs.ashbyhq.com
   hints: >-
     Ashby job board API, token `kraken.com`. Parse the standard Ashby fields. Strong match
     for crypto exchange infrastructure, custody, payments, on-chain integrations,
@@ -984,12 +976,6 @@
   url: https://api.ashbyhq.com/posting-api/job-board/uniswap?includeCompensation=true
   render: static
   company: "Uniswap Labs"
-  # Ashby serves the machine-readable feed from api.ashbyhq.com (the registry host)
-  # but the human-facing board — the canonical job URL each posting links to — lives
-  # on the sibling host jobs.ashbyhq.com. Authorize it explicitly so a regenerated
-  # crawler may reference/fetch it (§8); a sibling host is not on-domain of api.*.
-  extra_hosts:
-    - jobs.ashbyhq.com
   hints: >-
     Ashby job board API, token `uniswap`. Parse the standard Ashby fields. Strong match
     for DeFi, protocol infrastructure, exchange systems, smart contracts and backend
@@ -1067,10 +1053,6 @@
   url: https://api.ashbyhq.com/posting-api/job-board/nethermind?includeCompensation=true
   render: static
   company: "Nethermind"
-  # Ashby serves the feed from api.ashbyhq.com (the registry host); the canonical
-  # posting URLs live on the sibling host jobs.ashbyhq.com — authorize it (§8).
-  extra_hosts:
-    - jobs.ashbyhq.com
   hints: >-
     Ashby job board API, token `nethermind`. Parse the standard Ashby fields from the one
     JSON GET. Strong match for blockchain client engineering, EVM, protocol
@@ -1145,13 +1127,11 @@
 - slug: tigerdata
   name: "TigerData / Timescale"
   # The Timescale→TigerData rebrand retired the Greenhouse board (token `timescale`
-  # 404s as of 2026-07); the live board is Ashby token `tigerdata`. Feed from
-  # api.ashbyhq.com; posting URLs on jobs.ashbyhq.com (§8).
+  # 404s as of 2026-07); the live board is Ashby token `tigerdata`, feed from
+  # api.ashbyhq.com.
   url: https://api.ashbyhq.com/posting-api/job-board/tigerdata?includeCompensation=true
   render: static
   company: "TigerData / Timescale"
-  extra_hosts:
-    - jobs.ashbyhq.com
   hints: >-
     Ashby job board API, token `tigerdata`. Parse the standard Ashby fields from the one
     JSON GET. Strong match for PostgreSQL, time-series databases, storage/query systems,
@@ -1334,10 +1314,6 @@
   url: https://api.ashbyhq.com/posting-api/job-board/goteleport?includeCompensation=true
   render: static
   company: "Teleport"
-  # Ashby serves the feed from api.ashbyhq.com (the registry host); the canonical
-  # posting URLs live on the sibling host jobs.ashbyhq.com — authorize it (§8).
-  extra_hosts:
-    - jobs.ashbyhq.com
   hints: >-
     Ashby job board API, token `goteleport`. Parse the standard Ashby fields from the one
     JSON GET. Strong match for identity/security infrastructure, zero-trust access,
@@ -1680,12 +1656,10 @@
 - slug: materialize
   name: "Materialize"
   # Moved off Greenhouse (token `materialize` is a 404 as of 2026-07): the live board
-  # is Ashby. Feed from api.ashbyhq.com; posting URLs on jobs.ashbyhq.com (§8).
+  # is Ashby, feed from api.ashbyhq.com.
   url: https://api.ashbyhq.com/posting-api/job-board/materialize?includeCompensation=true
   render: static
   company: "Materialize"
-  extra_hosts:
-    - jobs.ashbyhq.com
   hints: >-
     Ashby job board API, token `materialize`. Parse the standard Ashby fields from the one
     JSON GET. Strong match for streaming data systems, distributed databases, Rust-heavy
@@ -2126,13 +2100,8 @@
   render: static
   company: "Redpanda"
   # Redpanda's careers page (www.redpanda.com/jobs) is a browser-rendered shell over an
-  # Ashby board; the naked page yielded nothing and the crawler kept reaching for the
-  # Ashby API unauthorized. Point straight at the machine-readable feed (token
-  # `redpanda-data`) like uniswap_labs. Ashby serves the feed from api.ashbyhq.com (the
-  # registry host) but each posting's canonical link lives on the sibling host
-  # jobs.ashbyhq.com — authorize it explicitly (§8); a sibling is not on-domain of api.*.
-  extra_hosts:
-    - jobs.ashbyhq.com
+  # Ashby board that yielded nothing; point straight at the machine-readable feed
+  # (token `redpanda-data`).
   hints: >-
     Ashby job board API, token `redpanda-data`. Parse the standard Ashby fields. Fit:
     streaming data platform, Kafka-compatible systems, storage, cloud infrastructure and
