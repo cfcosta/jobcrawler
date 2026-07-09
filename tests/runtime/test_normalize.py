@@ -366,6 +366,110 @@ def test_parse_salary_period_from_description() -> None:
     )
 
 
+# --- salary parser v2: widened recognition (printed notation only) -----------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # HTML entities from ATS content arrive verbatim in flattened strings.
+        ("$165,000 &mdash; $190,000 USD", SalaryRange(165000.0, 190000.0, "USD", "year")),
+        # Dollar-family prefixes ARE the printed currency — never USD-hijacked.
+        ("CA$120,000 - CA$150,000", SalaryRange(120000.0, 150000.0, "CAD", "year")),
+        ("A$150,000 - A$180,000", SalaryRange(150000.0, 180000.0, "AUD", "year")),
+        # An explicit ISO code overrides a bare '$' symbol.
+        ("$140,000 — $190,000 CAD", SalaryRange(140000.0, 190000.0, "CAD", "year")),
+        # New ISO codes (fx_table has all 166 rates; recognition was the gap).
+        ("PLN 26,500 to PLN 31,000", SalaryRange(26500.0, 31000.0, "PLN", "year")),
+        ("CHF 120,000 - 140,000", SalaryRange(120000.0, 140000.0, "CHF", "year")),
+        ("INR 2,500,000", SalaryRange(2500000.0, 2500000.0, "INR", "year")),
+        # Shared-magnitude shorthand: the second number's printed magnitude is
+        # the range's magnitude ('$80-100k' means 80k, not $80).
+        ("$80-100k", SalaryRange(80000.0, 100000.0, "USD", "year")),
+        ("EUR 80-110,000", SalaryRange(80000.0, 110000.0, "EUR", "year")),
+        ("$1-2m", SalaryRange(1000000.0, 2000000.0, "USD", "year")),
+        # The Ashby interval vocabulary flattened crawlers append.
+        ("USD 77.88 - 86.54 / 1 HOUR", SalaryRange(77.88, 86.54, "USD", "hour")),
+        ("S$8,000 - S$10,000 / 1 MONTH", SalaryRange(8000.0, 10000.0, "SGD", "month")),
+    ],
+)
+def test_parse_salary_widened_formats(raw: str, expected: SalaryRange) -> None:
+    assert parse_salary(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "$3B in annual sales",  # magnitude poison: salaries are never billions
+        "$875,000,000 per month",  # absurd in a major currency → funding, not pay
+        "€500 per day",  # day/week rates refuse — we have no honest factor
+        "£450/day",
+        "USD 0",  # zero is absence, not a figure
+        "¥400,000/month",  # ambiguous symbol (JPY/CNY) with no code
+        "kr 700,000",  # ambiguous 'kr' (SEK/NOK/DKK)
+        "USD 100,000 / EUR 90,000",  # two explicit codes → which one?
+        "$700/hour",  # contradictory: no major prints 700/hr — refuse, never re-period
+        "USD 150,000 per month",  # contradictory month in a major
+    ],
+)
+def test_parse_salary_refuses_contradictions_and_poison(raw: str) -> None:
+    assert parse_salary(raw) is None
+
+
+@pytest.mark.parametrize(
+    ("description", "expected_period"),
+    [
+        # Slash markers glued to a word on the left are prose, not rates.
+        ("ERP/HRIS systems experience", "year"),
+        ("read https://modal.com/blog for context", "year"),
+        ("People/HR Business Partner team", "year"),
+        ("data/model/pipeline parallelism", "year"),
+    ],
+)
+def test_parse_salary_description_markers_require_boundaries(
+    description: str, expected_period: str
+) -> None:
+    parsed = parse_salary("$150,000 - $180,000 USD", description)
+    assert parsed is not None
+    assert parsed.period == expected_period
+
+
+def test_parse_salary_description_rate_markers_still_fire() -> None:
+    parsed = parse_salary("$45", "contract rate 45/hr, remote")
+    assert parsed is not None
+    assert parsed.period == "hour"
+
+
+def test_salary_from_fields_refuses_zero_and_negative_bounds() -> None:
+    # devjobsscanner-style APIs send salaryMin=0 for "unstated" — zero is
+    # absence, never a floor.
+    assert enrich(_job(salary_min=0.0, salary_max=120000.0)).salary is None
+    assert enrich(_job(salary_min=-5.0, salary_max=-1.0)).salary is None
+
+
+def test_enrich_sets_salary_provenance() -> None:
+    structured = enrich(
+        _job(
+            salary_min=100000.0,
+            salary_max=120000.0,
+            salary_currency="USD",
+            salary_period="year",
+        )
+    )
+    assert structured.salary_origin == "structured"
+    text = enrich(_job(salary="$150k - $200k"))
+    assert text.salary_origin == "text"
+    assert enrich(_job()).salary_origin is None
+
+
+def test_salary_parser_version_pinned() -> None:
+    # Bumping SALARY_PARSER_VERSION replays the store-open repair sweep (and the
+    # salary_raw re-parse) — any parse_salary behavior change needs a bump.
+    from jobcrawler.runtime.normalize import SALARY_PARSER_VERSION
+
+    assert SALARY_PARSER_VERSION == 1
+
+
 # --- enrich (composition) --------------------------------------------------
 
 

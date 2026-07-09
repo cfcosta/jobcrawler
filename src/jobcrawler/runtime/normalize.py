@@ -112,6 +112,10 @@ class EnrichedJob:
     remote_scope: str
     relocation: str
     salary: SalaryRange | None
+    # Where ``salary`` came from: 'structured' (source data fields) | 'text'
+    # (host parse of the printed string) | None (no salary). The runner persists
+    # it as ``salary_source``; the §4.7 LLM backfill stamps its own 'llm'.
+    salary_origin: str | None = None
 
 
 # --- text matching primitives ----------------------------------------------
@@ -1033,14 +1037,55 @@ def normalize_title_key(title: str) -> str:
 # bare '80,000 - 100,000' is ambiguous (which currency?) and returns None — we
 # never guess. Numbers come only from ``raw`` (the explicit salary field), never
 # mined from the free-text description, so a JD's '$5M in funding' can't leak in.
+# Recognize-or-refuse: v2 widened what printed notation is READ (dollar-family
+# prefixes, more ISO codes, shared-magnitude shorthand, HTML entities) and added
+# refusals where reading would require a guess (day/week rates, ambiguous
+# symbols, contradictory periods, funding-scale magnitudes, zeros).
 
-_CUR_NUMBER = re.compile(r"(\d[\d.,]*\d|\d) ?([km])?")
+# Bumped on ANY parse_salary behavior change: the store-open repair sweep and the
+# salary_raw re-parse are meta-gated on it, so stored rows heal without a re-crawl.
+SALARY_PARSER_VERSION = 1
+
+_CUR_NUMBER = re.compile(r"(\d[\d.,]*\d|\d) ?([km])?\b")
 _RANGE_SEPS = ("-", "–", "—", "−", " to ", " a ", " ate ", "~")
+
+# Salaries are never printed in billions; a b/bn/billion/trillion magnitude next
+# to a number is a funding/revenue figure that leaked into the salary field.
+_MAGNITUDE_POISON = re.compile(r"\d\s?(?:bn?\b|billion|trillion)")
+
+# Rates we have no honest annualization factor for — refuse, never invent ×5/×8.
+_DAY_WEEK = ("per day", "/day", "por dia", "daily", "per week", "/week", "/wk", "weekly")
+
+# Explicit ISO codes (word-bounded in folded text). Two DIFFERENT codes in one
+# string is ambiguous → refuse. A code overrides a bare symbol ('$… CAD' → CAD).
+_CURRENCY_CODES: dict[str, str] = {
+    "usd": "USD", "eur": "EUR", "euro": "EUR", "euros": "EUR", "gbp": "GBP",
+    "brl": "BRL", "reais": "BRL", "cad": "CAD", "aud": "AUD", "sgd": "SGD",
+    "nzd": "NZD", "hkd": "HKD", "chf": "CHF", "pln": "PLN", "sek": "SEK",
+    "nok": "NOK", "dkk": "DKK", "jpy": "JPY", "inr": "INR", "mxn": "MXN",
+    "cny": "CNY", "rmb": "CNY",
+}
+
+# Symbol families, most-specific first (bare '$' LAST — 'CA$'/'A$'/'S$' are the
+# printed currency, not USD). Ambiguous symbols (¥ = JPY/CNY, kr = SEK/NOK/DKK)
+# are deliberately NOT anchors: they refuse instead of guessing.
+_CURRENCY_SYMBOLS: tuple[tuple[str, str], ...] = (
+    ("r$", "BRL"), ("ca$", "CAD"), ("c$", "CAD"), ("au$", "AUD"), ("a$", "AUD"),
+    ("sg$", "SGD"), ("s$", "SGD"), ("nz$", "NZD"), ("hk$", "HKD"), ("mx$", "MXN"),
+    ("€", "EUR"), ("£", "GBP"), ("₹", "INR"), ("$", "USD"),
+)
+_AMBIGUOUS_ANCHORS = ("¥", " kr ", " kr.")
+
+# Currencies whose salary magnitudes make the contradiction bounds meaningful:
+# no major prints 700/hour or 150,000/month — such a period is a mis-read.
+_CONTRADICTION_MAJORS = frozenset(
+    {"USD", "EUR", "GBP", "CAD", "AUD", "SGD", "NZD", "CHF"}
+)
 
 # Period markers. Explicit slash / 'per X' / 'por X' forms are safe to read out
 # of a description; the bare words (monthly/annual/hourly) are only trusted in
 # the raw salary field itself.
-_HOUR = ("per hour", "/hour", "/hr", "hourly", "por hora", "/hora")
+_HOUR = ("per hour", "/hour", "/hr", "hourly", "por hora", "/hora", "1 hour")
 _MONTH = (
     "per month",
     "/month",
@@ -1050,6 +1095,7 @@ _MONTH = (
     "/mes",
     "mensal",
     "a month",
+    "1 month",
 )
 _YEAR = (
     "per year",
@@ -1064,24 +1110,47 @@ _YEAR = (
     "anual",
     "a year",
     "p.a.",
+    "1 year",
 )
-_SAFE_HOUR = ("per hour", "/hour", "/hr", "por hora", "/hora")
-_SAFE_MONTH = ("per month", "/month", "/mo", "por mes", "/mes")
-_SAFE_YEAR = ("per year", "per annum", "/year", "/yr", "por ano", "/ano")
+# Description-side slash markers count only when NOT glued to a word on the left
+# ('$45/hr', 'paid /month' — never 'ERP/HRIS', 'People/HR', '…modal.com/…',
+# 'data/model/…') and not running into one on the right.
+_DESC_SLASH = {
+    "hour": r"(?:^|[^a-z])/\s?(?:hr|hour|hora)(?![a-z])",
+    "month": r"(?:^|[^a-z])/\s?(?:mo|month|mes)(?![a-z])",
+    "year": r"(?:^|[^a-z])/\s?(?:yr|year|ano)(?![a-z])",
+}
+_DESC_PHRASES = {
+    "hour": ("per hour", "por hora"),
+    "month": ("per month", "por mes"),
+    "year": ("per year", "per annum", "por ano"),
+}
 
 
 def _detect_currency(text: str) -> str | None:
-    """The currency anchor, if any. 'R$' is tested before bare '$' (it contains
-    one); a code ('usd') and its symbol are equivalent."""
-    if "r$" in text or _has(text, ("brl", "reais")):
-        return "BRL"
-    if "€" in text or _has(text, ("eur", "euro", "euros")):
-        return "EUR"
-    if "£" in text or _has(text, ("gbp",)):
-        return "GBP"
-    if "$" in text or _has(text, ("usd",)):
-        return "USD"
+    """The printed currency anchor, if exactly one exists.
+
+    Explicit ISO codes win over symbols (a '$…-… CAD' band is CAD); two
+    DIFFERENT codes refuse (ambiguous). Symbol families are tested
+    most-specific-first so 'CA$'/'A$'/'S$' never fall through to the bare-'$'
+    USD read, and deliberately-ambiguous symbols (¥, kr) refuse rather than
+    guess a country.
+    """
+    codes = {iso for word, iso in _CURRENCY_CODES.items() if _has(text, (word,))}
+    if len(codes) > 1:
+        return None
+    if len(codes) == 1:
+        return next(iter(codes))
+    for symbol, iso in _CURRENCY_SYMBOLS:
+        if symbol in text:
+            return iso
     return None
+
+
+def _has_ambiguous_anchor(text: str) -> bool:
+    """True when the only money marker is one we refuse to guess a country for."""
+    padded = f" {text} "
+    return any(marker in padded for marker in _AMBIGUOUS_ANCHORS)
 
 
 def _strip_separators(token: str) -> float | None:
@@ -1116,8 +1185,9 @@ def _strip_separators(token: str) -> float | None:
         return None
 
 
-def _extract_numbers(text: str) -> list[float]:
-    out: list[float] = []
+def _extract_numbers(text: str) -> list[tuple[float, str | None]]:
+    """Every number with its printed magnitude suffix ('k'/'m'), in order."""
+    out: list[tuple[float, str | None]] = []
     for match in _CUR_NUMBER.finditer(text):
         value = _strip_separators(match.group(1))
         if value is None:
@@ -1127,7 +1197,7 @@ def _extract_numbers(text: str) -> list[float]:
             value *= 1000
         elif suffix == "m":
             value *= 1_000_000
-        out.append(value)
+        out.append((value, suffix))
     return out
 
 
@@ -1143,6 +1213,17 @@ def _detect_period(
     return None
 
 
+def _detect_period_in_description(description: str) -> str | None:
+    """Boundary-guarded period read from free text (see _DESC_SLASH): a rate
+    marker next to a figure, never prose like 'ERP/HRIS' or a URL path."""
+    for period in ("hour", "month", "year"):
+        if re.search(_DESC_SLASH[period], description) or _contains_any(
+            description, _DESC_PHRASES[period]
+        ):
+            return period
+    return None
+
+
 def _default_period(currency: str) -> str:
     """BRL postings quote monthly by convention; USD/EUR/GBP quote yearly."""
     return "month" if currency == "BRL" else "year"
@@ -1151,13 +1232,24 @@ def _default_period(currency: str) -> str:
 def parse_salary(raw: str, description: str = "") -> SalaryRange | None:
     """Extract a :class:`SalaryRange` from verbatim salary text, or ``None``.
 
-    Conservative (§4.6): returns ``None`` unless *both* a currency anchor and at
-    least one number are present in ``raw``. A range needs two numbers separated
-    by a dash / 'to' / 'até'; a lone number yields a point band (min == max).
-    Period is taken from an explicit marker in ``raw``, else a slash/'per' marker
-    in ``description``, else the currency's convention.
+    Conservative (§4.6), recognize-or-refuse: returns ``None`` unless *both* an
+    unambiguous currency anchor and at least one positive number are present in
+    ``raw``. A range needs two numbers separated by a dash / 'to' / 'até'; a
+    shared-magnitude shorthand range ('$80-100k', 'EUR 80-110,000') reads the
+    second number's printed magnitude onto the first; a lone number yields a
+    point band. Period comes from an explicit marker in ``raw`` (including the
+    Ashby '/ 1 HOUR' vocabulary), else a boundary-guarded slash/'per' marker in
+    ``description``, else the currency's convention. Refusals — never guesses:
+    day/week rates (no honest annualization factor), b/trillion magnitudes
+    (funding figures), ambiguous symbols (¥, kr), two different ISO codes,
+    zeros, and periods the printed figures contradict (no major currency pays
+    700/hour or 150,000/month).
     """
-    text = _fold(raw or "")
+    text = _fold(html.unescape(raw or ""))
+    if _MAGNITUDE_POISON.search(text):
+        return None
+    if _contains_any(text, _DAY_WEEK):
+        return None
     currency = _detect_currency(text)
     if currency is None:
         return None
@@ -1165,14 +1257,32 @@ def parse_salary(raw: str, description: str = "") -> SalaryRange | None:
     if not numbers:
         return None
     if len(numbers) >= 2 and _contains_any(text, _RANGE_SEPS):
-        lo, hi = sorted(numbers[:2])
+        (lo, lo_suffix), (hi, hi_suffix) = sorted(numbers[:2], key=lambda p: p[0])
+        # Shared-magnitude shorthand: a bare small first bound next to a
+        # k/m-suffixed (or thousands-printed) second is the SAME magnitude as
+        # printed — '$80-100k' means 80k. Guarded so '$500-45,000' (a genuine
+        # low bound) is left alone.
+        if lo_suffix is None and lo < 1000:
+            if hi_suffix == "m" and lo * 1_000_000 <= hi * 2:
+                lo *= 1_000_000
+            elif (hi_suffix == "k" or hi >= 1000) and lo * 1000 <= hi * 2:
+                lo *= 1000
     else:
-        lo = hi = numbers[0]
+        lo = hi = numbers[0][0]
+    if lo <= 0 or hi <= 0:
+        return None
     period = (
         _detect_period(text, _HOUR, _MONTH, _YEAR)
-        or _detect_period(_fold(description or ""), _SAFE_HOUR, _SAFE_MONTH, _SAFE_YEAR)
+        or _detect_period_in_description(_fold(description or ""))
         or _default_period(currency)
     )
+    if currency in _CONTRADICTION_MAJORS:
+        if period == "hour" and hi > 500:
+            return None
+        if period == "month" and hi > 100_000:
+            return None
+        if hi * _PERIODS_PER_YEAR.get(period, 1.0) > 5_000_000:
+            return None
     return SalaryRange(lo, hi, currency, period)
 
 
@@ -1244,12 +1354,16 @@ def usd_annual_band(
 def _salary_from_fields(job: Job) -> SalaryRange | None:
     """Build a range from the crawler's *structured* salary fields, if it set
     them (the source exposed structured compensation). ``None`` → fall back to
-    parsing the verbatim ``salary`` text."""
+    parsing the verbatim ``salary`` text. Zero/negative bounds refuse: APIs send
+    0 for "unstated" (devjobsscanner salaryMin=0) and zero is absence, never a
+    floor."""
     if job.salary_min is None and job.salary_max is None:
         return None
     lo = job.salary_min if job.salary_min is not None else job.salary_max
     hi = job.salary_max if job.salary_max is not None else job.salary_min
     if lo is None or hi is None:
+        return None
+    if lo <= 0 or hi <= 0:
         return None
     if lo > hi:
         lo, hi = hi, lo
@@ -1266,8 +1380,11 @@ def enrich(job: Job) -> EnrichedJob:
     both host-side, never an LLM (§4.6/§8).
     """
     salary = _salary_from_fields(job)
+    salary_origin: str | None = "structured" if salary is not None else None
     if salary is None:
         salary = parse_salary(job.salary or "", job.description or "")
+        if salary is not None:
+            salary_origin = "text"
     workplace = classify_workplace(
         job.workplace_type or "", job.location, job.description
     )
@@ -1279,4 +1396,5 @@ def enrich(job: Job) -> EnrichedJob:
         remote_scope=classify_remote_scope(workplace, job.location),
         relocation=classify_relocation(job.title, job.description or ""),
         salary=salary,
+        salary_origin=salary_origin,
     )
