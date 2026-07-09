@@ -27,7 +27,9 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 
-GEO_PARSER_VERSION = 1
+# v2: Brazilian state codes resolve under Brazilian context (v1 read
+# 'Campo Grande, MS, Brasil' as Mississippi and briefly reached a live ledger).
+GEO_PARSER_VERSION = 2
 
 # Bump when GEO_REGION_MEMBERS changes so the store reseeds geo_region_members.
 GEO_REGION_SEED_VERSION = 1

@@ -431,4 +431,5 @@ def test_region_members_spot_checks() -> None:
 def test_parser_version_pinned() -> None:
     # Bumping GEO_PARSER_VERSION triggers a whole-corpus deterministic resweep at
     # store open — any behavior change in this module must come with a bump.
-    assert geo.GEO_PARSER_VERSION == 1
+    # v2: the Brazilian state-code context rule.
+    assert geo.GEO_PARSER_VERSION == 2
