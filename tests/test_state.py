@@ -2275,6 +2275,25 @@ def test_backfill_locations_sweeps_a_legacy_db(tmp_path: object) -> None:
         s3.close()
 
 
+def test_set_salary_stamps_llm_source_and_defaults_period(store: StateStore) -> None:
+    # LLM answers often omit the period; the §4.6 currency convention keeps the
+    # usd band computable instead of minting permanently-NULL-usd rows, and the
+    # provenance marker makes the fill distinguishable from source data.
+    store.upsert_position("acme", "u", fields=FIELDS, content_hash="h")
+    assert store.set_salary(
+        "acme",
+        "u",
+        salary_min=90000.0,
+        salary_max=110000.0,
+        salary_currency="USD",
+        salary_period=None,
+    )
+    rec = store.open_positions("acme")[0]
+    assert rec.salary_period == "year"
+    assert rec.salary_usd_min == 90000.0
+    assert rec.salary_source == "llm"
+
+
 def test_migration_adds_salary_raw_and_source(tmp_path: object) -> None:
     # §4.6 salary provenance: opening a legacy DB ALTERs in the verbatim printed
     # salary text (crawler-owned) and the provenance marker ('structured'|'text'|

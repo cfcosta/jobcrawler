@@ -1551,7 +1551,9 @@ def test_to_extraction_drops_ambiguous_or_missing_salary() -> None:
     assert no_cur is not None
     assert no_cur.salary_min is None and no_cur.salary_currency is None
 
-    # unrecognised period is dropped, but a well-formed salary is still kept.
+    # a STATED period outside year|month|hour refuses the whole figure — keeping
+    # the numbers under a period the source contradicted is how per-day rates
+    # became annual salaries (an absent period is fine; set_salary defaults it).
     odd_period = _to_extraction(
         {
             "salary": {
@@ -1563,7 +1565,7 @@ def test_to_extraction_drops_ambiguous_or_missing_salary() -> None:
         }
     )
     assert odd_period is not None
-    assert odd_period.salary_min == 90000.0 and odd_period.salary_period is None
+    assert odd_period.salary_min is None
 
     # a vague/equity posting returns salary: null but may still name an employer.
     vague = _to_extraction({"salary": None, "hiring_company": "Bar"})
@@ -1640,6 +1642,28 @@ def test_extraction_json_round_trip_preserves_location_geo() -> None:
     )
     assert ext is not None
     assert _extraction_from_json(_extraction_to_json(ext)) == ext
+
+
+def test_to_extraction_validates_iso_currency() -> None:
+    # A currency must be a 3-letter code: 'usd' folds up, 'US Dollars' refuses
+    # the whole figure (a salary without a real code is unusable downstream).
+    ok = _to_extraction({"salary": {"min": 5, "max": 6, "currency": "usd"}})
+    assert ok is not None and ok.salary_currency == "USD"
+    bad = _to_extraction({"salary": {"min": 5, "max": 6, "currency": "US Dollars"}})
+    assert bad is not None and bad.salary_min is None
+
+
+def test_to_extraction_drops_out_of_vocab_period_entirely() -> None:
+    # A STATED period outside year|month|hour (day/week) would need an invented
+    # annualization factor — the whole figure refuses, not just the period…
+    day = _to_extraction(
+        {"salary": {"min": 500, "max": 500, "currency": "EUR", "period": "day"}}
+    )
+    assert day is not None and day.salary_min is None
+    # …while an ABSENT period is fine: set_salary defaults it by currency.
+    absent = _to_extraction({"salary": {"min": 90000, "max": 90000, "currency": "EUR"}})
+    assert absent is not None
+    assert absent.salary_min == 90000.0 and absent.salary_period is None
 
 
 def test_num_or_none_never_invents_a_number() -> None:

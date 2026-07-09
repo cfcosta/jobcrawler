@@ -2045,11 +2045,15 @@ class StateStore:
         clobbered by an LLM guess. Salary is not part of ``content_hash``, so writing it
         never re-dedups a posting or invalidates its match verdict. The annualized-USD band
         is derived here too, so an LLM-backfilled salary is sortable/filterable like any
-        other. Returns whether a row was actually filled (False = it already had a salary,
-        or no such row).
+        other; a period the model omitted defaults by the §4.6 currency convention (the
+        same rule the crawler path applies) so the band stays computable. The fill stamps
+        ``salary_source = 'llm'``. Returns whether a row was actually filled (False = it
+        already had a salary, or no such row).
         """
-        from jobcrawler.runtime.normalize import usd_annual_band
+        from jobcrawler.runtime.normalize import _default_period, usd_annual_band
 
+        if salary_period is None and salary_currency:
+            salary_period = _default_period(salary_currency.strip().upper())
         usd_min, usd_max = usd_annual_band(
             salary_min,
             salary_max,
@@ -2061,7 +2065,7 @@ class StateStore:
             cur = self._conn.execute(
                 "UPDATE positions SET salary_min = ?, salary_max = ?, "
                 "salary_currency = ?, salary_period = ?, "
-                "salary_usd_min = ?, salary_usd_max = ? "
+                "salary_usd_min = ?, salary_usd_max = ?, salary_source = 'llm' "
                 "WHERE site = ? AND url = ? "
                 "AND salary_min IS NULL AND salary_max IS NULL",
                 (

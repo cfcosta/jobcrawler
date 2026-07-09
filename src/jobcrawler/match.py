@@ -48,6 +48,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Protocol, Sequence, cast
@@ -1081,11 +1082,18 @@ def _to_extraction(item: object) -> _Extraction | None:
         lo, hi = (lo if lo is not None else hi), (hi if hi is not None else lo)
         cur = salary.get("currency")
         cur_norm = cur.strip().upper() if isinstance(cur, str) and cur.strip() else None
+        if cur_norm is not None and not re.fullmatch(r"[A-Z]{3}", cur_norm):
+            cur_norm = None  # 'US Dollars' is prose, not a code — refuse, don't coerce
+        per = salary.get("period")
+        per_norm = per.strip().lower() if isinstance(per, str) and per.strip() else None
+        if per_norm is not None and per_norm not in _SALARY_PERIODS:
+            # A STATED period outside year|month|hour (day/week) would need an
+            # invented annualization factor — the whole figure refuses; an
+            # ABSENT period is fine (set_salary defaults it by currency).
+            lo = None
         if lo is not None and cur_norm is not None:
             smin, smax, currency = lo, hi, cur_norm
-            per = salary.get("period")
-            per_norm = per.strip().lower() if isinstance(per, str) else None
-            period = per_norm if per_norm in _SALARY_PERIODS else None
+            period = per_norm
     company = item.get("hiring_company")
     hiring = company.strip() if isinstance(company, str) else ""
     return _Extraction(

@@ -995,25 +995,42 @@ def test_position_fields_omits_salary_columns_when_unstated() -> None:
     fields = _position_fields(job, enriched)
     for key in ("salary_min", "salary_max", "salary_currency", "salary_period"):
         assert key not in fields
+    # provenance rides INSIDE the omit-when-absent block; the verbatim text is
+    # crawler-owned and ALWAYS keyed (None clears a board that stopped printing).
+    assert "salary_source" not in fields
+    assert "salary_raw" in fields and fields["salary_raw"] is None
     assert fields["company_canonical"] == "acme"  # suffix-stripped dedup key
 
 
 def test_position_fields_includes_a_source_salary() -> None:
     # When the source DOES state pay (§4.6 enrichment carries it), the columns are present
     # and carry the parsed figures — a source salary always wins over a later LLM guess.
-    from dataclasses import replace
-
-    from jobcrawler.runtime.normalize import SalaryRange, enrich
+    from jobcrawler.runtime.normalize import enrich
     from jobcrawler.runtime.runner import _position_fields
 
-    job = _job()
-    enriched = replace(
-        enrich(job),
-        salary=SalaryRange(min=150000.0, max=200000.0, currency="USD", period="year"),
+    job = _job(
+        salary_min=150000.0,
+        salary_max=200000.0,
+        salary_currency="USD",
+        salary_period="year",
     )
-    fields = _position_fields(job, enriched)
+    fields = _position_fields(job, enrich(job))
     assert fields["salary_min"] == 150000.0 and fields["salary_max"] == 200000.0
     assert fields["salary_currency"] == "USD" and fields["salary_period"] == "year"
+    assert fields["salary_source"] == "structured"
+
+    text_job = _job(salary="$150K – $200K")
+    text_fields = _position_fields(text_job, enrich(text_job))
+    assert text_fields["salary_source"] == "text"
+    assert text_fields["salary_raw"] == "$150K – $200K"
+
+
+def test_content_hash_ignores_the_salary_text() -> None:
+    # salary_raw is a side surface: hashing it would re-dedup and re-bill a
+    # posting every time a board reformats its printed range.
+    from jobcrawler.runtime.runner import _content_hash
+
+    assert _content_hash(_job()) == _content_hash(_job(salary="$1 – $2"))
 
 
 def test_position_fields_carries_the_apply_url() -> None:
@@ -1138,6 +1155,8 @@ def test_recrawl_without_salary_keys_preserves_a_backfilled_salary() -> None:
         rec = store.open_positions("example")[0]
         assert (rec.salary_min, rec.salary_max) == (120000.0, 120000.0)
         assert (rec.salary_currency, rec.salary_period) == ("EUR", "year")
+        # …and the 'llm' provenance stamp survives with it.
+        assert rec.salary_source == "llm"
     finally:
         store.close()
 

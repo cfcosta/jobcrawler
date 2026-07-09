@@ -709,6 +709,10 @@ def _position_fields(
             if job.locations
             else None
         ),
+        # §4.6 verbatim printed compensation text — crawler-owned and ALWAYS keyed
+        # like locations_json (a board that stops printing pay clears it). Persisted
+        # so a parser upgrade can re-read stored rows offline; never hashed.
+        "salary_raw": job.salary,
     }
     salary = enriched.salary
     if salary is not None:
@@ -716,6 +720,9 @@ def _position_fields(
         fields["salary_max"] = salary.max
         fields["salary_currency"] = salary.currency
         fields["salary_period"] = salary.period
+        # Provenance rides INSIDE the omit-when-absent block: a salary-less crawl
+        # must not clear the 'llm' stamp set_salary left with its figures.
+        fields["salary_source"] = enriched.salary_origin
         # Annualized-USD band for coherent cross-currency sort/filter (§4.6). Derived,
         # never hashed; NULL when the currency/period can't be resolved.
         usd_min, usd_max = usd_annual_band(
