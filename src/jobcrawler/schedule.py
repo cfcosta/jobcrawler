@@ -94,6 +94,14 @@ MatchDrain = Callable[[], Awaitable[dict[str, int]]]
 # rates now in effect (fail-soft — the closure never raises into the loop).
 FxRefresh = Callable[[], Awaitable[dict[str, float]]]
 
+# The §17 dedup-sweep seam: one identity-overlay rebuild — recompute every row's keys,
+# recluster, re-elect canonicals, swap the derived tables in one transaction, persist
+# the report. Injected because the sweep's policy inputs (direct-board slugs from the
+# registry, tier set, denylists) are owned by the daemon wiring (cli); the scheduler
+# owns only the cadence. Fail-soft: a failed rebuild keeps the previous overlay and
+# returns {} (derived state — never a reason to disturb the crawl loop).
+DedupSweep = Callable[[], Awaitable[dict[str, object]]]
+
 
 class Site(BaseModel):
     """One entry of the §4.1 site registry — a job board to crawl on a cadence."""
@@ -237,6 +245,8 @@ class Scheduler:
         match_drain_check: str | None = None,
         fx_refresh: FxRefresh | None = None,
         fx_check: str | None = None,
+        dedup_sweep: DedupSweep | None = None,
+        dedup_check: str | None = None,
         expired_markers: tuple[str, ...] | None = None,
         heal_cooldown: str | None = None,
         description_quality_floor: float | None = None,
@@ -331,6 +341,17 @@ class Scheduler:
         )
         self._fx_refresh = fx_refresh
         self._next_fx: datetime | None = None
+        # §17 dedup-sweep timer: rebuild the derived identity overlay on a cadence.
+        # Bookkeeping over already-tracked rows (like recheck/match_drain) — never
+        # self-modification — so EXEMPT from the master autonomy brake. Disabled unless
+        # both a cadence and the injected sweep seam are wired. The first pass fires on
+        # boot, so a daemon restarted onto pre-§17 rows (or rows tracked while it was
+        # down) clusters them at once.
+        self._dedup_interval = _optional_interval(
+            config.dedup_refresh_interval() if dedup_check is None else dedup_check
+        )
+        self._dedup_sweep = dedup_sweep
+        self._next_dedup: datetime | None = None
         # §4.8 event-driven healing: a drifted crawl assesses immediately (not waiting
         # for the periodic sweep), rate-limited per-site by this cooldown (None = off).
         self._heal_cooldown = _optional_interval(
@@ -1048,6 +1069,48 @@ class Scheduler:
             return {}
         return await refresh()
 
+    def dedup_due(self, now: datetime) -> bool:
+        """True if a §17 overlay resweep is due (``JOBCRAWLER_DEDUP_REFRESH_INTERVAL``).
+
+        Like the recheck/match drain, NOT gated by the master autonomy switch:
+        rebuilding derived identity state over already-tracked rows is bookkeeping,
+        not self-modification. Requires both a cadence and the injected sweep seam.
+        """
+        if self._dedup_interval is None or self._dedup_sweep is None:
+            return False
+        return self._next_dedup is None or now >= self._next_dedup
+
+    def mark_dedup(self, now: datetime) -> None:
+        """Record that a dedup sweep ran at ``now``; the next is one interval later.
+
+        Advanced whether or not the rebuild succeeded (the seam is fail-soft and keeps
+        the previous overlay on failure), so a persistent sweep bug degrades to a
+        stale-but-consistent overlay instead of a hot loop of failing rebuilds.
+        """
+        if self._dedup_interval is not None:
+            self._next_dedup = now + self._dedup_interval
+
+    async def dedup_tick(self) -> dict[str, object]:
+        """Run one injected §17 overlay resweep and log its headline counters.
+
+        The seam does the whole job (recompute keys → cluster → elect canonicals →
+        swap the overlay in one transaction → persist the report to meta); the
+        scheduler contributes only cadence and the run-loop log line.
+        """
+        sweep = self._dedup_sweep
+        if sweep is None:  # pragma: no cover - gated by dedup_due
+            return {}
+        report = await sweep()
+        if report:
+            _log.info(
+                "dedup sweep rows=%s clusters=%s clustered=%s collapse_saving_open=%s",
+                report.get("rows"),
+                report.get("clusters"),
+                report.get("clustered_rows"),
+                report.get("collapse_saving_open"),
+            )
+        return report
+
     def _closure_reason(self, status: int, text: str) -> str | None:
         """Why a re-fetched open position should close now, or None to keep it open.
 
@@ -1105,7 +1168,7 @@ class Scheduler:
         """
         _log.info(
             "scheduler starting sites=%d interval=%ss autonomy=%s "
-            "regen=%s reopt=%s recheck=%s match_drain=%s fx=%s",
+            "regen=%s reopt=%s recheck=%s match_drain=%s fx=%s dedup=%s",
             len(self._sites),
             interval,
             "on" if self._autonomy else "OFF",
@@ -1114,6 +1177,9 @@ class Scheduler:
             "off" if self._recheck_interval is None else self._recheck_interval,
             "off" if self._match_drain_interval is None else self._match_drain_interval,
             "off" if self._fx_interval is None else self._fx_interval,
+            "off"
+            if self._dedup_interval is None or self._dedup_sweep is None
+            else self._dedup_interval,
         )
         while not stop.is_set():
             try:
@@ -1134,6 +1200,9 @@ class Scheduler:
                 if self.fx_due(now):
                     await self.fx_tick()
                     self.mark_fx(now)
+                if self.dedup_due(now):
+                    await self.dedup_tick()
+                    self.mark_dedup(now)
                 self.adopt_watch_tick(now)
             except Exception:
                 # Last-resort guard: an unexpected error in a tick or sweep must not

@@ -66,6 +66,7 @@ from jobcrawler import config, notify
 from jobcrawler.match import Matcher, MatchVerdict, prefilter
 from jobcrawler.runtime.contract import CrawlFn, Job
 from jobcrawler.runtime.ctx import Ctx
+from jobcrawler.runtime.dedup import identity_keys
 from jobcrawler.runtime.hardening import harden_xml
 from jobcrawler.runtime.normalize import (
     EnrichedJob,
@@ -252,6 +253,12 @@ def _process(
     # the annualized-USD band is a pure function of the job plus these rates, and rates only
     # change out-of-band (:mod:`jobcrawler.fx`), so one read serves every job this crawl.
     fx_rates = store.fx_table()
+    # §17 identity substrate: eager per-row key writes so a duplicate upserted on another
+    # board minutes ago is already visible to the live match/notify gates. Derived state
+    # only — the periodic sweep recomputes every key — so failures are counted, never raised.
+    dedup_on = config.dedup_enabled()
+    apply_drop = config.dedup_apply_param_denylist()
+    dedup_key_failures = 0
 
     # ``present`` = COMPLETE positions tracked this crawl; it gates the mass-closure guard
     # (a wholly-incomplete crawl leaves it empty → no diff-close). ``seen`` = every URL
@@ -304,11 +311,12 @@ def _process(
         # the position row AND feeds the prefilter + matcher (new/changed now, or an
         # unchanged posting the drain re-presents when it is still parked pending).
         enriched = enrich(job)
+        chash = _content_hash(job)
         outcome = store.upsert_position(
             slug,
             canon,
             fields=_position_fields(job, enriched, fx_rates=fx_rates),
-            content_hash=_content_hash(job),
+            content_hash=chash,
         )
         present.add(canon)
         if outcome == "new":
@@ -323,6 +331,28 @@ def _process(
             unchanged.append(
                 (canon, enriched)
             )  # never-scored MISS the drain re-presents.
+        # §17 identity keys for new/changed rows only: an unchanged row's keys drift
+        # only through non-hashed fields (apply_url, external_id) — rare, and the next
+        # sweep repairs it — so re-writing identical keys every crawl is pure churn.
+        if dedup_on and outcome != "unchanged":
+            try:
+                ikeys = identity_keys(
+                    slug,
+                    canon,
+                    apply_url=job.apply_url,
+                    external_id=job.external_id,
+                    company=job.company,
+                    company_canonical=canonical_company(job.company),
+                    title=job.title,
+                    content_hash=chash,
+                    marketplace_hosts=marketplace_hosts,
+                    apply_drop_params=apply_drop,
+                )
+                store.replace_identity_keys(
+                    slug, canon, [(k.tier, k.key) for k in ikeys]
+                )
+            except Exception:  # never let derived identity cost the crawl itself
+                dedup_key_failures += 1
 
     matched, match_pending = _match(
         slug,
@@ -373,6 +403,10 @@ def _process(
     signals: dict[str, object] = {"incomplete": incomplete}
     if marketplace_skipped:
         signals["marketplace_skipped"] = marketplace_skipped
+    # §17 telemetry: identity-key extraction failures (isolated above; the sweep
+    # self-heals them, but the operator should see a systematically weird site).
+    if dedup_key_failures:
+        signals["dedup_key_failures"] = dedup_key_failures
     if positions_found:
         signals["body_quality"] = (positions_found - incomplete) / positions_found
     # §4.8 under-enumeration signal: a known board that came back a slice. Recorded even
@@ -463,11 +497,23 @@ def _match(
         ]
 
     result = matcher.score_new([(slug, canon, e) for canon, e in to_score])
-    matched = cast(int, result["cached"]) + cast(int, result["scored"])
+    # ``inherited`` (§17): verdicts copied from a cluster sibling — real verdicts on
+    # the row, so they count matched. ``.get`` tolerates test fakes' slimmer dicts.
+    matched = (
+        cast(int, result["cached"])
+        + cast(int, result["scored"])
+        + cast(int, result.get("inherited", 0))
+    )
     match_pending += cast(int, result["pending"])
 
     # Notify strong matches (§4.7 pipeline sink). notify() is best-effort and silent when
     # no webhook is configured (that is notify.py's job) — the runner just calls it.
+    # The §17 ledger gate sits in front: one ping per real-world job, however many
+    # boards carry it — suppressed when this row or any cluster sibling was already
+    # notified, dismissed, or applied to; every emit is recorded so two siblings in
+    # one batch dedup sequentially.
+    ledger_on = config.dedup_notify_enabled()
+    tiers = config.dedup_tiers() if ledger_on else frozenset()
     sent = {canon: e for canon, e in to_score}
     results = cast("list[tuple[str, str, MatchVerdict]]", result["results"])
     for site, url, verdict in results:
@@ -475,6 +521,8 @@ def _match(
             continue
         e = sent.get(url)
         if e is None:  # defensive: every result url was sent, but never assume
+            continue
+        if ledger_on and not store.notify_gate(site, url, tiers=tiers):
             continue
         job = e.job
         notify.notify(
@@ -490,6 +538,8 @@ def _match(
             score=verdict.score,
             reasons="; ".join(verdict.reasons),
         )
+        if ledger_on:
+            store.record_notified("match", site, url)
     return matched, match_pending
 
 

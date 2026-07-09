@@ -80,6 +80,27 @@
     {% if not reasons and not concerns %}<p class="empty">No reasons or concerns recorded.</p>{% endif %}
   </section>
 
+  {# ---- Cluster siblings (§17): the same job on other boards ----------- #}
+  {% if siblings is defined and siblings %}
+  <section class="panel">
+    <h2>Also listed on {{ siblings | length }} other board{{ 's' if siblings | length != 1 else '' }}</h2>
+    <ul class="siblings">
+      {% for s in siblings %}
+      <li>
+        <a href="/positions/{{ encode_pid(s.p.site, s.p.url) }}">{{ site_names.get(s.p.site, s.p.site) }}</a>
+        <span class="lifecycle lc-{{ s.p.status }}">{{ s.p.status }}</span>
+        {% if s.p.match_score is not none %}<span class="score-chip band-{{ score_band(s.p) }}" title="this copy's score">{{ score_of(s.p) }}</span>{% endif %}
+        {% if s.canonical %}<span class="tag" title="the copy the collapsed list shows for this cluster">shown in list</span>{% endif %}
+        {% if s.p.dismissed %}<span class="tag">dismissed</span>{% endif %}
+        {% if s.p.applied_at %}<span class="tag">applied</span>{% endif %}
+        <a class="ext" href="{{ s.p.url }}" target="_blank" rel="noopener noreferrer" title="Open this copy's posting">↗</a>
+      </li>
+      {% endfor %}
+    </ul>
+    <p class="empty">Detected as the same real-world job; dismissing or applying to any copy handles all of them in the collapsed view.</p>
+  </section>
+  {% endif %}
+
   {# ---- Classification + Compensation --------------------------------- #}
   <div class="cols">
     <section class="panel">

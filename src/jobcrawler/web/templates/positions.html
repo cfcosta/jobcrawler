@@ -60,6 +60,10 @@
     <label class="chk"><input type="checkbox" name="relocation_offered" value="1"{{ ' checked' if filters.relocation_offered else '' }}> Offers relocation</label>
     <label class="chk"><input type="checkbox" name="show_dismissed" value="1"{{ ' checked' if filters.show_dismissed else '' }}> Show dismissed</label>
     <label class="chk"><input type="checkbox" name="hide_applied_companies" value="1"{{ ' checked' if filters.hide_applied_companies else '' }}> Hide applied companies</label>
+    {% if dedup_ui_enabled() %}
+    {# value="0": checked sends collapse=0 (raw rows); unchecked sends nothing, so the collapsed default applies #}
+    <label class="chk" title="Show every crawled copy of a job instead of one row per real-world job"><input type="checkbox" name="collapse" value="0"{{ ' checked' if not filters.collapse else '' }}> Show duplicates</label>
+    {% endif %}
   </div>
 </form>
 
@@ -93,6 +97,8 @@
           <span class="loc">{{ p.location_normalized or p.location }}{% if p.workplace and p.workplace != 'unspecified' %} · {{ p.workplace }}{% endif %}</span>
           {% if p.remote_scope == 'anywhere' %}<span class="scope scope-anywhere" title="Open to candidates anywhere">anywhere</span>{% elif p.remote_scope == 'restricted' %}<span class="scope scope-restricted" title="Remote but geographically restricted — see location">restricted</span>{% endif %}
           {% if p.relocation == 'offered' %}<span class="scope scope-relo" title="Relocation or visa support mentioned in the posting">relocation</span>{% endif %}
+          {% set csize = cluster_sizes.get(encode_pid(p.site, p.url)) if cluster_sizes is defined else none %}
+          {% if csize and csize > 1 %}<span class="scope scope-cluster" title="The same job is listed on {{ csize }} boards — open the detail page to see all copies">on {{ csize }} boards</span>{% endif %}
         </span>
       </span>
     </div></td>

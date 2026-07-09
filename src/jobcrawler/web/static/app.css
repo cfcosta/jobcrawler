@@ -403,6 +403,11 @@ tr.dimmed { opacity: 0.45; }
 .scope-anywhere { background: color-mix(in srgb, var(--good) 14%, transparent); color: var(--good-text); }
 .scope-restricted { background: color-mix(in srgb, var(--warning) 16%, transparent); color: var(--warning); }
 .scope-relo { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent-strong); }
+.scope-cluster { background: var(--raised); color: var(--ink-3); }
+
+/* §17 cluster-sibling list (detail page) */
+.siblings { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.siblings li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 /* per-status select tinting (list view) — quiet: a colored dot edge, not a rainbow */
 select.badge-info, select.badge-progress, select.badge-warn, select.badge-good,

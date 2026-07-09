@@ -64,8 +64,10 @@ ever**, and misses are batched into one prediction per `batch` jobs (§4.7/§8).
   anti-bot wall are out of scope — we track public ATS boards and careers pages. Logins,
   paywalls, and **interactive** CAPTCHA solving (Turnstile/hCaptcha) remain non-goals;
   passive Cloudflare JS challenges *are* handled transparently (§4.10).
-- **Semantic cross-board dedup / repost clustering.** The same role posted to three boards
-  is three rows in v1 (§14 Q1). Content-hash dedup is *within* a `(site, url)` key only.
+- **Semantic cross-board dedup / repost clustering.** *Superseded by the §17 read-derived
+  overlay:* rows stay separate (one per `(site, url)`, content-hash dedup still within that
+  key only); identity is clustered at **read time** from deterministic key tiers. What stays
+  out: semantic/embedding similarity, LLM-judged identity, and physical row merging.
 - **Salary inference.** We parse a salary the board *prints* (§4.6) and never model or
   impute one it doesn't (§14 Q3).
 - **Multi-profile / team use.** One `PROFILE.md` per deployment in v1 (§13 next).
@@ -637,7 +639,8 @@ rule "show a company's roles only until I've applied to one of them": `matches(e
 drops every open row whose canonical company already has an `applied_at` stamp — most employers accept
 one application company-wide, so a second lead at a company you're already in is noise. Grouping
 COALESCEs the key to `lower(company)` for rows written before the column existed (they converge on
-their next crawl), and an empty key groups with nothing.
+their next crawl), and an empty key groups with nothing. Company grouping is orthogonal to the §17
+*job-identity* overlay: this folds a company's many roles; §17 folds one role's many board copies.
 
 ### 4.8 Health & self-healing regeneration
 Each crawl records `positions_found`, `new_positions`, `errors`, `pages_fetched`, and a
@@ -941,7 +944,10 @@ newly-added/unseen boards**, validated on the held-out split.
 - **`PositionRecord`** — the `positions` row (§4.7): identity + the crawler fields + lifecycle
   (`first_seen`/`last_seen`/`missing_streak`/`status`/`closed_at`) + match (`match_score`/
   `match_verdict`/`match_reasons`/`matched_at`/`match_pending`) + the §4.7-mined
-  `hiring_company` and the §16 `company_canonical` dedup key (both **out** of `content_hash`).
+  `hiring_company` and the §16 `company_canonical` dedup key (both **out** of `content_hash`)
+  + the §17 verdict-provenance `match_origin` (`'llm'` \| `'cache'` \| `'cluster:<site>\n<url>'`;
+  NULL on legacy rows). Cluster membership itself is **not** on the row — it lives only in the
+  disposable §17 overlay tables (`position_identity_keys`, `position_clusters`).
 - **`Profile` / `ProfilePrefs`** — §5 profile (below); `profile_hash` keys the match cache.
 - **`MatchVerdict`** — `score: int` (0–100 clamped), `verdict: strong|good|weak|reject`, `reasons`,
   `concerns` (§4.7). `PROMPT_VERSION = 'match-v1'`. The match-time extractor (§4.7) is a separate
@@ -1264,7 +1270,9 @@ The central risk is **executing model-written code against the live web**. Mitig
 | `jobcrawl list` | show boards, script presence, last position count, health/staleness, learned cadence |
 | `jobcrawl status` | per-board run aggregates, fleet health distribution, drift-recovery MTTR, active generator + held-out score + autonomy brake (§4.9/§4.11) |
 | `jobcrawl optimize [--adopt]` | the offline §4.11 job: build trainset → optimize → held-out promote (`--adopt` flips the active-generator pointer) |
-| `jobcrawl match-trainset [--out PATH]` | project persisted match verdicts + operator feedback into a JSONL **matcher** trainset for distilling a cheaper matcher (§8) |
+| `jobcrawl match-trainset [--out PATH]` | project persisted match verdicts + operator feedback into a JSONL **matcher** trainset for distilling a cheaper matcher (§8); §17 cluster-inherited verdicts are excluded (copies, not judgments) |
+| `jobcrawl dedup [--rebuild \| --report \| --block-key K [--reason R] \| --unblock-key K \| --requeue-inherited \| --seed-notify-ledger]` | operate the §17 identity overlay: recompute it from scratch, print the last sweep report + live overlay stats + blocklist, split an over-merging key (operator kill-switch), reverse every inherited verdict into the pending queue, or re-seed the notify ledger |
+| `jobcrawl retire-site <slug>` | close all open rows of a removed board (`reason=site_retired`) — the DB half of retirement; removing/disabling the `sites.yaml` entry is the registry half. History, verdicts, and §17 suppression facts survive |
 | `jobcrawl rollback-generator` | revert the active generator to the previously-adopted version (§4.11) |
 | `jobcrawl login` | import the ChatGPT-subscription (Codex) OAuth token from `codex login` into the store a `chatgpt/*` model slug bills against (§9) — one-shot, not a daemon |
 
@@ -1338,6 +1346,11 @@ an `openrouter/…` slug billed per token. Selected knobs:
 | `JOBCRAWLER_ASSESS_TIMEOUT` | `30m` | §4.9 liveness watchdog: max wall-clock ONE generation assess may hold the loop; on expiry the assess is abandoned (worker detached, its store writes still land) and the tick resumes — a wedged generation can't freeze crawling/recheck/matching. `0s` disables |
 | `JOBCRAWLER_SOLVER` / `FLARESOLVERR_URL` / `JOBCRAWLER_CLEARANCE_TTL` / `JOBCRAWLER_EGRESS_PROXY` | `none` / — / `30m` / — | §4.10 challenge backend + clearance + IP/UA-pinned egress |
 | `JOBCRAWLER_NOTIFY_WEBHOOK` / `NOTIFY_TIMEOUT` | — / `10s` | optional operator webhook for autonomous actions + match alerts (§4.7/§4.9) |
+| `JOBCRAWLER_DEDUP` | `on` | §17 master switch: off stops the sweep loop + ingest key hook AND forces every consumer flag below to report off (the overlay tables persist, untouched) |
+| `JOBCRAWLER_DEDUP_REFRESH_INTERVAL` | `15m` | §17 sweep cadence (first pass on boot; autonomy-exempt bookkeeping like recheck/fx); `off` disables the loop |
+| `JOBCRAWLER_DEDUP_TIERS` | `0,1,2,3,6` | comma-set of identity tiers whose **edges** may join rows (keys for all tiers are always written — free shadow measurement). T4 corroborates only; T5 (fuzzy) ships off |
+| `JOBCRAWLER_DEDUP_MATCH` / `_NOTIFY` / `_UI` | `on` | per-consumer flags (each ANDed with the master): cluster verdict inheritance (§4.7 cache step); notify-ledger sibling suppression; browse collapse/chips/siblings/distinct-KPI |
+| `JOBCRAWLER_DEDUP_APPLY_PARAM_DENYLIST` | curated §17 list | tracking params stripped when normalizing `apply_url` for T2 identity — a SEPARATE, wider list than the crawl-time `tracking_param_denylist`; identity-bearing params (`gh_jid`/`ashby_jid`/`for`/`token`/`jk`/`pid`/`applyData`) are never on it |
 
 ## 12. Testing strategy
 - **Generator** — `dspy.RLM` driven by a hand-authored `MockInterpreter` (dspy ships none importable;
@@ -1370,7 +1383,13 @@ an `openrouter/…` slug billed per token. Selected knobs:
   the full-description reconstruction (Lever concat, Greenhouse unescape), lifecycle transitions, and
   the enrich→prefilter→match wiring. Hand-written reference crawlers double as contract tests.
 - **Politeness/SSRF** — unit tests proving robots/rate-limit/allowed-host enforcement.
-- Mirror `tests/` to `src/`, `pytest` + `pytest-asyncio` (`asyncio_mode=auto`), `ty`, `ruff`.
+- **Dedup overlay (§17)** — pure key-derivation tables over the measured hazard fixtures (gh 5-digit
+  floor, org-conflict veto, generic-`apply:` corroboration, separator/blocklist splits, degenerate
+  keys, HN company-tier exclusion); sweep determinism (same rows ⇒ same clusters/canonicals);
+  election preferences; with every flag off the read queries are byte-identical to pre-§17; verdict
+  inheritance (donor guards, no cache write, no spend) and its `--requeue-inherited` reversal;
+  ledger gate (one ping per cluster, dismiss/apply suppression); collapse + anti-resurrection +
+  user-data auto-force in `search_positions`.
 
 ## 13. Milestones (the news→jobs pivot)
 - **P0 — Rename + green (DONE):** mechanical package rename `bizup_autocrawler → jobcrawler`,
@@ -1385,17 +1404,27 @@ an `openrouter/…` slug billed per token. Selected knobs:
 - **P2 — Real boards:** seed `sites.yaml` with real ATS boards (Greenhouse/Lever/Ashby/Gupy tokens +
   RemoteOK/WWR), generate over them, measure the §6 gate-1+2 pass-rate and $/board; the M1 step-0
   feed/API/Cloudflare tally (§4.10) sizing how much rides on the solver tier.
+- **P3 — Cross-board dedup (DONE, §17):** the read-derived identity overlay — deterministic key
+  tiers, guarded sweep, cluster verdict inheritance, notify-ledger suppression, UI collapse —
+  shipped default-on with per-consumer kill-switches. Resolves §14 Q1 for exact/structural
+  identity; the fuzzy tier (T5) remains off.
 - **Next (post-v1):** **multi-profile** (per-persona `PROFILE.md`, per-profile caches/caps); **apply-assist**
   (draft a tailored cover note from the match reasons — still human-sent, never auto-applied); **richer
   salary normalization** (FX-normalized comparison **shipped** — `usd_annual_band` over DB-cached live
   rates, §4.6/§4.9; confidence bands still open — §14 Q3); **Postgres** state store
-  (§14 Q5); cross-board repost dedup (§14 Q1).
+  (§14 Q5); §17 follow-ons: display-layer field borrowing onto the canonical, T5 fuzzy tier if the
+  shadow reports ever justify it.
 
 ## 14. Open questions / follow-ups
-1. **Cross-board repost dedup.** The same role on Greenhouse + WWR + RemoteOK is three `positions` rows.
+1. **Cross-board repost dedup.** ~~The same role on Greenhouse + WWR + RemoteOK is three `positions` rows.
    Should a content-similarity pass collapse reposts (and how does closure interact — one board closes, the
    others don't)? v1 keeps them separate; a fuzzy `(company, title, normalized-description)` cluster key is
-   the candidate.
+   the candidate.~~ **Shipped as §17** (structural tiers T0–T3 + T6, default-on): rows stay separate;
+   identity is a read-derived overlay. The closure interaction resolved itself once identity left the
+   rows — lifecycle stays per-board per-row, and canonical election simply prefers an open sibling, so
+   one board closing never closes (or hides) a still-open copy. The fuzzy `(company, title)` key was
+   built as T5 but stays **off** (measured false-merge hazards: robinhood 9× same-title reqs,
+   seniority-stripped collisions); the §17 shadow report is the evidence bar for ever enabling it.
 2. **Regeneration / review-gate delivery tier.** The delivery mechanism is *built* — `JOBCRAWLER_REVIEW_GATE`
    is the tri-state (§6 gate-4, §8): `auto` backs up the live crawler and promotes the new one unattended,
    `on` stages it under `crawlers/_pending/<slug>.py` for a human `jobcrawl promote`, `off` writes live with
@@ -1560,3 +1589,89 @@ UI-occasional-writer overlap safe. **Profile editing is out of scope** for v1 (a
 file edit the §4.7 drain picks up). Because it holds **personal application data**, `serve` binds `127.0.0.1`
 by default (`JOBCRAWLER_SERVE_HOST` / `JOBCRAWLER_SERVE_PORT`, flag > env > config); `0.0.0.0` is opt-in and
 only sound behind a trusted authenticating proxy (§8).
+
+## 17. Cross-board duplicate clustering (read-derived overlay)
+
+The same real-world opening is routinely stored several times — an ATS board row plus aggregator
+copies (§14 Q1; measured at ~29% of open rows on the live corpus). **Rows are observations; identity
+is derived.** `positions` keeps one row per `(site, url)` with its §4.7 lifecycle untouched; job
+identity lives in two overlay tables (`position_identity_keys`, `position_clusters`) that a
+deterministic host-side sweep (`runtime/dedup.py`, cadence `JOBCRAWLER_DEDUP_REFRESH_INTERVAL`,
+default 15m, first pass on boot) recomputes from the rows alone. **The overlay is disposable:**
+dropping it and resweeping is lossless, every consumer is flag-gated (§11), identity state never
+enters `content_hash`, and `cluster_id` is never persisted outside the overlay — so a bug in
+identity rules can be reverted with an env var and can never corrupt crawl, closure, or tracking
+state. The sweep swaps both tables in one transaction (readers see old-or-new, never empty), writes
+its report to meta `dedup_last_report` (read by `jobcrawl dedup`), and is autonomy-*exempt*
+bookkeeping — `JOBCRAWLER_AUTONOMY` brakes self-modification, and re-deriving state from unchanged
+rules isn't that.
+
+**Key tiers (a false merge is worse than a missed merge).** Keys for *every* tier are always
+written — shadow measurement is free and the report reads it; `JOBCRAWLER_DEDUP_TIERS`
+(default `0,1,2,3,6`) picks which tiers may form **edges**:
+
+- **T0** identical canonical `url` across sites (re-canonicalized idempotently at derivation).
+- **T1** ATS identity regex-extracted from `url` *and* `apply_url`: greenhouse (incl. `gh_jid` and
+  embed `for`+`token`; ids must be ≥5 digits — the format guard), ashby (incl. `ashby_jid`), lever,
+  smartrecruiters, workable, recruitee, workday (tenant-scoped org-qualified req ids only). An id
+  observed under two orgs voids its edges (org-conflict veto) and is auto-blocklisted.
+- **T2** normalized `apply_url` equality under the SEPARATE §17 param denylist
+  (`JOBCRAWLER_DEDUP_APPLY_PARAM_DENYLIST`; identity-bearing params `gh_jid`/`ashby_jid`/`for`/
+  `token`/`jk`/`pid`/`applyData` are never stripped; `urls.canonicalize_url` defaults and the PK URL
+  form are untouched). Two key namespaces: `applyats:` (per-job ATS hosts — unconditionally
+  edge-safe) vs generic `apply:` (needs sweep-time company+title corroboration and single-candidate
+  anchoring; never trusted by the live between-sweep gates).
+- **T3** `external_id` within a declared slug family only (e.g. the workingnomads tag feeds), never
+  globally.
+- **T4** cross-site `(company-key, content_hash)` — corroboration only, never edges; an ambiguous
+  hash (two rows one side) is vetoed.
+- **T5** `(company-key, geo-gated normalized title)` — built, **ships off** (measured hazards:
+  robinhood's 9 identical-title reqs, seniority-stripped collisions); never within one site, never
+  with seniority stripped. The shadow report is the evidence bar for ever enabling it.
+- **T6** LinkedIn/Indeed posting ids (promoted to the default edge set after a zero-conflict audit).
+
+Company-keyed tiers (T4/T5) are skipped entirely for sites whose company column is unreliable (HN
+"Who is hiring") and for degenerate (<3 char) company keys. Two rows carrying **different** T1
+identities can never be joined by any lower tier (the higher-tier separator), and a blocklisted key
+(`jobcrawl dedup --block-key`, or the auto-veto) splits its group back to singletons — the safe
+direction. Clusters are connected components (union-find, deterministic order); one member is
+elected **canonical** per sweep: applied (earliest) > operator-touched > open > the company's own
+board > longest description > `(first_seen, site, url)` — recomputed every sweep, so a closed
+canonical is replaced as soon as a sibling is open.
+
+**Ingest hook.** The §4.7 runner derives and replaces a row's keys inline on `new`/`changed`
+outcomes (failure-isolated per row; failures count into the run's `signals.dedup_key_failures`,
+never fail the crawl). Between sweeps, live sibling gates trust only edge-safe keys (T0/T1/T3/T6 +
+`applyats:`) — generic `apply:`/T4/T5 wait for the sweep's corroboration.
+
+**Consumers (each behind its own §11 flag, all ANDed with the master).**
+- *Match inheritance* (`JOBCRAWLER_DEDUP_MATCH`): at the §4.7 cache-miss step, a candidate whose
+  cluster (live keys ∪ materialized clusters) holds a fresh verdict — `matched_at` set, not
+  `match_pending` (a profile edit parks every open row, so no stale-profile verdict is ever
+  inherited), donor description at least as informative up to the 1200-char digest cap — inherits it
+  row-level with `match_origin='cluster:<site>\n<url>'`. Free: draws nothing from the daily cap, and
+  **never written to `match_cache`** (the cache stays a pure content→verdict map). Reversible in
+  bulk: `jobcrawl dedup --requeue-inherited`. Inherited verdicts are excluded from the §8 matcher
+  trainset (copies, not judgments — one LLM call must not vote N times).
+- *Notify suppression* (`JOBCRAWLER_DEDUP_NOTIFY`): an append-only `notify_ledger` records per-row
+  facts (`notified`/`dismissed`/`applied`); a `match` notification is suppressed when the row or any
+  cluster sibling already has one — one ping per real job, enforced identically in the crawl sink
+  and the drain sink. Seeded once at boot from existing strong matches (meta-guarded;
+  `jobcrawl dedup --seed-notify-ledger` re-seeds at the current threshold).
+- *UI collapse* (`JOBCRAWLER_DEDUP_UI`, §16): browse collapses a cluster to its canonical row
+  ("also on N boards" chip; the detail page lists every sibling with its own score/status), and the
+  default view hides rows whose cluster contains a dismissed or applied member — **dismissing one
+  copy retires the job everywhere at read time, without writing to siblings**. "New since" counts
+  distinct jobs, and the dashboard shows distinct-open over raw-open. Queries filtered on the
+  operator's own data (applied, dismissed, an operator-set `track_status` — the default `'new'`
+  stage is exempt) always bypass collapse; `?collapse=0` (the "Everything" pill) is the per-request
+  raw escape; every `pid` keeps resolving regardless.
+
+**Boundaries (what it must not do).** Never delete, merge, or rewrite a `positions` row. Never touch
+`status`/`missing_streak`/`closed_at` — closure stays per-board per §4.7, and one board closing
+never closes a sibling. Never let derived identity into `content_hash`. Never block or fail a crawl.
+Never propagate operator columns by write. Never distort §4.8 health signals or §6 gates (per-board
+counters stay raw). **Never call an LLM (§3)** — keys are pure functions of stored fields; the only
+LLM the pipeline runs remains the §4.7 matcher, which §17 makes *rarer*, never different. All
+thresholds, families, allowlists, and the blocklist live host-side (§8), never authored or visible
+to generated code.

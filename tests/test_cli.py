@@ -1702,3 +1702,177 @@ def test_match_drain_pass_keeps_the_old_matcher_through_a_malformed_save(
     assert _match_drain_pass(store, cell) == {}  # type: ignore[arg-type]
     assert cell["m"] is old_matcher
     store.close()
+
+
+# --- §17 dedup + retire-site commands ----------------------------------------
+
+
+def _dedup_args(*argv: str):
+    return build_parser().parse_args(["dedup", *argv])
+
+
+def _tmp_db(tmp_path: Path, monkeypatch: MonkeyPatch) -> str:
+    db = str(tmp_path / "state.db")
+    monkeypatch.setenv("JOBCRAWLER_STATE_URL", db)
+    return db
+
+
+def test_parser_dispatches_dedup_and_retire_site() -> None:
+    from jobcrawler.cli import cmd_dedup, cmd_retire_site
+
+    parser = build_parser()
+    assert parser.parse_args(["dedup"]).func is cmd_dedup
+    args = parser.parse_args(["dedup", "--block-key", "k", "--reason", "r"])
+    assert (args.block_key, args.reason) == ("k", "r")
+    assert parser.parse_args(["dedup", "--rebuild"]).rebuild is True
+    assert parser.parse_args(["dedup", "--requeue-inherited"]).requeue_inherited
+    assert parser.parse_args(["dedup", "--seed-notify-ledger"]).seed_notify_ledger
+    retire = parser.parse_args(["retire-site", "jobicy_remote_dev"])
+    assert retire.func is cmd_retire_site and retire.slug == "jobicy_remote_dev"
+
+
+def test_cmd_dedup_block_unblock_roundtrip(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from jobcrawler.cli import cmd_dedup
+
+    db = _tmp_db(tmp_path, monkeypatch)
+    assert cmd_dedup(_dedup_args("--block-key", "ats:greenhouse:1", "--reason", "bad")) == 0
+    store = StateStore(db)
+    try:
+        assert store.blocked_key_set() == {"ats:greenhouse:1"}
+    finally:
+        store.close()
+    assert cmd_dedup(_dedup_args("--unblock-key", "ats:greenhouse:1")) == 0
+    # Unblocking a key that is not there is a loud exit-1, not a silent success.
+    assert cmd_dedup(_dedup_args("--unblock-key", "ats:greenhouse:1")) == 1
+    out = capsys.readouterr().out
+    assert "blocked: ats:greenhouse:1" in out
+    assert "not on the blocklist" in out
+
+
+def test_cmd_dedup_report_before_any_sweep(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from jobcrawler.cli import cmd_dedup
+
+    _tmp_db(tmp_path, monkeypatch)
+    assert cmd_dedup(_dedup_args()) == 0
+    out = capsys.readouterr().out
+    assert "no sweep has run yet" in out
+    assert "overlay:" in out  # live stats still print (all zeros)
+
+
+def test_cmd_dedup_rebuild_failure_keeps_overlay_and_exits_1(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from jobcrawler.cli import cmd_dedup
+
+    _tmp_db(tmp_path, monkeypatch)
+    monkeypatch.setattr("jobcrawler.cli._dedup_sweep_pass", lambda store, sites: {})
+    assert cmd_dedup(_dedup_args("--rebuild")) == 1
+    assert "previous overlay kept" in capsys.readouterr().out
+
+
+def test_cmd_retire_site_closes_only_that_board(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from jobcrawler.cli import cmd_retire_site
+
+    db = _tmp_db(tmp_path, monkeypatch)
+    store = StateStore(db)
+    _seed_position(store, site="jobicy_remote_dev", url="https://j.test/1",
+                   title="Rust Engineer", content_hash="r1")
+    _seed_position(store, site="jobicy_remote_dev", url="https://j.test/2",
+                   title="Go Engineer", content_hash="r2")
+    _seed_position(store, site="acme", url="https://acme.test/1",
+                   title="Backend Engineer", content_hash="a1")
+    store.close()
+
+    args = build_parser().parse_args(["retire-site", "jobicy_remote_dev"])
+    assert cmd_retire_site(args) == 0
+    assert "closed 2 open position(s)" in capsys.readouterr().out
+
+    store = StateStore(db)
+    try:
+        assert store.open_urls("jobicy_remote_dev", limit=10) == []
+        assert store.open_urls("acme", limit=10) == ["https://acme.test/1"]
+        # History survives: the closed rows are still there for §17 suppression.
+        assert store.get_position("jobicy_remote_dev", "https://j.test/1") is not None
+    finally:
+        store.close()
+
+
+def test_match_trainset_excludes_cluster_inherited_verdicts(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # §17: an inherited verdict is a copy of a sibling's judgment, not a judgment —
+    # exporting it would let one LLM call vote N times in the trainset.
+    from types import SimpleNamespace
+
+    from jobcrawler.cli import cmd_match_trainset
+    from jobcrawler.match import _content_hash
+
+    db = _tmp_db(tmp_path, monkeypatch)
+    profile = tmp_path / "PROFILE.md"
+    profile.write_text(_VALID_PROFILE)
+    monkeypatch.setenv("JOBCRAWLER_PROFILE", str(profile))
+
+    fields: dict[str, object] = {
+        "title": "Senior Backend Engineer",
+        "company": "Acme",
+        "location": "Remote",
+        "discipline": "backend",
+        "level": "senior",
+        "workplace": "remote",
+        "employment_type": "full-time",
+        "department": "Engineering",
+        "description": "We build distributed payment systems in Rust.",
+    }
+    job = SimpleNamespace(
+        title=fields["title"],
+        company=fields["company"],
+        location=fields["location"],
+        description=fields["description"],
+        employment_type=fields["employment_type"],
+        department=fields["department"],
+    )
+    store = StateStore(db)
+    try:
+        for site, origin in (
+            ("board_a", "llm"),
+            ("board_b", "cluster:board_a\nhttps://board_a.test/1"),
+        ):
+            store.upsert_position(
+                site,
+                f"https://{site}.test/1",
+                fields=dict(fields),
+                content_hash=_content_hash(job),
+            )
+            store.set_match(
+                site,
+                f"https://{site}.test/1",
+                score=88,
+                verdict="strong",
+                reasons="[]",
+                origin=origin,
+            )
+    finally:
+        store.close()
+
+    out_path = tmp_path / "trainset.jsonl"
+    args = build_parser().parse_args(["match-trainset", "--out", str(out_path)])
+    assert cmd_match_trainset(args) == 0
+    assert "wrote 1 matcher example(s)" in capsys.readouterr().out
+    # Only the judged row is exported; the inherited copy is not a second vote.
+    assert len(out_path.read_text().splitlines()) == 1

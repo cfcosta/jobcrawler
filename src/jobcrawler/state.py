@@ -40,7 +40,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from collections.abc import Callable, Collection, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -195,6 +195,9 @@ class PositionRecord:
     notes: str | None
     dismissed: bool
     track_updated_at: datetime | None
+    # §17 verdict provenance: 'llm' | 'cache' | 'cluster:<site>\n<url>' | None (legacy
+    # rows). Inherited verdicts are excluded from trainsets and reversible in bulk.
+    match_origin: str | None = None
     # Not a stored column: the §4.7 freshness-decayed score (base fit × a recency multiplier),
     # computed in SQL by the display/rank queries. None when the query didn't select it.
     effective_score: float | None = None
@@ -279,6 +282,7 @@ CREATE TABLE IF NOT EXISTS positions (
     match_concerns  TEXT,
     matched_at      TEXT,
     match_pending   INTEGER NOT NULL DEFAULT 0,
+    match_origin    TEXT,
     track_status     TEXT NOT NULL DEFAULT 'new',
     applied_at       TEXT,
     notes            TEXT,
@@ -331,6 +335,43 @@ CREATE TABLE IF NOT EXISTS generation_log (
     llm_log    TEXT
 );
 CREATE INDEX IF NOT EXISTS generation_log_by_site ON generation_log (site, id DESC);
+-- §17 read-derived duplicate clustering. position_identity_keys and position_clusters
+-- are DISPOSABLE PROJECTIONS: the reconciliation sweep rebuilds them from positions
+-- alone; DROP + resweep is lossless. Nothing durable may key on cluster_id.
+CREATE TABLE IF NOT EXISTS position_identity_keys (
+    site TEXT NOT NULL,
+    url  TEXT NOT NULL,
+    tier INTEGER NOT NULL,
+    key  TEXT NOT NULL,
+    PRIMARY KEY (site, url, tier, key)
+);
+CREATE INDEX IF NOT EXISTS pik_by_key ON position_identity_keys (key);
+CREATE TABLE IF NOT EXISTS position_clusters (
+    site         TEXT NOT NULL,
+    url          TEXT NOT NULL,
+    cluster_id   TEXT NOT NULL,
+    is_canonical INTEGER NOT NULL DEFAULT 0,
+    tier         INTEGER NOT NULL,
+    computed_at  TEXT NOT NULL,
+    PRIMARY KEY (site, url)
+);
+CREATE INDEX IF NOT EXISTS pc_by_cluster ON position_clusters (cluster_id);
+-- §17 notification ledger: append-only per-row FACTS (never derived), so cluster
+-- rebuilds can neither lose nor double notification history.
+CREATE TABLE IF NOT EXISTS notify_ledger (
+    event   TEXT NOT NULL,
+    site    TEXT NOT NULL,
+    url     TEXT NOT NULL,
+    sent_at TEXT NOT NULL,
+    PRIMARY KEY (event, site, url)
+);
+-- §17 operator escape hatch: a blocked key forms no edges; blocking splits its
+-- group back to singletons at the next sweep (the safe failure direction).
+CREATE TABLE IF NOT EXISTS identity_key_blocklist (
+    key        TEXT PRIMARY KEY,
+    reason     TEXT,
+    created_at TEXT NOT NULL
+);
 """
 
 # Columns of ``positions`` the runner supplies per crawl via ``upsert_position(fields=)``.
@@ -421,6 +462,11 @@ _POSITION_ADD_COLUMNS: tuple[tuple[str, str], ...] = (
     ("match_concerns", "TEXT"),
     ("matched_at", "TEXT"),
     ("match_pending", "INTEGER NOT NULL DEFAULT 0"),
+    # §17 verdict provenance: NULL = pre-§17; 'llm' | 'cache' = scored normally;
+    # 'cluster:<site>\n<url>' = inherited from a cluster sibling without billing.
+    # Store-owned (NOT in _POSITION_FIELDS) so crawls never clobber it; out of
+    # content_hash like every derived column, so it never re-bills or re-dedups.
+    ("match_origin", "TEXT"),
     # The §16 operator tracking axis, landed on top of the match layer. Like ``match_*``
     # these are store-owned and never taken from a crawler's ``fields`` dict, so a re-crawl
     # of an already-tracked posting can never clobber the application state you set.
@@ -464,6 +510,30 @@ class _Result:
             row = self._rows[self._pos]
             self._pos += 1
             yield row
+
+
+def _live_key_clause(tiers: Collection[int]) -> str:
+    """SQL filter selecting §17 identity keys that are *edge-safe without sweep guards*.
+
+    The live sibling gates (verdict donor, notify gate) join ``position_identity_keys``
+    directly — between sweeps, no per-group guard has run — so they may only trust key
+    namespaces whose equality alone is identity: T0 url, T1 ATS ids, T3 family-scoped
+    external ids (the family name is inside the key string), T6 posting ids, and the
+    ``applyats:`` half of T2 (per-job ATS hosts). Generic ``apply:`` links and the
+    T4/T5 shadow keys need the sweep's corroboration and never pass here. ``tiers``
+    values are trusted host-side config ints, never user input (f-string SQL matches
+    the store's other trusted-literal composition).
+    """
+    enabled = {int(t) for t in tiers}
+    parts: list[str] = []
+    safe = sorted(enabled & {0, 1, 3, 6})
+    if safe:
+        parts.append(f"k1.tier IN ({', '.join(str(t) for t in safe)})")
+    if 2 in enabled:
+        parts.append("(k1.tier = 2 AND k1.key LIKE 'applyats:%')")
+    if not parts:
+        return "0"
+    return "(" + " OR ".join(parts) + ")"
 
 
 class _SerializedConnection:
@@ -588,6 +658,38 @@ class StateStore:
         self._backfill_remote_scope()
         self._backfill_salary_usd()
         self._backfill_relocation()
+        self._backfill_notify_ledger()
+
+    def _backfill_notify_ledger(self, *, force: bool = False) -> None:
+        """One-time §17 notify-ledger seed: pre-feature strong matches count as notified.
+
+        Without the seed, a late-arriving board copy of a job whose strong match already
+        pinged (before the ledger existed) would ping again — the notify gate would see
+        an empty cluster history. Seeds an append-only fact per already-strong row at the
+        current ``match_min_score`` threshold; the threshold used is recorded in the meta
+        guard value for auditability. Idempotent via the ``notify_ledger_seeded`` meta key
+        (and INSERT OR IGNORE, belt-and-braces); ``force`` skips only the meta guard —
+        the operator re-seed path (:meth:`seed_notify_ledger`).
+        """
+        if not force and self.get_meta("notify_ledger_seeded") is not None:
+            return
+        from jobcrawler import config
+
+        threshold = config.match_min_score()
+        self._conn.execute(
+            "INSERT OR IGNORE INTO notify_ledger (event, site, url, sent_at) "
+            "SELECT 'match', site, url, COALESCE(matched_at, last_seen) FROM positions "
+            "WHERE match_score >= ?",
+            (threshold,),
+        )
+        self.set_meta("notify_ledger_seeded", f"threshold={threshold}")
+
+    def seed_notify_ledger(self) -> None:
+        """Operator re-seed (``jobcrawl dedup --seed-notify-ledger``): idempotent facts
+        at the *current* threshold — useful after lowering ``match_min_score`` or bulk
+        imports, instead of waiting for each row's next organic send. Never un-seeds:
+        the ledger is append-only, so a raised threshold changes nothing here."""
+        self._backfill_notify_ledger(force=True)
 
     def _backfill_remote_scope(self) -> None:
         """Fill ``remote_scope`` for rows written before the column existed (§4.6).
@@ -1181,6 +1283,8 @@ class StateStore:
         exclude_applied: bool = False,
         exclude_dismissed: bool = False,
         exclude_company_applied: bool = False,
+        collapse_duplicates: bool = False,
+        exclude_cluster_handled: bool = False,
     ) -> list[PositionRecord]:
         """Open, scored positions at or above ``min_score``, best **effective** fit first (§4.7).
 
@@ -1201,10 +1305,28 @@ class StateStore:
         nothing. ``exclude_dismissed`` additionally drops rows you've hidden with the §16
         dismiss button. All are off by default: the CLI listing and the score histogram
         want the full scored corpus.
+
+        ``collapse_duplicates`` / ``exclude_cluster_handled`` are the §17 cluster flags
+        (see :meth:`search_positions`): one row per real-world job, and no job whose
+        cluster you've already dismissed or applied to.
         """
         clauses = ""
         if exclude_applied:
             clauses += "AND applied_at IS NULL "
+        if collapse_duplicates:
+            clauses += (
+                "AND NOT EXISTS (SELECT 1 FROM position_clusters pc "
+                "WHERE pc.site = positions.site AND pc.url = positions.url "
+                "AND pc.is_canonical = 0) "
+            )
+        if exclude_cluster_handled:
+            clauses += (
+                "AND NOT EXISTS (SELECT 1 FROM position_clusters me "
+                "JOIN position_clusters sib ON sib.cluster_id = me.cluster_id "
+                "JOIN positions p2 ON p2.site = sib.site AND p2.url = sib.url "
+                "WHERE me.site = positions.site AND me.url = positions.url "
+                "AND (p2.dismissed = 1 OR p2.applied_at IS NOT NULL)) "
+            )
         if exclude_company_applied:
             clauses += (
                 "AND NOT EXISTS (SELECT 1 FROM positions p2 "
@@ -1278,6 +1400,7 @@ class StateStore:
         verdict: str,
         reasons: str,
         concerns: str = "[]",
+        origin: str | None = None,
     ) -> None:
         """Record a match verdict on a position and clear its pending flag (§6).
 
@@ -1286,15 +1409,28 @@ class StateStore:
         pending. ``reasons``/``concerns`` are opaque text to the store (the matcher
         serializes its rationale/concerns lists into them); persisting both keeps the full
         verdict on the durable row so a match trainset can be projected from it (§8).
+
+        ``origin`` is §17 provenance: ``'llm'`` / ``'cache'`` for a normally scored row,
+        ``'cluster:<site>\\n<url>'`` for a verdict inherited from a cluster sibling (the
+        reversal handle for :meth:`requeue_inherited`). ``None`` leaves the column
+        untouched for any legacy caller.
         """
         now = self._clock().isoformat()
         with self._lock:
-            self._conn.execute(
-                "UPDATE positions SET match_score = ?, match_verdict = ?, "
-                "match_reasons = ?, match_concerns = ?, matched_at = ?, match_pending = 0 "
-                "WHERE site = ? AND url = ?",
-                (score, verdict, reasons, concerns, now, site, url),
-            )
+            if origin is None:
+                self._conn.execute(
+                    "UPDATE positions SET match_score = ?, match_verdict = ?, "
+                    "match_reasons = ?, match_concerns = ?, matched_at = ?, match_pending = 0 "
+                    "WHERE site = ? AND url = ?",
+                    (score, verdict, reasons, concerns, now, site, url),
+                )
+            else:
+                self._conn.execute(
+                    "UPDATE positions SET match_score = ?, match_verdict = ?, "
+                    "match_reasons = ?, match_concerns = ?, matched_at = ?, match_pending = 0, "
+                    "match_origin = ? WHERE site = ? AND url = ?",
+                    (score, verdict, reasons, concerns, now, origin, site, url),
+                )
             self._conn.commit()
 
     def set_salary(
@@ -1440,6 +1576,11 @@ class StateStore:
         (``rematch`` pass 1) scores by ``content_hash`` alone and never touches the
         description — a description-less row with a cached verdict is legitimately scorable
         there, so excluding it would forfeit a free hit.
+
+        Cluster-canonical rows drain FIRST (§17): after a profile edit parks a whole
+        cluster, the canonical copy rescores on budget and its siblings then inherit the
+        fresh verdict for free instead of each paying. Standalone rows (no overlay row)
+        rank with canonicals; within a rank the FIFO order is unchanged.
         """
         clause = (
             " AND description IS NOT NULL AND description != ''"
@@ -1447,11 +1588,307 @@ class StateStore:
             else ""
         )
         rows = self._conn.execute(
-            "SELECT * FROM positions WHERE status = 'open' AND match_pending = 1"
-            f"{clause} ORDER BY first_seen ASC, site, url LIMIT ?",
+            "SELECT positions.* FROM positions "
+            "LEFT JOIN position_clusters pc ON pc.site = positions.site AND pc.url = positions.url "
+            "WHERE status = 'open' AND match_pending = 1"
+            f"{clause} ORDER BY COALESCE(pc.is_canonical, 1) DESC, "
+            "first_seen ASC, positions.site, positions.url LIMIT ?",
             (limit,),
         ).fetchall()
         return [_to_position(r) for r in rows]
+
+    # -- §17 cross-board duplicate clustering (read-derived overlay) ------------
+    #
+    # positions rows are observations; identity is an interpretation living in two
+    # DISPOSABLE derived tables the reconciliation sweep rebuilds from rows alone
+    # (jobcrawler.runtime.dedup). The store never derives keys itself — it persists
+    # what the sweep/ingest hook computed and answers the sibling questions the
+    # match/notify/UI gates ask. Nothing here writes positions lifecycle state.
+
+    def replace_identity_keys(
+        self, site: str, url: str, keys: Iterable[tuple[int, str]]
+    ) -> None:
+        """Replace one row's §17 identity keys (the failure-isolated ingest hook).
+
+        An eager per-row write so a sibling upserted seconds earlier in the same crawl
+        tick is already visible to the live match/notify gates — an optimization only;
+        the sweep rebuilds every key regardless, so this is never a correctness
+        dependency.
+        """
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM position_identity_keys WHERE site = ? AND url = ?",
+                (site, url),
+            )
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO position_identity_keys (site, url, tier, key) "
+                "VALUES (?, ?, ?, ?)",
+                [(site, url, tier, key) for tier, key in keys],
+            )
+            self._conn.commit()
+
+    def dedup_sweep_rows(self) -> list[sqlite3.Row]:
+        """Every position — open AND closed — with the fields the §17 sweep keys on.
+
+        Closed rows are included on purpose: dismissed/applied suppression must survive
+        board closure (a job you dismissed under a now-closed aggregator copy must not
+        resurrect via a fresh board). ``desc_len`` substitutes for the multi-KB
+        description (the election only compares lengths).
+        """
+        return self._conn.execute(
+            "SELECT site, url, apply_url, external_id, company, company_canonical, "
+            "title, location, location_normalized, content_hash, first_seen, status, "
+            "applied_at, track_status, notes, dismissed, matched_at, match_verdict, "
+            "LENGTH(COALESCE(description, '')) AS desc_len "
+            "FROM positions ORDER BY site, url"
+        ).fetchall()
+
+    def rebuild_dedup_overlay(
+        self,
+        key_rows: Iterable[tuple[str, str, int, str]],
+        cluster_rows: Iterable[tuple[str, str, str, int, int]],
+    ) -> str:
+        """Swap BOTH overlay tables in one transaction; return the ``computed_at`` stamp.
+
+        The single RLock'd connection means readers see the old overlay or the new one,
+        never an empty in-between. DELETE + bulk INSERT (not incremental diffing) keeps
+        the sweep idempotent and the overlay a pure projection.
+        """
+        now = self._clock().isoformat()
+        with self._lock:
+            self._conn.execute("DELETE FROM position_identity_keys")
+            self._conn.execute("DELETE FROM position_clusters")
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO position_identity_keys (site, url, tier, key) "
+                "VALUES (?, ?, ?, ?)",
+                list(key_rows),
+            )
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO position_clusters "
+                "(site, url, cluster_id, is_canonical, tier, computed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                [(s, u, cid, canon, tier, now) for s, u, cid, canon, tier in cluster_rows],
+            )
+            self._conn.commit()
+        return now
+
+    def cluster_members(self, site: str, url: str) -> list[tuple[PositionRecord, bool]]:
+        """All members of the row's materialized cluster (including itself) with their
+        canonical flag, canonical first — or ``[]`` when the row is standalone."""
+        rows = self._conn.execute(
+            "SELECT p.*, sib.is_canonical AS _is_canonical FROM position_clusters me "
+            "JOIN position_clusters sib ON sib.cluster_id = me.cluster_id "
+            "JOIN positions p ON p.site = sib.site AND p.url = sib.url "
+            "WHERE me.site = ? AND me.url = ? "
+            "ORDER BY sib.is_canonical DESC, p.site, p.url",
+            (site, url),
+        ).fetchall()
+        return [(_to_position(r), bool(r["_is_canonical"])) for r in rows]
+
+    def cluster_sizes(
+        self, pairs: Collection[tuple[str, str]]
+    ) -> dict[tuple[str, str], int]:
+        """Cluster size per (site, url), batched for a list page ("also on N boards").
+
+        Rows not in any multi-row cluster are absent from the result (absence =
+        standalone). One query per ≤400 pairs keeps parameter counts under SQLite's
+        limit without a per-row lookup loop.
+        """
+        out: dict[tuple[str, str], int] = {}
+        batch = [p for p in pairs]
+        for start in range(0, len(batch), 400):
+            chunk = batch[start : start + 400]
+            values = ", ".join("(?, ?)" for _ in chunk)
+            params: list[object] = []
+            for s, u in chunk:
+                params += [s, u]
+            rows = self._conn.execute(
+                f"WITH page(site, url) AS (VALUES {values}) "
+                "SELECT page.site AS s, page.url AS u, COUNT(*) AS n "
+                "FROM page "
+                "JOIN position_clusters me ON me.site = page.site AND me.url = page.url "
+                "JOIN position_clusters sib ON sib.cluster_id = me.cluster_id "
+                "GROUP BY page.site, page.url",
+                params,
+            ).fetchall()
+            for row in rows:
+                out[(row["s"], row["u"])] = int(row["n"])
+        return out
+
+    def cluster_verdict_donor(
+        self, site: str, url: str, *, min_desc_len: int, tiers: Collection[int]
+    ) -> PositionRecord | None:
+        """The best cluster sibling whose verdict a candidate may inherit, or None (§17).
+
+        Sibling set = live identity-key join (edge-safe tiers only, blocklist excluded)
+        ∪ the materialized cluster — live keys make a sibling scored seconds earlier in
+        the same tick visible with no sweep latency. A donor must hold a real verdict
+        (``matched_at`` set) and not be parked (``match_pending = 0`` — since a profile
+        edit parks every open row, no stale-profile verdict can ever be inherited), and
+        its description must be at least as informative as the candidate's up to the LLM
+        digest cap (``min_desc_len``, computed by the caller) — a stub-derived verdict
+        never overrides fuller text. Deterministic pick: longest description wins.
+        """
+        key_clause = _live_key_clause(tiers)
+        row = self._conn.execute(
+            "WITH sibs(site, url) AS ("
+            "  SELECT k2.site, k2.url FROM position_identity_keys k1 "
+            "  JOIN position_identity_keys k2 ON k2.key = k1.key "
+            f"  WHERE k1.site = ? AND k1.url = ? AND {key_clause} "
+            "    AND NOT (k2.site = k1.site AND k2.url = k1.url) "
+            "    AND k1.key NOT IN (SELECT key FROM identity_key_blocklist) "
+            "  UNION "
+            "  SELECT sib.site, sib.url FROM position_clusters me "
+            "  JOIN position_clusters sib ON sib.cluster_id = me.cluster_id "
+            "  WHERE me.site = ? AND me.url = ? "
+            "    AND NOT (sib.site = me.site AND sib.url = me.url)"
+            ") "
+            "SELECT p.* FROM sibs JOIN positions p ON p.site = sibs.site AND p.url = sibs.url "
+            "WHERE p.matched_at IS NOT NULL AND p.match_pending = 0 "
+            "  AND LENGTH(COALESCE(p.description, '')) >= ? "
+            "ORDER BY LENGTH(COALESCE(p.description, '')) DESC, p.matched_at DESC, p.site, p.url "
+            "LIMIT 1",
+            (site, url, site, url, min_desc_len),
+        ).fetchone()
+        return _to_position(row) if row is not None else None
+
+    def notify_gate(self, site: str, url: str, *, tiers: Collection[int]) -> bool:
+        """True iff a ``match`` notification for this row should be sent (§17).
+
+        Suppressed when the row itself is already handled (dismissed / applied) or has a
+        ledger fact, or when ANY cluster sibling (live-key join ∪ materialized cluster)
+        already notified or is dismissed / applied — one ping per real-world job, and a
+        job you handled under one board never pings from another. Callers must
+        :meth:`record_notified` after a successful emit so two siblings inside one drain
+        batch dedup sequentially.
+        """
+        own = self._conn.execute(
+            "SELECT 1 FROM notify_ledger WHERE event = 'match' AND site = ? AND url = ? "
+            "UNION ALL "
+            "SELECT 1 FROM positions WHERE site = ? AND url = ? "
+            "AND (dismissed = 1 OR applied_at IS NOT NULL) LIMIT 1",
+            (site, url, site, url),
+        ).fetchone()
+        if own is not None:
+            return False
+        key_clause = _live_key_clause(tiers)
+        row = self._conn.execute(
+            "WITH sibs(site, url) AS ("
+            "  SELECT k2.site, k2.url FROM position_identity_keys k1 "
+            "  JOIN position_identity_keys k2 ON k2.key = k1.key "
+            f"  WHERE k1.site = ? AND k1.url = ? AND {key_clause} "
+            "    AND NOT (k2.site = k1.site AND k2.url = k1.url) "
+            "    AND k1.key NOT IN (SELECT key FROM identity_key_blocklist) "
+            "  UNION "
+            "  SELECT sib.site, sib.url FROM position_clusters me "
+            "  JOIN position_clusters sib ON sib.cluster_id = me.cluster_id "
+            "  WHERE me.site = ? AND me.url = ? "
+            "    AND NOT (sib.site = me.site AND sib.url = me.url)"
+            ") "
+            "SELECT 1 FROM sibs WHERE "
+            "EXISTS (SELECT 1 FROM notify_ledger nl WHERE nl.event = 'match' "
+            "        AND nl.site = sibs.site AND nl.url = sibs.url) "
+            "OR EXISTS (SELECT 1 FROM positions p WHERE p.site = sibs.site "
+            "           AND p.url = sibs.url AND (p.dismissed = 1 OR p.applied_at IS NOT NULL)) "
+            "LIMIT 1",
+            (site, url, site, url),
+        ).fetchone()
+        return row is None
+
+    def record_notified(self, event: str, site: str, url: str) -> None:
+        """Append the per-row notification FACT (idempotent; facts are never derived)."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO notify_ledger (event, site, url, sent_at) "
+                "VALUES (?, ?, ?, ?)",
+                (event, site, url, self._clock().isoformat()),
+            )
+            self._conn.commit()
+
+    def requeue_inherited(self) -> int:
+        """Reverse ALL §17 verdict inheritance: park every inherited row for rescoring.
+
+        The full-reversal handle (``jobcrawl dedup --requeue-inherited``): rows whose
+        verdict came from a cluster sibling re-enter the pending FIFO and re-score under
+        the normal budget. Rows scored by LLM/cache are untouched.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE positions SET match_pending = 1, match_origin = NULL "
+                "WHERE match_origin LIKE 'cluster:%'"
+            )
+            self._conn.commit()
+            return cur.rowcount
+
+    def block_identity_key(self, key: str, *, reason: str | None = None) -> None:
+        """Blocklist an identity key: it forms no edges from the next sweep on, and the
+        live sibling gates exclude it immediately. Splitting a group back to singletons
+        is the safe failure direction. Re-blocking updates the reason, keeps the stamp."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO identity_key_blocklist (key, reason, created_at) "
+                "VALUES (?, ?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET reason = excluded.reason",
+                (key, reason, self._clock().isoformat()),
+            )
+            self._conn.commit()
+
+    def unblock_identity_key(self, key: str) -> bool:
+        """Remove a key from the blocklist; True if it was present."""
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM identity_key_blocklist WHERE key = ?", (key,)
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def blocked_keys(self) -> list[dict[str, str | None]]:
+        """The full blocklist (key / reason / created_at), oldest first."""
+        rows = self._conn.execute(
+            "SELECT key, reason, created_at FROM identity_key_blocklist "
+            "ORDER BY created_at, key"
+        ).fetchall()
+        return [
+            {"key": r["key"], "reason": r["reason"], "created_at": r["created_at"]}
+            for r in rows
+        ]
+
+    def blocked_key_set(self) -> set[str]:
+        """Just the blocked key strings (the sweep's edge filter)."""
+        rows = self._conn.execute("SELECT key FROM identity_key_blocklist").fetchall()
+        return {r["key"] for r in rows}
+
+    def dedup_overlay_stats(self) -> dict[str, int]:
+        """Distinct-jobs arithmetic from the overlay (§17 dashboard KPI + report).
+
+        ``distinct_open`` = open rows − open rows in clusters + clusters holding ≥1 open
+        member: every standalone open row counts once, every cluster counts once.
+        """
+
+        def _one(sql: str) -> int:
+            row = self._conn.execute(sql).fetchone()
+            return int(row[0] if row is not None and row[0] is not None else 0)
+
+        open_rows = _one("SELECT COUNT(*) FROM positions WHERE status = 'open'")
+        open_clustered = _one(
+            "SELECT COUNT(*) FROM positions p JOIN position_clusters pc "
+            "ON pc.site = p.site AND pc.url = p.url WHERE p.status = 'open'"
+        )
+        clusters_with_open = _one(
+            "SELECT COUNT(DISTINCT pc.cluster_id) FROM positions p "
+            "JOIN position_clusters pc ON pc.site = p.site AND pc.url = p.url "
+            "WHERE p.status = 'open'"
+        )
+        return {
+            "open_rows": open_rows,
+            "open_clustered_rows": open_clustered,
+            "clusters_with_open": clusters_with_open,
+            "distinct_open": open_rows - open_clustered + clusters_with_open,
+            "clusters": _one(
+                "SELECT COUNT(DISTINCT cluster_id) FROM position_clusters"
+            ),
+            "clustered_rows": _one("SELECT COUNT(*) FROM position_clusters"),
+        }
 
     # -- operator tracking axis (§16 web UI) -----------------------------------
     #
@@ -1552,6 +1989,8 @@ class StateStore:
         dismissed: bool | None = None,
         applied: bool = False,
         exclude_company_applied: bool = False,
+        collapse_duplicates: bool = False,
+        exclude_cluster_handled: bool = False,
         sort: str = "recent",
         limit: int = 100,
         offset: int = 0,
@@ -1587,9 +2026,38 @@ class StateStore:
 
         ``sort`` ∈ {recent, score, updated, salary, title, applied}; NULL scores/salaries/dates
         sink last under a DESC sort. ``limit``/``offset`` paginate. Returns ``list[PositionRecord]``.
+
+        §17 cluster flags (both default off ⇒ byte-identical queries):
+        ``collapse_duplicates`` hides non-canonical cluster members (each real-world job
+        shows once, via its elected representative; standalone rows are unaffected).
+        ``exclude_cluster_handled`` hides every row whose cluster contains a dismissed or
+        applied member — dismissing one copy retires the job everywhere at read time.
+        **User-data auto-force**: a query filtered on the operator's own rows
+        (``applied=True``, ``dismissed=True``, or an operator-set ``track_status``)
+        bypasses both — a row you applied to via an aggregator stays reachable in
+        Applications forever. ``track_status='new'`` is exempt: 'new' is the schema
+        default (untriaged inventory, the default browse view), not an operator action,
+        and it is exactly the view collapsing exists for.
         """
+        if applied or dismissed is True or (track_status and track_status != "new"):
+            collapse_duplicates = False
+            exclude_cluster_handled = False
         clauses: list[str] = []
         params: list[object] = []
+        if collapse_duplicates:
+            clauses.append(
+                "NOT EXISTS (SELECT 1 FROM position_clusters pc "
+                "WHERE pc.site = positions.site AND pc.url = positions.url "
+                "AND pc.is_canonical = 0)"
+            )
+        if exclude_cluster_handled:
+            clauses.append(
+                "NOT EXISTS (SELECT 1 FROM position_clusters me "
+                "JOIN position_clusters sib ON sib.cluster_id = me.cluster_id "
+                "JOIN positions p2 ON p2.site = sib.site AND p2.url = sib.url "
+                "WHERE me.site = positions.site AND me.url = positions.url "
+                "AND (p2.dismissed = 1 OR p2.applied_at IS NOT NULL))"
+            )
         q = query.strip()
         if q:
             like = f"%{q.lower()}%"
@@ -1953,10 +2421,27 @@ class StateStore:
         rows = self._conn.execute("SELECT site, state FROM site_health").fetchall()
         return {row["site"]: row["state"] for row in rows}
 
-    def new_positions_since(self, since_iso: str) -> int:
-        """Positions first seen at/after ``since_iso`` (§16 dashboard "new today" delta)."""
+    def new_positions_since(self, since_iso: str, *, collapse: bool = False) -> int:
+        """Positions first seen at/after ``since_iso`` (§16 dashboard "new today" delta).
+
+        With ``collapse`` (§17), counts distinct real-world jobs instead of rows: solo
+        rows plus clusters, grouped by cluster id, where the group's EARLIEST first_seen
+        is inside the window — so a late-arriving board copy of an old job no longer
+        inflates "new since last visit".
+        """
+        if not collapse:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM positions WHERE first_seen >= ?",
+                (since_iso,),
+            ).fetchone()
+            return int(row["n"])
         row = self._conn.execute(
-            "SELECT COUNT(*) AS n FROM positions WHERE first_seen >= ?", (since_iso,)
+            "SELECT COUNT(*) AS n FROM ("
+            "SELECT COALESCE(pc.cluster_id, positions.site || char(10) || positions.url) AS gid "
+            "FROM positions LEFT JOIN position_clusters pc "
+            "ON pc.site = positions.site AND pc.url = positions.url "
+            "GROUP BY gid HAVING MIN(positions.first_seen) >= ?)",
+            (since_iso,),
         ).fetchone()
         return int(row["n"])
 
@@ -2209,6 +2694,7 @@ def _to_position(row: sqlite3.Row) -> PositionRecord:
         notes=row["notes"],
         dismissed=bool(row["dismissed"]),
         track_updated_at=_dt("track_updated_at"),
+        match_origin=(row["match_origin"] if "match_origin" in row.keys() else None),
         # Present only when the query computed it (matches/search/get_position, §6).
         effective_score=(
             row["effective_score"] if "effective_score" in row.keys() else None

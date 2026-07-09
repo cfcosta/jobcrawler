@@ -1065,3 +1065,113 @@ def test_recrawl_without_salary_keys_preserves_a_backfilled_salary() -> None:
         assert (rec.salary_currency, rec.salary_period) == ("EUR", "year")
     finally:
         store.close()
+
+
+# --- §17 dedup: the ingest key hook + the notify ledger gate -----------------
+
+
+def test_crawl_writes_identity_keys_for_tracked_rows() -> None:
+    store = StateStore(":memory:")
+    try:
+        crawl_site(
+            "s",
+            _crawl(
+                _job(
+                    "https://example.com/a",
+                    apply_url="https://boards.greenhouse.io/acme/jobs/400123",
+                )
+            ),
+            _ctx(),
+            store,
+        )
+        keys = {
+            row["key"]
+            for row in store._conn.execute(
+                "SELECT key FROM position_identity_keys WHERE site = 's'"
+            ).fetchall()
+        }
+        # T0 from the row URL, T1 + edge-safe T2 from the ATS apply target.
+        assert "url:https://example.com/a" in keys
+        assert "ats:greenhouse:400123" in keys
+        assert "applyats:https://boards.greenhouse.io/acme/jobs/400123" in keys
+    finally:
+        store.close()
+
+
+def test_crawl_skips_identity_keys_when_dedup_disabled(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JOBCRAWLER_DEDUP", "0")
+    store = StateStore(":memory:")
+    try:
+        crawl_site("s", _crawl(_job("https://example.com/a")), _ctx(), store)
+        row = store._conn.execute(
+            "SELECT COUNT(*) AS n FROM position_identity_keys"
+        ).fetchone()
+        assert row["n"] == 0
+    finally:
+        store.close()
+
+
+def test_cluster_sibling_notifies_once_across_boards(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    # The same real-world job crawled from two boards (shared ATS apply target):
+    # the first strong match pings, the sibling's identical content is a cache hit
+    # that must NOT ping again — the ledger + live identity keys silence it with
+    # no sweep in between.
+    events = _capture_notify(monkeypatch)
+    store = StateStore(":memory:")
+    try:
+        matcher = _matcher(store, _all_score(85))
+        shared = {"apply_url": "https://boards.greenhouse.io/acme/jobs/400123"}
+        crawl_site(
+            "board_a",
+            _crawl(_job("https://example.com/a", **shared)),
+            _ctx(),
+            store,
+            matcher=matcher,
+        )
+        assert len(events) == 1
+        crawl_site(
+            "board_b",
+            _crawl(_job("https://example.com/b", **shared)),
+            _ctx(),
+            store,
+            matcher=matcher,
+        )
+        # The copy is scored (cache hit → a real verdict on the row) but silent.
+        assert store.position_counts()["matched"] == 2
+        assert len(events) == 1
+    finally:
+        store.close()
+
+
+def test_dismissed_sibling_suppresses_the_other_boards_ping(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    # A job dismissed under one board must never ping from another (§17): the
+    # dismissal itself is the suppression, no notification ledger fact needed.
+    events = _capture_notify(monkeypatch)
+    store = StateStore(":memory:")
+    try:
+        shared = {"apply_url": "https://boards.greenhouse.io/acme/jobs/400123"}
+        crawl_site(
+            "board_a",
+            _crawl(_job("https://example.com/a", **shared)),
+            _ctx(),
+            store,
+        )  # tracked without matching — no ping yet
+        store.set_dismissed(
+            "board_a", canonicalize_url("https://example.com/a"), True
+        )
+        crawl_site(
+            "board_b",
+            _crawl(_job("https://example.com/b", **shared)),
+            _ctx(),
+            store,
+            matcher=_matcher(store, _all_score(85)),
+        )
+        assert events == []
+    finally:
+        store.close()

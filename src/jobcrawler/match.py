@@ -54,6 +54,7 @@ from typing import TYPE_CHECKING, Callable, Iterable, Protocol, Sequence, cast
 
 import dspy
 
+from jobcrawler import config
 from jobcrawler.lm import build_lm
 from jobcrawler.profile import Profile, ProfilePrefs
 from jobcrawler.runtime.normalize import normalize_location
@@ -61,7 +62,7 @@ from jobcrawler.runtime.normalize import normalize_location
 if (
     TYPE_CHECKING
 ):  # concrete import (no runtime coupling); StateStore has already landed
-    from jobcrawler.state import StateStore
+    from jobcrawler.state import PositionRecord, StateStore
 
 _log = logging.getLogger("jobcrawler.match")
 
@@ -86,6 +87,13 @@ _VERDICTS: frozenset[str] = frozenset({"strong", "good", "weak", "reject"})
 # Discipline buckets that are recall-safe: never prefilter-dropped for "not in prefs"
 # — they carry too little signal to reject deterministically, so the LLM decides.
 _DISCIPLINE_PASS: frozenset[str] = frozenset({"eng_other", "unspecified"})
+
+# How much description the LLM digest carries (chars). Shared by ``_digest`` and the
+# §17 inheritance stub guard: a donor's verdict was formed from at most this window of
+# ITS text, so a candidate may only inherit from a donor whose description is at least
+# as informative as the candidate's own would be — capped here, where the LLM stops
+# reading anyway.
+_DIGEST_CHARS = 1200
 
 
 # The normalizer's per-job output the matcher consumes (§4.6), modeled STRUCTURALLY
@@ -403,9 +411,21 @@ class Matcher:
         day = self._clock().date().isoformat()
         results: list[tuple[str, str, MatchVerdict]] = []
         cached_n = 0
+        inherited_n = 0
         pending_n = 0
 
-        # (a) cache lookup — a hit is free and applied at once; a miss queues for LLM.
+        # §17 verdict inheritance sits between the cache and the LLM: a cache-missing
+        # candidate whose cluster already holds a settled verdict (another board's copy
+        # of the same real-world job) copies it — deterministic, zero spend, and NEVER
+        # written to the match cache (the cache is content-addressed and the donor's
+        # verdict describes *different* text; a poisoned entry would outlive the cluster
+        # edge that justified it). Reversal is wholesale: ``requeue_inherited`` re-parks
+        # every 'cluster:%' row for real scoring.
+        inherit = config.dedup_match_enabled()
+        tiers = config.dedup_tiers() if inherit else frozenset()
+
+        # (a) cache lookup — a hit is free and applied at once; a miss tries a §17
+        # donor next, and only then queues for LLM.
         misses: list[tuple[str, str, _Enriched, str]] = []
         enriched_by_key: dict[tuple[str, str], _Enriched] = {}
         for site, url, enriched in candidates:
@@ -416,9 +436,32 @@ class Matcher:
             )
             verdict = _verdict_from_json(cached) if cached is not None else None
             if verdict is not None:
-                self._apply(site, url, verdict)
+                self._apply(site, url, verdict, origin="cache")
                 results.append((site, url, verdict))
                 cached_n += 1
+                continue
+            donor = (
+                self._store.cluster_verdict_donor(
+                    site,
+                    url,
+                    # Stub guard: the donor must carry at least as much text as this
+                    # candidate would feed the digest — a thin aggregator row never
+                    # overrides fuller text (see _DIGEST_CHARS).
+                    min_desc_len=min(
+                        _DIGEST_CHARS, len(getattr(enriched.job, "description", "") or "")
+                    ),
+                    tiers=tiers,
+                )
+                if inherit
+                else None
+            )
+            if donor is not None and donor.match_score is not None:
+                verdict = _inherited_verdict(donor)
+                self._apply(
+                    site, url, verdict, origin=f"cluster:{donor.site}\n{donor.url}"
+                )
+                results.append((site, url, verdict))
+                inherited_n += 1
             else:
                 misses.append((site, url, enriched, content_hash))
 
@@ -486,6 +529,7 @@ class Matcher:
         return {
             "candidates": len(candidates),
             "cached": cached_n,
+            "inherited": inherited_n,
             "scored": scored_n,
             "pending": pending_n,
             "extracted": extracted_n,
@@ -534,7 +578,7 @@ class Matcher:
             if verdict is None:
                 self._store.set_match_pending(site, url)
                 continue
-            self._apply(site, url, verdict)
+            self._apply(site, url, verdict, origin="llm")
             self._store.cache_match(
                 content_hash,
                 self._profile.profile_hash,
@@ -545,12 +589,17 @@ class Matcher:
             applied.append((site, url, verdict))
         return applied
 
-    def _apply(self, site: str, url: str, verdict: MatchVerdict) -> None:
+    def _apply(
+        self, site: str, url: str, verdict: MatchVerdict, *, origin: str
+    ) -> None:
         """Persist a verdict to the position row (clears its pending flag).
 
         Both ``reasons`` and ``concerns`` are stored so the durable row carries the whole
         verdict — the match trainset (§8) is projected from these rows, not the memoization
-        cache, which is keyed by hashes and may be absent.
+        cache, which is keyed by hashes and may be absent. ``origin`` records how the
+        verdict got here (``'llm'`` | ``'cache'`` | ``'cluster:<site>\\n<url>'``) so §17
+        inheritances stay reversible (``requeue_inherited``) and the trainset can exclude
+        them (an inherited verdict describes the donor's text, not this row's).
         """
         self._store.set_match(
             site,
@@ -559,6 +608,7 @@ class Matcher:
             verdict=verdict.verdict,
             reasons=json.dumps(list(verdict.reasons)),
             concerns=json.dumps(list(verdict.concerns)),
+            origin=origin,
         )
 
     # -- match-time extraction (§4.7) ---------------------------------------
@@ -855,7 +905,7 @@ def _digest(index: int, enriched: _Enriched) -> dict[str, object]:
         "employment_type": getattr(job, "employment_type", None),
         "salary": salary,
         "department": getattr(job, "department", None),
-        "description": (getattr(job, "description", "") or "")[:1200],
+        "description": (getattr(job, "description", "") or "")[:_DIGEST_CHARS],
     }
 
 
@@ -1164,6 +1214,36 @@ def _verdict_to_json(verdict: MatchVerdict) -> str:
             "concerns": list(verdict.concerns),
         }
     )
+
+
+def _inherited_verdict(donor: PositionRecord) -> MatchVerdict:
+    """A donor row's persisted verdict, rebuilt as a :class:`MatchVerdict` (§17).
+
+    Callers guarantee ``donor.match_score`` is set. The band label falls back to the
+    score-derived one if the stored label is missing (score is authoritative); the
+    reasons/concerns JSON is parsed tolerantly — a corrupt list degrades to empty,
+    never a raise (inheritance is an optimization, not a correctness dependency).
+    """
+    score = max(0, min(100, int(donor.match_score or 0)))
+    return MatchVerdict(
+        score=score,
+        verdict=donor.match_verdict or _verdict_label(score),
+        reasons=_stored_list(donor.match_reasons),
+        concerns=_stored_list(donor.match_concerns),
+    )
+
+
+def _stored_list(raw: str | None) -> tuple[str, ...]:
+    """Parse a persisted reasons/concerns JSON list; anything malformed is empty."""
+    if not raw:
+        return ()
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return ()
+    if not isinstance(data, list):
+        return ()
+    return tuple(str(x) for x in data)
 
 
 def _verdict_from_json(cached: object) -> MatchVerdict | None:

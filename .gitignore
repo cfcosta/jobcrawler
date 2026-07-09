@@ -29,6 +29,7 @@ err.txt
 # repo root; production points the JOBCRAWLER_* paths at /var/lib instead).
 optimize.lock
 optimize.log
+daemon.log
 # single-instance flock for `jobcrawl run` (#26) — runtime state, sibling of optimize.lock
 run.lock
 trainset.jsonl

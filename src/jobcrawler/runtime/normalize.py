@@ -41,6 +41,7 @@ posting did not print (§4.6).
 
 from __future__ import annotations
 
+import html
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -910,6 +911,121 @@ def canonical_company(name: str) -> str:
     while len(tokens) > 1 and tokens[-1] in _COMPANY_SUFFIXES:
         tokens.pop()
     return "".join(tokens)
+
+
+# --- title dedup key (§17) ---------------------------------------------------
+# Title normalization for the cross-board identity tiers. The measured hazard: the
+# vast majority of trailing title segments are CONTENT-bearing ("… - Payments",
+# "… (Kubernetes)"), so blanket tail-stripping merges distinct roles. Stripping is
+# therefore *whitelist-gated*: a trailing paren/dash/pipe/comma segment is removed
+# only when every part of it names a place / remote-ness / timezone. Seniority is
+# never stripped (level words distinguish real distinct reqs).
+
+# One decorative/req-number layer: [tags], (m/w/d) diversity boilerplate, "#1234".
+_TITLE_TAG = re.compile(r"\[[^\]\[]*\]")
+_TITLE_MWD = re.compile(
+    r"\(\s*[mwfdhx*]\s*[/|]\s*[mwfdhx*]\s*(?:[/|]\s*(?:[mwfdhx*]|div|divers)\s*)?\)",
+    re.IGNORECASE,
+)
+_TITLE_REQNO = re.compile(r"#\s*\d+\s*$")
+_TITLE_LEAD_REMOTE = re.compile(r"^\s*remote\s*[-:–—|]\s*", re.IGNORECASE)
+_TITLE_TRAIL_PAREN = re.compile(r"\(([^()]*)\)\s*$")
+# Trailing segment after the LAST dash/pipe/comma separator (dashes pre-folded to '-').
+_TITLE_TRAIL_SEG = re.compile(r"[-|,]\s*([^\-|,]*)$")
+_TZ_PART = re.compile(
+    r"^(?:utc|gmt)\s*[+-]?\d{1,2}(?::\d{2})?$"
+    r"|^[cepm][sd]t$|^cet$|^cest$|^bst$|^ist$|^aest$|^aedt$|^wet$|^eet$",
+    re.IGNORECASE,
+)
+
+# Geography/remote-ness vocabulary a strippable tail part must resolve to. Multi-word
+# entries are matched after whitespace collapse. Deliberately places + work-mode words
+# only — never technologies, teams, or seniority.
+_GEO_PARTS: frozenset[str] = frozenset(
+    {
+        "remote", "hybrid", "onsite", "on-site", "in-office", "anywhere", "worldwide",
+        "global", "distributed", "flexible", "americas", "america", "north america",
+        "south america", "latin america", "latam", "emea", "apac", "asia", "africa",
+        "europe", "oceania", "eu", "eea", "uk", "u.k.", "us", "u.s.", "usa", "us only",
+        "united states", "united kingdom", "canada", "germany", "france", "spain",
+        "portugal", "netherlands", "poland", "romania", "ukraine", "brazil", "brasil",
+        "argentina", "mexico", "colombia", "chile", "peru", "uruguay", "costa rica",
+        "india", "singapore", "japan", "korea", "south korea", "china", "australia",
+        "new zealand", "ireland", "israel", "austria", "switzerland", "belgium",
+        "sweden", "norway", "denmark", "finland", "iceland", "estonia", "latvia",
+        "lithuania", "czechia", "czech republic", "slovakia", "hungary", "bulgaria",
+        "croatia", "serbia", "greece", "italy", "turkey", "uae", "dubai", "egypt",
+        "nigeria", "south africa", "philippines", "vietnam", "indonesia", "thailand",
+        "pakistan", "bangladesh", "london", "berlin", "munich", "amsterdam", "paris",
+        "madrid", "barcelona", "lisbon", "porto", "dublin", "zurich", "vienna",
+        "warsaw", "prague", "bucharest", "sofia", "athens", "stockholm", "oslo",
+        "copenhagen", "helsinki", "tallinn", "toronto", "vancouver", "montreal",
+        "nyc", "new york", "new york city", "san francisco", "sf", "bay area",
+        "boston", "seattle", "austin", "denver", "chicago", "los angeles", "miami",
+        "atlanta", "washington dc", "sao paulo", "são paulo", "mexico city",
+        "buenos aires", "bogota", "bogotá", "santiago", "lima", "bangalore",
+        "bengaluru", "mumbai", "delhi", "hyderabad", "pune", "tokyo", "sydney",
+        "melbourne", "tel aviv", "east coast", "west coast", "pacific", "eastern",
+        "central", "mountain",
+    }
+)
+# Qualifier words dropped from a part before the vocabulary check ("US only",
+# "remote friendly", "EU based", "UK preferred") — they modify a place, not name one.
+_GEO_QUALIFIERS: frozenset[str] = frozenset(
+    {"only", "based", "preferred", "friendly", "first", "ok", "okay", "eligible"}
+)
+
+
+def _is_geo_segment(segment: str) -> bool:
+    """True iff every part of ``segment`` names a place / remote-ness / timezone."""
+    seg = segment.strip().lower()
+    if not seg:
+        return False
+    parts = [p.strip() for p in re.split(r"[,/&+]| - | and | or ", seg)]
+    parts = [p for p in parts if p]
+    if not parts:
+        return False
+    for part in parts:
+        words = [w for w in part.split() if w not in _GEO_QUALIFIERS]
+        cleaned = " ".join(words)
+        if not cleaned:
+            continue  # a bare qualifier riding a sibling part ("US, only")
+        if cleaned in _GEO_PARTS or _TZ_PART.match(cleaned):
+            continue
+        return False
+    return True
+
+
+def normalize_title_key(title: str) -> str:
+    """A conservative equality key for a job title (§17), or ``""`` if nothing survives.
+
+    Unescapes entities, casefolds, folds unicode dashes, drops decorative layers
+    ([tags], (m/w/d) boilerplate, trailing req numbers, a leading "Remote -"), then
+    iteratively strips trailing paren/dash/pipe/comma segments **only** while they are
+    pure geography/remote-ness/timezone (see :func:`_is_geo_segment`); any
+    content-bearing tail ("… - Payments") stops the loop and survives into the key.
+    Used only for corroborating/keying cross-board duplicates — never for display.
+    """
+    text = html.unescape(title or "").casefold()
+    text = re.sub(r"[–—−]", "-", text)
+    text = _TITLE_TAG.sub(" ", text)
+    text = _TITLE_MWD.sub(" ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    text = _TITLE_REQNO.sub("", text).strip()
+    text = _TITLE_LEAD_REMOTE.sub("", text)
+    while True:
+        m = _TITLE_TRAIL_PAREN.search(text)
+        if m and _is_geo_segment(m.group(1)):
+            text = text[: m.start()].strip()
+            continue
+        m = _TITLE_TRAIL_SEG.search(text)
+        if m and m.start() > 0 and _is_geo_segment(m.group(1)):
+            text = text[: m.start()].strip()
+            continue
+        break
+    text = re.sub(r"[^\w\s+#./-]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip(" -|,")
+    return text.strip()
 
 
 # --- salary parsing --------------------------------------------------------

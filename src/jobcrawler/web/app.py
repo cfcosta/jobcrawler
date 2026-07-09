@@ -44,7 +44,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-from jobcrawler import tracking
+from jobcrawler import config, tracking
 from jobcrawler.state import PositionRecord, StateStore
 
 _log = logging.getLogger("jobcrawler.web")
@@ -88,7 +88,13 @@ SAVED_VIEWS = (
         "label": "Strong ≥ 80",
         "href": "/positions?min_score=80&sort=score",
     },
-    {"key": "all", "label": "Everything", "href": "/positions?sort=score&status="},
+    # "Everything" is the raw-rows escape: lifecycle unfiltered AND §17 collapse off,
+    # so every crawled copy of a job is individually visible (audit/debug view).
+    {
+        "key": "all",
+        "label": "Everything",
+        "href": "/positions?sort=score&status=&collapse=0",
+    },
     {"key": "applied", "label": "Applied", "href": "/applications"},
 )
 
@@ -275,6 +281,7 @@ def _position_dict(p: PositionRecord) -> dict[str, Any]:
         ),
         "match_verdict": p.match_verdict,
         "match_reasons": reasons_list(p.match_reasons),
+        "match_origin": p.match_origin,
         "matched_at": _iso(p.matched_at),
         "track_status": p.track_status,
         "track_label": tracking.label(p.track_status),
@@ -322,9 +329,19 @@ def _read_filters(
     gets the defaults — any form submission carries at least the stage/sort selects, so
     an explicitly UNchecked checkbox (absent from a non-empty query) is honored rather
     than re-defaulted, and deep links with their own params stay exactly as written.
+
+    §17 collapse is ON by default (each real-world job shows once, cross-board handled
+    state respected); ``?collapse=0`` is the per-request escape to the raw row view (the
+    "Everything" pill uses it). The whole axis vanishes when the UI consumer flag is off.
     """
     if default_new_view and not len(params):
         params = {"track_status": "new", "hide_applied_companies": "1"}
+    collapse = config.dedup_ui_enabled() and (params.get("collapse") or "") not in {
+        "0",
+        "false",
+        "off",
+        "no",
+    }
 
     def _s(name: str) -> str | None:
         v = params.get(name)
@@ -360,6 +377,8 @@ def _read_filters(
         "dismissed": None if show_dismissed else False,
         "applied": applied,
         "exclude_company_applied": hide_applied_companies,
+        "collapse_duplicates": collapse,
+        "exclude_cluster_handled": collapse,
         "sort": sort,
     }
     raw = {
@@ -379,6 +398,7 @@ def _read_filters(
         "applied": applied,
         "remote_anywhere": remote_anywhere,
         "relocation_offered": relocation_offered,
+        "collapse": collapse,
     }
     return kwargs, raw
 
@@ -514,6 +534,8 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
     )
     jinja_globals["score_band"] = _score_band  # chip band, aligned w/ verdict bands
     jinja_globals["hue_of"] = _hue_of  # deterministic company-avatar hue
+    # Called per render (not snapshot at app build) so tests/env flips take effect.
+    jinja_globals["dedup_ui_enabled"] = config.dedup_ui_enabled  # §17 collapse UI
     jinja_filters = cast("dict[str, Any]", templates.env.filters)
     jinja_filters["reasons"] = reasons_list
     jinja_filters["age"] = humanize_age
@@ -672,15 +694,27 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
         today = datetime.now(timezone.utc).replace(
             hour=0, minute=0, second=0, microsecond=0
         )
-        new_today = store.new_positions_since(today.isoformat())
+        ui_on = config.dedup_ui_enabled()
+        new_today = store.new_positions_since(today.isoformat(), collapse=ui_on)
+        # §17 distinct-jobs arithmetic: when the overlay holds clusters, the headline
+        # counts real-world jobs (value) over raw crawled rows (sub) — "312 / 405".
+        overlay = store.dedup_overlay_stats() if ui_on else {}
+        distinct_open = int(overlay.get("distinct_open") or 0)
+        show_distinct = bool(overlay.get("clusters")) and distinct_open < lifecycle["open"]
 
+        open_kpi: dict[str, Any] = {
+            "label": "Open roles",
+            "value": lifecycle["open"],
+            "href": "/positions?status=open",
+            "delta": new_today,
+        }
+        if show_distinct:
+            open_kpi.update(
+                {"label": "Distinct open roles", "value": distinct_open}
+            )
+            open_kpi["sub"] = lifecycle["open"]
         kpis = [
-            {
-                "label": "Open roles",
-                "value": lifecycle["open"],
-                "href": "/positions?status=open",
-                "delta": new_today,
-            },
+            open_kpi,
             {
                 "label": "Match ≥60",
                 "value": strong,
@@ -769,7 +803,7 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
         if (
             params.get("sort") == "score"
             and params.get("status") == ""
-            and (len(params) <= 2)
+            and not (set(params.keys()) - {"sort", "status", "collapse"})
         ):
             return "all"
         return ""
@@ -784,10 +818,24 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
         has_next = len(rows) > _PAGE_SIZE
         rows = rows[:_PAGE_SIZE]
         url = request.url
+        collapse_on = bool(kwargs.get("collapse_duplicates"))
+        # "Also on N boards" chips (§17): batch cluster sizes for this page. Computed
+        # whenever the UI consumer is on — in the raw view the chip explains WHY the
+        # list looks duplicated rather than pretending it isn't.
+        sizes = (
+            store.cluster_sizes([(p.site, p.url) for p in rows])
+            if config.dedup_ui_enabled() and rows
+            else {}
+        )
+        cluster_sizes = {encode_pid(s, u): n for (s, u), n in sizes.items()}
         # "New since last visit": count first_seen after the cookie's timestamp, then
         # stamp now — so the badge reflects arrivals between visits (0 on a refresh).
+        # Cluster-aware when collapsing: a job arriving on 4 boards overnight is one
+        # new opportunity, not four (§17).
         seen = request.cookies.get(_SEEN_COOKIE)
-        new_since = store.new_positions_since(seen) if seen else None
+        new_since = (
+            store.new_positions_since(seen, collapse=collapse_on) if seen else None
+        )
         now_iso = datetime.now(timezone.utc).isoformat()
         response = templates.TemplateResponse(
             request=request,
@@ -803,6 +851,7 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
                 "saved_views": SAVED_VIEWS,
                 "active_view": _active_view(request.query_params),
                 "new_since": new_since,
+                "cluster_sizes": cluster_sizes,
                 "prev_url": str(url.include_query_params(page=page - 1))
                 if page > 1
                 else None,
@@ -872,6 +921,15 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
         # ?partial=1 renders the detail body alone (no base shell) for the list
         # slide-over; a bare GET renders the full page for deep links / no-JS.
         partial = request.query_params.get("partial") in {"1", "true"}
+        # §17 cluster siblings — the same real-world job on other boards. The row
+        # itself is excluded; ``canonical`` marks the cluster's elected representative.
+        siblings = [
+            {"p": member, "canonical": canonical}
+            for member, canonical in (
+                store.cluster_members(site, url) if config.dedup_ui_enabled() else []
+            )
+            if not (member.site == site and member.url == url)
+        ]
         return templates.TemplateResponse(
             request=request,
             name="_detail_body.html" if partial else "detail.html",
@@ -884,6 +942,7 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
                 "reasons": reasons_list(rec.match_reasons),
                 "concerns": reasons_list(rec.match_concerns),
                 "crawlable": rec.site in known_slugs,
+                "siblings": siblings,
             },
         )
 

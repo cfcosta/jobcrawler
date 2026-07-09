@@ -1975,3 +1975,62 @@ async def test_fx_tick_invokes_the_seam_and_marks_the_timer() -> None:
     assert sched.fx_due(T0) is False
     assert sched.fx_due(T0 + timedelta(hours=23)) is False
     assert sched.fx_due(T0 + timedelta(hours=24)) is True
+
+
+def test_dedup_due_requires_both_a_cadence_and_a_sweep_seam() -> None:
+    store = StateStore(":memory:")
+    sites = [Site(slug="s0", url="https://x.com")]
+
+    async def _never_sweep() -> dict[str, object]:  # pragma: no cover - guard
+        raise AssertionError("unexpected dedup sweep")
+
+    # The default cadence (15m) but no injected seam → disabled.
+    no_seam = Scheduler(sites, store=store, crawl=_ok_crawl, clock=lambda: T0)
+    assert no_seam.dedup_due(T0) is False
+    # A seam but the cadence turned off → disabled.
+    no_cadence = Scheduler(
+        sites,
+        store=store,
+        crawl=_ok_crawl,
+        clock=lambda: T0,
+        dedup_check="off",
+        dedup_sweep=_never_sweep,
+    )
+    assert no_cadence.dedup_due(T0) is False
+    # Both wired → due on the FIRST pass (a fresh daemon rebuilds the overlay at boot,
+    # so registry/denylist edits made while it was down take effect immediately).
+    both = Scheduler(
+        sites,
+        store=store,
+        crawl=_ok_crawl,
+        clock=lambda: T0,
+        dedup_check="15m",
+        dedup_sweep=_never_sweep,
+    )
+    assert both.dedup_due(T0) is True
+
+
+async def test_dedup_tick_invokes_the_seam_and_mark_advances_one_interval() -> None:
+    calls: list[str] = []
+
+    async def sweep() -> dict[str, object]:
+        calls.append("sweep")
+        return {"rows": 2, "clusters": 1, "clustered_rows": 2, "collapse_saving_open": 1}
+
+    sched = Scheduler(
+        [Site(slug="s0", url="https://x.com")],
+        store=StateStore(":memory:"),
+        crawl=_ok_crawl,
+        clock=lambda: T0,
+        dedup_check="15m",
+        dedup_sweep=sweep,
+    )
+    assert (await sched.dedup_tick())["clusters"] == 1
+    assert calls == ["sweep"]
+    # The timer advances one full interval whether or not the rebuild succeeded (the
+    # seam is fail-soft and keeps the previous overlay on failure), so a persistent
+    # sweep bug degrades to a stale overlay instead of a hot loop of failing rebuilds.
+    sched.mark_dedup(T0)
+    assert sched.dedup_due(T0) is False
+    assert sched.dedup_due(T0 + timedelta(minutes=14, seconds=59)) is False
+    assert sched.dedup_due(T0 + timedelta(minutes=15)) is True

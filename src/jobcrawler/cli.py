@@ -498,6 +498,7 @@ def _notify_strong_matches(
     candidates: Sequence[tuple[str, str, object]],
     results: Sequence[tuple[str, str, object]],
     *,
+    store: StateStore,
     min_score: int,
 ) -> None:
     """Emit a ``match`` notify for every applied verdict at/over ``min_score``.
@@ -505,8 +506,12 @@ def _notify_strong_matches(
     Mirrors the runner's §4.7 pipeline sink for store-side scoring paths (the daemon's
     match drain and ``rematch``): the fields come off the rebuilt row candidates rather
     than a live crawl. Best-effort by construction — ``notify.notify`` always logs, only
-    POSTs when a webhook is configured, and never raises into the caller.
+    POSTs when a webhook is configured, and never raises into the caller. The §17
+    notify-ledger gate fronts it exactly as in the runner: one ping per real-world job,
+    with every emit recorded so cluster siblings in the same batch dedup sequentially.
     """
+    ledger_on = config.dedup_notify_enabled()
+    tiers = config.dedup_tiers() if ledger_on else frozenset()
     sent = {(site, url): enriched for site, url, enriched in candidates}
     for site, url, verdict in results:
         score = getattr(verdict, "score", 0)
@@ -517,6 +522,8 @@ def _notify_strong_matches(
             continue
         job = getattr(enriched, "job", None)
         if job is None:
+            continue
+        if ledger_on and not store.notify_gate(site, url, tiers=tiers):
             continue
         notify.notify(
             "match",
@@ -529,6 +536,8 @@ def _notify_strong_matches(
             score=score,
             reasons="; ".join(getattr(verdict, "reasons", ())),
         )
+        if ledger_on:
+            store.record_notified("match", site, url)
 
 
 def _match_drain_pass(
@@ -593,14 +602,41 @@ def _match_drain_pass(
     if candidates:
         result = matcher.score_new(candidates, drain=True)
         summary["cached"] = cast(int, result["cached"])
+        summary["inherited"] = cast(int, result.get("inherited", 0))
         summary["scored"] = cast(int, result["scored"])
         summary["pending"] = cast(int, result["pending"])
         _notify_strong_matches(
             candidates,
             cast("Sequence[tuple[str, str, object]]", result["results"]),
+            store=store,
             min_score=config.match_min_score(),
         )
     return summary
+
+
+def _dedup_sweep_pass(store: StateStore, sites: Sequence[Site]) -> dict[str, object]:
+    """One §17 overlay resweep: rebuild keys + clusters, persist + return the report.
+
+    Runs on a worker thread off the scheduler's dedup timer (and inline for
+    ``jobcrawl dedup --rebuild``). Fail-soft on the daemon path: the rebuild swaps the
+    derived tables in one transaction, so a failure rolls back to the previous overlay
+    and returns {} — derived state must never disturb the crawl loop. Direct boards
+    (registry entries carrying ``company:``) are the canonical-election preference —
+    the employer's own page outranks an aggregator copy.
+    """
+    from jobcrawler.runtime.dedup import resweep  # lazy: keep boot imports lean
+
+    try:
+        return resweep(
+            store,
+            direct_sites={s.slug for s in sites if s.company},
+            tiers=config.dedup_tiers(),
+            marketplace_hosts=config.marketplace_apply_host_denylist(),
+            apply_drop_params=config.dedup_apply_param_denylist(),
+        )
+    except Exception:
+        _log.exception("dedup sweep failed; keeping the previous overlay")
+        return {}
 
 
 def crawl_one(
@@ -913,6 +949,115 @@ def cmd_fx_refresh(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_dedup_report(report: dict[str, object]) -> None:
+    """Render a §17 sweep report for the terminal (headline, per-tier, guards, top)."""
+    print(
+        f"dedup: rows={report.get('rows')} open={report.get('open_rows')} "
+        f"clusters={report.get('clusters')} clustered_rows={report.get('clustered_rows')} "
+        f"collapse_saving_open={report.get('collapse_saving_open')} "
+        f"tiers={report.get('tiers_enabled')}"
+    )
+    for name in ("keys_by_tier", "edges_by_tier", "guards"):
+        value = report.get(name)
+        if isinstance(value, dict) and value:
+            body = " ".join(f"{k}={v}" for k, v in sorted(value.items()))
+            print(f"  {name}: {body}")
+    for name in (
+        "multi_matched_clusters",
+        "conflicting_verdict_clusters",
+        "dismissal_leak_rows",
+    ):
+        print(f"  {name}: {report.get(name)}")
+    top = report.get("top_clusters")
+    if isinstance(top, list) and top:
+        print("  top clusters:")
+        for entry in top[:5]:
+            print(f"    {entry}")
+
+
+def cmd_dedup(args: argparse.Namespace) -> int:
+    """Operate the §17 identity overlay: rebuild, report, blocklist, reverse.
+
+    The overlay is derived state, so every action here is safe: ``--rebuild`` recomputes
+    it from the immutable rows; ``--block-key`` / ``--unblock-key`` steer the next sweep
+    (and the live gates immediately); ``--requeue-inherited`` reverses every §17 verdict
+    inheritance back into the pending queue; ``--seed-notify-ledger`` re-runs the strong-
+    match seed at the current threshold. Default (no flags): the last sweep report plus
+    the live overlay stats.
+    """
+    store = StateStore(_db_path())
+    try:
+        if args.block_key:
+            store.block_identity_key(args.block_key, reason=args.reason)
+            print(f"blocked: {args.block_key}")
+            print("(splits its group from the next sweep; live gates exclude it now —")
+            print(" run `jobcrawl dedup --rebuild` to apply immediately)")
+            return 0
+        if args.unblock_key:
+            ok = store.unblock_identity_key(args.unblock_key)
+            print(
+                f"unblocked: {args.unblock_key}"
+                if ok
+                else f"not on the blocklist: {args.unblock_key}"
+            )
+            return 0 if ok else 1
+        if args.requeue_inherited:
+            n = store.requeue_inherited()
+            print(f"requeued {n} inherited verdict(s) for real rescoring")
+            return 0
+        if args.seed_notify_ledger:
+            store.seed_notify_ledger()
+            print(f"notify ledger re-seeded ({store.get_meta('notify_ledger_seeded')})")
+            return 0
+        if args.rebuild:
+            report = _dedup_sweep_pass(store, load_sites(config.sites_path()))
+            if not report:
+                print("dedup: sweep failed; previous overlay kept (see log)")
+                return 1
+            _print_dedup_report(report)
+            return 0
+        # Default / --report: the persisted last report + live overlay arithmetic.
+        raw = store.get_meta("dedup_last_report")
+        if raw is None:
+            print("dedup: no sweep has run yet (try `jobcrawl dedup --rebuild`)")
+        else:
+            try:
+                _print_dedup_report(json.loads(raw))
+            except ValueError:
+                print("dedup: stored report unreadable; run `jobcrawl dedup --rebuild`")
+        stats = store.dedup_overlay_stats()
+        print("  overlay: " + " ".join(f"{k}={v}" for k, v in sorted(stats.items())))
+        blocked = store.blocked_keys()
+        if blocked:
+            print(f"  blocklist ({len(blocked)}):")
+            for entry in blocked:
+                reason = entry.get("reason") or ""
+                print(f"    {entry.get('key')}  {reason}".rstrip())
+        return 0
+    finally:
+        store.close()
+
+
+def cmd_retire_site(args: argparse.Namespace) -> int:
+    """Close every open row of a retired board (reason ``site_retired``).
+
+    The DB half of retiring a site; the registry half is the sites.yaml edit (remove or
+    ``enabled: false`` — hot-reloaded by the daemon). Closed rows keep their history and
+    verdicts, so cluster election and the §17 anti-resurrection gate still see them; they
+    just stop counting as live inventory. Idempotent — already-closed rows are no-ops.
+    """
+    store = StateStore(_db_path())
+    try:
+        urls = store.open_urls(args.slug, limit=1_000_000)
+        for url in urls:
+            store.mark_closed(args.slug, url, reason="site_retired")
+        print(f"retire-site: closed {len(urls)} open position(s) on {args.slug}")
+        print("(registry half is manual: remove or disable the entry in sites.yaml)")
+        return 0
+    finally:
+        store.close()
+
+
 def cmd_generation_log(args: argparse.Namespace) -> int:
     """Show recent crawler-generation attempts; ``-v`` dumps each attempt's LLM log (§4.2).
 
@@ -1003,6 +1148,7 @@ def _run_rematch(store: StateStore) -> int:
             verdict=verdict,
             reasons=reasons,
             concerns=concerns,
+            origin="cache",
         )
         scored += 1
         cache_hits += 1
@@ -1029,6 +1175,7 @@ def _run_rematch(store: StateStore) -> int:
                 verdict=verdict,
                 reasons=reasons,
                 concerns=concerns,
+                origin="cache",
             )
             rescored += 1
             cache_hits += 1
@@ -1050,6 +1197,7 @@ def _run_rematch(store: StateStore) -> int:
             _notify_strong_matches(
                 candidates,
                 cast("Sequence[tuple[str, str, object]]", result["results"]),
+                store=store,
                 min_score=config.match_min_score(),
             )
     store.set_meta("profile_hash", profile_hash)
@@ -1330,6 +1478,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     async def fx_refresh() -> dict[str, float]:
         return await asyncio.to_thread(fx.refresh_rates, store)
 
+    # §17 dedup sweep: whole-corpus key/cluster rebuild on a worker thread (SQLite +
+    # string mechanics, no LLM). Reads the live roster so a board added or retired
+    # mid-run changes the direct-board election preference without a restart.
+    async def dedup_sweep() -> dict[str, object]:
+        return await asyncio.to_thread(_dedup_sweep_pass, store, _live_sites())
+
     # §4.1 hot-reload: the scheduler re-stats sites.yaml each tick and swaps in an
     # added/retired board without a restart; the healer's failure-capture hook reads the
     # same file fresh so a just-added board that breaks still feeds the §4.11 trainset.
@@ -1348,6 +1502,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         reload_sites=_make_sites_reloader(config.sites_path()),  # §4.1 hot-reload
         match_drain=match_drain,  # §4.7 profile watch + store-side pending drain
         fx_refresh=fx_refresh,  # §4.6 daily currency-rate pull for the salary→USD band
+        # §17 identity-overlay resweep; master-switched here (seam absent ⇒ dedup_due()
+        # is always False), so JOBCRAWLER_DEDUP=0 leaves the loop byte-identical.
+        dedup_sweep=dedup_sweep if config.dedup_enabled() else None,
         # §4.9 recheck: without this seam recheck_due() is always False, so neither the
         # windowed 404/expired-marker re-verification NOR the fleet-wide expire_due()
         # sweep (which lives inside recheck_tick) ever runs — stale/closed positions
@@ -1481,9 +1638,15 @@ def cmd_match_trainset(args: argparse.Namespace) -> int:
     try:
         # Every scored row across the whole lifecycle, dismissed included — a dismissed or
         # closed-but-applied posting is exactly the operator-corrected label we want.
-        rows = store.search_positions(
-            min_score=0, status=None, dismissed=None, sort="score", limit=1_000_000
-        )
+        # Cluster-inherited verdicts (§17) are copies, not judgments: keeping them would
+        # let one LLM call vote N times in the trainset.
+        rows = [
+            r
+            for r in store.search_positions(
+                min_score=0, status=None, dismissed=None, sort="score", limit=1_000_000
+            )
+            if not (r.match_origin or "").startswith("cluster:")
+        ]
         examples = match_trainset.build_examples(rows, profile.body)
         match_trainset.save_trainset(examples, out_path)
     finally:
@@ -1636,6 +1799,53 @@ def build_parser() -> argparse.ArgumentParser:
         "fx-refresh",
         help="fetch live currency exchange rates and store them for salary→USD conversion",
     ).set_defaults(func=cmd_fx_refresh)
+
+    ddp = sub.add_parser(
+        "dedup",
+        help="§17 identity overlay: sweep report, rebuild, blocklist, reverse inheritance",
+    )
+    ddp.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="recompute the overlay from scratch (safe: derived state only)",
+    )
+    ddp.add_argument(
+        "--report",
+        action="store_true",
+        help="print the last sweep report + live overlay stats (default action)",
+    )
+    ddp.add_argument(
+        "--requeue-inherited",
+        action="store_true",
+        help="reverse every cluster-inherited verdict back into the pending-match queue",
+    )
+    ddp.add_argument(
+        "--seed-notify-ledger",
+        action="store_true",
+        help="re-seed notify_ledger facts for existing strong matches at the current threshold",
+    )
+    ddp.add_argument(
+        "--block-key",
+        metavar="KEY",
+        help="operator kill-switch: never let this identity key merge rows again",
+    )
+    ddp.add_argument(
+        "--reason",
+        help="note stored with --block-key (why the key over-merges)",
+    )
+    ddp.add_argument(
+        "--unblock-key",
+        metavar="KEY",
+        help="lift a --block-key entry",
+    )
+    ddp.set_defaults(func=cmd_dedup)
+
+    ret = sub.add_parser(
+        "retire-site",
+        help="close all open positions of a removed board (reason=site_retired)",
+    )
+    ret.add_argument("slug", help="site slug as registered in sites.yaml")
+    ret.set_defaults(func=cmd_retire_site)
 
     genlog = sub.add_parser(
         "generation-log",

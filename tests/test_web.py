@@ -936,3 +936,102 @@ async def test_crawl_now_button_queues_a_request_the_scheduler_drains() -> None:
         assert [s.slug for s in sched.due_sites()] == ["acme"]
     finally:
         store.close()
+
+
+# -- §17 cross-board dedup UI -------------------------------------------------
+
+
+def _cluster_store() -> StateStore:
+    """Two boards carrying one greenhouse req (a real T1 cluster) + a solo row."""
+    from jobcrawler.runtime.dedup import resweep
+
+    s = StateStore(":memory:")
+    s.upsert_position(
+        "board_a",
+        "https://boards.greenhouse.io/acme/jobs/400123",
+        fields={**FIELDS, "description": "short"},
+        content_hash="c1",
+    )
+    s.upsert_position(
+        "board_b",
+        "https://acme.test/careers?gh_jid=400123",
+        fields={**FIELDS, "description": "a much longer description " * 10},
+        content_hash="c2",
+    )
+    s.upsert_position(
+        "solo", "https://solo.test/jobs/1", fields=FIELDS, content_hash="c3"
+    )
+    resweep(s, direct_sites=(), tiers={0, 1, 2, 3, 6})
+    return s
+
+
+async def test_positions_collapse_on_by_default_with_escape() -> None:
+    store = _cluster_store()
+    try:
+        async with _client(create_app(store)) as c:
+            collapsed = (await c.get("/positions")).text
+            # One row per real-world job: the elected canonical (longest
+            # description → board_b) plus the standalone row.
+            assert "gh_jid" in collapsed  # board_b's URL is percent-escaped in pids
+            assert "boards.greenhouse.io/acme/jobs/400123" not in collapsed
+            assert "solo.test/jobs/1" in collapsed
+            # The canonical row wears the cluster chip.
+            assert "on 2 boards" in collapsed
+            # The refine line offers the raw escape…
+            assert "Show duplicates" in collapsed
+            # …and it works: every copy, chips on both cluster members.
+            raw = (await c.get("/positions?collapse=0")).text
+            assert "boards.greenhouse.io/acme/jobs/400123" in raw
+            # ">on 2 boards<" is the chip's visible text (its title attribute
+            # repeats the phrase); one chip per cluster member.
+            assert raw.count(">on 2 boards<") == 2
+    finally:
+        store.close()
+
+
+async def test_detail_lists_cluster_siblings() -> None:
+    store = _cluster_store()
+    try:
+        pid = encode_pid("board_a", "https://boards.greenhouse.io/acme/jobs/400123")
+        async with _client(create_app(store)) as c:
+            html = (await c.get(f"/positions/{pid}")).text
+            assert "Also listed on 1 other board" in html
+            assert encode_pid("board_b", "https://acme.test/careers?gh_jid=400123") in html
+            # The sibling is the elected canonical — the copy the list shows.
+            assert "shown in list" in html
+            # The standalone row renders no siblings panel at all.
+            solo = encode_pid("solo", "https://solo.test/jobs/1")
+            assert "Also listed" not in (await c.get(f"/positions/{solo}")).text
+    finally:
+        store.close()
+
+
+async def test_dashboard_shows_distinct_open_kpi() -> None:
+    store = _cluster_store()
+    try:
+        async with _client(create_app(store)) as c:
+            html = (await c.get("/")).text
+            # 3 open rows, 2 distinct real-world jobs.
+            assert "Distinct open roles" in html
+    finally:
+        store.close()
+
+
+async def test_dedup_ui_env_kill_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Flipping the env off must revert the whole UI to raw rows per render —
+    # no app rebuild, no residue: config getters read the env at call time.
+    store = _cluster_store()
+    monkeypatch.setenv("JOBCRAWLER_DEDUP_UI", "0")
+    try:
+        async with _client(create_app(store)) as c:
+            html = (await c.get("/positions")).text
+            assert "boards.greenhouse.io/acme/jobs/400123" in html  # nothing hidden
+            assert "Show duplicates" not in html
+            assert "on 2 boards" not in html
+            pid = encode_pid(
+                "board_a", "https://boards.greenhouse.io/acme/jobs/400123"
+            )
+            assert "Also listed" not in (await c.get(f"/positions/{pid}")).text
+            assert "Distinct open roles" not in (await c.get("/")).text
+    finally:
+        store.close()

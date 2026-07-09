@@ -13,6 +13,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from jobcrawler.durations import parse_duration
+from jobcrawler.runtime.dedup import IDENTITY_APPLY_TRACKING_PARAMS
 from jobcrawler.urls import DEFAULT_MARKETPLACE_APPLY_HOSTS, DEFAULT_TRACKING_PARAMS
 
 # This module lives at the package root, so its directory *is* the package dir —
@@ -698,6 +699,86 @@ def match_drain_cap() -> int:
     ticks (FIFO) work through the rest, and the §8 daily cap still bounds total spend.
     Default 200."""
     return _int("JOBCRAWLER_MATCH_DRAIN_CAP", 200)
+
+
+# --- identity overlay / dedup (§17) -----------------------------------------
+# Pure host-side string mechanics: keys and clusters are *derived* state, rebuilt
+# from immutable positions rows by a deterministic sweep — never an LLM call.
+
+
+def dedup_enabled() -> bool:
+    """Master switch for the §17 identity overlay: per-row key extraction at ingest,
+    the periodic resweep, and every consumer below (which all compose this). Off ⇒
+    the derived tables stop being maintained and match/notify/UI behave exactly
+    pre-§17; ``positions`` rows are never touched either way, so flipping this is
+    lossless in both directions. Default on."""
+    return _bool("JOBCRAWLER_DEDUP", True)
+
+
+def dedup_refresh_interval() -> str:
+    """How often the daemon's §17 sweep rebuilds the identity overlay (drop the
+    derived key/cluster tables, recompute keys, recluster, re-elect canonicals —
+    disposable state, so the rebuild is lossless by construction). Default 15m: the
+    full-corpus sweep is a cheap in-process pass, and 15m bounds how stale cross-board
+    grouping gets between crawls. ``off`` disables the loop (the overlay then only
+    moves via a manual ``jobcrawl dedup --rebuild``)."""
+    return _str("JOBCRAWLER_DEDUP_REFRESH_INTERVAL", "15m")
+
+
+def dedup_tiers() -> frozenset[int]:
+    """Identity tiers whose keys may form §17 cluster edges (comma-separated ints).
+    Default ``0,1,2,3,6``: exact canonical URL (0), ATS req-ids (1), normalized
+    external apply target (2), external ids within a slug family (3), LinkedIn/Indeed
+    job ids (6). Deliberately NOT default: 4 (content-hash — corroboration signal
+    only) and 5 (fuzzy company+title — operator opted out). Keys for disabled tiers
+    are still *written* for audit; they just never join rows. Unknown tier numbers
+    are harmless (no such keys exist)."""
+    raw = os.getenv("JOBCRAWLER_DEDUP_TIERS")
+    if raw is None:
+        return frozenset({0, 1, 2, 3, 6})
+    return frozenset(int(p.strip()) for p in raw.split(",") if p.strip())
+
+
+def dedup_match_enabled() -> bool:
+    """Consumer switch: §17 verdict inheritance at score-time. On (and master on), a
+    cache-missing candidate first looks for a settled cluster sibling and copies its
+    verdict — origin-stamped ``cluster:…``, zero LLM spend, never written to the
+    match cache, reversible via ``jobcrawl dedup --requeue-inherited``. Off ⇒ every
+    candidate scores the old way. Default on."""
+    return dedup_enabled() and _bool("JOBCRAWLER_DEDUP_MATCH", True)
+
+
+def dedup_notify_enabled() -> bool:
+    """Consumer switch: the §17 notify-ledger gate. On (and master on), a strong
+    match is suppressed when any cluster sibling was already notified — or was
+    dismissed or applied to — and every send is recorded as an append-only per-row
+    fact in ``notify_ledger``. Off ⇒ notification dedup falls back to the pre-§17
+    watermark alone. Default on."""
+    return dedup_enabled() and _bool("JOBCRAWLER_DEDUP_NOTIFY", True)
+
+
+def dedup_ui_enabled() -> bool:
+    """Consumer switch: duplicate collapse in the web UI (§17). On (and master on),
+    list views show one canonical row per cluster with an "also on N boards"
+    affordance, and a cluster any sibling of which was dismissed/applied stays
+    collapsed (anti-resurrection); raw rows stay one click away (``?collapse=0``,
+    and filters on user-touched rows never collapse). Off ⇒ every board's copy
+    lists separately, as before. Default on."""
+    return dedup_enabled() and _bool("JOBCRAWLER_DEDUP_UI", True)
+
+
+def dedup_apply_param_denylist() -> frozenset[str]:
+    """Query params stripped when normalizing *apply targets* into §17 T2 identity
+    keys — a separate, wider list than :func:`tracking_param_denylist`, which feeds
+    the §4.6 storage key and must stay conservative (identity keys are disposable;
+    storage keys are forever). Identity-bearing params (``gh_jid``, ``ashby_jid``,
+    ``for``, ``token``, ``jk``…) are load-bearing there and must never be listed.
+    ``JOBCRAWLER_DEDUP_APPLY_PARAM_DENYLIST`` (comma-separated) overrides the curated
+    default in :mod:`jobcrawler.runtime.dedup`."""
+    raw = os.getenv("JOBCRAWLER_DEDUP_APPLY_PARAM_DENYLIST")
+    if raw is None:
+        return IDENTITY_APPLY_TRACKING_PARAMS
+    return frozenset(p.strip().lower() for p in raw.split(",") if p.strip())
 
 
 # --- scheduler (§4.9) ------------------------------------------------------

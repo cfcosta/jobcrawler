@@ -105,6 +105,9 @@ class FakeStore:
     cache_match_calls: list = field(default_factory=list)
     bump_calls: list = field(default_factory=list)
     reserve_calls: list = field(default_factory=list)
+    # §17 verdict inheritance: (site, url) -> donor PositionRecord (None = no donor)
+    donors: dict = field(default_factory=dict)
+    donor_calls: list = field(default_factory=list)
     # §4.7 extraction surface
     extract_cache: dict = field(default_factory=dict)
     salary_set: list = field(default_factory=list)
@@ -143,8 +146,16 @@ class FakeStore:
             (content_hash, profile_hash, model, prompt_version, verdict_json)
         )
 
-    def set_match(self, site, url, *, score, verdict, reasons, concerns="[]"):
-        self.set_match_calls.append((site, url, score, verdict, reasons, concerns))
+    def set_match(
+        self, site, url, *, score, verdict, reasons, concerns="[]", origin=None
+    ):
+        self.set_match_calls.append(
+            (site, url, score, verdict, reasons, concerns, origin)
+        )
+
+    def cluster_verdict_donor(self, site, url, *, min_desc_len, tiers):
+        self.donor_calls.append((site, url, min_desc_len, tiers))
+        return self.donors.get((site, url))
 
     def set_match_pending(self, site, url):
         self.pending_calls.append((site, url))
@@ -784,6 +795,7 @@ def test_empty_candidates_is_a_noop() -> None:
     assert summary == {
         "candidates": 0,
         "cached": 0,
+        "inherited": 0,
         "scored": 0,
         "pending": 0,
         "extracted": 0,
@@ -1427,3 +1439,128 @@ def test_coerce_index_normalizes_numeric_forms_and_rejects_the_rest() -> None:
     assert _coerce_index("abc") is None
     assert _coerce_index(None) is None
     assert _coerce_index([0]) is None
+
+
+# --- §17 cluster verdict inheritance -----------------------------------------
+#
+# Between the cache and the LLM: a cache-missing candidate whose cluster already
+# holds a settled verdict copies it — zero LLM spend, never cached, reversible.
+
+
+def _donor(site="greenhouse_acme", url="https://boards.greenhouse.io/acme/jobs/400123"):
+    return SimpleNamespace(
+        site=site,
+        url=url,
+        match_score=88,
+        match_verdict="strong",
+        match_reasons=json.dumps(["rust", "payments"]),
+        match_concerns=json.dumps(["onsite days"]),
+    )
+
+
+def test_inherited_verdict_skips_llm_and_never_touches_cache_or_spend() -> None:
+    store = FakeStore()
+    cands = _candidates(1)
+    store.donors[(cands[0][0], cands[0][1])] = _donor()
+    matcher = _matcher(store)
+    matcher._predict = FakePredictor(_all_score())
+
+    summary = matcher.score_new(cands)
+
+    assert summary["inherited"] == 1
+    assert summary["scored"] == 0 and summary["pending"] == 0
+    assert matcher._predict.calls == 0  # no LLM call
+    assert store.reserve_calls == []  # inheritance draws nothing from the cap
+    # Never written to the content-addressed cache: the donor's verdict describes
+    # the donor's text; a poisoned entry would outlive the cluster edge.
+    assert store.cache_match_calls == []
+    site, url, score, verdict, reasons, _concerns, origin = store.set_match_calls[0]
+    assert (site, url) == (cands[0][0], cands[0][1])
+    assert score == 88 and verdict == "strong"
+    assert json.loads(reasons) == ["rust", "payments"]
+    assert origin == "cluster:greenhouse_acme\nhttps://boards.greenhouse.io/acme/jobs/400123"
+
+
+def test_cache_hit_wins_over_donor_and_stamps_cache_origin() -> None:
+    store = FakeStore()
+    cands = _candidates(1)
+    store.donors[(cands[0][0], cands[0][1])] = _donor()
+    matcher = _matcher(store)
+    matcher._predict = FakePredictor(_all_score())
+    content_hash = _content_hash(cands[0][2].job)
+    store.cache[(content_hash, "profhash", "openrouter/test/model", PROMPT_VERSION)] = (
+        _verdict_to_json(
+            MatchVerdict(score=70, verdict="good", reasons=("cached",), concerns=())
+        )
+    )
+
+    summary = matcher.score_new(cands)
+
+    assert summary["cached"] == 1 and summary["inherited"] == 0
+    assert store.donor_calls == []  # cache hit short-circuits the donor lookup
+    assert store.set_match_calls[0][6] == "cache"
+
+
+def test_llm_scored_rows_stamp_llm_origin() -> None:
+    store = FakeStore()
+    matcher = _matcher(store)
+    matcher._predict = FakePredictor(_all_score())
+
+    matcher.score_new(_candidates(2))
+
+    assert [c[6] for c in store.set_match_calls] == ["llm", "llm"]
+
+
+def test_inheritance_disabled_by_env_flag(monkeypatch) -> None:
+    monkeypatch.setenv("JOBCRAWLER_DEDUP_MATCH", "0")
+    store = FakeStore()
+    cands = _candidates(1)
+    store.donors[(cands[0][0], cands[0][1])] = _donor()
+    matcher = _matcher(store)
+    matcher._predict = FakePredictor(_all_score())
+
+    summary = matcher.score_new(cands)
+
+    assert summary["inherited"] == 0 and summary["scored"] == 1
+    assert store.donor_calls == []  # store never asked for a donor
+    assert matcher._predict.calls == 1
+
+
+def test_donor_lookup_passes_digest_bounded_min_desc_len() -> None:
+    from jobcrawler.match import _DIGEST_CHARS
+
+    store = FakeStore()
+    short = _candidates(1)
+    short[0][2].job.description = "tiny"
+    long_desc = "x" * (_DIGEST_CHARS + 500)
+    long = [
+        (
+            "acme",
+            "https://acme.example/job/long",
+            FakeEnriched(job=FakeJob(title="Staff Engineer", description=long_desc)),
+        )
+    ]
+    matcher = _matcher(store)
+    matcher._predict = FakePredictor(_all_score())
+
+    matcher.score_new(short + long)
+
+    # The stub guard: a donor must carry at least as much text as this candidate
+    # would feed the digest — capped at the digest window itself.
+    assert store.donor_calls[0][2] == len("tiny")
+    assert store.donor_calls[1][2] == _DIGEST_CHARS
+
+
+def test_donor_without_score_falls_through_to_llm() -> None:
+    store = FakeStore()
+    cands = _candidates(1)
+    donor = _donor()
+    donor.match_score = None  # settled cluster-mate exists but was never scored
+    store.donors[(cands[0][0], cands[0][1])] = donor
+    matcher = _matcher(store)
+    matcher._predict = FakePredictor(_all_score())
+
+    summary = matcher.score_new(cands)
+
+    assert summary["inherited"] == 0 and summary["scored"] == 1
+    assert store.set_match_calls[0][6] == "llm"
