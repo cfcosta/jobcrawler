@@ -152,6 +152,44 @@ def _compact(data):
     return {k: v for k, v in data.items() if v not in (None, "")}
 
 
+def _apply_url(ctx, page_url):
+    """Return the external application URL for a listing, or None.
+
+    Each detail page's "Candidatar-se" button links straight to the employer's
+    real application page (an external ATS such as jobs.gem.com or ashbyhq). The
+    RSS feed and card listing never carry it, so fetch the page and read that
+    anchor's href. Hugo minifies the markup, so the href is usually *unquoted*
+    (the shared _first helper only handles quoted attrs, hence the local parse).
+    Returns None on any fetch/parse failure, when the button is absent, or when
+    it points back at rustlang.com.br — the caller then omits apply_url entirely,
+    so a transient miss never clobbers a value a previous crawl already stored.
+    """
+    if not page_url:
+        return None
+    try:
+        page = _fetch_text(ctx, page_url)
+    except Exception:
+        return None
+    # The apply button carries a distinct umami "job-apply" analytics hook; fall
+    # back to its visible "Candidatar-se" label if that hook is ever absent.
+    tag = re.search(r"<a\b[^>]*job-apply[^>]*>", page, re.I)
+    if not tag:
+        tag = re.search(r"<a\b[^>]*>\s*Candidatar\b", page, re.I)
+    if not tag:
+        return None
+    href = re.search(
+        r"""\bhref=(?:"([^"]+)"|'([^']+)'|([^\s>]+))""", tag.group(0), re.I
+    )
+    if not href:
+        return None
+    url = html.unescape(next(g for g in href.groups() if g is not None)).strip()
+    if not url.lower().startswith(("http://", "https://")):
+        return None
+    if "rustlang.com.br" in url.lower():
+        return None
+    return url
+
+
 def crawl(ctx):
     feed = _feed_jobs(ctx)
     for card in _discover_cards(ctx):
@@ -166,4 +204,7 @@ def crawl(ctx):
             and job.get("location")
             and job.get("description")
         ):
+            apply = _apply_url(ctx, job["url"])
+            if apply:
+                job["apply_url"] = apply
             yield _compact(job)
