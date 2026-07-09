@@ -240,6 +240,22 @@ def test_brazilian_regional_code_chain() -> None:
     assert any(p.subdivision == "SP" for p in parse.places)
 
 
+def test_brazilian_state_codes_that_collide_with_us_codes() -> None:
+    # MS/SC/MA/PA/MT/AL are BOTH US state codes and Brazilian ones. Brazilian
+    # context (a BR country word or a BR gazetteer city) must win; without any
+    # context the US reading stands.
+    parse = geo.parse_location("Campo Grande, MS, Brasil")
+    assert countries_of(parse) == ["BR"]
+    assert len(parse.places) == 1
+    assert (parse.places[0].city, parse.places[0].subdivision) == ("Campo Grande", "MS")
+
+    parse = geo.parse_location("Florianopolis, SC")  # BR city-table context
+    assert countries_of(parse) == ["BR"]
+
+    parse = geo.parse_location("Jackson, MS")  # no BR context → Mississippi
+    assert countries_of(parse) == ["US"]
+
+
 def test_bare_georgia_is_the_us_state() -> None:
     # Documented acceptance: bare 'Georgia' on job boards is the US state.
     parse = geo.parse_location("Georgia")

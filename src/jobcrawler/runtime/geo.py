@@ -191,6 +191,13 @@ _CA_PROVINCES: dict[str, str] = {
 }
 _CA_PROV_CODES = frozenset(_CA_PROVINCES.values())
 
+# Brazilian state codes — several (MS, SC, MA, PA, MT, AL…) collide with US state
+# codes; Brazilian context in the same string flips them (see _tokenize).
+_BR_STATE_CODES = frozenset({
+    "AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", "MA", "MT", "MS", "MG",
+    "PA", "PB", "PR", "PE", "PI", "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO",
+})
+
 # Macro-region alias → canonical key. Keys are the vocabulary of MACRO_KEYS,
 # GeoPlace.macro, position_locations.macro_region, and GEO_REGION_MEMBERS.
 _MACRO_ALIASES: dict[str, str] = {
@@ -790,12 +797,17 @@ def _tokenize(raw: str) -> list[_Tok]:
                 t.seg, t.part = seg_i, part_i
                 all_toks.append(t)
 
-    # 2-letter code resolution, context-aware: CA context → province; a city of
-    # that ISO2 present and no US evidence → country ('IN - Bangalore' → India,
-    # 'Toronto, CA' → Canada); default → US state.
+    # 2-letter code resolution, context-aware: CA context → province; BR context
+    # (a Brazil country word or a BR gazetteer city) → Brazilian state code
+    # ('Campo Grande, MS, Brasil' — MS is Mato Grosso do Sul, not Mississippi);
+    # a city of that ISO2 present and no US evidence → country ('IN - Bangalore'
+    # → India, 'Toronto, CA' → Canada); default → US state.
     city_isos = {t.payload for t in all_toks if t.cls == "CITY"}
     has_ca = any((t.cls == "COUNTRY" and t.payload == "CA") or t.cls == "CA_PROV"
                  for t in all_toks)
+    has_br = "BR" in city_isos or any(
+        t.cls == "COUNTRY" and t.payload == "BR" for t in all_toks
+    )
     us_evidence = any((t.cls == "COUNTRY" and t.payload == "US") or t.cls == "US_STATE"
                       or (t.cls == "CITY" and t.payload == "US") or t.cls == "US_REGION"
                       for t in all_toks)
@@ -803,6 +815,8 @@ def _tokenize(raw: str) -> list[_Tok]:
         if t.cls == "CODE2":
             if has_ca and t.payload in _CA_PROV_CODES:
                 t.cls = "CA_PROV"
+            elif has_br and not us_evidence and t.payload in _BR_STATE_CODES:
+                t.cls, t.payload = "SUBDIV", "BR"
             elif t.payload in city_isos and t.payload != "US" and not us_evidence:
                 t.cls = "COUNTRY"
             else:
