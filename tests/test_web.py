@@ -1284,6 +1284,22 @@ async def test_api_carries_structured_location_keys() -> None:
         store.close()
 
 
+async def test_keyboard_help_overlay_lists_both_modes() -> None:
+    # '?' toggles the shortcut card (base shell, every page): it must document the
+    # list bindings AND the panel-mode bindings that act on the shown position.
+    store = _seeded_store()
+    try:
+        async with _client(create_app(store)) as c:
+            html = (await c.get("/positions")).text
+            assert 'id="kbd-help"' in html
+            assert "Keyboard shortcuts" in html
+            assert "With the position panel open" in html
+            for hint in ("panel follows", "Act on the shown position", "Jump to notes"):
+                assert hint in html, hint
+    finally:
+        store.close()
+
+
 async def test_salary_provenance_reaches_api_and_detail() -> None:
     # The operator can see WHERE a figure came from: source data, the printed
     # text, or the §4.7 LLM backfill (badged) — and the as-printed string rides

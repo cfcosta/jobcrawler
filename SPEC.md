@@ -1740,7 +1740,11 @@ it, exactly like the match `reasons`; only the offline `jobcrawl match-trainset`
   crawl needed — the description is already persisted). Both return promptly; the daemon does the work.
 - A small **JSON `/api`** mirrors the browse/detail reads for scripting; each mutation also has an HTML form
   path (POST → 303 redirect) so the UI degrades without JavaScript. `app.js` is progressive enhancement only
-  (auto-submit a changed status select); nothing requires it.
+  (auto-submit a changed status select, keyboard triage, the detail slide-over); nothing requires it.
+  Keyboard triage has two modes, both listed on the `?` help card: on the list, j/k move the highlight and
+  enter/o/a/i/d/x act on it; with the **slide-over open** the same keys act on the SHOWN position — j/k
+  (or ←/→) page through positions with the panel following, ↓/↑ scroll the focused panel, n jumps to
+  notes, f opens the full page, and esc peels the topmost layer (help card → focused field → panel).
 
 **Boundaries (what it must not do).** No scheduler, no LLM, no crawler import, no generated-code execution — it
 only reads/writes the store and *flags* work, so it cannot widen the §4.4 sandbox surface or the §8 trust

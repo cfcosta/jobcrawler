@@ -135,6 +135,10 @@ function postForm(path, data) {
         const full = over.querySelector(".slideover-full");
         if (full) full.setAttribute("href", row.dataset.detail);
         over.removeAttribute("hidden");
+        // Focus the panel so native keys (↓/↑, space, PgDn) scroll IT, not the
+        // list underneath — the panel is what you are reading now.
+        overBody.setAttribute("tabindex", "-1");
+        overBody.focus({ preventScroll: true });
       });
   }
   function closeDetail() {
@@ -151,9 +155,14 @@ function postForm(path, data) {
   function stage(row, value, label) {
     const pid = row.dataset.pid;
     postForm(`/positions/${pid}/status`, { track_status: value }).then(() => {
-      // Reflect the change in the row's own stage select, if present.
+      // Reflect the change in the row's own stage select, if present — and in
+      // the open panel's Track select (panel-mode keys act on the shown row).
       const sel = row.querySelector('select[name="track_status"]');
       if (sel) sel.value = value;
+      if (slideOpen()) {
+        const panelSel = overBody.querySelector('select[name="track_status"]');
+        if (panelSel) panelSel.value = value;
+      }
       Toast.show(`Marked ${label}`);
     });
   }
@@ -180,15 +189,77 @@ function postForm(path, data) {
     if (event.metaKey || event.ctrlKey || event.altKey) return;
 
     if (event.key === "Escape") {
+      // Topmost layer first: help card, then a focused panel field, then the panel.
+      if (help && !help.hasAttribute("hidden")) {
+        toggleHelp(false);
+        return;
+      }
+      if (typing && slideOpen() && over.contains(t)) {
+        t.blur();
+        overBody.focus({ preventScroll: true });
+        return;
+      }
       if (slideOpen()) closeDetail();
-      else toggleHelp(false);
       return;
     }
-    // With the slide-over open, ←/→ page through positions in place.
-    if (slideOpen() && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
-      event.preventDefault();
-      focusRow(idx + (event.key === "ArrowRight" ? 1 : -1));
-      openDetail(current());
+    // Panel mode: with the slide-over open the keys act on the SHOWN position.
+    // j/k (and ←/→) page through positions in place; o/a/i/d target what you
+    // are looking at; n jumps to notes; f opens the full page. Nothing falls
+    // through to the list bindings while the panel is up.
+    if (slideOpen()) {
+      if (typing) return;
+      switch (event.key) {
+        case "ArrowLeft":
+        case "k":
+          event.preventDefault();
+          focusRow(idx <= 0 ? 0 : idx - 1);
+          openDetail(current());
+          break;
+        case "ArrowRight":
+        case "j":
+          event.preventDefault();
+          focusRow(idx + 1);
+          openDetail(current());
+          break;
+        case "o": {
+          const row = current();
+          if (row && row.dataset.ext) window.open(row.dataset.ext, "_blank", "noopener");
+          break;
+        }
+        case "f": {
+          const row = current();
+          if (row && row.dataset.detail) window.location.assign(row.dataset.detail);
+          break;
+        }
+        case "a": {
+          const row = current();
+          if (row) stage(row, "applied", "applied");
+          break;
+        }
+        case "i": {
+          const row = current();
+          if (row) stage(row, "interested", "interested");
+          break;
+        }
+        case "d": {
+          const row = current();
+          if (row) dismissRow(row);
+          break;
+        }
+        case "n": {
+          event.preventDefault();
+          const notes = overBody.querySelector('textarea[name="notes"]');
+          if (notes) {
+            notes.focus();
+            notes.setSelectionRange(notes.value.length, notes.value.length);
+          }
+          break;
+        }
+        case "?":
+          event.preventDefault();
+          toggleHelp();
+          break;
+      }
       return;
     }
     if (typing) return;
