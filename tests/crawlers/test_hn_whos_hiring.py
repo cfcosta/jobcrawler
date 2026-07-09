@@ -81,3 +81,16 @@ def test_crawl_yields_hn_permalink_urls_and_mailto_apply_links() -> None:
     ]
     assert jobs[0]["apply_url"] == "mailto:jobs@acme.com"  # emailed application → mailto
     assert jobs[1]["apply_url"] == "https://jobs.lever.co/globex"  # ATS link kept
+
+
+def test_apply_link_unescapes_algolia_entity_escaped_hrefs() -> None:
+    # Algolia's comment_text entity-escapes attribute values ("&#x2F;" for "/",
+    # "&amp;" for "&"), so each captured href must be unescaped — otherwise the
+    # stored apply_url is garbage and the ATS identity key derived from it (§17)
+    # can never match the same posting seen on a direct board.
+    raw = (
+        "Acme | Rust | Remote<p>Apply here: "
+        '<a href="https:&#x2F;&#x2F;boards.greenhouse.io&#x2F;acme&#x2F;jobs&#x2F;'
+        '400123?gh_src=hn&amp;t=1" rel="nofollow">apply</a>'
+    )
+    assert _link(raw) == "https://boards.greenhouse.io/acme/jobs/400123?gh_src=hn&t=1"

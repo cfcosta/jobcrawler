@@ -94,7 +94,9 @@ def _find_email(*texts):
 def _apply_link(raw_html, text):
     # Applications on HN are usually an email; when there's no direct ATS/careers link, the
     # apply link should be a mailto: to that address rather than the HN item URL.
-    hrefs = _HREF_RE.findall(raw_html or "")
+    # Algolia's comment_text entity-escapes attribute values ("&#x2F;" for "/", "&amp;"),
+    # so each captured href must be unescaped or the stored apply_url is garbage.
+    hrefs = [html.unescape(h) for h in _HREF_RE.findall(raw_html or "")]
     urls = [h.rstrip(".,;)") for h in hrefs if h.lower().startswith("http")]
     urls += [u.rstrip(".,;)") for u in _URL_RE.findall(text or "") if u.rstrip(".,;)") not in urls]
 
