@@ -1380,12 +1380,45 @@ def _candidate_at(url, location, *, title="Senior Backend Engineer", salary=None
     return ("acme", url, FakeEnriched(job=job, salary=salary))
 
 
-def test_extract_version_pins_the_v2_location_schema() -> None:
-    # extract-v2 added location_geo to the prompt + persisted shape; any further
-    # change to either must bump this again (the cache is keyed on it).
+def test_extract_version_pin() -> None:
+    # v2 added location_geo; v3 widened the digest to head+tail. Any further
+    # prompt/digest/shape change must bump this again (the cache is keyed on it).
     from jobcrawler.match import EXTRACT_VERSION
 
-    assert EXTRACT_VERSION == "extract-v2"
+    assert EXTRACT_VERSION == "extract-v3"
+
+
+def test_extract_digest_sends_head_and_tail_of_long_descriptions() -> None:
+    # Pay sits in footers: 0/88 gate-pool pay mentions fell inside the old
+    # head-2000 window, 88/88 inside head-2000 + tail-4000.
+    from jobcrawler.match import _extract_digest
+
+    filler = "About the role and the team. " * 400  # ~12k chars
+    long_desc = filler[:7500] + "Compensation: $170,000 – $210,000 USD annually."
+    digest = _extract_digest(0, FakeEnriched(job=FakeJob(description=long_desc)))
+    text = digest["description"]
+    assert isinstance(text, str)
+    assert "Compensation: $170,000" in text
+    assert len(text) < 6200  # head + tail, never the whole body
+
+    short = "Short posting body."
+    digest = _extract_digest(0, FakeEnriched(job=FakeJob(description=short)))
+    assert digest["description"] == short
+
+
+def test_extraction_cap_overflow_reparks_rows_for_the_drain() -> None:
+    # Overflow rows used to wait for a re-present that never came (scored rows
+    # leave the pending queue). Re-parking makes the drain re-present them: the
+    # verdict re-applies from cache for free and extraction takes a fresh slot.
+    store = FakeStore()
+    matcher = _matcher(store, extract_model="openrouter/test/model", extract_cap=1)
+    matcher._predict = FakePredictor(_all_score(90))
+    matcher._extract_predict = FakeExtractPredictor(
+        _extract_all(salary={"min": 80000, "max": 80000, "currency": "USD"})
+    )
+    matcher.score_new(_candidates(3))
+    assert len(store.salary_set) == 1  # the one in-cap extraction applied
+    assert len(store.pending_calls) == 2  # the overflow re-parked, nothing dropped
 
 
 def test_extract_digest_includes_location_and_workplace() -> None:

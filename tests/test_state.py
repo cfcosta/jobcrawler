@@ -2275,6 +2275,44 @@ def test_backfill_locations_sweeps_a_legacy_db(tmp_path: object) -> None:
         s3.close()
 
 
+def test_requeue_salaryless_matches_marks_only_the_extraction_pool(
+    store: StateStore,
+) -> None:
+    # The staged extract-v3 trigger: open + scored at/above the gate + salary-less.
+    # Closed, salaried, sub-threshold, unscored, and already-pending rows untouched.
+    rows = [
+        ("target", "open", 70, None),
+        ("salaried", "open", 80, 90000.0),
+        ("weak", "open", 40, None),
+        ("unscored", "open", None, None),
+        ("gone", "closed", 90, None),
+    ]
+    for url, status, score, salary in rows:
+        fields = dict(FIELDS)
+        if salary is not None:
+            fields.update(
+                salary_min=salary, salary_max=salary, salary_currency="USD",
+                salary_period="year",
+            )
+        store.upsert_position("acme", url, fields=fields, content_hash=url)
+        if score is not None:
+            store.set_match("acme", url, score=score, verdict="x", reasons="")
+    store._conn.execute(
+        "UPDATE positions SET status = 'closed' WHERE url = 'gone'"
+    )
+    store._conn.commit()
+
+    assert store.requeue_salaryless_matches(min_score=60) == 1
+    pending = {
+        r["url"]
+        for r in store._conn.execute(
+            "SELECT url FROM positions WHERE match_pending = 1"
+        )
+    }
+    assert pending == {"target"}
+    assert store.requeue_salaryless_matches(min_score=60) == 0  # idempotent
+
+
 def test_set_salary_stamps_llm_source_and_defaults_period(store: StateStore) -> None:
     # LLM answers often omit the period; the §4.6 currency convention keeps the
     # usd band computable instead of minting permanently-NULL-usd rows, and the

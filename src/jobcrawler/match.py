@@ -79,7 +79,7 @@ PROMPT_VERSION = "match-v2"  # v2: location eligibility became a hard gate in Ma
 # not of the profile — so one extraction serves every profile. Bump on ANY change to the
 # ExtractFromDescription prompt or the persisted extraction shape: it invalidates every
 # prior extraction (the old backlog re-mines at <=extract_cap per run as rows resurface).
-EXTRACT_VERSION = "extract-v2"  # v2: location_geo joined the schema (§4.12)
+EXTRACT_VERSION = "extract-v3"  # v2: location_geo (§4.12); v3: head+tail digest window
 
 # The verdict bands. Numeric score is the source of truth; the label is derived from
 # it when the LLM omits or garbles it (see _verdict_label). match_min_score (the
@@ -668,9 +668,10 @@ class Matcher:
         Cache lookup first — a hit re-applies for free (keeping salary and the §16 employer
         key populated on every run, even after a crawl upsert reverts the key). Cache misses
         are extracted on the cheap LM in batches, bounded to ``extract_cap`` per run so a
-        first pass over a big backlog can't spike spend (the overflow is simply retried next
-        run — extraction is best-effort, nothing is parked). Never raises: a failed extract
-        batch leaves those rows untouched (fail-open, like scoring)."""
+        first pass over a big backlog can't spike spend; the overflow RE-PARKS
+        (``set_match_pending``) so the drain re-presents those rows next tick — the verdict
+        re-applies from cache for free and extraction takes a fresh slot. Never raises: a
+        failed extract batch leaves those rows untouched (fail-open, like scoring)."""
         applied = 0
         misses: list[tuple[str, str, _Enriched, str]] = []
         model = cast(str, self._extract_model)
@@ -702,6 +703,10 @@ class Matcher:
                     type(exc).__name__,
                     str(exc)[:200],
                 )
+        for site, url, _enriched, _hash in misses[self._extract_cap :]:
+            # Cap overflow: scored rows never re-present on their own, so park
+            # them for the drain — cache replays the verdict, extraction fresh.
+            self._store.set_match_pending(site, url)
         return applied
 
     def _extract_batch(self, batch: Sequence[tuple[str, str, _Enriched, str]]) -> int:
@@ -1037,13 +1042,19 @@ def _extract_digest(index: int, enriched: _Enriched) -> dict[str, object]:
     only ever mine the description.
     """
     job = enriched.job
+    description = getattr(job, "description", "") or ""
+    if len(description) > 6000:
+        # Pay lives in footers: on the measured gate pool, 0/88 stated ranges sat
+        # inside a head-only 2000-char window and 88/88 inside head+tail. Send
+        # the head and the tail, skip the middle.
+        description = description[:2000] + "\n[…]\n" + description[-4000:]
     return {
         "index": index,
         "title": getattr(job, "title", None),
         "company": getattr(job, "company", None),
         "location": getattr(job, "location", None),
         "workplace": getattr(enriched, "workplace", None),
-        "description": (getattr(job, "description", "") or "")[:2000],
+        "description": description,
     }
 
 

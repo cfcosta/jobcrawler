@@ -2283,6 +2283,23 @@ class StateStore:
             )
             self._conn.commit()
 
+    def requeue_salaryless_matches(self, *, min_score: int) -> int:
+        """Park open, well-matched, salary-less rows for the drain (§4.7 staged backfill).
+
+        The extract-v3 trigger: re-presented rows re-apply their verdict from cache for
+        free and enter the extraction gate's salary arm. Idempotent (already-pending rows
+        don't recount); closed, salaried, sub-threshold, and unscored rows are untouched.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE positions SET match_pending = 1 WHERE status = 'open' "
+                "AND match_pending = 0 AND match_score >= ? "
+                "AND salary_min IS NULL AND salary_max IS NULL",
+                (min_score,),
+            )
+            self._conn.commit()
+            return cur.rowcount
+
     def requeue_open_matches(self) -> int:
         """Park every open position for (re)scoring; return how many rows changed.
 

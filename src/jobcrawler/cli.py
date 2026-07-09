@@ -920,6 +920,16 @@ def _parse_cached_verdict(cached: str | None) -> tuple[int, str, str, str] | Non
 def cmd_rematch(args: argparse.Namespace) -> int:
     store = StateStore(_db_path())
     try:
+        if getattr(args, "requeue_salaryless", False):
+            # Staged §4.7 extract-v3 backfill: mark the pool and let the daemon's
+            # drain work through it at extract_cap per tick — never a bulk bill.
+            floor = config.extract_min_score()
+            n = store.requeue_salaryless_matches(min_score=floor)
+            print(
+                f"requeued {n} open salary-less match(es) scored >= {floor}; "
+                "the daemon's drain re-presents them (extraction is capped per run)"
+            )
+            return 0
         return _run_rematch(store)
     finally:
         store.close()
@@ -1794,6 +1804,12 @@ def build_parser() -> argparse.ArgumentParser:
     rem = sub.add_parser(
         "rematch",
         help="drain the pending-match backlog + re-evaluate verdicts after a profile edit",
+    )
+    rem.add_argument(
+        "--requeue-salaryless",
+        action="store_true",
+        help="park open salary-less matches at/above extract_min_score for the "
+        "daemon's drain to mine (§4.7 staged salary backfill; capped per run)",
     )
     rem.set_defaults(func=cmd_rematch)
 
