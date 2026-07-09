@@ -773,6 +773,149 @@ class StateStore:
         self._backfill_notify_ledger()
         self._seed_geo_regions()
         self._backfill_locations()
+        self._repair_salaries()
+
+    def _repair_salaries(self) -> None:
+        """One sweep per SALARY_PARSER_VERSION: heal the measured salary-corruption classes.
+
+        Every class below was live-verified before it was coded (§4.6): zeros stored as
+        figures, yearly figures labeled month/hour by description false-positives, half-k
+        shorthand mins, funding-scale magnitudes, and impossible sub-$10k annual bands in
+        major currencies. A row FLIPS only when the flipped reading is plausible;
+        otherwise it CLEARS to honest absence — the untouched set_salary NULL-guard then
+        lets the §4.7 extract arm re-fill it. Rows with a persisted ``salary_raw``
+        re-parse under the current grammar first (a refused parse on a 'text'-sourced row
+        also clears). LLM-sourced rows are never swept; ``salary_raw`` is never erased.
+        Meta-gated: runs once per parser version, at store open, like the §4.12 sweep.
+        """
+        from jobcrawler.runtime.normalize import (
+            _CONTRADICTION_MAJORS,
+            SALARY_PARSER_VERSION,
+            parse_salary,
+            usd_annual_band,
+        )
+
+        if self.get_meta("salary_parser_version") == str(SALARY_PARSER_VERSION):
+            return
+        fx = self.fx_table()
+        majors = tuple(sorted(_CONTRADICTION_MAJORS))
+        marks = ", ".join("?" for _ in majors)
+        not_llm = "COALESCE(salary_source, '') != 'llm'"
+
+        def _clear(pairs: list[tuple[str, str]]) -> None:
+            self._conn.executemany(
+                "UPDATE positions SET salary_min = NULL, salary_max = NULL, "
+                "salary_currency = NULL, salary_period = NULL, salary_usd_min = NULL, "
+                "salary_usd_max = NULL, salary_source = NULL "
+                "WHERE site = ? AND url = ?",
+                pairs,
+            )
+
+        def _write(
+            site: str, url: str, lo: float, hi: float, cur: str, per: str, source: str
+        ) -> None:
+            usd_lo, usd_hi = usd_annual_band(lo, hi, cur, per, fx_rates=fx)
+            self._conn.execute(
+                "UPDATE positions SET salary_min = ?, salary_max = ?, "
+                "salary_currency = ?, salary_period = ?, salary_usd_min = ?, "
+                "salary_usd_max = ?, salary_source = ? WHERE site = ? AND url = ?",
+                (lo, hi, cur, per, usd_lo, usd_hi, source, site, url),
+            )
+
+        # (1) Zeros are absence, not figures.
+        self._conn.execute(
+            "UPDATE positions SET salary_min = NULL, salary_max = NULL, "
+            "salary_currency = NULL, salary_period = NULL, salary_usd_min = NULL, "
+            "salary_usd_max = NULL, salary_source = NULL "
+            f"WHERE {not_llm} AND salary_min <= 0 AND salary_max <= 0"
+        )
+
+        # (2) Re-parse persisted printed text under the current grammar. Success
+        # overwrites; a refusal on a 'text'-sourced row clears (the old figures
+        # came from a parse we now know was wrong). 'structured' rows are the
+        # source's own data — never re-derived from text.
+        rows = self._conn.execute(
+            "SELECT site, url, salary_raw, salary_source FROM positions "
+            "WHERE salary_raw IS NOT NULL AND salary_raw != '' "
+            "AND COALESCE(salary_source, '') NOT IN ('llm', 'structured')"
+        ).fetchall()
+        refused: list[tuple[str, str]] = []
+        for row in rows:
+            parsed = parse_salary(row["salary_raw"])
+            if parsed is not None:
+                _write(
+                    row["site"], row["url"], parsed.min, parsed.max,
+                    parsed.currency, parsed.period, "text",
+                )
+            elif row["salary_source"] == "text":
+                refused.append((row["site"], row["url"]))
+        _clear(refused)
+
+        # (3)/(4) Period mislabels: figures at yearly scale stored hour/month (the
+        # '/hr'-in-'ERP/HRIS' class). Flip to year when plausible, else clear.
+        for period, selector in (
+            ("hour", "salary_period = 'hour' AND salary_min >= 1000"),
+            ("month", "salary_period = 'month' AND salary_usd_min >= 360000"),
+        ):
+            candidates = self._conn.execute(
+                "SELECT site, url, salary_min, salary_max, salary_currency "
+                f"FROM positions WHERE {not_llm} AND {selector} "
+                f"AND upper(COALESCE(salary_currency, '')) IN ({marks})",
+                majors,
+            ).fetchall()
+            implausible: list[tuple[str, str]] = []
+            for row in candidates:
+                usd_lo, usd_hi = usd_annual_band(
+                    row["salary_min"], row["salary_max"], row["salary_currency"],
+                    "year", fx_rates=fx,
+                )
+                if (
+                    usd_lo is not None
+                    and usd_hi is not None
+                    and 10_000 <= usd_lo
+                    and usd_hi <= 2_000_000
+                ):
+                    _write(
+                        row["site"], row["url"], row["salary_min"],
+                        row["salary_max"], row["salary_currency"], "year", "text",
+                    )
+                else:
+                    implausible.append((row["site"], row["url"]))
+            _clear(implausible)
+
+        # (5) Half-k shorthand mins ('€80-110k' stored as 80): scale to the max's
+        # printed magnitude under a tight same-magnitude guard.
+        halfk = self._conn.execute(
+            "SELECT site, url, salary_min, salary_max, salary_currency, "
+            "salary_period FROM positions "
+            f"WHERE {not_llm} AND salary_period = 'year' AND salary_min < 1000 "
+            "AND salary_max >= 50000 AND salary_min * 1000 <= salary_max * 2"
+        ).fetchall()
+        for row in halfk:
+            _write(
+                row["site"], row["url"], row["salary_min"] * 1000,
+                row["salary_max"], row["salary_currency"], row["salary_period"],
+                "text",
+            )
+
+        # (6) Impossible annual bands in majors (hourly/monthly figures stored as
+        # year — the true period is unknowable, so clear, never guess).
+        tiny = self._conn.execute(
+            "SELECT site, url FROM positions "
+            f"WHERE {not_llm} AND salary_period = 'year' AND salary_usd_max < 10000 "
+            f"AND upper(COALESCE(salary_currency, '')) IN ({marks})",
+            majors,
+        ).fetchall()
+        _clear([(r["site"], r["url"]) for r in tiny])
+
+        # (7) Funding-scale magnitudes: no salary annualizes past $2M.
+        absurd = self._conn.execute(
+            f"SELECT site, url FROM positions WHERE {not_llm} "
+            "AND salary_usd_max > 2000000"
+        ).fetchall()
+        _clear([(r["site"], r["url"]) for r in absurd])
+
+        self.set_meta("salary_parser_version", str(SALARY_PARSER_VERSION))
 
     def _seed_geo_regions(self) -> None:
         """Materialize geo.GEO_REGION_MEMBERS into SQL (§4.12), reseeding on version bumps.

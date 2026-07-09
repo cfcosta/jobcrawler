@@ -2294,6 +2294,109 @@ def test_set_salary_stamps_llm_source_and_defaults_period(store: StateStore) -> 
     assert rec.salary_source == "llm"
 
 
+def test_salary_repair_sweep_heals_the_measured_corruption_classes(
+    tmp_path: object,
+) -> None:
+    # One sweep per SALARY_PARSER_VERSION at store open (§4.6): each class below is
+    # a live-measured corruption shape. Flips only when the flipped reading is
+    # plausible; otherwise clears to honest absence (the untouched NULL-guard then
+    # lets the §4.7 extract arm re-fill). LLM-sourced rows are never touched.
+    db = f"{tmp_path}/legacy.db"  # type: ignore[str-bytes-safe]
+    raw = sqlite3.connect(db)
+    raw.execute(
+        """
+        CREATE TABLE positions (
+            site TEXT NOT NULL, url TEXT NOT NULL, content_hash TEXT NOT NULL,
+            title TEXT NOT NULL, company TEXT NOT NULL, location TEXT NOT NULL,
+            salary_min REAL, salary_max REAL, salary_currency TEXT,
+            salary_period TEXT, salary_usd_min REAL, salary_usd_max REAL,
+            salary_raw TEXT, salary_source TEXT,
+            first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
+            PRIMARY KEY (site, url)
+        )
+        """
+    )
+    ts = "2026-01-01T00:00:00+00:00"
+
+    def put(url, lo, hi, cur, per, usd_lo, usd_hi, sraw=None, source=None):
+        raw.execute(
+            "INSERT INTO positions VALUES ('s', ?, 'h', 'T', 'C', 'L', ?, ?, ?, ?, "
+            "?, ?, ?, ?, ?, ?)",
+            (url, lo, hi, cur, per, usd_lo, usd_hi, sraw, source, ts, ts),
+        )
+
+    put("zero", 0.0, 0.0, "USD", "year", 0.0, 0.0)
+    put("hourflip", 107000.0, 164550.0, "USD", "hour", 222560000.0, 342264000.0)
+    put("monthflip", 430000.0, 430000.0, "USD", "month", 5160000.0, 5160000.0)
+    put("monthclear", 875000000.0, 875000000.0, "USD", "month", 1.05e10, 1.05e10)
+    put("halfk", 80.0, 110000.0, "EUR", "year", 86.4, 118800.0)
+    put("tinyyear", 78.0, 87.0, "USD", "year", 78.0, 87.0)
+    put("absurd", 220000000.0, 220000000.0, "USD", "year", 2.2e8, 2.2e8)
+    put("llmrow", 78.0, 87.0, "USD", "year", 78.0, 87.0, source="llm")
+    put("rawgood", 1.0, 1.0, "USD", "year", 1.0, 1.0,
+        sraw="CA$120,000 - CA$150,000", source="text")
+    put("rawbad", 500.0, 500.0, "EUR", "year", 540.0, 540.0,
+        sraw="€500 per day", source="text")
+    raw.commit()
+    raw.close()
+
+    s = StateStore(db)
+    try:
+        rows = {
+            r["url"]: r
+            for r in s._conn.execute(
+                "SELECT url, salary_min, salary_max, salary_currency, salary_period, "
+                "salary_usd_min, salary_usd_max, salary_source FROM positions"
+            )
+        }
+        for cleared in ("zero", "monthclear", "tinyyear", "absurd", "rawbad"):
+            assert rows[cleared]["salary_min"] is None, cleared
+            assert rows[cleared]["salary_source"] is None, cleared
+        assert rows["hourflip"]["salary_period"] == "year"
+        assert rows["hourflip"]["salary_usd_min"] == 107000.0
+        assert rows["monthflip"]["salary_period"] == "year"
+        assert rows["monthflip"]["salary_usd_max"] == 430000.0
+        assert rows["halfk"]["salary_min"] == 80000.0
+        assert rows["halfk"]["salary_usd_min"] == pytest.approx(86400.0)
+        assert rows["llmrow"]["salary_min"] == 78.0  # llm rows are never swept
+        assert rows["rawgood"]["salary_currency"] == "CAD"
+        assert (rows["rawgood"]["salary_min"], rows["rawgood"]["salary_max"]) == (
+            120000.0,
+            150000.0,
+        )
+        assert s.get_meta("salary_parser_version") is not None
+        # Idempotent while the version holds…
+        s._conn.execute(
+            "UPDATE positions SET salary_min = 42, salary_max = 42, "
+            "salary_currency = 'USD', salary_period = 'year', "
+            "salary_usd_min = 42, salary_usd_max = 42 WHERE url = 'zero'"
+        )
+        s._conn.commit()
+    finally:
+        s.close()
+
+    s2 = StateStore(db)
+    try:
+        row = s2._conn.execute(
+            "SELECT salary_min FROM positions WHERE url = 'zero'"
+        ).fetchone()
+        assert row["salary_min"] == 42  # guard held: no resweep
+        # …and a version bump resweeps ($42/yr is a tiny-year band → cleared).
+        s2.set_meta("salary_parser_version", "0")
+        s2._conn.commit()
+    finally:
+        s2.close()
+
+    s3 = StateStore(db)
+    try:
+        row = s3._conn.execute(
+            "SELECT salary_min FROM positions WHERE url = 'zero'"
+        ).fetchone()
+        assert row["salary_min"] is None
+    finally:
+        s3.close()
+
+
 def test_migration_adds_salary_raw_and_source(tmp_path: object) -> None:
     # §4.6 salary provenance: opening a legacy DB ALTERs in the verbatim printed
     # salary text (crawler-owned) and the provenance marker ('structured'|'text'|
