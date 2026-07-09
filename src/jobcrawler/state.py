@@ -413,9 +413,11 @@ CREATE TABLE IF NOT EXISTS location_values (
     PRIMARY KEY (site, value)
 );
 -- §4.12 per-position resolved places: a presentation/filter overlay in the §17
--- style — source='rules' rows are a disposable projection of positions ×
--- location_values, rebuilt at any time; source='llm' rows are POSTING-LOCAL facts
--- (description-derived fences) purged when the posting's content changes.
+-- style — source 'rules' and 'llm_value' rows are a disposable projection of
+-- positions × location_values (the value tells provenance: parser vs paid ledger
+-- fill), rebuilt at any time; source='llm_posting' rows are POSTING-LOCAL facts
+-- (description-derived fences) that survive resweeps and purge when the posting's
+-- content changes.
 -- kind: 'place' | 'remote_fence' | 'remote_anywhere'; country: ISO 3166-1 alpha-2
 -- UPPER (NULL when unresolved); macro_region: a geo.MACRO_KEYS key; display: the
 -- canonical human form with full English country names ("São Paulo, Brazil",
@@ -751,6 +753,7 @@ class StateStore:
         self._backfill_relocation()
         self._backfill_notify_ledger()
         self._seed_geo_regions()
+        self._backfill_locations()
 
     def _seed_geo_regions(self) -> None:
         """Materialize geo.GEO_REGION_MEMBERS into SQL (§4.12), reseeding on version bumps.
@@ -911,6 +914,414 @@ class StateStore:
                 for row in rows
             ],
         )
+
+    # -- §4.12 structured locations -------------------------------------------
+
+    def _ledger_entry(self, site: str, value: str) -> dict[str, Any]:
+        """Get-or-parse the ``(site, value)`` ledger row (assumes the caller holds the lock).
+
+        Rules rows are disposable: a GEO_PARSER_VERSION mismatch reparses in place. LLM
+        rows are durable — but deterministic-first: when a version bump lets the parser
+        resolve the string cleanly ('full'/'macro'), the cached LLM reading retires;
+        otherwise the row survives with its ``parser_version`` advanced so the string
+        is not re-evaluated until the next bump.
+        """
+        from jobcrawler.runtime import geo
+
+        key = value.strip()
+        row = self._conn.execute(
+            "SELECT places_json, fence_json, remote_marker, worldwide, parse_quality, "
+            "parse_source, parser_version FROM location_values "
+            "WHERE site = ? AND value = ?",
+            (site, key),
+        ).fetchone()
+        if row is not None and row["parser_version"] == geo.GEO_PARSER_VERSION:
+            return _decode_ledger(row)
+        parse = geo.parse_location(key)
+        if (
+            row is not None
+            and row["parse_source"] == "llm"
+            and parse.quality not in ("full", "macro")
+        ):
+            self._conn.execute(
+                "UPDATE location_values SET parser_version = ? "
+                "WHERE site = ? AND value = ?",
+                (geo.GEO_PARSER_VERSION, site, key),
+            )
+            return _decode_ledger(row)
+        entry = _parse_to_entry(parse)
+        self._conn.execute(
+            "INSERT OR REPLACE INTO location_values (site, value, places_json, "
+            "fence_json, remote_marker, worldwide, parse_quality, parse_source, "
+            "parser_version, llm_model, parsed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 'rules', ?, NULL, ?)",
+            (
+                site,
+                key,
+                json.dumps(entry["places"], ensure_ascii=False),
+                json.dumps(entry["fence"], ensure_ascii=False),
+                int(entry["remote_marker"]),
+                int(entry["worldwide"]),
+                entry["quality"],
+                geo.GEO_PARSER_VERSION,
+                self._clock().isoformat(),
+            ),
+        )
+        return entry
+
+    def location_needs_llm(self, site: str, value: str) -> bool:
+        """True when the string's rules parse left it 'partial'/'fail' — the §4.7
+        extract pass's ledger-tail arm. Parses (and caches) on first sight."""
+        if not value or not value.strip():
+            return False
+        with self._lock:
+            entry = self._ledger_entry(site, value)
+            self._conn.commit()
+        return entry["source"] == "rules" and entry["quality"] in ("partial", "fail")
+
+    def refresh_position_locations(
+        self,
+        site: str,
+        url: str,
+        *,
+        location: str,
+        locations_json: str | None = None,
+        workplace: str | None = None,
+        force: bool = False,
+        purge_llm: bool = False,
+    ) -> None:
+        """(Re)build the position's §4.12 projection rows and display summary.
+
+        The runner calls this right after ``upsert_position`` with
+        ``force=(outcome != 'unchanged')`` and ``purge_llm=(outcome == 'changed')``:
+        posting-local LLM rows (description-derived fences) die with the content
+        that produced them, while a plain resweep keeps them. Without ``force`` a
+        current-version ledger row proves this position was already projected (every
+        row is projected at its own insert/change), so the common unchanged-crawl
+        path costs one SELECT. Rows carrying a ``locations_json`` array always
+        refresh — the array is not content-hash-guarded.
+        """
+        from jobcrawler.runtime import geo
+
+        with self._lock:
+            if not force and not locations_json and not purge_llm:
+                row = self._conn.execute(
+                    "SELECT parse_source, parser_version FROM location_values "
+                    "WHERE site = ? AND value = ?",
+                    (site, (location or "").strip()),
+                ).fetchone()
+                if row is not None and (
+                    row["parse_source"] == "llm"
+                    or row["parser_version"] == geo.GEO_PARSER_VERSION
+                ):
+                    return
+            self._refresh_locations_locked(
+                site,
+                url,
+                location=location,
+                locations_json=locations_json,
+                workplace=workplace,
+                purge_llm=purge_llm,
+            )
+            self._conn.commit()
+
+    def _refresh_locations_locked(
+        self,
+        site: str,
+        url: str,
+        *,
+        location: str,
+        locations_json: str | None,
+        workplace: str | None,
+        purge_llm: bool,
+    ) -> None:
+        strings: list[str] = []
+        for candidate in [location, *_json_list(locations_json)]:
+            text = (candidate or "").strip()
+            if text and text not in strings:
+                strings.append(text)
+        entries = [self._ledger_entry(site, s) for s in strings]
+        rows = _compose_projection(entries, workplace)
+
+        kept: list[sqlite3.Row] = []
+        if purge_llm:
+            self._conn.execute(
+                "UPDATE positions SET loc_llm_at = NULL WHERE site = ? AND url = ?",
+                (site, url),
+            )
+        else:
+            kept = self._conn.execute(
+                "SELECT kind, city, subdivision, country, macro_region, display, "
+                "confidence, raw_fragment FROM position_locations "
+                "WHERE site = ? AND url = ? AND source = 'llm_posting' ORDER BY seq",
+                (site, url),
+            ).fetchall()
+        self._conn.execute(
+            "DELETE FROM position_locations WHERE site = ? AND url = ?", (site, url)
+        )
+        params: list[tuple[object, ...]] = []
+        seq = 0
+        for row in rows:
+            params.append(
+                (site, url, seq, row["kind"], row.get("city"), row.get("subdivision"),
+                 row.get("country"), row.get("macro_region"), row["display"],
+                 row.get("source", "rules"), row.get("confidence", "high"),
+                 row.get("raw_fragment"))
+            )
+            seq += 1
+        for row in kept:
+            params.append(
+                (site, url, seq, row["kind"], row["city"], row["subdivision"],
+                 row["country"], row["macro_region"], row["display"], "llm_posting",
+                 row["confidence"], row["raw_fragment"])
+            )
+            seq += 1
+        if params:
+            self._conn.executemany(
+                "INSERT INTO position_locations (site, url, seq, kind, city, "
+                "subdivision, country, macro_region, display, source, confidence, "
+                "raw_fragment) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params,
+            )
+        self._recompute_location_display_locked(site, url)
+
+    def _recompute_location_display_locked(self, site: str, url: str) -> None:
+        """Derive ``positions.location_display`` from the stored projection rows."""
+        from jobcrawler.runtime import geo
+
+        rows = self._conn.execute(
+            "SELECT kind, country, macro_region, display FROM position_locations "
+            "WHERE site = ? AND url = ? ORDER BY seq",
+            (site, url),
+        ).fetchall()
+        place_items = [r["display"] for r in rows if r["kind"] == "place"]
+        fence_names = [
+            geo.country_name(r["country"]) or geo.macro_label(r["macro_region"])
+            or r["display"]
+            for r in rows
+            if r["kind"] == "remote_fence"
+        ]
+        anywhere = any(r["kind"] == "remote_anywhere" for r in rows)
+        display = _compose_display(place_items, fence_names, anywhere)
+        self._conn.execute(
+            "UPDATE positions SET location_display = ? WHERE site = ? AND url = ?",
+            (display, site, url),
+        )
+
+    def set_location_value_llm(
+        self,
+        site: str,
+        value: str,
+        *,
+        places: list[dict[str, Any]],
+        fence: list[str],
+        remote: str,
+        model: str,
+    ) -> bool:
+        """§4.7 ledger fill for a rules-'partial'/'fail' string. First writer wins.
+
+        Returns True when the fill landed; the projections of every position on
+        ``site`` carrying the string refresh immediately (later crawls stay
+        consistent through the ledger). An empty answer writes nothing — absence
+        of geography is recorded per-posting via ``loc_llm_at``, not in the ledger.
+        """
+        from jobcrawler.runtime import geo
+
+        key = (value or "").strip()
+        if not key:
+            return False
+        if not places and not fence and remote != "worldwide":
+            return False
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT parse_source, parse_quality FROM location_values "
+                "WHERE site = ? AND value = ?",
+                (site, key),
+            ).fetchone()
+            fillable = row is None or (
+                row["parse_source"] == "rules"
+                and row["parse_quality"] in ("partial", "fail")
+            )
+            if not fillable:
+                return False
+            place_dicts = [
+                {
+                    "city": p.get("city"),
+                    "subdivision": p.get("subdivision"),
+                    "country": p.get("country"),
+                    "macro": p.get("macro"),
+                    "confidence": "medium",
+                    "raw": "",
+                }
+                for p in places
+            ]
+            fence_dicts = [_fence_dict(f) for f in fence]
+            has_geo = any(p.get("country") for p in place_dicts) or any(
+                f.get("country") for f in fence_dicts
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO location_values (site, value, places_json, "
+                "fence_json, remote_marker, worldwide, parse_quality, parse_source, "
+                "parser_version, llm_model, parsed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'llm', ?, ?, ?)",
+                (
+                    site,
+                    key,
+                    json.dumps(place_dicts, ensure_ascii=False),
+                    json.dumps(fence_dicts, ensure_ascii=False),
+                    int(remote != "none"),
+                    int(remote == "worldwide"),
+                    "full" if has_geo else "macro",
+                    geo.GEO_PARSER_VERSION,
+                    model,
+                    self._clock().isoformat(),
+                ),
+            )
+            carriers = self._conn.execute(
+                "SELECT url, location, locations_json, workplace FROM positions "
+                "WHERE site = ? AND location = ?",
+                (site, key),
+            ).fetchall()
+            for carrier in carriers:
+                self._refresh_locations_locked(
+                    site,
+                    carrier["url"],
+                    location=carrier["location"],
+                    locations_json=carrier["locations_json"],
+                    workplace=carrier["workplace"],
+                    purge_llm=False,
+                )
+            self._conn.commit()
+        return True
+
+    def set_position_location_llm(
+        self,
+        site: str,
+        url: str,
+        *,
+        places: list[dict[str, Any]],
+        fence: list[str],
+        remote: str,
+        model: str,
+    ) -> bool:
+        """§4.7 marker-arm fill: POSTING-LOCAL rows mined from this description.
+
+        Unlike the value ledger these facts belong to one posting (the string —
+        e.g. bare 'Remote' — says nothing); they survive rules resweeps and die
+        when the posting's content changes (``purge_llm``). First writer wins.
+        """
+        from jobcrawler.runtime import geo
+
+        del model  # recorded per-value in the ledger; posting rows carry source='llm'
+        with self._lock:
+            existing = self._conn.execute(
+                "SELECT 1 FROM position_locations "
+                "WHERE site = ? AND url = ? AND source = 'llm_posting' LIMIT 1",
+                (site, url),
+            ).fetchone()
+            if existing is not None:
+                return False
+            rows: list[dict[str, Any]] = []
+            for p in places:
+                place = {
+                    "city": p.get("city"),
+                    "subdivision": p.get("subdivision"),
+                    "country": p.get("country"),
+                    "macro": p.get("macro"),
+                    "confidence": "medium",
+                    "raw": "",
+                }
+                rows.append(
+                    {
+                        "kind": "place",
+                        "city": place["city"],
+                        "subdivision": place["subdivision"],
+                        "country": place["country"],
+                        "macro_region": place["macro"],
+                        "display": _place_display_dict(place),
+                        "confidence": "medium",
+                    }
+                )
+            for f in fence:
+                fd = _fence_dict(f)
+                name = geo.country_name(fd.get("country")) or geo.macro_label(
+                    fd.get("macro")
+                )
+                rows.append(
+                    {
+                        "kind": "remote_fence",
+                        "country": fd.get("country"),
+                        "macro_region": fd.get("macro"),
+                        "display": f"Remote ({name})" if name else "Remote",
+                        "confidence": "medium",
+                    }
+                )
+            if remote == "worldwide":
+                rows.append(
+                    {
+                        "kind": "remote_anywhere",
+                        "macro_region": "worldwide",
+                        "display": "Remote (Worldwide)",
+                        "confidence": "medium",
+                    }
+                )
+            if not rows:
+                return False
+            base = self._conn.execute(
+                "SELECT COALESCE(MAX(seq), -1) AS s FROM position_locations "
+                "WHERE site = ? AND url = ?",
+                (site, url),
+            ).fetchone()["s"]
+            self._conn.executemany(
+                "INSERT INTO position_locations (site, url, seq, kind, city, "
+                "subdivision, country, macro_region, display, source, confidence, "
+                "raw_fragment) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'llm_posting', ?, NULL)",
+                [
+                    (site, url, base + 1 + i, r["kind"], r.get("city"),
+                     r.get("subdivision"), r.get("country"), r.get("macro_region"),
+                     r["display"], r["confidence"])
+                    for i, r in enumerate(rows)
+                ],
+            )
+            self._recompute_location_display_locked(site, url)
+            self._conn.commit()
+        return True
+
+    def mark_location_extracted(self, site: str, url: str) -> None:
+        """Stamp ``loc_llm_at``: the extract pass answered for this posting — even an
+        empty answer — so the marker-arm gate never re-selects it for this content."""
+        self._conn.execute(
+            "UPDATE positions SET loc_llm_at = ? WHERE site = ? AND url = ?",
+            (self._clock().isoformat(), site, url),
+        )
+        self._conn.commit()
+
+    def _backfill_locations(self) -> None:
+        """One sweep per GEO_PARSER_VERSION: parse every stored string, project every row.
+
+        Covers ALL rows including closed ones (they resurface via search and role
+        groups), recovers the 'Remote - US'-on-hybrid class as explicit fence rows at
+        zero LLM cost, and re-evaluates LLM ledger rows against the upgraded parser
+        (clean rules retire them; unresolved strings keep their paid answers). Runs
+        inside the open-time migration — one commit, meta-guarded.
+        """
+        from jobcrawler.runtime import geo
+
+        if self.get_meta("geo_parser_version") == str(geo.GEO_PARSER_VERSION):
+            return
+        rows = self._conn.execute(
+            "SELECT site, url, location, locations_json, workplace FROM positions"
+        ).fetchall()
+        for row in rows:
+            self._refresh_locations_locked(
+                row["site"],
+                row["url"],
+                location=row["location"] or "",
+                locations_json=row["locations_json"],
+                workplace=row["workplace"],
+                purge_llm=False,
+            )
+        self.set_meta("geo_parser_version", str(geo.GEO_PARSER_VERSION))
 
     # -- item state (dedup) --------------------------------------------------
 
@@ -2886,6 +3297,209 @@ def _to_transition(row: sqlite3.Row) -> HealthTransition:
         to_state=row["to_state"],
         ts=datetime.fromisoformat(row["ts"]),
     )
+
+
+# -- §4.12 structured-location helpers (pure; shared by the store methods) -------
+
+
+def _json_list(raw: str | None) -> list[str]:
+    """Decode a locations_json array defensively — malformed input reads as empty."""
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return [x for x in data if isinstance(x, str)] if isinstance(data, list) else []
+
+
+def _parse_to_entry(parse: Any) -> dict[str, Any]:
+    """Flatten a geo.LocationParse into the ledger's JSON-ready dict shape."""
+
+    def _place(p: Any) -> dict[str, Any]:
+        return {
+            "city": p.city,
+            "subdivision": p.subdivision,
+            "country": p.country,
+            "macro": p.macro,
+            "confidence": p.confidence,
+            "raw": p.raw,
+        }
+
+    return {
+        "places": [_place(p) for p in parse.places],
+        "fence": [_place(f) for f in parse.fence],
+        "remote_marker": parse.remote_marker,
+        "worldwide": parse.worldwide,
+        "quality": parse.quality,
+        "source": "rules",
+    }
+
+
+def _decode_ledger(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "places": json.loads(row["places_json"]),
+        "fence": json.loads(row["fence_json"]),
+        "remote_marker": bool(row["remote_marker"]),
+        "worldwide": bool(row["worldwide"]),
+        "quality": row["parse_quality"],
+        "source": row["parse_source"],
+    }
+
+
+def _fence_dict(entry: str) -> dict[str, Any]:
+    """An extract-pass fence token is an ISO2 code or a macro key; route by vocabulary."""
+    from jobcrawler.runtime import geo
+
+    token = (entry or "").strip()
+    if token.upper() in geo.COUNTRY_CODES:
+        return {"country": token.upper(), "macro": None, "confidence": "medium"}
+    return {"country": None, "macro": token.lower(), "confidence": "medium"}
+
+
+def _place_display_dict(place: dict[str, Any]) -> str:
+    from jobcrawler.runtime import geo
+
+    return geo.place_display(
+        geo.GeoPlace(
+            city=place.get("city"),
+            subdivision=place.get("subdivision"),
+            country=place.get("country"),
+            macro=place.get("macro"),
+            raw=place.get("raw") or "",
+        )
+    )
+
+
+def _compose_projection(
+    entries: list[dict[str, Any]], workplace: str | None
+) -> list[dict[str, Any]]:
+    """Merge the ledger entries of a position's strings into ordered projection rows.
+
+    Places and fences dedup across strings. When the row is remote and the strings
+    named only city-less places with no explicit fence, those places ARE the fence
+    ('Spain' on a remote row means remote-fenced-to-Spain — the same reading
+    ``classify_remote_scope`` gives the flat string), mirrored here so the
+    structured rows never contradict the §4.6 enums.
+    """
+    from jobcrawler.runtime import geo
+
+    places: list[dict[str, Any]] = []
+    fences: list[dict[str, Any]] = []
+    seen_places: set[tuple[Any, ...]] = set()
+    seen_fences: set[tuple[Any, ...]] = set()
+    worldwide = any(e["worldwide"] for e in entries)
+    ww_source = "rules"
+    if worldwide and all(
+        e["source"] != "rules" for e in entries if e["worldwide"]
+    ):
+        ww_source = "llm_value"
+    for entry in entries:
+        # Projection provenance: 'rules' for parser-derived rows, 'llm_value' for
+        # rows read out of a paid ledger fill. Both are disposable (re-derivable
+        # from positions × location_values), unlike posting-local 'llm_posting'.
+        row_source = "rules" if entry["source"] == "rules" else "llm_value"
+        for place in entry["places"]:
+            key = ((place.get("city") or "").lower(), place.get("subdivision"),
+                   place.get("country"), place.get("macro"))
+            if key not in seen_places:
+                seen_places.add(key)
+                places.append({**place, "source": row_source})
+        for fence in entry["fence"]:
+            key = (fence.get("country"), fence.get("macro"))
+            if key not in seen_fences:
+                seen_fences.add(key)
+                fences.append({**fence, "source": row_source})
+
+    if (
+        workplace == "remote"
+        and not fences
+        and not worldwide
+        and places
+        and all(not p.get("city") and not p.get("subdivision") for p in places)
+    ):
+        fences = [
+            {**p, "confidence": _worse_confidence(p.get("confidence"), "medium")}
+            for p in places
+        ]
+        places = []
+
+    rows: list[dict[str, Any]] = []
+    for place in places:
+        rows.append(
+            {
+                "kind": "place",
+                "city": place.get("city"),
+                "subdivision": place.get("subdivision"),
+                "country": place.get("country"),
+                "macro_region": place.get("macro"),
+                "display": _place_display_dict(place),
+                "source": place.get("source", "rules"),
+                "confidence": place.get("confidence") or "high",
+                "raw_fragment": place.get("raw") or None,
+            }
+        )
+    for fence in fences:
+        name = geo.country_name(fence.get("country")) or geo.macro_label(
+            fence.get("macro")
+        )
+        rows.append(
+            {
+                "kind": "remote_fence",
+                "country": fence.get("country"),
+                "subdivision": None,
+                "macro_region": fence.get("macro"),
+                "display": f"Remote ({name})" if name else "Remote",
+                "source": fence.get("source", "rules"),
+                "confidence": fence.get("confidence") or "high",
+                "raw_fragment": fence.get("raw") or None,
+            }
+        )
+    if worldwide:
+        rows.append(
+            {
+                "kind": "remote_anywhere",
+                "macro_region": "worldwide",
+                "display": "Remote (Worldwide)",
+                "source": ww_source,
+                "confidence": "high",
+            }
+        )
+    return rows
+
+
+def _worse_confidence(a: str | None, b: str) -> str:
+    rank = {"high": 0, "medium": 1, "low": 2}
+    left = a if a in rank else "high"
+    return left if rank[left] >= rank[b] else b
+
+
+def _compose_display(
+    place_items: list[str], fence_names: list[str], anywhere: bool
+) -> str | None:
+    """One human line for the position row: places, then the fence, then worldwide.
+
+    Long lists cap rather than scroll — 'Remote (A, B, C, D +18 more)' reads;
+    twenty-two country names do not.
+    """
+    items: list[str] = []
+    if len(place_items) > 5:
+        items.extend(place_items[:5])
+        items.append(f"+{len(place_items) - 5} more")
+    else:
+        items.extend(place_items)
+    names = [n for n in fence_names if n]
+    if names:
+        if len(names) == 1:
+            fenced = names[0]
+        elif len(names) <= 4:
+            fenced = ", ".join(names[:-1]) + " or " + names[-1]
+        else:
+            fenced = ", ".join(names[:4]) + f" +{len(names) - 4} more"
+        items.append(f"Remote ({fenced})")
+    if anywhere:
+        items.append("Remote (Worldwide)")
+    return " · ".join(items) if items else None
 
 
 def _to_position(row: sqlite3.Row) -> PositionRecord:

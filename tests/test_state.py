@@ -1946,6 +1946,333 @@ def test_upsert_accepts_locations_json_and_the_record_reads_it_back(
     assert rec.loc_llm_at is None
 
 
+# --- §4.12 structured locations: ledger + projection + backfill ----------------
+
+
+def _projection(store: StateStore, site: str, url: str) -> list[tuple]:
+    return [
+        (r["seq"], r["kind"], r["city"], r["subdivision"], r["country"],
+         r["macro_region"], r["display"], r["source"])
+        for r in store._conn.execute(
+            "SELECT * FROM position_locations WHERE site = ? AND url = ? ORDER BY seq",
+            (site, url),
+        )
+    ]
+
+
+def _display(store: StateStore, site: str, url: str) -> str | None:
+    row = store._conn.execute(
+        "SELECT location_display FROM positions WHERE site = ? AND url = ?", (site, url)
+    ).fetchone()
+    return row["location_display"] if row else None
+
+
+def test_refresh_projects_a_single_place_location(store: StateStore) -> None:
+    store.upsert_position(
+        "acme", "u", fields={**FIELDS, "location": "Berlin, Germany"}, content_hash="h"
+    )
+    store.refresh_position_locations(
+        "acme", "u", location="Berlin, Germany", workplace="hybrid", force=True
+    )
+    rows = _projection(store, "acme", "u")
+    assert len(rows) == 1
+    seq, kind, city, sub, country, macro, display, source = rows[0]
+    assert (kind, city, country, source) == ("place", "Berlin", "DE", "rules")
+    assert display == "Berlin, Germany"
+    assert _display(store, "acme", "u") == "Berlin, Germany"
+    # The parse landed in the (site, value) ledger as a current-version rules row.
+    ledger = store._conn.execute(
+        "SELECT * FROM location_values WHERE site = 'acme' AND value = 'Berlin, Germany'"
+    ).fetchone()
+    assert ledger["parse_source"] == "rules"
+    assert ledger["parse_quality"] == "full"
+
+
+def test_refresh_merges_the_locations_json_array(store: StateStore) -> None:
+    store.upsert_position(
+        "acme", "u", fields={**FIELDS, "location": "Berlin, Germany"}, content_hash="h"
+    )
+    store.refresh_position_locations(
+        "acme",
+        "u",
+        location="Berlin, Germany",
+        locations_json='["Berlin, Germany", "Remote - US"]',
+        workplace="hybrid",
+        force=True,
+    )
+    rows = _projection(store, "acme", "u")
+    assert [(r[1], r[4]) for r in rows] == [("place", "DE"), ("remote_fence", "US")]
+    assert _display(store, "acme", "u") == "Berlin, Germany · Remote (United States)"
+
+
+def test_refresh_promotes_countries_to_fence_only_for_remote_rows(
+    store: StateStore,
+) -> None:
+    # working_nomads style: location='Spain' on a remote row means "remote, fenced to
+    # Spain" (exactly classify_remote_scope's reading); on a hybrid row it is an office.
+    for url, workplace, kind, display in [
+        ("r", "remote", "remote_fence", "Remote (Spain)"),
+        ("h", "hybrid", "place", "Spain"),
+    ]:
+        store.upsert_position(
+            "acme", url, fields={**FIELDS, "location": "Spain"}, content_hash=url
+        )
+        store.refresh_position_locations(
+            "acme", url, location="Spain", workplace=workplace, force=True
+        )
+        rows = _projection(store, "acme", url)
+        assert [(r[1], r[4]) for r in rows] == [(kind, "ES")], url
+        assert _display(store, "acme", url) == display, url
+
+
+def test_refresh_worldwide_and_marker_only(store: StateStore) -> None:
+    store.upsert_position(
+        "acme", "w", fields={**FIELDS, "location": "Anywhere in the World"}, content_hash="w"
+    )
+    store.refresh_position_locations(
+        "acme", "w", location="Anywhere in the World", workplace="remote", force=True
+    )
+    assert [(r[1],) for r in _projection(store, "acme", "w")] == [("remote_anywhere",)]
+    assert _display(store, "acme", "w") == "Remote (Worldwide)"
+
+    # A bare marker parses clean but yields nothing structured: display stays NULL
+    # so every renderer falls back to the raw string.
+    store.upsert_position(
+        "acme", "m", fields={**FIELDS, "location": "Remote"}, content_hash="m"
+    )
+    store.refresh_position_locations(
+        "acme", "m", location="Remote", workplace="remote", force=True
+    )
+    assert _projection(store, "acme", "m") == []
+    assert _display(store, "acme", "m") is None
+
+
+def test_refresh_skip_path_trusts_a_current_ledger_row(store: StateStore) -> None:
+    store.upsert_position(
+        "acme", "u", fields={**FIELDS, "location": "Berlin, Germany"}, content_hash="h"
+    )
+    store.refresh_position_locations(
+        "acme", "u", location="Berlin, Germany", workplace="hybrid", force=True
+    )
+    # Poison the projection, then refresh without force (the 'unchanged' crawl path):
+    # the current-version ledger row proves this position was already projected, so
+    # nothing is rewritten.
+    store._conn.execute(
+        "UPDATE position_locations SET display = 'poisoned' WHERE site = 'acme'"
+    )
+    store._conn.commit()
+    store.refresh_position_locations(
+        "acme", "u", location="Berlin, Germany", workplace="hybrid", force=False
+    )
+    assert _projection(store, "acme", "u")[0][6] == "poisoned"
+    # force=True rebuilds.
+    store.refresh_position_locations(
+        "acme", "u", location="Berlin, Germany", workplace="hybrid", force=True
+    )
+    assert _projection(store, "acme", "u")[0][6] == "Berlin, Germany"
+
+
+def test_refresh_reparses_a_stale_rules_ledger_row(store: StateStore) -> None:
+    now = "2026-07-09T00:00:00+00:00"
+    store._conn.execute(
+        "INSERT INTO location_values (site, value, places_json, fence_json, parse_quality, "
+        "parse_source, parser_version, parsed_at) "
+        "VALUES ('acme', 'Berlin, Germany', '[]', '[]', 'fail', 'rules', 0, ?)",
+        (now,),
+    )
+    store._conn.commit()
+    store.upsert_position(
+        "acme", "u", fields={**FIELDS, "location": "Berlin, Germany"}, content_hash="h"
+    )
+    store.refresh_position_locations(
+        "acme", "u", location="Berlin, Germany", workplace="hybrid", force=False
+    )
+    ledger = store._conn.execute(
+        "SELECT * FROM location_values WHERE site = 'acme' AND value = 'Berlin, Germany'"
+    ).fetchone()
+    assert ledger["parse_quality"] == "full"
+    assert ledger["parser_version"] > 0
+    assert _projection(store, "acme", "u") != []
+
+
+def test_llm_ledger_fill_and_precedence(store: StateStore, monkeypatch) -> None:
+    from jobcrawler.runtime import geo
+
+    store.upsert_position(
+        "acme", "u", fields={**FIELDS, "location": "Zorgville"}, content_hash="h"
+    )
+    store.refresh_position_locations(
+        "acme", "u", location="Zorgville", workplace="hybrid", force=True
+    )
+    assert store.location_needs_llm("acme", "Zorgville") is True
+    assert _projection(store, "acme", "u") == []
+
+    filled = store.set_location_value_llm(
+        "acme",
+        "Zorgville",
+        places=[{"city": "Zorgville", "subdivision": None, "country": "US"}],
+        fence=[],
+        remote="none",
+        model="m1",
+    )
+    assert filled is True
+    assert store.location_needs_llm("acme", "Zorgville") is False
+    rows = _projection(store, "acme", "u")
+    assert [(r[1], r[2], r[4], r[7]) for r in rows] == [
+        ("place", "Zorgville", "US", "llm_value")
+    ]
+    assert _display(store, "acme", "u") == "Zorgville, United States"
+
+    # First writer wins: a second fill is a no-op.
+    assert (
+        store.set_location_value_llm(
+            "acme", "Zorgville",
+            places=[{"city": "Elsewhere", "subdivision": None, "country": "CA"}],
+            fence=[], remote="none", model="m2",
+        )
+        is False
+    )
+    assert _display(store, "acme", "u") == "Zorgville, United States"
+
+    # A parser upgrade that still can't parse the string leaves the LLM row standing…
+    monkeypatch.setattr(geo, "GEO_PARSER_VERSION", geo.GEO_PARSER_VERSION + 1)
+    store.refresh_position_locations(
+        "acme", "u", location="Zorgville", workplace="hybrid", force=True
+    )
+    ledger = store._conn.execute(
+        "SELECT * FROM location_values WHERE site = 'acme' AND value = 'Zorgville'"
+    ).fetchone()
+    assert ledger["parse_source"] == "llm"
+    assert _display(store, "acme", "u") == "Zorgville, United States"
+
+
+def test_clean_rules_parse_beats_a_stale_llm_row(store: StateStore) -> None:
+    # Deterministic-first: if the (upgraded) parser resolves a string cleanly, the
+    # cached LLM reading is retired.
+    now = "2026-07-09T00:00:00+00:00"
+    store._conn.execute(
+        "INSERT INTO location_values (site, value, places_json, fence_json, parse_quality, "
+        "parse_source, parser_version, llm_model, parsed_at) "
+        "VALUES ('acme', 'Berlin, Germany', "
+        "'[{\"city\": \"Wrongtown\", \"subdivision\": null, \"country\": \"US\", "
+        "\"macro\": null, \"confidence\": \"medium\", \"raw\": \"\"}]', '[]', "
+        "'full', 'llm', 0, 'm1', ?)",
+        (now,),
+    )
+    store._conn.commit()
+    store.upsert_position(
+        "acme", "u", fields={**FIELDS, "location": "Berlin, Germany"}, content_hash="h"
+    )
+    store.refresh_position_locations(
+        "acme", "u", location="Berlin, Germany", workplace="hybrid", force=True
+    )
+    ledger = store._conn.execute(
+        "SELECT * FROM location_values WHERE site = 'acme' AND value = 'Berlin, Germany'"
+    ).fetchone()
+    assert ledger["parse_source"] == "rules"
+    assert _display(store, "acme", "u") == "Berlin, Germany"
+
+
+def test_posting_local_llm_rows_and_the_extract_stamp(store: StateStore) -> None:
+    # The marker arm: a fence mined from THIS posting's description is posting-local —
+    # it survives rules resweeps but dies with the posting's content.
+    store.upsert_position(
+        "acme", "u", fields={**FIELDS, "location": "Remote"}, content_hash="h"
+    )
+    store.refresh_position_locations(
+        "acme", "u", location="Remote", workplace="remote", force=True
+    )
+    store.set_position_location_llm(
+        "acme", "u", places=[], fence=["US", "CA"], remote="fenced", model="m1"
+    )
+    store.mark_location_extracted("acme", "u")
+    rows = _projection(store, "acme", "u")
+    assert [(r[1], r[4], r[7]) for r in rows] == [
+        ("remote_fence", "US", "llm_posting"),
+        ("remote_fence", "CA", "llm_posting"),
+    ]
+    assert _display(store, "acme", "u") == "Remote (United States or Canada)"
+    rec = store.open_positions("acme")[0]
+    assert rec.loc_llm_at is not None
+
+    # A rules resweep (parser upgrade) keeps posting-local LLM rows…
+    store.refresh_position_locations(
+        "acme", "u", location="Remote", workplace="remote", force=True
+    )
+    assert [(r[1], r[7]) for r in _projection(store, "acme", "u")] == [
+        ("remote_fence", "llm_posting"),
+        ("remote_fence", "llm_posting"),
+    ]
+    # …but a content change purges them and clears the stamp (the extract cache
+    # misses on the new hash, so the pass re-answers from the fresh description).
+    store.refresh_position_locations(
+        "acme", "u", location="Remote", workplace="remote", force=True, purge_llm=True
+    )
+    assert _projection(store, "acme", "u") == []
+    assert store.open_positions("acme")[0].loc_llm_at is None
+
+
+def test_backfill_locations_sweeps_a_legacy_db(tmp_path: object) -> None:
+    # Opening a DB whose meta parser version is absent/stale parses every distinct
+    # string and projects every row — including closed ones and the conflict-(d)
+    # class: 'Remote - US' on a hybrid row gains an explicit fence at zero LLM cost.
+    db = f"{tmp_path}/legacy.db"  # type: ignore[str-bytes-safe]
+    raw = sqlite3.connect(db)
+    raw.executescript(
+        """
+        CREATE TABLE positions (
+            site TEXT NOT NULL, url TEXT NOT NULL, content_hash TEXT NOT NULL,
+            title TEXT NOT NULL, company TEXT NOT NULL, location TEXT NOT NULL,
+            workplace TEXT, status TEXT NOT NULL DEFAULT 'open', closed_at TEXT,
+            first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
+            PRIMARY KEY (site, url)
+        );
+        INSERT INTO positions (site, url, content_hash, title, company, location,
+            workplace, status, first_seen, last_seen)
+        VALUES
+            ('acme', 'open', 'h1', 'T', 'C', 'Berlin, Germany', 'hybrid', 'open',
+                '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'),
+            ('acme', 'closed', 'h2', 'T', 'C', 'Lisbon, Portugal', 'onsite', 'closed',
+                '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'),
+            ('acme', 'fenced', 'h3', 'T', 'C', 'Remote - US', 'hybrid', 'open',
+                '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
+        """
+    )
+    raw.commit()
+    raw.close()
+
+    s = StateStore(db)
+    try:
+        assert _display(s, "acme", "open") == "Berlin, Germany"
+        assert _display(s, "acme", "closed") == "Lisbon, Portugal"
+        assert [(r[1], r[4]) for r in _projection(s, "acme", "fenced")] == [
+            ("remote_fence", "US")
+        ]
+        assert s.get_meta("geo_parser_version") is not None
+        # Idempotent while the version holds: a poisoned display survives a reopen.
+        s._conn.execute(
+            "UPDATE positions SET location_display = 'poisoned' WHERE url = 'open'"
+        )
+        s._conn.commit()
+    finally:
+        s.close()
+
+    s2 = StateStore(db)
+    try:
+        assert _display(s2, "acme", "open") == "poisoned"
+        # …and a version bump resweeps it clean.
+        s2.set_meta("geo_parser_version", "0")
+        s2._conn.commit()
+    finally:
+        s2.close()
+
+    s3 = StateStore(db)
+    try:
+        assert _display(s3, "acme", "open") == "Berlin, Germany"
+    finally:
+        s3.close()
+
+
 def test_search_positions_salary_sort_and_filter_are_usd_coherent(
     store: StateStore,
 ) -> None:
