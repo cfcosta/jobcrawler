@@ -39,7 +39,7 @@ def _department(job):
     return ", ".join(names) if names else None
 
 def crawl(ctx):
-    data = json.loads(ctx.fetch(SITE))
+    data = json.loads(ctx.fetch(SITE + "&pay_transparency=true"))
     for job in data.get("jobs", []):
         title = job.get("title")
         url = job.get("absolute_url")
@@ -72,5 +72,20 @@ def crawl(ctx):
         apply_url = job.get("absolute_url")
         if apply_url:
             item["apply_url"] = apply_url
+
+        ranges = job.get("pay_input_ranges") or []
+        bands = [
+            r for r in ranges
+            if isinstance(r, dict) and r.get("min_cents") and r.get("max_cents")
+        ]
+        currencies = {
+            str(r.get("currency_type") or "").strip().upper() for r in bands
+        }
+        # Single-currency boards only: mixed-currency ranges (one per region)
+        # cannot collapse into one honest band, so leave those unstated.
+        if bands and len(currencies) == 1 and "" not in currencies:
+            item["salary_min"] = min(r["min_cents"] for r in bands) / 100
+            item["salary_max"] = max(r["max_cents"] for r in bands) / 100
+            item["salary_currency"] = next(iter(currencies))
 
         yield item

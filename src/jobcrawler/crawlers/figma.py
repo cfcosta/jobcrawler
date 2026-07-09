@@ -15,7 +15,7 @@ def _strip_tags(html_text):
 
 
 def crawl(ctx):
-    resp = ctx.fetch(API_URL)
+    resp = ctx.fetch(API_URL + "&pay_transparency=true")
     data = json.loads(resp)
     jobs = data.get("jobs", [])
     seen = set()
@@ -36,7 +36,7 @@ def crawl(ctx):
         )
         posted_at = j.get("first_published") or None
         expires_at = j.get("application_deadline") or None
-        yield {
+        out = {
             "url": url,
             "title": title,
             "company": company,
@@ -49,3 +49,18 @@ def crawl(ctx):
             "apply_url": url,
             "source": SITE,
         }
+        ranges = j.get("pay_input_ranges") or []
+        bands = [
+            r for r in ranges
+            if isinstance(r, dict) and r.get("min_cents") and r.get("max_cents")
+        ]
+        currencies = {
+            str(r.get("currency_type") or "").strip().upper() for r in bands
+        }
+        # Single-currency boards only: mixed-currency ranges (one per region)
+        # cannot collapse into one honest band, so leave those unstated.
+        if bands and len(currencies) == 1 and "" not in currencies:
+            out["salary_min"] = min(r["min_cents"] for r in bands) / 100
+            out["salary_max"] = max(r["max_cents"] for r in bands) / 100
+            out["salary_currency"] = next(iter(currencies))
+        yield out

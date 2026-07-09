@@ -33,7 +33,7 @@ def _first_name(items):
 
 
 def crawl(ctx):
-    data = json.loads(ctx.fetch(SITE))
+    data = json.loads(ctx.fetch(SITE + "&pay_transparency=true"))
     for job in data.get("jobs", []):
         title = (job.get("title") or "").strip()
         url = (job.get("absolute_url") or "").strip()
@@ -62,5 +62,20 @@ def crawl(ctx):
             out["posted_at"] = job["first_published"]
         if job.get("application_deadline"):
             out["expires_at"] = job["application_deadline"]
+
+        ranges = job.get("pay_input_ranges") or []
+        bands = [
+            r for r in ranges
+            if isinstance(r, dict) and r.get("min_cents") and r.get("max_cents")
+        ]
+        currencies = {
+            str(r.get("currency_type") or "").strip().upper() for r in bands
+        }
+        # Single-currency boards only: mixed-currency ranges (one per region)
+        # cannot collapse into one honest band, so leave those unstated.
+        if bands and len(currencies) == 1 and "" not in currencies:
+            out["salary_min"] = min(r["min_cents"] for r in bands) / 100
+            out["salary_max"] = max(r["max_cents"] for r in bands) / 100
+            out["salary_currency"] = next(iter(currencies))
 
         yield out

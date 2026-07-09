@@ -50,7 +50,7 @@ def _department_name(raw):
 
 
 def crawl(ctx):
-    data = json.loads(ctx.fetch(SITE))
+    data = json.loads(ctx.fetch(SITE + "&pay_transparency=true"))
     for item in data.get("jobs", []):
         loc = item.get("location") or {}
         url = item.get("absolute_url") or item.get("url")
@@ -70,6 +70,21 @@ def crawl(ctx):
         apply_url = item.get("absolute_url")
         if apply_url and apply_url != url:
             _set_if_present(out, "apply_url", apply_url)
+
+        ranges = item.get("pay_input_ranges") or []
+        bands = [
+            r for r in ranges
+            if isinstance(r, dict) and r.get("min_cents") and r.get("max_cents")
+        ]
+        currencies = {
+            str(r.get("currency_type") or "").strip().upper() for r in bands
+        }
+        # Single-currency boards only: mixed-currency ranges (one per region)
+        # cannot collapse into one honest band, so leave those unstated.
+        if bands and len(currencies) == 1 and "" not in currencies:
+            out["salary_min"] = min(r["min_cents"] for r in bands) / 100
+            out["salary_max"] = max(r["max_cents"] for r in bands) / 100
+            out["salary_currency"] = next(iter(currencies))
 
         # Drop any source-silent or blank values so schema validation does not see empty strings.
         out = {k: v for k, v in out.items() if v is not None and v != ""}

@@ -34,7 +34,7 @@ def _html_to_text(value):
 
 
 def crawl(ctx):
-    data = json.loads(ctx.fetch(SITE))
+    data = json.loads(ctx.fetch(SITE + "&pay_transparency=true"))
     for item in data.get("jobs", []):
         title = _clean(item.get("title"))
         url = _clean(item.get("absolute_url"))
@@ -58,5 +58,20 @@ def crawl(ctx):
             "source": SITE,
             "external_id": _clean(item.get("id")),
         }
+
+        ranges = item.get("pay_input_ranges") or []
+        bands = [
+            r for r in ranges
+            if isinstance(r, dict) and r.get("min_cents") and r.get("max_cents")
+        ]
+        currencies = {
+            str(r.get("currency_type") or "").strip().upper() for r in bands
+        }
+        # Single-currency boards only: mixed-currency ranges (one per region)
+        # cannot collapse into one honest band, so leave those unstated.
+        if bands and len(currencies) == 1 and "" not in currencies:
+            job["salary_min"] = min(r["min_cents"] for r in bands) / 100
+            job["salary_max"] = max(r["max_cents"] for r in bands) / 100
+            job["salary_currency"] = next(iter(currencies))
 
         yield {key: value for key, value in job.items() if value is not None}

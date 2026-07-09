@@ -34,7 +34,7 @@ def crawl(ctx=None):
     The `content` field is HTML-entity-escaped; we unescape and strip tags
     to produce clean plain-text descriptions.
     """
-    raw = ctx.fetch(API_URL)
+    raw = ctx.fetch(API_URL + "&pay_transparency=true")
     data = json.loads(raw)
 
     for job in data.get("jobs", []):
@@ -59,7 +59,7 @@ def crawl(ctx=None):
         apply_url = job.get("absolute_url", "") or None
         url = job.get("absolute_url", "") or None
 
-        yield {
+        out = {
             "url": url,
             "title": job.get("title", ""),
             "company": COMPANY,
@@ -72,3 +72,20 @@ def crawl(ctx=None):
             "external_id": external_id,
             "apply_url": apply_url,
         }
+
+        ranges = job.get("pay_input_ranges") or []
+        bands = [
+            r for r in ranges
+            if isinstance(r, dict) and r.get("min_cents") and r.get("max_cents")
+        ]
+        currencies = {
+            str(r.get("currency_type") or "").strip().upper() for r in bands
+        }
+        # Single-currency boards only: mixed-currency ranges (one per region)
+        # cannot collapse into one honest band, so leave those unstated.
+        if bands and len(currencies) == 1 and "" not in currencies:
+            out["salary_min"] = min(r["min_cents"] for r in bands) / 100
+            out["salary_max"] = max(r["max_cents"] for r in bands) / 100
+            out["salary_currency"] = next(iter(currencies))
+
+        yield out

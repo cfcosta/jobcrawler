@@ -23,7 +23,7 @@ def crawl(ctx):
     """
     Yield one Job dict per open role from the Greenhouse boards API.
     """
-    raw = ctx.fetch(SITE)
+    raw = ctx.fetch(SITE + "&pay_transparency=true")
     data = json.loads(raw)
     for job in data.get("jobs", []):
         desc = _strip_tags(job.get("content", ""))
@@ -40,7 +40,7 @@ def crawl(ctx):
 
         company = job.get("company_name") or COMPANY
 
-        yield {
+        out = {
             "url": job.get("absolute_url"),
             "title": job.get("title"),
             "company": company,
@@ -57,3 +57,20 @@ def crawl(ctx):
             "workplace_type": None,
             "salary": None,
         }
+
+        ranges = job.get("pay_input_ranges") or []
+        bands = [
+            r for r in ranges
+            if isinstance(r, dict) and r.get("min_cents") and r.get("max_cents")
+        ]
+        currencies = {
+            str(r.get("currency_type") or "").strip().upper() for r in bands
+        }
+        # Single-currency boards only: mixed-currency ranges (one per region)
+        # cannot collapse into one honest band, so leave those unstated.
+        if bands and len(currencies) == 1 and "" not in currencies:
+            out["salary_min"] = min(r["min_cents"] for r in bands) / 100
+            out["salary_max"] = max(r["max_cents"] for r in bands) / 100
+            out["salary_currency"] = next(iter(currencies))
+
+        yield out

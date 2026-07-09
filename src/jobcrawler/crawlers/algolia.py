@@ -42,7 +42,7 @@ def _first_name(items):
 
 
 def crawl(ctx):
-    response = ctx.fetch(SITE)
+    response = ctx.fetch(SITE + "&pay_transparency=true")
     if hasattr(response, "json"):
         data = response.json()
     else:
@@ -85,5 +85,20 @@ def crawl(ctx):
         expires_at = _iso_datetime(item.get("application_deadline"))
         if expires_at:
             job["expires_at"] = expires_at
+
+        ranges = item.get("pay_input_ranges") or []
+        bands = [
+            r for r in ranges
+            if isinstance(r, dict) and r.get("min_cents") and r.get("max_cents")
+        ]
+        currencies = {
+            str(r.get("currency_type") or "").strip().upper() for r in bands
+        }
+        # Single-currency boards only: mixed-currency ranges (one per region)
+        # cannot collapse into one honest band, so leave those unstated.
+        if bands and len(currencies) == 1 and "" not in currencies:
+            job["salary_min"] = min(r["min_cents"] for r in bands) / 100
+            job["salary_max"] = max(r["max_cents"] for r in bands) / 100
+            job["salary_currency"] = next(iter(currencies))
 
         yield job
