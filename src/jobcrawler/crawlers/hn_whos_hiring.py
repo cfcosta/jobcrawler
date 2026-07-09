@@ -39,6 +39,11 @@ def _split_header(text):
     return []
 
 def _looks_location(part):
+    # A header location fragment is short and never a URL. Slash-style posts with a
+    # '|' deep in the body make parts[0] the whole 400-char head, which would match
+    # on a stray "remote"/"onsite" and stuff pitch text + URLs into `location`.
+    if len(part) > 80 or _URL_RE.search(part):
+        return False
     p = part.lower()
     tokens = [
         "remote", "hybrid", "onsite", "on-site", "nyc", "new york", "sf", "san francisco",

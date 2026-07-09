@@ -83,6 +83,36 @@ def test_crawl_yields_hn_permalink_urls_and_mailto_apply_links() -> None:
     assert jobs[1]["apply_url"] == "https://jobs.lever.co/globex"  # ATS link kept
 
 
+def test_parse_header_never_takes_a_url_or_blurb_as_location() -> None:
+    # Slash-style posters with a '|' deep in the body turn the whole 400-char head
+    # into parts[0], which "looks like" a location the moment it contains "remote"
+    # or "onsite" anywhere — 83 live rows carried URLs + pitch text in `location`.
+    # A real header location fragment is short and never a URL.
+    blob = (
+        "SmarterDx / Remote (US only) / https://smarterdx.com/careers SmarterDx "
+        "builds clinical AI for one of healthcare's most broken systems: how "
+        "hospitals get paid"
+    )
+    _, _, location, _ = hn._parse_header([blob, "Python"], "alice")
+    assert location == "Not specified"
+
+    url_part = "https://www.monumental.co/ / Onsite We make robots that construct buildings"
+    _, _, location2, _ = hn._parse_header([url_part, "Robotics"], "bob")
+    assert location2 == "Not specified"
+
+
+def test_parse_header_still_reads_short_location_parts() -> None:
+    company, title, location, emp = hn._parse_header(
+        ["Acme", "Senior Rust Engineer", "Remote (US only)", "Full-time"], "alice"
+    )
+    assert (company, title, location, emp) == (
+        "Acme",
+        "Senior Rust Engineer",
+        "Remote (US only)",
+        "Full-time",
+    )
+
+
 def test_apply_link_unescapes_algolia_entity_escaped_hrefs() -> None:
     # Algolia's comment_text entity-escapes attribute values ("&#x2F;" for "/",
     # "&amp;" for "&"), so each captured href must be unescaped — otherwise the
