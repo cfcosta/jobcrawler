@@ -356,6 +356,18 @@ CREATE TABLE IF NOT EXISTS position_clusters (
     PRIMARY KEY (site, url)
 );
 CREATE INDEX IF NOT EXISTS pc_by_cluster ON position_clusters (cluster_id);
+-- §17 role groups: same-company/same-title postings differing only by location,
+-- bundled for the web layer's "N locations" picker. A disposable projection like
+-- the two above — but PRESENTATION-ONLY: members are real distinct postings
+-- (applied to separately), so matching/notify/lifecycle must never read it.
+CREATE TABLE IF NOT EXISTS position_role_groups (
+    site        TEXT NOT NULL,
+    url         TEXT NOT NULL,
+    group_id    TEXT NOT NULL,
+    computed_at TEXT NOT NULL,
+    PRIMARY KEY (site, url)
+);
+CREATE INDEX IF NOT EXISTS prg_by_group ON position_role_groups (group_id);
 -- §17 notification ledger: append-only per-row FACTS (never derived), so cluster
 -- rebuilds can neither lose nor double notification history.
 CREATE TABLE IF NOT EXISTS notify_ledger (
@@ -1253,7 +1265,7 @@ class StateStore:
         ).fetchall()
         return [row["url"] for row in rows]
 
-    def _effective_score_sql(self, *, column: str = "match_score") -> str:
+    def _effective_score_sql(self, *, column: str = "match_score", prefix: str = "") -> str:
         """SQL for the §4.7 freshness-decayed effective score: the base ``match_score`` fit
         scaled by a recency multiplier in ``[floor, 1]`` that decays with the posting's age
         (from ``posted_at``, else ``first_seen``). So a newer posting outranks an equally-good
@@ -1263,17 +1275,23 @@ class StateStore:
         Half-life/floor come from config; ``now`` is baked from the store's injected clock as
         a Julian-day literal so tests control it (``julianday()`` parses the ISO timestamps).
         Numeric literals only, never user input — matching the store's other f-string SQL.
+
+        ``prefix`` qualifies the column references (``"p2."`` …) so the expression can
+        score a specific table inside a correlated subquery, where the bare names would
+        be ambiguous or bind to the wrong row.
         """
         from jobcrawler import config
 
         half_life = max(1e-6, config.score_half_life_days())
         floor = min(1.0, max(0.0, config.score_freshness_floor()))
         now_jd = 2440587.5 + self._clock().timestamp() / 86400.0
-        age_days = f"max(0.0, {now_jd!r} - julianday(COALESCE(posted_at, first_seen)))"
+        age_days = (
+            f"max(0.0, {now_jd!r} - julianday(COALESCE({prefix}posted_at, {prefix}first_seen)))"
+        )
         freshness = (
             f"({floor!r} + {(1.0 - floor)!r} * pow(2.0, -({age_days}) / {half_life!r}))"
         )
-        return f"{column} * {freshness}"
+        return f"{prefix}{column} * {freshness}"
 
     def matches(
         self,
@@ -1285,6 +1303,7 @@ class StateStore:
         exclude_company_applied: bool = False,
         collapse_duplicates: bool = False,
         exclude_cluster_handled: bool = False,
+        collapse_role_groups: bool = False,
     ) -> list[PositionRecord]:
         """Open, scored positions at or above ``min_score``, best **effective** fit first (§4.7).
 
@@ -1306,9 +1325,11 @@ class StateStore:
         dismiss button. All are off by default: the CLI listing and the score histogram
         want the full scored corpus.
 
-        ``collapse_duplicates`` / ``exclude_cluster_handled`` are the §17 cluster flags
-        (see :meth:`search_positions`): one row per real-world job, and no job whose
-        cluster you've already dismissed or applied to.
+        ``collapse_duplicates`` / ``exclude_cluster_handled`` / ``collapse_role_groups``
+        are the §17 flags (see :meth:`search_positions`): one row per real-world job,
+        no job whose cluster you've already dismissed or applied to, and one row per
+        role group — here the score-first election is exactly the point, surfacing the
+        location variant most worth pursuing.
         """
         clauses = ""
         if exclude_applied:
@@ -1319,6 +1340,8 @@ class StateStore:
                 "WHERE pc.site = positions.site AND pc.url = positions.url "
                 "AND pc.is_canonical = 0) "
             )
+        if collapse_role_groups:
+            clauses += f"AND {self._role_group_primary_sql()} "
         if exclude_cluster_handled:
             clauses += (
                 "AND NOT EXISTS (SELECT 1 FROM position_clusters me "
@@ -1647,17 +1670,21 @@ class StateStore:
         self,
         key_rows: Iterable[tuple[str, str, int, str]],
         cluster_rows: Iterable[tuple[str, str, str, int, int]],
+        role_rows: Iterable[tuple[str, str, str]] = (),
     ) -> str:
-        """Swap BOTH overlay tables in one transaction; return the ``computed_at`` stamp.
+        """Swap ALL overlay tables in one transaction; return the ``computed_at`` stamp.
 
         The single RLock'd connection means readers see the old overlay or the new one,
         never an empty in-between. DELETE + bulk INSERT (not incremental diffing) keeps
-        the sweep idempotent and the overlay a pure projection.
+        the sweep idempotent and the overlay a pure projection. ``position_role_groups``
+        is cleared unconditionally, so a sweep with the role-groups knob off leaves no
+        stale groups behind.
         """
         now = self._clock().isoformat()
         with self._lock:
             self._conn.execute("DELETE FROM position_identity_keys")
             self._conn.execute("DELETE FROM position_clusters")
+            self._conn.execute("DELETE FROM position_role_groups")
             self._conn.executemany(
                 "INSERT OR IGNORE INTO position_identity_keys (site, url, tier, key) "
                 "VALUES (?, ?, ?, ?)",
@@ -1668,6 +1695,11 @@ class StateStore:
                 "(site, url, cluster_id, is_canonical, tier, computed_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 [(s, u, cid, canon, tier, now) for s, u, cid, canon, tier in cluster_rows],
+            )
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO position_role_groups "
+                "(site, url, group_id, computed_at) VALUES (?, ?, ?, ?)",
+                [(s, u, gid, now) for s, u, gid in role_rows],
             )
             self._conn.commit()
         return now
@@ -1714,6 +1746,94 @@ class StateStore:
             for row in rows:
                 out[(row["s"], row["u"])] = int(row["n"])
         return out
+
+    def _role_group_primary_sql(self) -> str:
+        """WHERE fragment keeping only each §17 role group's primary open member.
+
+        An open row is hidden iff a strictly-better OPEN sibling shares its role group:
+        better = higher rounded effective score (NULL ranks below any score), then
+        earlier ``first_seen``, then ``(site, url)`` ascending — a total order over
+        distinct rows, so exactly one member survives per group. Ungrouped and closed
+        rows always pass. Query-time on purpose: verdicts land between sweeps, and the
+        surfaced variant must follow them without waiting for the next rebuild.
+        """
+        eff_self = self._effective_score_sql(prefix="positions.")
+        eff_sib = self._effective_score_sql(prefix="p2.")
+        return (
+            "(positions.status != 'open' OR NOT EXISTS ("
+            "SELECT 1 FROM position_role_groups rg "
+            "JOIN position_role_groups sib ON sib.group_id = rg.group_id "
+            "AND (sib.site != rg.site OR sib.url != rg.url) "
+            "JOIN positions p2 ON p2.site = sib.site AND p2.url = sib.url "
+            "WHERE rg.site = positions.site AND rg.url = positions.url "
+            "AND p2.status = 'open' AND ("
+            f"COALESCE(round({eff_sib}), -1) > COALESCE(round({eff_self}), -1) "
+            f"OR (COALESCE(round({eff_sib}), -1) = COALESCE(round({eff_self}), -1) "
+            "AND (p2.first_seen < positions.first_seen "
+            "OR (p2.first_seen = positions.first_seen "
+            "AND (p2.site < positions.site "
+            "OR (p2.site = positions.site AND p2.url < positions.url))))))))"
+        )
+
+    def role_group_variants(
+        self, pairs: Collection[tuple[str, str]]
+    ) -> dict[tuple[str, str], list[dict[str, str | None]]]:
+        """Open location-variants per (site, url), batched for a list page's picker.
+
+        For every listed row belonging to a §17 role group with 2+ open members, the
+        full open membership (the row itself included) as light dicts — site, url,
+        location fields, apply_url — ordered by location so the popup reads stably.
+        Rows outside any group, or whose group has collapsed to one open member, are
+        absent (absence = no picker). Same ≤400-pair batching as :meth:`cluster_sizes`.
+        """
+        out: dict[tuple[str, str], list[dict[str, str | None]]] = {}
+        batch = list(pairs)
+        for start in range(0, len(batch), 400):
+            chunk = batch[start : start + 400]
+            values = ", ".join("(?, ?)" for _ in chunk)
+            params: list[object] = []
+            for s, u in chunk:
+                params += [s, u]
+            rows = self._conn.execute(
+                f"WITH page(site, url) AS (VALUES {values}) "
+                "SELECT page.site AS s, page.url AS u, p.site, p.url, "
+                "p.location, p.location_normalized, p.apply_url "
+                "FROM page "
+                "JOIN position_role_groups me ON me.site = page.site AND me.url = page.url "
+                "JOIN position_role_groups sib ON sib.group_id = me.group_id "
+                "JOIN positions p ON p.site = sib.site AND p.url = sib.url "
+                "WHERE p.status = 'open' "
+                "ORDER BY lower(COALESCE(NULLIF(p.location_normalized, ''), p.location, '')), "
+                "p.site, p.url",
+                params,
+            ).fetchall()
+            for row in rows:
+                out.setdefault((row["s"], row["u"]), []).append(
+                    {
+                        "site": row["site"],
+                        "url": row["url"],
+                        "location": row["location"],
+                        "location_normalized": row["location_normalized"],
+                        "apply_url": row["apply_url"],
+                    }
+                )
+        return {k: v for k, v in out.items() if len(v) > 1}
+
+    def role_group_members(self, site: str, url: str) -> list[PositionRecord]:
+        """All OPEN members of the row's §17 role group (itself included), in location
+        order — or ``[]`` when the row is ungrouped. Full records, unlike
+        :meth:`role_group_variants`: the detail page's "other locations" panel shows
+        score/lifecycle chips, which need the whole row."""
+        rows = self._conn.execute(
+            "SELECT p.* FROM position_role_groups me "
+            "JOIN position_role_groups sib ON sib.group_id = me.group_id "
+            "JOIN positions p ON p.site = sib.site AND p.url = sib.url "
+            "WHERE me.site = ? AND me.url = ? AND p.status = 'open' "
+            "ORDER BY lower(COALESCE(NULLIF(p.location_normalized, ''), p.location, '')), "
+            "p.site, p.url",
+            (site, url),
+        ).fetchall()
+        return [_to_position(r) for r in rows]
 
     def cluster_verdict_donor(
         self, site: str, url: str, *, min_desc_len: int, tiers: Collection[int]
@@ -1991,6 +2111,7 @@ class StateStore:
         exclude_company_applied: bool = False,
         collapse_duplicates: bool = False,
         exclude_cluster_handled: bool = False,
+        collapse_role_groups: bool = False,
         sort: str = "recent",
         limit: int = 100,
         offset: int = 0,
@@ -2027,14 +2148,21 @@ class StateStore:
         ``sort`` ∈ {recent, score, updated, salary, title, applied}; NULL scores/salaries/dates
         sink last under a DESC sort. ``limit``/``offset`` paginate. Returns ``list[PositionRecord]``.
 
-        §17 cluster flags (both default off ⇒ byte-identical queries):
+        §17 cluster flags (all default off ⇒ byte-identical queries):
         ``collapse_duplicates`` hides non-canonical cluster members (each real-world job
         shows once, via its elected representative; standalone rows are unaffected).
         ``exclude_cluster_handled`` hides every row whose cluster contains a dismissed or
         applied member — dismissing one copy retires the job everywhere at read time.
+        ``collapse_role_groups`` shows one row per §17 role group (the same role opened
+        in several locations): among a group's OPEN members, the one with the best
+        rounded effective score wins — earliest ``first_seen`` then ``(site, url)``
+        break ties, a total order, so exactly one survives. Election happens at query
+        time, not sweep time, because verdicts land between sweeps and the surfaced
+        variant should be the one most worth the operator's click. Closed rows never
+        role-collapse (the group is a live-inventory affordance).
         **User-data auto-force**: a query filtered on the operator's own rows
         (``applied=True``, ``dismissed=True``, or an operator-set ``track_status``)
-        bypasses both — a row you applied to via an aggregator stays reachable in
+        bypasses all three — a row you applied to via an aggregator stays reachable in
         Applications forever. ``track_status='new'`` is exempt: 'new' is the schema
         default (untriaged inventory, the default browse view), not an operator action,
         and it is exactly the view collapsing exists for.
@@ -2042,6 +2170,7 @@ class StateStore:
         if applied or dismissed is True or (track_status and track_status != "new"):
             collapse_duplicates = False
             exclude_cluster_handled = False
+            collapse_role_groups = False
         clauses: list[str] = []
         params: list[object] = []
         if collapse_duplicates:
@@ -2058,6 +2187,8 @@ class StateStore:
                 "WHERE me.site = positions.site AND me.url = positions.url "
                 "AND (p2.dismissed = 1 OR p2.applied_at IS NOT NULL))"
             )
+        if collapse_role_groups:
+            clauses.append(self._role_group_primary_sql())
         q = query.strip()
         if q:
             like = f"%{q.lower()}%"

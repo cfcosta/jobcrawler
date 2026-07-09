@@ -835,3 +835,200 @@ def test_new_positions_since_collapse_counts_jobs_not_rows(store) -> None:
     assert store.new_positions_since(since, collapse=True) == 1
     # A window after both first_seen stamps counts nothing either way.
     assert store.new_positions_since("2999-01-01T00:00:00", collapse=True) == 0
+
+
+# --- role groups: same role, several locations (presentation-only) --------------
+
+
+def _role_groups(store: StateStore) -> dict[str, set[tuple[str, str]]]:
+    rows = store._conn.execute(
+        "SELECT site, url, group_id FROM position_role_groups"
+    ).fetchall()
+    out: dict[str, set[tuple[str, str]]] = {}
+    for r in rows:
+        out.setdefault(r["group_id"], set()).add((r["site"], r["url"]))
+    return out
+
+
+def _role_pair(store: StateStore) -> None:
+    """One role (default company+title) open in two cities — the smallest group."""
+    _put(store, "a", "https://a.test/1", location="New York, NY")
+    _put(store, "b", "https://b.test/2", location="London")
+
+
+def test_role_group_bundles_location_variants(store) -> None:
+    _role_pair(store)
+    _put(store, "c", "https://c.test/3", title="Data Engineer", location="Berlin")
+    report = _sweep(store)
+
+    groups = _role_groups(store)
+    assert len(groups) == 1  # the lone Data Engineer never groups
+    (members,) = groups.values()
+    assert members == {("a", "https://a.test/1"), ("b", "https://b.test/2")}
+    assert report["role_groups"] == 1
+    assert report["role_grouped_rows"] == 2
+    assert report["role_collapse_saving"] == 1
+    assert report["guards"]["role_group_cap_skips"] == 0
+
+
+def test_role_group_same_location_multiples_stay_ungrouped(store) -> None:
+    # The robinhood shape: N identical-title reqs in ONE city are N separate
+    # openings, not location variants — grouping them would hide real headcount.
+    _put(store, "a", "https://a.test/1", location="Menlo Park, CA")
+    _put(store, "b", "https://b.test/2", location="Menlo Park, CA")
+    _put(store, "c", "https://c.test/3", location="menlo park, ca")  # case-folded
+    _sweep(store)
+    assert _role_groups(store) == {}
+
+
+def test_role_group_unlocated_rows_share_one_bucket(store) -> None:
+    # No location evidence = no variant evidence: two blank locations are not
+    # "two locations", so they never form a picker.
+    _put(store, "a", "https://a.test/1", location="")
+    _put(store, "b", "https://b.test/2", location="")
+    _sweep(store)
+    assert _role_groups(store) == {}
+
+
+def test_role_group_degenerate_title_key_is_skipped(store) -> None:
+    _put(store, "a", "https://a.test/1", title="", location="New York, NY")
+    _put(store, "b", "https://b.test/2", title="", location="London")
+    _sweep(store)
+    assert _role_groups(store) == {}
+
+
+def test_role_group_cap_guards_mass_posters(store) -> None:
+    # 65 same-key rows is boilerplate titling, not one role in 65 cities.
+    for i in range(65):
+        _put(store, "s", f"https://s.test/{i}", location=f"City {i}")
+    report = _sweep(store)
+    assert _role_groups(store) == {}
+    assert report["guards"]["role_group_cap_skips"] == 1
+    assert report["role_groups"] == 0
+
+
+def test_role_group_excludes_shadowed_copies_and_closed_rows(store) -> None:
+    # Groups are keyed over what the collapsed list shows: a clustered duplicate
+    # is already hidden, so bundling it too would double-count the role. Only the
+    # cluster's canonical joins the standalone variant.
+    _pair(store)  # board_a/board_b: one greenhouse req, location "Remote"
+    _put(store, "board_c", "https://acme.test/careers/london-1", location="London")
+    _sweep(store)
+
+    (members,) = _role_groups(store).values()
+    assert members == {
+        ("board_b", "https://acme.test/careers?gh_jid=400123"),  # elected canonical
+        ("board_c", "https://acme.test/careers/london-1"),
+    }
+
+    # One variant closing leaves a single open location: nothing left to pick.
+    store.mark_closed(
+        "board_c", "https://acme.test/careers/london-1", reason="missing"
+    )
+    _sweep(store)
+    assert _role_groups(store) == {}
+
+
+def test_role_groups_deterministic_and_disposable(store) -> None:
+    _role_pair(store)
+    _sweep(store)
+    first = _role_groups(store)
+    assert first  # sanity: the pair grouped
+    _sweep(store)
+    assert _role_groups(store) == first  # same group_id, same members
+    _sweep(store, role_groups=False)  # knob off ⇒ the next sweep clears the table
+    assert _role_groups(store) == {}
+
+
+def test_role_group_variants_and_members_read_open_membership(store) -> None:
+    _role_pair(store)
+    _put(store, "c", "https://c.test/3", company="Other Co", location="Berlin")
+    _sweep(store)
+
+    variants = store.role_group_variants(
+        [("a", "https://a.test/1"), ("c", "https://c.test/3")]
+    )
+    assert set(variants) == {("a", "https://a.test/1")}  # ungrouped row absent
+    got = variants[("a", "https://a.test/1")]
+    assert {v["location"] for v in got} == {"New York, NY", "London"}  # self included
+
+    members = store.role_group_members("b", "https://b.test/2")
+    assert {(m.site, m.url) for m in members} == {
+        ("a", "https://a.test/1"),
+        ("b", "https://b.test/2"),
+    }
+    assert store.role_group_members("c", "https://c.test/3") == []
+
+
+# --- role groups: query-time primary election ------------------------------------
+
+
+def test_role_collapse_surfaces_the_best_scored_variant(store) -> None:
+    _role_pair(store)
+    _sweep(store)
+    store.set_match("a", "https://a.test/1", score=60, verdict="good", reasons="[]")
+    store.set_match("b", "https://b.test/2", score=85, verdict="strong", reasons="[]")
+
+    assert _urls(store.search_positions(collapse_role_groups=True, limit=100)) == {
+        "https://b.test/2"
+    }
+    # Verdicts land between sweeps; election is query-time so the surfaced
+    # variant follows them immediately, no rebuild needed.
+    store.set_match("a", "https://a.test/1", score=95, verdict="strong", reasons="[]")
+    assert _urls(store.search_positions(collapse_role_groups=True, limit=100)) == {
+        "https://a.test/1"
+    }
+
+
+def test_role_collapse_prefers_any_score_over_none_then_ties_deterministically(
+    store,
+) -> None:
+    _role_pair(store)
+    _sweep(store)
+    # Unscored ties (NULL == NULL) break on first_seen then (site, url): "a" wins.
+    assert _urls(store.search_positions(collapse_role_groups=True, limit=100)) == {
+        "https://a.test/1"
+    }
+    # A score of 0 still outranks "never scored" — NULL sorts below everything.
+    store.set_match("b", "https://b.test/2", score=0, verdict="reject", reasons="[]")
+    assert _urls(store.search_positions(collapse_role_groups=True, limit=100)) == {
+        "https://b.test/2"
+    }
+
+
+def test_role_collapse_reacts_to_closure_without_a_resweep(store) -> None:
+    _role_pair(store)
+    _sweep(store)
+    store.set_match("b", "https://b.test/2", score=85, verdict="strong", reasons="[]")
+    assert _urls(store.search_positions(collapse_role_groups=True, limit=100)) == {
+        "https://b.test/2"
+    }
+
+    store.mark_closed("b", "https://b.test/2", reason="missing")
+    # No sweep ran: the stale overlay row must not keep hiding the survivor…
+    assert _urls(
+        store.search_positions(status="open", collapse_role_groups=True, limit=100)
+    ) == {"https://a.test/1"}
+    # …and a closed row itself never role-collapses (the both-states view keeps it).
+    assert "https://b.test/2" in _urls(
+        store.search_positions(collapse_role_groups=True, limit=100)
+    )
+
+
+def test_role_collapse_bypassed_on_user_data_queries(store) -> None:
+    _role_pair(store)
+    _sweep(store)
+    store.set_match("b", "https://b.test/2", score=85, verdict="strong", reasons="[]")
+    store.set_dismissed("a", "https://a.test/1", True)
+
+    # The dismissed view must keep the operator's own action reachable even
+    # though a better-scored sibling would normally shadow the row.
+    got = store.search_positions(dismissed=True, collapse_role_groups=True, limit=100)
+    assert _urls(got) == {"https://a.test/1"}
+
+
+def test_role_collapse_off_is_a_no_op(store) -> None:
+    _role_pair(store)
+    _sweep(store)
+    plain = _urls(store.search_positions(limit=100))
+    assert plain == {"https://a.test/1", "https://b.test/2"}  # flag unset: raw rows

@@ -262,8 +262,32 @@ function postForm(path, data) {
       openDetail(row);
       return;
     }
-    if (event.target.closest("a, button, select, input, form")) return;
+    // §17 role groups: when this row bundles several locations, the ↗ jump would
+    // silently pick one — first click opens the location picker instead; a second
+    // click (picker already open) proceeds to the shown variant. Modified clicks
+    // and no-JS keep the direct link.
+    const extLink = event.target.closest("a.row-ext");
+    if (extLink && !event.metaKey && !event.ctrlKey && event.button === 0) {
+      const menu = row.querySelector("details.locmenu");
+      if (menu && !menu.open) {
+        event.preventDefault();
+        menu.open = true;
+        return;
+      }
+    }
+    // `details` covers the location-variant picker (§17 role groups): toggling or
+    // choosing from the popup must not also change the focused row / open the panel.
+    if (event.target.closest("a, button, select, input, form, details")) return;
     focusRow(rows().indexOf(row));
+  });
+
+  // Only one location picker open at a time, and any outside click closes it —
+  // native <details> keeps the no-JS fallback (popups just stack open).
+  document.addEventListener("click", function (event) {
+    const inside = event.target.closest && event.target.closest("details.locmenu");
+    document.querySelectorAll("details.locmenu[open]").forEach(function (menu) {
+      if (menu !== inside) menu.removeAttribute("open");
+    });
   });
 })();
 

@@ -767,6 +767,16 @@ def dedup_ui_enabled() -> bool:
     return dedup_enabled() and _bool("JOBCRAWLER_DEDUP_UI", True)
 
 
+def dedup_role_groups_enabled() -> bool:
+    """Sweep switch: §17 role groups — bundling one role's location variants (same
+    company key + title key, ≥2 distinct locations) for the web layer's "N locations"
+    picker. Presentation-only by contract: members are real, separately-applied-to
+    postings, so matching/notify/lifecycle never read the table. Off (or master off)
+    ⇒ the next sweep clears the table and every variant lists on its own row.
+    Default on."""
+    return dedup_enabled() and _bool("JOBCRAWLER_DEDUP_ROLE_GROUPS", True)
+
+
 def dedup_apply_param_denylist() -> frozenset[str]:
     """Query params stripped when normalizing *apply targets* into §17 T2 identity
     keys — a separate, wider list than :func:`tracking_param_denylist`, which feeds

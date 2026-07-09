@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import re
 from types import SimpleNamespace
+from typing import cast
 
 import httpx
 import pytest
@@ -334,7 +335,10 @@ def test_format_salary_appends_usd_hint_for_non_usd() -> None:
         salary_usd_min=43200.0,
         salary_usd_max=54000.0,
     )
-    assert format_salary(brl) == "BRL 20,000–25,000/month (~$43k–$54k/yr)"  # type: ignore[arg-type]
+    assert (
+        format_salary(cast(PositionRecord, brl))
+        == "BRL 20,000–25,000/month (~$43k–$54k/yr)"
+    )
 
     # a USD posting needs no hint
     usd = SimpleNamespace(
@@ -345,7 +349,7 @@ def test_format_salary_appends_usd_hint_for_non_usd() -> None:
         salary_usd_min=120000.0,
         salary_usd_max=140000.0,
     )
-    assert format_salary(usd) == "USD 120,000–140,000/year"  # type: ignore[arg-type]
+    assert format_salary(cast(PositionRecord, usd)) == "USD 120,000–140,000/year"
 
 
 async def test_relocation_filter_and_badge() -> None:
@@ -915,6 +919,7 @@ async def test_crawl_now_button_queues_a_request_the_scheduler_drains() -> None:
     # due_sites() drains it and dispatches the site even when its cadence hasn't elapsed.
     from datetime import datetime, timezone
 
+    from jobcrawler.runtime.runner import CrawlSummary
     from jobcrawler.schedule import Scheduler, Site
 
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -924,7 +929,7 @@ async def test_crawl_now_button_queues_a_request_the_scheduler_drains() -> None:
     rid = store.start_run("acme")
     store.finish_run(rid, items_found=1, new_items=0, errors=0, pages_fetched=1)
 
-    async def _crawl(s: Site) -> object:  # never invoked by due_sites()
+    async def _crawl(s: Site) -> CrawlSummary:  # never invoked by due_sites()
         raise AssertionError("crawl must not run in this test")
 
     sched = Scheduler([site], store=store, crawl=_crawl, clock=lambda: now)
@@ -1033,5 +1038,95 @@ async def test_dedup_ui_env_kill_switch(monkeypatch: pytest.MonkeyPatch) -> None
             )
             assert "Also listed" not in (await c.get(f"/positions/{pid}")).text
             assert "Distinct open roles" not in (await c.get("/")).text
+    finally:
+        store.close()
+
+
+# -- §17 role groups: same role, several locations ------------------------------
+
+
+def _role_group_store() -> StateStore:
+    """One role open in two cities (a §17 role group) + an unrelated solo row."""
+    from jobcrawler.runtime.dedup import resweep
+
+    s = StateStore(":memory:")
+    s.upsert_position(
+        "board_a",
+        "https://acme.test/jobs/ny",
+        fields={**FIELDS, "location": "New York, NY"},
+        content_hash="r1",
+    )
+    s.upsert_position(
+        "board_b",
+        "https://acme.test/jobs/london",
+        fields={**FIELDS, "location": "London"},
+        content_hash="r2",
+    )
+    s.upsert_position(
+        "solo",
+        "https://solo.test/jobs/1",
+        fields={**FIELDS, "title": "Data Engineer", "location": "Berlin"},
+        content_hash="r3",
+    )
+    # Only the London variant carries a verdict → it is the group's primary.
+    s.set_match(
+        "board_b", "https://acme.test/jobs/london", score=85, verdict="strong",
+        reasons="[]",
+    )
+    resweep(s, direct_sites=(), tiers={0, 1, 2, 3, 6})
+    return s
+
+
+async def test_positions_role_group_collapses_to_one_row_with_picker() -> None:
+    store = _role_group_store()
+    try:
+        async with _client(create_app(store)) as c:
+            html = (await c.get("/positions")).text
+            # One row for the two-city role (the scored London variant)…
+            assert html.count("Staff Engineer") == 1
+            # …wearing the location picker, with the hidden variant a click away.
+            assert ">2 locations ▾<" in html
+            assert "New York, NY" in html
+            assert "· this row" in html  # the current variant is marked, not linked
+            # The raw escape shows both rows, each wearing its own picker chip.
+            raw = (await c.get("/positions?collapse=0")).text
+            assert raw.count("Staff Engineer") == 2
+            assert raw.count(">2 locations ▾<") == 2
+    finally:
+        store.close()
+
+
+async def test_detail_lists_role_location_variants() -> None:
+    store = _role_group_store()
+    try:
+        pid = encode_pid("board_b", "https://acme.test/jobs/london")
+        other = encode_pid("board_a", "https://acme.test/jobs/ny")
+        async with _client(create_app(store)) as c:
+            html = (await c.get(f"/positions/{pid}")).text
+            assert "Same role in 1 other location" in html
+            assert other in html  # linked to the variant's own detail page
+            assert "New York, NY" in html
+            # The ungrouped row renders no locations panel at all.
+            solo = encode_pid("solo", "https://solo.test/jobs/1")
+            assert "Same role in" not in (await c.get(f"/positions/{solo}")).text
+    finally:
+        store.close()
+
+
+async def test_dashboard_top_matches_collapse_role_variants() -> None:
+    # Both variants scored strong: without role collapse the one opening would
+    # occupy two of the dashboard's top slots.
+    store = _role_group_store()
+    store.set_match(
+        "board_a", "https://acme.test/jobs/ny", score=80, verdict="strong",
+        reasons="[]",
+    )
+    try:
+        pid_london = encode_pid("board_b", "https://acme.test/jobs/london")
+        pid_ny = encode_pid("board_a", "https://acme.test/jobs/ny")
+        async with _client(create_app(store)) as c:
+            html = (await c.get("/")).text
+            assert pid_london in html  # the better-scored variant's card
+            assert pid_ny not in html  # its sibling folded into it
     finally:
         store.close()

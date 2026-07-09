@@ -99,6 +99,21 @@
           {% if p.relocation == 'offered' %}<span class="scope scope-relo" title="Relocation or visa support mentioned in the posting">relocation</span>{% endif %}
           {% set csize = cluster_sizes.get(encode_pid(p.site, p.url)) if cluster_sizes is defined else none %}
           {% if csize and csize > 1 %}<span class="scope scope-cluster" title="The same job is listed on {{ csize }} boards — open the detail page to see all copies">on {{ csize }} boards</span>{% endif %}
+          {% set rvars = role_variants.get(encode_pid(p.site, p.url)) if role_variants is defined else none %}
+          {% if rvars %}
+          <details class="locmenu">
+            <summary class="scope scope-role" title="The same role is open in {{ rvars | length }} locations — pick the one that fits">{{ rvars | length }} locations ▾</summary>
+            <div class="locmenu-list">
+              {% for v in rvars %}
+              {% if v.site == p.site and v.url == p.url %}
+              <span class="locmenu-item is-current"><span class="locmenu-go"><span class="locmenu-loc">{{ v.location_normalized or v.location or 'Location unlisted' }}</span><span class="locmenu-board">{{ site_names.get(v.site, v.site) }} · this row</span></span></span>
+              {% else %}
+              <span class="locmenu-item"><a class="locmenu-go" href="/positions/{{ encode_pid(v.site, v.url) }}"><span class="locmenu-loc">{{ v.location_normalized or v.location or 'Location unlisted' }}</span><span class="locmenu-board">{{ site_names.get(v.site, v.site) }}</span></a><a class="ext" href="{{ v.ext }}" target="_blank" rel="noopener noreferrer" title="Open this variant's posting">↗</a></span>
+              {% endif %}
+              {% endfor %}
+            </div>
+          </details>
+          {% endif %}
         </span>
       </span>
     </div></td>

@@ -633,6 +633,7 @@ def _dedup_sweep_pass(store: StateStore, sites: Sequence[Site]) -> dict[str, obj
             tiers=config.dedup_tiers(),
             marketplace_hosts=config.marketplace_apply_host_denylist(),
             apply_drop_params=config.dedup_apply_param_denylist(),
+            role_groups=config.dedup_role_groups_enabled(),
         )
     except Exception:
         _log.exception("dedup sweep failed; keeping the previous overlay")
@@ -1538,7 +1539,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         # The scheduler owns the process's SIGINT/SIGTERM handlers (graceful drain); neutralize
         # uvicorn's own signal capture (a signal.signal() install that would otherwise clobber
         # the scheduler's asyncio handlers) so a Ctrl-C drains BOTH via _shutdown below.
-        server.capture_signals = contextlib.nullcontext  # type: ignore[method-assign]
+        server.capture_signals = contextlib.nullcontext  # ty: ignore[invalid-assignment]
         _log.info("position tracker UI on http://%s:%d", web_host, web_port)
 
     async def serve() -> None:

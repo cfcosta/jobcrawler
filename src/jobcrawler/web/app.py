@@ -379,6 +379,7 @@ def _read_filters(
         "exclude_company_applied": hide_applied_companies,
         "collapse_duplicates": collapse,
         "exclude_cluster_handled": collapse,
+        "collapse_role_groups": collapse,
         "sort": sort,
     }
     raw = {
@@ -751,12 +752,19 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
                 "dismissed": tcounts.get("dismissed", 0),
                 "lifecycle": lifecycle,
                 "distribution": distribution,
+                # §17: the top-8 collapses clusters AND role groups (gated on the UI
+                # consumer flag) — inherited verdicts give every sibling a score, so
+                # without this one strong job fills the list via its board copies and
+                # location variants.
                 "top_matches": store.matches(
                     0,
                     limit=8,
                     exclude_applied=True,
                     exclude_dismissed=True,
                     exclude_company_applied=True,
+                    collapse_duplicates=ui_on,
+                    exclude_cluster_handled=ui_on,
+                    collapse_role_groups=ui_on,
                 ),
                 "coverage": {
                     "total": len(visible) + len(idle),
@@ -828,6 +836,29 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
             else {}
         )
         cluster_sizes = {encode_pid(s, u): n for (s, u), n in sizes.items()}
+        # "N locations" pickers (§17 role groups): the same role open in several
+        # locations, listed behind one row. Computed on the same terms as the cluster
+        # chips — in the raw view every variant row carries the picker, which reads as
+        # "this role is also open elsewhere" rather than pretending the list is flat.
+        variants = (
+            store.role_group_variants([(p.site, p.url) for p in rows])
+            if config.dedup_ui_enabled() and rows
+            else {}
+        )
+        role_variants = {
+            encode_pid(s, u): [
+                {
+                    **v,
+                    # same rule as _ext_url: the real posting page, not the
+                    # aggregator front (mailto is a channel, not a page)
+                    "ext": v["apply_url"]
+                    if v["apply_url"] and not str(v["apply_url"]).startswith("mailto:")
+                    else v["url"],
+                }
+                for v in vs
+            ]
+            for (s, u), vs in variants.items()
+        }
         # "New since last visit": count first_seen after the cookie's timestamp, then
         # stamp now — so the badge reflects arrivals between visits (0 on a refresh).
         # Cluster-aware when collapsing: a job arriving on 4 boards overnight is one
@@ -852,6 +883,7 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
                 "active_view": _active_view(request.query_params),
                 "new_since": new_since,
                 "cluster_sizes": cluster_sizes,
+                "role_variants": role_variants,
                 "prev_url": str(url.include_query_params(page=page - 1))
                 if page > 1
                 else None,
@@ -930,6 +962,15 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
             )
             if not (member.site == site and member.url == url)
         ]
+        # §17 role groups — the same role open in OTHER locations. Distinct from the
+        # cluster siblings above: each variant is a real, separately-applied-to posting.
+        role_variants = [
+            member
+            for member in (
+                store.role_group_members(site, url) if config.dedup_ui_enabled() else []
+            )
+            if not (member.site == site and member.url == url)
+        ]
         return templates.TemplateResponse(
             request=request,
             name="_detail_body.html" if partial else "detail.html",
@@ -943,6 +984,7 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
                 "concerns": reasons_list(rec.match_concerns),
                 "crawlable": rec.site in known_slugs,
                 "siblings": siblings,
+                "role_variants": role_variants,
             },
         )
 

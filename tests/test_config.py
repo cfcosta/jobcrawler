@@ -816,3 +816,14 @@ def test_serve_port_invalid_raises(monkeypatch) -> None:
     monkeypatch.setenv("JOBCRAWLER_SERVE_PORT", "notaport")
     with pytest.raises(ValueError):
         config.serve_port()
+
+
+def test_dedup_role_groups_knob_anded_with_master(monkeypatch) -> None:
+    monkeypatch.delenv("JOBCRAWLER_DEDUP", raising=False)
+    monkeypatch.delenv("JOBCRAWLER_DEDUP_ROLE_GROUPS", raising=False)
+    assert config.dedup_role_groups_enabled()  # default on
+    monkeypatch.setenv("JOBCRAWLER_DEDUP_ROLE_GROUPS", "0")
+    assert not config.dedup_role_groups_enabled()
+    monkeypatch.delenv("JOBCRAWLER_DEDUP_ROLE_GROUPS")
+    monkeypatch.setenv("JOBCRAWLER_DEDUP", "0")  # the §17 master brakes it too
+    assert not config.dedup_role_groups_enabled()

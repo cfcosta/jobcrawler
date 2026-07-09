@@ -1597,7 +1597,8 @@ copies (§14 Q1; measured at ~29% of open rows on the live corpus). **Rows are o
 is derived.** `positions` keeps one row per `(site, url)` with its §4.7 lifecycle untouched; job
 identity lives in two overlay tables (`position_identity_keys`, `position_clusters`) that a
 deterministic host-side sweep (`runtime/dedup.py`, cadence `JOBCRAWLER_DEDUP_REFRESH_INTERVAL`,
-default 15m, first pass on boot) recomputes from the rows alone. **The overlay is disposable:**
+default 15m, first pass on boot) recomputes from the rows alone (a third, `position_role_groups`,
+rides the same sweep — presentation only, see *Role groups* below). **The overlay is disposable:**
 dropping it and resweeping is lossless, every consumer is flag-gated (§11), identity state never
 enters `content_hash`, and `cluster_id` is never persisted outside the overlay — so a bug in
 identity rules can be reverted with an env var and can never corrupt crawl, closure, or tracking
@@ -1666,6 +1667,25 @@ never fail the crawl). Between sweeps, live sibling gates trust only edge-safe k
   operator's own data (applied, dismissed, an operator-set `track_status` — the default `'new'`
   stage is exempt) always bypass collapse; `?collapse=0` (the "Everything" pill) is the per-request
   raw escape; every `pid` keeps resolving regardless.
+
+**Role groups (presentation-only, `JOBCRAWLER_DEDUP_ROLE_GROUPS`).** One company opening one role
+in several locations is the inverse hazard: real distinct postings (separate reqs, separate apply
+forms) that must never cluster — exactly T5's measured false merges — yet read as duplicates in the
+list. The sweep bundles them in a third disposable table (`position_role_groups`, swapped in the
+same transaction; stays empty while the knob is off) keyed on `(company key, normalized title key)`
+over exactly what the collapsed list shows (open cluster-canonicals + open standalone rows — never
+a shadowed duplicate, which would double-count the role), requiring ≥2 members over ≥2 distinct
+case-folded locations (same-city multiples — robinhood's nine identical reqs — and all-blank
+locations never group) and skipping keys spanning >64 rows (`role_group_cap_skips` guard:
+mass-poster boilerplate titling, not one role in 64 cities). The browse list shows one row per
+group behind the same `?collapse=0` escape; the primary is elected at **query** time — highest
+rounded effective score, then earliest `first_seen`, then `(site, url)`; closed rows never role-
+collapse — so a verdict landing between sweeps resurfaces the better variant immediately. The
+surviving row wears an "N locations ▾" picker (also opened by the row's apply/visit click, so the
+operator chooses a location before leaving) linking every open variant; the detail page lists the
+other locations with their own scores. Because members are real separate postings, the overlay is
+read by the UI **only**: matching, notify, lifecycle, and tracking never touch it, and
+operator-data queries bypass it exactly like cluster collapse.
 
 **Boundaries (what it must not do).** Never delete, merge, or rewrite a `positions` row. Never touch
 `status`/`missing_streak`/`closed_at` — closure stays per-board per §4.7, and one board closing

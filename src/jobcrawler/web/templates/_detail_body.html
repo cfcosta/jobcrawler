@@ -101,6 +101,26 @@
   </section>
   {% endif %}
 
+  {# ---- Role group (§17): the same role open in other locations -------- #}
+  {% if role_variants is defined and role_variants %}
+  <section class="panel">
+    <h2>Same role in {{ role_variants | length }} other location{{ 's' if role_variants | length != 1 else '' }}</h2>
+    <ul class="siblings">
+      {% for v in role_variants %}
+      <li>
+        <a href="/positions/{{ encode_pid(v.site, v.url) }}">{{ v.location_normalized or v.location or 'Location unlisted' }}</a>
+        <span class="tag">{{ site_names.get(v.site, v.site) }}</span>
+        {% if v.match_score is not none %}<span class="score-chip band-{{ score_band(v) }}" title="this variant's score">{{ score_of(v) }}</span>{% endif %}
+        {% if v.applied_at %}<span class="tag">applied</span>{% endif %}
+        {% if v.dismissed %}<span class="tag">dismissed</span>{% endif %}
+        <a class="ext" href="{{ v.url }}" target="_blank" rel="noopener noreferrer" title="Open this variant's posting">↗</a>
+      </li>
+      {% endfor %}
+    </ul>
+    <p class="empty">Same title at this company, different locations — each is a separate posting; apply to the one that fits.</p>
+  </section>
+  {% endif %}
+
   {# ---- Classification + Compensation --------------------------------- #}
   <div class="cols">
     <section class="panel">

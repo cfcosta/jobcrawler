@@ -152,6 +152,11 @@ COMPANY_UNRELIABLE_SITES: frozenset[str] = frozenset({"hn_whos_hiring", "hnhirin
 # identity) — it forms no edges and is surfaced in the report instead.
 _DEGENERATE_KEY_ROWS = 100
 
+# §17 role groups: a (company, title) key spanning more rows than this is a
+# mass-poster's boilerplate title, not one role in many locations — grouping it
+# would hide a page of inventory behind one list entry.
+_ROLE_GROUP_CAP = 64
+
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
 )
@@ -500,6 +505,21 @@ def _cluster_id(root_site: str, root_url: str) -> str:
     return "c" + digest[:16]
 
 
+def _role_group_id(company_key_: str, title_key: str) -> str:
+    digest = hashlib.sha256(f"{company_key_}\n{title_key}".encode()).hexdigest()
+    return "rg" + digest[:16]
+
+
+def _role_location(row: sqlite3.Row | Mapping[str, Any]) -> str:
+    """Location bucket for §17 role grouping: normalized, else raw, else ``''``.
+
+    Two empty-location rows share the ``''`` bucket — indistinguishable variants
+    stay ungrouped (a picker of identical entries helps nobody), which also keeps
+    same-city multiples (N identical openings at one office) as separate rows.
+    """
+    return (row["location_normalized"] or row["location"] or "").strip().lower()
+
+
 def _election_key(row: Mapping[str, Any], direct_sites: Collection[str]) -> tuple:
     """Canonical (display representative) priority — min() wins.
 
@@ -534,13 +554,19 @@ def resweep(
     marketplace_hosts: Collection[str] = (),
     apply_drop_params: Collection[str] = IDENTITY_APPLY_TRACKING_PARAMS,
     families: Mapping[str, Collection[str]] | None = None,
+    role_groups: bool = True,
 ) -> dict[str, Any]:
     """Rebuild the whole identity overlay from ``positions`` alone; return the report.
 
     Loads open AND closed rows (dismissed/applied suppression must survive board
     closure), derives every row's keys, forms guarded edges for the enabled
-    ``tiers``, elects canonicals, and swaps both overlay tables in one transaction
+    ``tiers``, elects canonicals, and swaps the overlay tables in one transaction
     (readers see old-or-new, never empty). Idempotent; rerunnable forever.
+
+    ``role_groups`` additionally bundles same-company/same-title OPEN postings that
+    differ only by location into ``position_role_groups`` — a presentation-only
+    projection (each member is a real, separately-applied-to posting; identity,
+    verdicts, notify, and lifecycle never read it). ``False`` clears the table.
     """
     enabled = set(tiers)
     rows = store.dedup_sweep_rows()
@@ -607,6 +633,7 @@ def resweep(
             "separator_splits": 0,
             "blocklist_splits": 0,
             "degenerate_keys": 0,
+            "role_group_cap_skips": 0,
         }
     )
 
@@ -704,11 +731,13 @@ def resweep(
     leak_rows = 0
     open_in_clusters = 0
     clusters_with_open = 0
+    shadowed: set[int] = set()  # non-canonical members: hidden in the collapsed list
     top: list[dict[str, Any]] = []
     for members in clusters:
         root = min(members, key=lambda i: (rows[i]["first_seen"], rows[i]["site"], rows[i]["url"]))
         cid = _cluster_id(rows[root]["site"], rows[root]["url"])
         canonical = min(members, key=lambda i: _election_key(rows[i], direct_sites))
+        shadowed.update(i for i in members if i != canonical)
         for i in members:
             rank = edge_tier_of[i]
             cluster_rows.append(
@@ -750,7 +779,39 @@ def resweep(
         )
     top.sort(key=lambda c: (-c["size"], c["cluster_id"]))
 
-    computed_at = store.rebuild_dedup_overlay(key_rows, cluster_rows)
+    # §17 role groups: bundle the same role opened in several locations. Groups are
+    # keyed on (company key, title key) over what the collapsed list actually shows —
+    # open cluster-canonicals and open standalone rows (a shadowed duplicate is
+    # already hidden; grouping it too would double-count the role). Members are real
+    # distinct postings, so this projection is presentation-only by contract.
+    role_rows: list[tuple[str, str, str]] = []
+    role_group_count = 0
+    role_grouped_rows = 0
+    if role_groups:
+        by_role: dict[tuple[str, str], list[int]] = {}
+        for i in range(n):
+            if i in shadowed or rows[i]["status"] != "open":
+                continue
+            ck, tk = ck_of[i], tk_of[i]
+            if ck and tk:
+                by_role.setdefault((ck, tk), []).append(i)
+        for (ck, tk), members in sorted(by_role.items()):
+            if len(members) < 2:
+                continue
+            if len(members) > _ROLE_GROUP_CAP:
+                guards["role_group_cap_skips"] += 1
+                log.warning(
+                    "dedup: role key (%r, %r) spans %d rows; skipped", ck, tk, len(members)
+                )
+                continue
+            if len({_role_location(rows[i]) for i in members}) < 2:
+                continue  # same-location multiples are separate openings, not variants
+            gid = _role_group_id(ck, tk)
+            role_group_count += 1
+            role_grouped_rows += len(members)
+            role_rows.extend((rows[i]["site"], rows[i]["url"], gid) for i in members)
+
+    computed_at = store.rebuild_dedup_overlay(key_rows, cluster_rows, role_rows)
 
     report: dict[str, Any] = {
         "swept_at": computed_at,
@@ -760,6 +821,9 @@ def resweep(
         "clusters": len(clusters),
         "clustered_rows": sum(len(m) for m in clusters),
         "collapse_saving_open": open_in_clusters - clusters_with_open,
+        "role_groups": role_group_count,
+        "role_grouped_rows": role_grouped_rows,
+        "role_collapse_saving": role_grouped_rows - role_group_count,
         "keys_by_tier": {str(t): keys_by_tier[t] for t in sorted(keys_by_tier)},
         "edges_by_tier": {str(t): edges_by_tier[t] for t in sorted(edges_by_tier)},
         "guards": dict(guards),
