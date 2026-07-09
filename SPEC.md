@@ -415,7 +415,7 @@ crawl; (2) **fix once, fixed fleet-wide** — a mis-bucketed title or a new pt-B
 is fixed in *this* file and every board benefits immediately, no regeneration, no §4.11 run;
 (3) **determinism = testability** — pure in→out pins the whole taxonomy under EN+pt-BR unit
 tests. The enrichment (`enrich(job) -> EnrichedJob`, a frozen dataclass of `job` + `discipline`
-+ `level` + `workplace` + `salary: SalaryRange|None`):
++ `level` + `workplace` + `remote_scope` + `relocation` + `salary: SalaryRange|None`):
 
 - **Two-axis taxonomy.** *Discipline* (what kind of engineering) and *level* (how senior /
   role-shape) are orthogonal, so the profile can say "senior-or-above backend/frontend" without
@@ -438,6 +438,21 @@ tests. The enrichment (`enrich(job) -> EnrichedJob`, a frozen dataclass of `job`
   unspecified`. The **structured field wins outright**; only when it is empty/unrecognized do we
   read markers (remote/remoto, hybrid/híbrido, on-site/onsite/presencial) from
   location+description, hybrid tested before remote before onsite.
+- `classify_remote_scope(workplace, location)` → `anywhere | restricted | unspecified` — the
+  geographic scope of a **remote** row (non-remote rows read `unspecified`). Scope-filler tokens
+  are stripped from the folded location; ANY residual place token means `restricted`, an explicit
+  global signal (worldwide/anywhere) means `anywhere`, else `unspecified`. Deliberately never
+  reads the description (it names cities constantly and would manufacture false scopes). The
+  richer per-place reading of the same string lives in §4.12.
+- `classify_relocation(title, description)` → `offered | none | unspecified` — negation-aware
+  phrase scan for relocation/visa support. With `remote_scope` these are the §16 "attainable"
+  enums; both persist on the row and NULL-backfill at store open.
+- `normalize_location(raw)` → the **surface-form** display/grouping string (`location_normalized`):
+  synonyms folded ("EUA"→"United States"), separators flattened to commas, casing normalized —
+  never inferring a place the text didn't name. It is the §17 role-group bucket key and a search
+  LIKE target, so its output contract is frozen (tests pin it); the *structural* parse that
+  preserves multi-location boundaries is §4.12's `parse_location`, a different function on the
+  RAW string.
 - `parse_salary(raw, description='')` → `SalaryRange(min, max, currency, period) | None`.
   Handles `$152,800 — $259,200 USD`, `$189K – $330K`, `R$ 8.000 - R$ 12.000`, `€60k–80k`. A
   **currency anchor is mandatory** and numbers come **only from `raw`** (never mined from the
@@ -458,6 +473,8 @@ tests. The enrichment (`enrich(job) -> EnrichedJob`, a frozen dataclass of `job`
   feed) overlaid with the live `fx_rates` table, which a daily out-of-band job refreshes (§4.9) and
   which broadens coverage to the feed's ~160 currencies. With no argument the function falls back to
   the static floor, keeping it a pure in→out unit under test.
+- **Structured locations** — the per-place parse of the same location strings (multi-office
+  lists, remote fences, worldwide claims) is its own subsystem: §4.12.
 
 ### 4.7 Dedup, position lifecycle & the matching pipeline
 This section **replaces the old news-ingest at-most-once story and the `POST /news` sink
@@ -534,26 +551,38 @@ dropping a job**:
    `pending` and logs — it **never raises into the crawl loop**. A matching outage degrades to
    "not scored yet". Each fresh verdict is cached (`store.cache_match`) and persisted
    (`store.set_match`, clearing the pending flag).
-6. **Match-time extraction (salary + employer, best-effort).** After scoring, when an extract
-   model is configured (`JOBCRAWLER_EXTRACT_MODEL`, else the cheap `JOBCRAWLER_SUB_MODEL` —
-   **never** the root planner), jobs that matched at/above `extract_min_score` (default 60) but
-   carry **no structured salary** have their description mined on the cheap tier via a separate
-   `dspy.Predict(ExtractFromDescription)` for a salary and, when the board's `company` was blank
-   or a placeholder, the real **hiring company**. It is separately cached on `(content_hash,
-   model, EXTRACT_VERSION)` — **no `profile_hash`**, because salary and employer are properties
-   of the posting, not the profile, so one extraction serves every profile — and a cache hit
-   re-applies for free on every run (which also re-heals the §16 dedup key a crawl upsert
-   reverted). Fresh (cache-miss) extractions are bounded to `extract_cap` (default 50) per run so
-   a first pass over a big salary-less backlog can't spike spend; the overflow simply waits for
+6. **Match-time extraction (salary + employer + geography, best-effort).** After scoring, when
+   an extract model is configured (`JOBCRAWLER_EXTRACT_MODEL`, else the cheap
+   `JOBCRAWLER_SUB_MODEL` — **never** the root planner), a separate
+   `dspy.Predict(ExtractFromDescription)` mines postings on the cheap tier. **Three arms select
+   a row** (the gate is the pass's entire cost model): (a) *salary* — matched at/above
+   `extract_min_score` (default 60) with **no structured salary**; (b) *ledger tail* — its
+   location string rules-parsed `partial`/`fail` (§4.12): **score-independent** (the parse is a
+   property of the string, reused by every row ever carrying it) and deduped to one slot per
+   distinct string per run; (c) *marker* — matched at/above `extract_min_score`, its string a
+   bare workplace marker (`Remote`), and `loc_llm_at` unset. Arms (b)/(c) sit behind
+   `JOBCRAWLER_EXTRACT_LOCATIONS` (default on; off reverts the gate to salary-only). The pass
+   returns salary, the real **hiring company** when the board's `company` was blank or a
+   placeholder, and `location_geo` — the geography the posting *states* (ISO2-coded places,
+   remote `none|fenced|worldwide`, the fence), vocabulary-validated against the §4.12 gazetteer
+   (junk dropped, never coerced; never inferred from HQ, currency, or language). It is
+   separately cached on `(content_hash, model, EXTRACT_VERSION)` — **no `profile_hash`**,
+   because salary, employer, and geography are properties of the posting, not the profile — and
+   a cache hit re-applies for free on every run (which also re-heals the §16 dedup key a crawl
+   upsert reverted). Fresh (cache-miss) extractions are bounded to `extract_cap` (default 50)
+   per run so a first pass over a big backlog can't spike spend; the overflow simply waits for
    the next run (nothing is parked). It is strictly additive and conservative: `set_salary` only
    fills a row that has **none** (a source salary always wins and is never clobbered — this is
    why `_position_fields` **omits** the salary columns on a salary-less crawl rather than sending
    NULLs), the extractor returns `null` unless the description *literally* states pay **with a
-   currency** (never inferring from seniority/market/location), and `set_hiring_company` records
-   the cleaner name and repoints the §16 `company_canonical` dedup key at the real employer.
-   Neither salary nor employer is in `content_hash`, so backfilling them never re-dedups a
-   posting or invalidates its verdict. Like scoring, it is **fail-open** — a bad extract batch is
-   skipped, never raised into the crawl loop, and never affects the verdict the runner notifies on.
+   currency** (never inferring from seniority/market/location), `set_hiring_company` records
+   the cleaner name and repoints the §16 `company_canonical` dedup key at the real employer,
+   and the geo answer routes by string class — tail strings fill the §4.12 value ledger,
+   marker rows get posting-local fence rows, both first-writer-wins, and `loc_llm_at` stamps
+   even an empty answer so the marker arm never re-selects the same content. Nothing here is in
+   `content_hash`, so backfilling never re-dedups a posting or invalidates its verdict. Like
+   scoring, it is **fail-open** — a bad extract batch is skipped, never raised into the crawl
+   loop, and never affects the verdict the runner notifies on.
 
 **First-crawl cap.** On a board's first-ever position-yielding crawl only the newest
 `first_crawl_cap` (by `posted_at`, discovery order as fallback) go to the matcher now; the tail is
@@ -935,6 +964,66 @@ can pass it yet regress on the live fleet.
 list. It optimizes for (a) **regeneration quality under drift** (§4.8) and (b) **cold-start on
 newly-added/unseen boards**, validated on the held-out split.
 
+### 4.12 Structured locations (deterministic-first)
+
+Location strings arrive in ~3k surface forms per 15k rows — `USA` / `United States` /
+`Remote - US` / `US - San Francisco`, semicolon/pipe/bullet multi-office lists, macro-regions
+(`Home based - EMEA`), worldwide claims — and §4.6's `location_normalized` deliberately only
+cleans the *surface* (it folds every list separator into commas, destroying the boundaries).
+This subsystem gives every position **structured places and remote-eligibility**, rules-first,
+with the §4.7 LLM pass reserved for the residue the rules cannot read.
+
+**The parser (`runtime/geo.py`).** `parse_location(raw) -> LocationParse` — pure, no I/O, no
+LLM, gazetteer-in-code (countries+aliases, US states / CA provinces, macro-regions, a famous-city
+table that is empirically decisive: without it clean coverage drops 97%→81% of rows). Output:
+ordered `places` (city / subdivision / ISO2 country / macro), a remote `fence` (city-less
+geography attached to a remote marker: `Remote - US` fences to `US`, never becomes an office),
+`remote_marker` / `worldwide` flags, and a `quality` in `full | macro | marker | noise | partial
+| fail`. Input is the RAW `positions.location` (or one `locations_json` element) — never
+`location_normalized`. The tokenizer guards are load-bearing (ALL-CAPS-only short aliases so
+prose "at"/"per" never anchor; place-shaped absorption checks; `Remote-first` never splits) and
+the corpus is pinned by tests. Any behavior change **must bump `GEO_PARSER_VERSION`**.
+
+**Storage — three additive tables + three columns.** `location_values` is the parse **ledger**,
+keyed `(site, value)`: `parse_source='rules'` rows are disposable (reparsed whenever
+`GEO_PARSER_VERSION` moves); `'llm'` rows are durable facts paid once via §4.7 and reused by
+every posting ever carrying that string — retired only when an upgraded rules parse comes back
+clean (deterministic-first). `position_locations` is the per-position overlay in the §17
+disposable-projection style: ordered rows `(kind ∈ place | remote_fence | remote_anywhere,
+city, subdivision, country, macro_region, display, source, confidence)`; `source ∈ rules |
+llm_value` rows re-derive from positions × ledger at any time, `llm_posting` rows are
+posting-local facts (description-mined fences) that survive resweeps and purge when the
+posting's content changes. `geo_region_members` materializes `GEO_REGION_MEMBERS` for SQL
+(macro-expanded filters; reseeded whole under `GEO_REGION_SEED_VERSION`). On `positions`:
+`locations_json` (crawler-owned raw array — Greenhouse `offices[]`, Lever `allLocations`,
+Ashby `secondaryLocations` — refreshed every crawl), `location_display` (the store-owned
+canonical human line, full English country names; NULL falls back to
+`location_normalized`/`location` everywhere), and `loc_llm_at` (the §4.7 answer stamp).
+
+**Write path.** The runner calls `refresh_position_locations` right after every upsert with
+`force = (outcome != 'unchanged')` and `purge_llm = (outcome == 'changed')`; the unchanged path
+costs one ledger SELECT. A country-only string on a `workplace='remote'` row projects as a
+`remote_fence` (the same reading `classify_remote_scope` gives the flat string, so the
+structured rows never contradict the §4.6 enums); `worldwide` projects `remote_anywhere`; bare
+markers project nothing (display NULL → raw fallback). A store-open sweep (meta-guarded by
+`geo_parser_version`) reparses every stored string and rebuilds every row — closed included —
+once per parser version.
+
+**Read path.** Display surfaces render `location_display`-first (list rows, role-group picker
+labels, detail header + Locations panel, API `location_display`/`locations` keys). Search gains
+one LIKE over `location_display` (the synonym bridge: `q=brazil` finds a raw `Brasil` row) and
+two structured filters: `country=` (any resolved office or fence in that ISO2) and `remote_in=`
+(remotely workable from there: fence match, macro fences expanded through `geo_region_members`,
+`remote_anywhere` matches everything; office places never do).
+
+**Boundaries (what it must not do).** Never write `location`, `location_normalized`,
+`workplace`, `remote_scope`, or `relocation` (their writers are §4.6's, frozen). Never enter
+`content_hash` (§4.7) — parses re-derive freely without re-hashing, re-deduping, or re-billing.
+Never feed the MatchJobs digest (its `location` input stays the RAW string; `PROMPT_VERSION`
+untouched). §17 stays frozen: role-group buckets and the T5 gate keep reading
+`location_normalized`-else-raw — `location_display` is a label there, never a key (re-keying is
+§14 Q10, an explicit sign-off). The §16 attainable gate keeps reading the §4.6 enums only.
+
 ## 5. Data & interface contracts (summary)
 
 - **Site entry** — §4.1 (adds `company`, `enumerates_all`).
@@ -942,20 +1031,26 @@ newly-added/unseen boards**, validated on the held-out split.
 - **`ctx`** — `fetch`, `render`, `get`, `log`; enforces robots/rate-limit/timeouts/allowed-hosts.
 - **`Job`** — §4.6; required `url/title/company/location/description/source`, optional
   salary/workplace/employment/timestamp/id fields; **no `Item` alias** (clean break).
-- **`EnrichedJob`** — `Job` + `discipline` + `level` + `workplace` + `salary: SalaryRange|None`
-  (host-side, §4.6).
-- **`PositionRecord`** — the `positions` row (§4.7): identity + the crawler fields + lifecycle
+- **`EnrichedJob`** — `Job` + `discipline` + `level` + `workplace` + `remote_scope` +
+  `relocation` + `salary: SalaryRange|None` (host-side, §4.6).
+- **`PositionRecord`** — the `positions` row (§4.7): identity + the crawler fields + the §4.6
+  derived taxonomy (`discipline`/`level`/`workplace`/`remote_scope`/`relocation`,
+  `location_normalized`, `salary_usd_min/max`) + lifecycle
   (`first_seen`/`last_seen`/`missing_streak`/`status`/`closed_at`) + match (`match_score`/
   `match_verdict`/`match_reasons`/`matched_at`/`match_pending`) + the §4.7-mined
   `hiring_company` and the §16 `company_canonical` dedup key (both **out** of `content_hash`)
   + the §17 verdict-provenance `match_origin` (`'llm'` \| `'cache'` \| `'cluster:<site>\n<url>'`;
-  NULL on legacy rows). Cluster membership itself is **not** on the row — it lives only in the
-  disposable §17 overlay tables (`position_identity_keys`, `position_clusters`).
+  NULL on legacy rows) + the §4.12 trio (`locations_json` crawler-owned, `location_display` and
+  `loc_llm_at` store-owned; all out of `content_hash`). Cluster membership itself is **not** on
+  the row — it lives only in the disposable §17 overlay tables (`position_identity_keys`,
+  `position_clusters`; §4.12 adds `location_values`, `position_locations`,
+  `geo_region_members` on the same disposable/durable terms).
 - **`Profile` / `ProfilePrefs`** — §5 profile (below); `profile_hash` keys the match cache.
 - **`MatchVerdict`** — `score: int` (0–100 clamped), `verdict: strong|good|weak|reject`, `reasons`,
-  `concerns` (§4.7). `PROMPT_VERSION = 'match-v1'`. The match-time extractor (§4.7) is a separate
-  signature cached under `EXTRACT_VERSION = 'extract-v1'` — keyed on `(content_hash, model)` with
-  **no** `profile_hash`, since salary/employer are properties of the posting, not the profile.
+  `concerns` (§4.7). `PROMPT_VERSION = 'match-v2'`. The match-time extractor (§4.7) is a separate
+  signature cached under `EXTRACT_VERSION = 'extract-v2'` (v2 added §4.12's `location_geo`) —
+  keyed on `(content_hash, model)` with **no** `profile_hash`, since salary/employer/geography
+  are properties of the posting, not the profile.
 - **Run record** (canonical) — `{site, started, finished, positions_found, new_positions, errors,
   pages_fetched, signals}` (the `runs` table's `items_found`/`new_items` columns carry
   positions/new-positions; the richer per-crawl deltas — changed/closed/matched/pending — plus
@@ -1306,6 +1401,7 @@ an `openrouter/…` slug billed per token. Selected knobs:
 | `JOBCRAWLER_EXTRACT_MODEL` | `sub_model()` fallback | the §4.7 match-time salary/employer extract LM; `require_extract_model` falls back to the cheap `sub_lm`, **never** the root planner; unset with no `sub_lm` ⇒ extraction is simply **off** |
 | `JOBCRAWLER_EXTRACT_MIN_SCORE` | `60` | 0–100 match score at/above which a salary-less posting is mined (below the notify threshold, above the noise floor) |
 | `JOBCRAWLER_EXTRACT_CAP` | `50` | hard per-run ceiling on *fresh* (cache-miss) description extractions; cache hits free; overflow retried next run |
+| `JOBCRAWLER_EXTRACT_LOCATIONS` | `true` | the §4.12 location arms of the §4.7 extract gate (ledger tail + marker); off ⇒ salary-only gate, no location writes/stamps; the deterministic parser is unaffected |
 | `JOBCRAWLER_PROFILE` | `PROFILE.md` | path to the operator's match profile (§5a) |
 | `JOBCRAWLER_FIRST_CRAWL_CAP` | `30` | newest-K new positions matched on a board's *first* crawl (§4.7) |
 | `JOBCRAWLER_CLOSE_AFTER_MISSES` | `2` | consecutive absences from an enumerating board before a position closes (§4.7) |
@@ -1364,6 +1460,12 @@ an `openrouter/…` slug billed per token. Selected knobs:
   pt-BR**: role-shape-outranks-IC precedence, `eng_other`/`non_eng` recall-safety, structured-workplace
   precedence, and conservative salary (`$189K–$330K`, `R$ 8.000 - R$ 12.000`, `€60k–80k`, ambiguous →
   `None`, BRL-defaults-monthly).
+- **Geo parser (§4.12)** — the adversarial corpus pinned as unit tests: fence vs place derivation
+  (`Remote - US` fences, `Cardiff, London or Remote (UK)` mixes), comma-list absorption, prefix-code
+  disambiguation (`IN - Bangalore`→India, `Toronto, CA`→Canada), the documented `Georgia`/`Washington`
+  acceptances, garbage-never-raises, purity/frozen invariants, and the region-members vocabulary;
+  plus store-side ledger precedence (rules-clean-beats-llm), projection refresh/purge semantics, the
+  open-time sweep, and the §17 pin that role-group buckets ignore `location_display`.
 - **Profile (§5a)** — frontmatter split, enum validation (an unknown discipline fails loud naming it),
   `profile_hash` stability across cosmetic churn and its change on a body-only edit, `ProfileNotFound`.
 - **Matcher (§4.7)** — with a fake `dspy.Predict` and a fake governor/clock: cache hit is free and
@@ -1467,6 +1569,17 @@ an `openrouter/…` slug billed per token. Selected knobs:
 9. **Typed-predictor round-trip** — *de-risked*: the optimized artifact is declarative **text** (§4.11); the
    pre-build toy milestone settles whether a *typed* `ChainOfThought` predictor round-trips end-to-end, else
    the instruction-string/CodeAct path is the default.
+10. **Re-keying location consumers onto §4.12.** v1 deliberately leaves three readers on the flat
+    surfaces: §17 role-group buckets and the T5 gate read `location_normalized`-else-raw (so a picker
+    can show two buckets that RENDER identically — the display/grouping split-brain is accepted and
+    pinned by test); the §4.7 prefilter's `exclude_locations` markers substring-match
+    `normalize_location` output (PROFILE.md vocabulary would have to migrate with any change); and
+    the §16 attainable gate reads only the §4.6 enums (a ledger-`worldwide` row whose `remote_scope`
+    stayed `unspecified` doesn't qualify). Each re-key is mechanically easy — the atomic resweep makes
+    the §17 cutover self-consistent, an ISO-fence arm would sharpen the prefilter, and an `OR
+    worldwide-fence` arm would widen the shortlist — but each shifts operator-visible semantics
+    (group membership, token spend, shortlist membership), so each is its own explicit sign-off,
+    never a side effect of §4.12 landing.
 
 ## 15. Evidence base
 
@@ -1578,7 +1691,8 @@ it, exactly like the match `reasons`; only the offline `jobcrawl match-trainset`
   tallies, the match-score distribution, per-site open counts, recent run health, and the **top-matches
   shortlist**: best effective fit first, at most one card per company (the §4.6 hiring-company key), and
   only rows attainable from anywhere — `remote_scope = 'anywhere'` or `relocation = 'offered'` (`matches
-  (attainable_only=…)`); a fenced or unclassified posting never takes a slot however well it scores.
+  (attainable_only=…)`); a fenced or unclassified posting never takes a slot however well it scores. The
+  gate reads the §4.6 enums only; widening it with §4.12 fence data is §14 Q10.
 - **Manual triggers** — "crawl now" calls `store.request_crawl(slug)` to flag a board for the daemon's
   `due_sites` to pick up (§4.9 single-owner: the UI must **not** run the crawl itself and overlap the board's
   own schedule); "rescore" parks open rows via `requeue_open_matches` for the §4.7 match-drain to flush (no
@@ -1683,7 +1797,9 @@ over exactly what the collapsed list shows (open cluster-canonicals + open stand
 a shadowed duplicate, which would double-count the role), requiring ≥2 members over ≥2 distinct
 case-folded locations (same-city multiples — robinhood's nine identical reqs — and all-blank
 locations never group) and skipping keys spanning >64 rows (`role_group_cap_skips` guard:
-mass-poster boilerplate titling, not one role in 64 cities). The browse list shows one row per
+mass-poster boilerplate titling, not one role in 64 cities). The location bucket reads
+`location_normalized`-else-raw, lower-cased — NEVER the §4.12 `location_display` (a label there,
+not a key; two buckets can render identically, and re-keying is §14 Q10). The browse list shows one row per
 group behind the same `?collapse=0` escape; the primary is elected at **query** time — highest
 rounded effective score, then earliest `first_seen`, then `(site, url)`; closed rows never role-
 collapse — so a verdict landing between sweeps resurfaces the better variant immediately. The

@@ -881,6 +881,31 @@ def test_role_group_same_location_multiples_stay_ungrouped(store) -> None:
     assert _role_groups(store) == {}
 
 
+def test_role_group_buckets_read_normalized_never_display(store) -> None:
+    # §4.12 froze this surface: the variant bucket stays location_normalized-else-raw.
+    # These two rows RENDER identically ('Berlin, Germany' via location_display) but
+    # their bucket keys differ, so they still form a group — the display summary is a
+    # label, never a grouping key. Re-keying buckets onto the projection is an
+    # explicit §14 Q10 decision, not a side effect.
+    _put(store, "a", "https://a.test/1", location="Berlin")
+    _put(store, "b", "https://b.test/2", location="Berlin, Germany")
+    for site, url, loc in [
+        ("a", "https://a.test/1", "Berlin"),
+        ("b", "https://b.test/2", "Berlin, Germany"),
+    ]:
+        store.refresh_position_locations(
+            site, url, location=loc, workplace="hybrid", force=True
+        )
+    displays = set()
+    for site, url in [("a", "https://a.test/1"), ("b", "https://b.test/2")]:
+        rec = store.get_position(site, url)
+        assert rec is not None
+        displays.add(rec.location_display)
+    assert displays == {"Berlin, Germany"}  # identical rendering…
+    _sweep(store)
+    assert len(_role_groups(store)) == 1  # …still two buckets → a picker forms
+
+
 def test_role_group_unlocated_rows_share_one_bucket(store) -> None:
     # No location evidence = no variant evidence: two blank locations are not
     # "two locations", so they never form a picker.
