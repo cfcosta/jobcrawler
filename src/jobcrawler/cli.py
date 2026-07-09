@@ -491,6 +491,7 @@ def build_matcher(store: StateStore) -> Matcher | None:
         extract_model=extract_model,
         extract_min_score=config.extract_min_score(),
         extract_cap=config.extract_cap(),
+        extract_locations=config.extract_locations(),
     )
 
 

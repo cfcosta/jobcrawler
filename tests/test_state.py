@@ -2185,7 +2185,9 @@ def test_posting_local_llm_rows_and_the_extract_stamp(store: StateStore) -> None
     store.set_position_location_llm(
         "acme", "u", places=[], fence=["US", "CA"], remote="fenced", model="m1"
     )
+    assert store.location_llm_stamped("acme", "u") is False
     store.mark_location_extracted("acme", "u")
+    assert store.location_llm_stamped("acme", "u") is True
     rows = _projection(store, "acme", "u")
     assert [(r[1], r[4], r[7]) for r in rows] == [
         ("remote_fence", "US", "llm_posting"),

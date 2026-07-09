@@ -324,6 +324,16 @@ def extract_cap() -> int:
     return _int("JOBCRAWLER_EXTRACT_CAP", 50)
 
 
+def extract_locations() -> bool:
+    """The §4.12 location arms of the extract gate: the ledger tail (strings the rules
+    parser left 'partial'/'fail' — score-independent, deduped per distinct string) and
+    the marker arm (bare-'Remote' rows whose fence lives only in the description).
+    Off ⇒ the gate reverts to salary-only and no location data is written or stamped by
+    the pass; the deterministic parser and its projections are unaffected. Default on —
+    the tail is small by construction (~3% of rows) and each string bills at most once."""
+    return _bool("JOBCRAWLER_EXTRACT_LOCATIONS", True)
+
+
 # --- generation caps (§4.2) ------------------------------------------------
 
 

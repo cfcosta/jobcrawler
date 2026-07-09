@@ -113,6 +113,32 @@ class FakeStore:
     salary_set: list = field(default_factory=list)
     salary_rows: set = field(default_factory=set)
     hiring_set: list = field(default_factory=list)
+    # §4.12 location surface: which (site, value) strings are the rules-parse tail,
+    # which (site, url) rows already carry the loc_llm_at stamp, and what got written.
+    loc_needs: dict = field(default_factory=dict)
+    loc_stamped: set = field(default_factory=set)
+    loc_value_set: list = field(default_factory=list)
+    loc_posting_set: list = field(default_factory=list)
+    loc_marked: list = field(default_factory=list)
+
+    def location_needs_llm(self, site, value):
+        return self.loc_needs.get((site, value), False)
+
+    def location_llm_stamped(self, site, url):
+        return (site, url) in self.loc_stamped
+
+    def set_location_value_llm(self, site, value, *, places, fence, remote, model):
+        self.loc_value_set.append((site, value, places, fence, remote, model))
+        self.loc_needs[(site, value)] = False  # filled — mirrors first-writer-wins
+        return True
+
+    def set_position_location_llm(self, site, url, *, places, fence, remote, model):
+        self.loc_posting_set.append((site, url, places, fence, remote, model))
+        return True
+
+    def mark_location_extracted(self, site, url):
+        self.loc_marked.append((site, url))
+        self.loc_stamped.add((site, url))
 
     def cached_extract(self, content_hash, model, prompt_version):
         return self.extract_cache.get((content_hash, model, prompt_version))
@@ -225,6 +251,7 @@ def _matcher(
     extract_model=None,
     extract_min_score=60,
     extract_cap=50,
+    extract_locations=True,
 ):
     return Matcher(
         store,
@@ -238,6 +265,7 @@ def _matcher(
         extract_model=extract_model,
         extract_min_score=extract_min_score,
         extract_cap=extract_cap,
+        extract_locations=extract_locations,
     )
 
 
@@ -256,13 +284,18 @@ class FakeExtractPredictor:
         return SimpleNamespace(extractions=self._respond(parsed))
 
 
-def _extract_all(*, salary=None, hiring=""):
-    """A responder that returns the same salary/employer for every job, echoing its index."""
+def _extract_all(*, salary=None, hiring="", location_geo=None):
+    """A responder that returns the same salary/employer/geo for every job, echoing its index."""
 
     def respond(jobs):
         return json.dumps(
             [
-                {"index": job["index"], "salary": salary, "hiring_company": hiring}
+                {
+                    "index": job["index"],
+                    "salary": salary,
+                    "hiring_company": hiring,
+                    "location_geo": location_geo,
+                }
                 for job in jobs
             ]
         )
@@ -1207,13 +1240,18 @@ def test_extraction_skips_jobs_that_already_have_structured_salary() -> None:
         _extract_all(salary={"min": 1, "max": 2, "currency": "USD"})
     )
     matcher._extract_predict = ep
-    # candidates arrive already carrying a §4.6 structured salary.
+    # candidates arrive already carrying a §4.6 structured salary; their location
+    # parses clean ('full'), so the §4.12 arms stay quiet too — a bare 'Remote'
+    # string would legitimately re-select these rows for description mining.
     cands = [
         (
             "acme",
             f"https://acme.example/job/{i}",
             FakeEnriched(
-                job=FakeJob(title=f"Senior Backend Engineer {i}"),
+                job=FakeJob(
+                    title=f"Senior Backend Engineer {i}",
+                    location="Berlin, Germany",
+                ),
                 salary=FakeSalaryRange(
                     min=90000, max=90000, currency="USD", period="year"
                 ),
@@ -1334,6 +1372,143 @@ def test_extraction_set_salary_guard_blocks_a_second_fill() -> None:
     assert summary["extracted"] == 1
 
 
+# --- §4.12 extraction location arms ------------------------------------------
+
+
+def _candidate_at(url, location, *, title="Senior Backend Engineer", salary=None):
+    job = FakeJob(url=url, title=title, location=location)
+    return ("acme", url, FakeEnriched(job=job, salary=salary))
+
+
+def test_extract_version_pins_the_v2_location_schema() -> None:
+    # extract-v2 added location_geo to the prompt + persisted shape; any further
+    # change to either must bump this again (the cache is keyed on it).
+    from jobcrawler.match import EXTRACT_VERSION
+
+    assert EXTRACT_VERSION == "extract-v2"
+
+
+def test_extract_digest_includes_location_and_workplace() -> None:
+    # The extractor must see the board's location string — the geo answer is
+    # meaningless if the model only ever saw the description.
+    from jobcrawler.match import _extract_digest
+
+    digest = _extract_digest(3, FakeEnriched(job=FakeJob(location="Remote - US")))
+    assert digest["location"] == "Remote - US"
+    assert digest["workplace"] == "remote"
+
+
+def test_ledger_tail_arm_is_score_independent_and_deduped_per_string() -> None:
+    # A rules-'partial'/'fail' string earns an extraction even on a rejected row —
+    # the parse is a property of the STRING, reused by every row carrying it — and
+    # two rows with the same string take ONE slot per run.
+    store = FakeStore()
+    store.loc_needs[("acme", "Zorgville")] = True
+    matcher = _matcher(store, extract_model="openrouter/test/model")
+    matcher._predict = FakePredictor(_all_score(10))  # hard reject
+    matcher._extract_predict = FakeExtractPredictor(
+        _extract_all(
+            location_geo={
+                "places": [{"city": "Zorgville", "country": "US"}],
+                "remote": "none",
+                "fence": [],
+            }
+        )
+    )
+    summary = matcher.score_new(
+        [
+            _candidate_at("https://acme.example/1", "Zorgville", title="Role A"),
+            _candidate_at("https://acme.example/2", "Zorgville", title="Role B"),
+        ]
+    )
+    assert matcher._extract_predict.calls == 1
+    assert len(matcher._extract_predict.batches[0]) == 1
+    assert [(c[0], c[1]) for c in store.loc_value_set] == [("acme", "Zorgville")]
+    assert store.loc_marked == [("acme", "https://acme.example/1")]
+    assert summary["extracted"] == 1
+
+
+def test_marker_arm_mines_the_description_for_a_fence() -> None:
+    # A bare 'Remote' string says nothing; a well-matched row without the
+    # loc_llm_at stamp goes to the description miner, and the fence lands as
+    # posting-local rows.
+    store = FakeStore()
+    matcher = _matcher(store, extract_model="openrouter/test/model")
+    matcher._predict = FakePredictor(_all_score(85))
+    matcher._extract_predict = FakeExtractPredictor(
+        _extract_all(
+            salary=None,
+            location_geo={"places": [], "remote": "fenced", "fence": ["US"]},
+        )
+    )
+    url = "https://acme.example/1"
+    matcher.score_new(
+        [_candidate_at(url, "Remote", salary=FakeSalaryRange(1, 2, "USD", "year"))]
+    )
+    assert store.loc_posting_set == [
+        ("acme", url, [], ["US"], "fenced", "openrouter/test/model")
+    ]
+    assert store.loc_marked == [("acme", url)]
+
+
+def test_marker_arm_skips_stamped_and_low_scoring_rows() -> None:
+    store = FakeStore()
+    url = "https://acme.example/1"
+    store.loc_stamped.add(("acme", url))
+    matcher = _matcher(store, extract_model="openrouter/test/model")
+    matcher._predict = FakePredictor(_all_score(85))
+    matcher._extract_predict = FakeExtractPredictor(_extract_all())
+    matcher.score_new(
+        [_candidate_at(url, "Remote", salary=FakeSalaryRange(1, 2, "USD", "year"))]
+    )
+    assert matcher._extract_predict.calls == 0  # stamped → not re-selected
+
+    low = _matcher(FakeStore(), extract_model="openrouter/test/model")
+    low._predict = FakePredictor(_all_score(30))
+    low._extract_predict = FakeExtractPredictor(_extract_all())
+    low.score_new(
+        [
+            _candidate_at(
+                "https://acme.example/2",
+                "Remote",
+                salary=FakeSalaryRange(1, 2, "USD", "year"),
+            )
+        ]
+    )
+    assert low._extract_predict.calls == 0  # marker arm is score-gated
+
+
+def test_extract_locations_kill_switch_reverts_to_the_salary_gate() -> None:
+    store = FakeStore()
+    store.loc_needs[("acme", "Zorgville")] = True
+    matcher = _matcher(
+        store, extract_model="openrouter/test/model", extract_locations=False
+    )
+    matcher._predict = FakePredictor(_all_score(85))
+    matcher._extract_predict = FakeExtractPredictor(
+        _extract_all(
+            location_geo={"places": [], "remote": "worldwide", "fence": []}
+        )
+    )
+    # Salary present + tail string: with the switch off, nothing selects…
+    matcher.score_new(
+        [
+            _candidate_at(
+                "https://acme.example/1",
+                "Zorgville",
+                salary=FakeSalaryRange(1, 2, "USD", "year"),
+            )
+        ]
+    )
+    assert matcher._extract_predict.calls == 0
+    # …and a salary-arm extraction never routes or stamps location data.
+    matcher.score_new([_candidate_at("https://acme.example/2", "Zorgville")])
+    assert matcher._extract_predict.calls == 1
+    assert store.loc_value_set == []
+    assert store.loc_posting_set == []
+    assert store.loc_marked == []
+
+
 # --- extraction parse/normalise units ---------------------------------------
 
 
@@ -1400,6 +1575,71 @@ def test_to_extraction_drops_ambiguous_or_missing_salary() -> None:
     empty = _to_extraction({})
     assert empty is not None
     assert empty.salary_min is None and empty.hiring_company == ""
+
+
+def test_to_extraction_validates_location_geo_against_the_geo_vocabulary() -> None:
+    # Junk is dropped, never coerced: countries must be ISO2 from the gazetteer
+    # (case-folded), fence tokens must be ISO2 or a known macro key.
+    ext = _to_extraction(
+        {
+            "location_geo": {
+                "places": [
+                    {"city": "Berlin", "country": "de"},
+                    {"city": "Nowhere", "country": "XX"},
+                ],
+                "remote": "fenced",
+                "fence": ["us", "EMEA", "narnia"],
+            }
+        }
+    )
+    assert ext is not None and ext.location_geo is not None
+    assert ext.location_geo["places"] == [
+        {"city": "Berlin", "subdivision": None, "country": "DE"},
+        {"city": "Nowhere", "subdivision": None, "country": None},
+    ]
+    assert ext.location_geo["fence"] == ["US", "emea"]
+    assert ext.location_geo["remote"] == "fenced"
+
+    # A malformed geo answer never blocks the salary in the same entry.
+    ext2 = _to_extraction(
+        {"salary": {"min": 5, "max": 5, "currency": "USD"}, "location_geo": "garbage"}
+    )
+    assert ext2 is not None and ext2.location_geo is None
+    assert ext2.salary_min == 5.0
+
+    # An all-empty geo reads as None (nothing learned)…
+    empty = _to_extraction(
+        {"location_geo": {"places": [], "remote": "none", "fence": []}}
+    )
+    assert empty is not None and empty.location_geo is None
+    # …but bare worldwide IS information.
+    ww = _to_extraction(
+        {"location_geo": {"places": [], "remote": "worldwide", "fence": []}}
+    )
+    assert ww is not None and ww.location_geo == {
+        "places": [],
+        "remote": "worldwide",
+        "fence": [],
+    }
+
+
+def test_extraction_json_round_trip_preserves_location_geo() -> None:
+    # A cache hit must re-apply the geo answer bit-for-bit across runs.
+    from jobcrawler.match import _extraction_from_json, _extraction_to_json
+
+    ext = _to_extraction(
+        {
+            "salary": {"min": 5, "max": 6, "currency": "USD", "period": "year"},
+            "hiring_company": "Umbrella",
+            "location_geo": {
+                "places": [{"city": "Berlin", "country": "DE"}],
+                "remote": "fenced",
+                "fence": ["DE"],
+            },
+        }
+    )
+    assert ext is not None
+    assert _extraction_from_json(_extraction_to_json(ext)) == ext
 
 
 def test_num_or_none_never_invents_a_number() -> None:

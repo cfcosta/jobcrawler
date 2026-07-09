@@ -1831,6 +1831,7 @@ def test_build_matcher_wires_the_matcher_when_configured(
     monkeypatch.setattr(config, "require_extract_model", lambda: "openai/gpt-mini")
     monkeypatch.setattr(config, "extract_min_score", lambda: 55)
     monkeypatch.setattr(config, "extract_cap", lambda: 30)
+    monkeypatch.setattr(config, "extract_locations", lambda: False)
 
     captured: dict[str, object] = {}
 
@@ -1848,6 +1849,7 @@ def test_build_matcher_wires_the_matcher_when_configured(
             extract_model: str | None,
             extract_min_score: int,
             extract_cap: int,
+            extract_locations: bool,
         ) -> None:
             captured.update(
                 model=model,
@@ -1857,6 +1859,7 @@ def test_build_matcher_wires_the_matcher_when_configured(
                 extract_model=extract_model,
                 extract_min_score=extract_min_score,
                 extract_cap=extract_cap,
+                extract_locations=extract_locations,
             )
 
     monkeypatch.setattr("jobcrawler.match.Matcher", _StubMatcher)
@@ -1873,6 +1876,7 @@ def test_build_matcher_wires_the_matcher_when_configured(
         "extract_model": "openai/gpt-mini",
         "extract_min_score": 55,
         "extract_cap": 30,
+        "extract_locations": False,
     }
 
 

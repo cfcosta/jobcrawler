@@ -1332,4 +1332,5 @@ def build_matcher(
         extract_model=extract_model,
         extract_min_score=config.extract_min_score(),
         extract_cap=config.extract_cap(),
+        extract_locations=config.extract_locations(),
     )

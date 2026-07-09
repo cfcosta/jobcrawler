@@ -50,13 +50,14 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Callable, Iterable, Protocol, Sequence, cast
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Protocol, Sequence, cast
 
 import dspy
 
 from jobcrawler import config
 from jobcrawler.lm import build_lm
 from jobcrawler.profile import Profile, ProfilePrefs
+from jobcrawler.runtime.geo import parse_location
 from jobcrawler.runtime.normalize import normalize_location
 
 if (
@@ -72,11 +73,12 @@ _log = logging.getLogger("jobcrawler.match")
 # version string for a different prompt.
 PROMPT_VERSION = "match-v2"  # v2: location eligibility became a hard gate in MatchJobs
 
-# The extraction cache version (§4.7 match-time salary/employer mining). Keyed WITHOUT a
-# profile hash — salary and employer are properties of the posting, not of the profile — so
-# one extraction serves every profile. Bump on ANY change to the ExtractFromDescription
-# prompt or the persisted extraction shape: it invalidates every prior extraction.
-EXTRACT_VERSION = "extract-v1"
+# The extraction cache version (§4.7 match-time salary/employer/location mining). Keyed
+# WITHOUT a profile hash — salary, employer, and geography are properties of the posting,
+# not of the profile — so one extraction serves every profile. Bump on ANY change to the
+# ExtractFromDescription prompt or the persisted extraction shape: it invalidates every
+# prior extraction (the old backlog re-mines at <=extract_cap per run as rows resurface).
+EXTRACT_VERSION = "extract-v2"  # v2: location_geo joined the schema (§4.12)
 
 # The verdict bands. Numeric score is the source of truth; the label is derived from
 # it when the LLM omits or garbles it (see _verdict_label). match_min_score (the
@@ -216,11 +218,12 @@ class MatchJobs(dspy.Signature):
 
 
 class ExtractFromDescription(dspy.Signature):
-    """Extract compensation and the hiring company from job postings. COPY, do not guess.
+    """Extract compensation, the hiring company, and stated geography from job postings.
+    COPY, do not guess.
 
     You get each job's integer ``index`` plus its title, the board-supplied ``company`` (may
-    be blank or a placeholder like "Confidential"), and the description text. Return exactly
-    one object per input job:
+    be blank or a placeholder like "Confidential"), its ``location`` string and ``workplace``
+    as posted, and the description text. Return exactly one object per input job:
 
       * ``salary`` — ONLY if the description literally states the pay for THIS role. Copy the
         figures as written into ``{min, max, currency, period}``: ``currency`` an ISO-ish code
@@ -232,18 +235,35 @@ class ExtractFromDescription(dspy.Signature):
       * ``hiring_company`` — the real employer the description names, but ONLY when the board
         ``company`` is blank or a placeholder AND the text clearly identifies it. Otherwise
         return "". Never guess from the domain, the title, or invent a name.
+      * ``location_geo`` — the geography the POSTING states, read from its ``location``
+        string and description: ``places`` are offices/onsite cities it names, each
+        ``{"city": str|null, "subdivision": str|null, "country": "<ISO2>"|null}`` with
+        ``country`` an ISO 3166-1 alpha-2 code; ``remote`` is "worldwide" when it says
+        work-from-anywhere, "fenced" when remote work is limited to named countries/regions,
+        else "none"; ``fence`` lists those limits as ISO2 codes or region words ("US", "DE",
+        "EMEA", "LATAM"). Return ``location_geo: null`` when neither the location string nor
+        the text states geography. NEVER infer a country from the company's HQ, the salary
+        currency, or the posting's language — only what is written.
 
     Output ``extractions`` as a JSON array, one object per input job, echoing its integer
     ``index``: {"index": int, "salary": {"min": num|null, "max": num|null,
-    "currency": str|null, "period": str|null} | null, "hiring_company": str}. Return exactly
-    one object per input job, in any order; add no commentary outside the JSON.
+    "currency": str|null, "period": str|null} | null, "hiring_company": str,
+    "location_geo": {"places": [...], "remote": "none"|"fenced"|"worldwide",
+    "fence": [str, ...]} | null}. Return exactly one object per input job, in any order; add
+    no commentary outside the JSON.
     """
 
     jobs: str = dspy.InputField(
-        desc="JSON array of jobs, each with an integer 'index', title, company, description"
+        desc=(
+            "JSON array of jobs, each with an integer 'index', title, company, "
+            "location, workplace, description"
+        )
     )
     extractions: str = dspy.OutputField(
-        desc="JSON array of {index, salary|null, hiring_company}, one per input job"
+        desc=(
+            "JSON array of {index, salary|null, hiring_company, location_geo|null}, "
+            "one per input job"
+        )
     )
 
 
@@ -355,6 +375,7 @@ class Matcher:
         extract_model: str | None = None,
         extract_min_score: int = 60,
         extract_cap: int = 50,
+        extract_locations: bool = True,
     ) -> None:
         self._store = store
         self._profile = profile
@@ -374,6 +395,9 @@ class Matcher:
         self._extract_model = extract_model
         self._extract_min_score = extract_min_score
         self._extract_cap = max(0, extract_cap)
+        # §4.12 location arms of the extract gate (kill-switch, default on). False
+        # reverts the gate to salary-only and stops all location routing/stamping.
+        self._extract_locations = extract_locations
         # A verdict is ~200 tokens; even a full batch fits comfortably in 4k. Bounding
         # the request matters beyond cost: providers reject a call whose max_tokens
         # exceeds the remaining credit balance, so an unbounded (provider-default)
@@ -511,19 +535,43 @@ class Matcher:
         # No late bump: reserve_match_spend already charged the grant (== len(to_score))
         # atomically up front, so concurrent crawls sharing this matcher can't race the cap.
 
-        # (f) match-time salary/employer backfill (§4.7). For jobs that matched well but carry
-        # no structured salary, mine the description on the cheap extract LM. Runs over cache
-        # hits AND fresh scores (a cached extraction re-applies for free), is bounded per run,
-        # and is a no-op unless an extract model is configured. Best-effort: never affects the
-        # scoring result the runner notifies on.
+        # (f) match-time salary/employer/location backfill (§4.7). Three arms select a
+        # row: (1) salary — matched at/above extract_min_score with no structured pay;
+        # (2) ledger tail — its location string rules-parsed 'partial'/'fail'
+        # (SCORE-INDEPENDENT: the parse is a property of the string, reused by every
+        # row that ever carries it, and deduped to one slot per distinct string per
+        # run); (3) marker — a well-matched row whose string is a bare workplace
+        # marker ('Remote') and whose description hasn't been mined yet
+        # (loc_llm_at IS NULL). Runs over cache hits AND fresh scores (a cached
+        # extraction re-applies for free), is bounded per run, and is a no-op unless
+        # an extract model is configured. Best-effort: never affects the scoring
+        # result the runner notifies on.
         extracted_n = 0
         if self._extract_model is not None:
-            to_extract = [
-                (site, url, enriched_by_key[(site, url)])
-                for site, url, verdict in results
-                if verdict.score >= self._extract_min_score
-                and enriched_by_key[(site, url)].salary is None
-            ]
+            to_extract: list[tuple[str, str, _Enriched]] = []
+            tail_seen: set[tuple[str, str]] = set()
+            for site, url, verdict in results:
+                enriched = enriched_by_key[(site, url)]
+                wants = (
+                    verdict.score >= self._extract_min_score
+                    and enriched.salary is None
+                )
+                if not wants and self._extract_locations:
+                    loc = (getattr(enriched.job, "location", "") or "").strip()
+                    if loc and self._store.location_needs_llm(site, loc):
+                        key = (site, loc)
+                        if key not in tail_seen:
+                            tail_seen.add(key)
+                            wants = True
+                    elif (
+                        loc
+                        and verdict.score >= self._extract_min_score
+                        and parse_location(loc).quality == "marker"
+                        and not self._store.location_llm_stamped(site, url)
+                    ):
+                        wants = True
+                if wants:
+                    to_extract.append((site, url, enriched))
             extracted_n = self._extract_missing(to_extract)
 
         return {
@@ -630,7 +678,14 @@ class Matcher:
             cached = self._store.cached_extract(content_hash, model, EXTRACT_VERSION)
             ext = _extraction_from_json(cached) if cached is not None else None
             if ext is not None:
-                applied += int(self._apply_extraction(site, url, ext))
+                applied += int(
+                    self._apply_extraction(
+                        site,
+                        url,
+                        ext,
+                        location=getattr(enriched.job, "location", None),
+                    )
+                )
             else:
                 misses.append((site, url, enriched, content_hash))
         for batch in _chunks(misses[: self._extract_cap], self._batch):
@@ -670,22 +725,33 @@ class Matcher:
                     by_index[idx] = item
 
         applied = 0
-        for index, (site, url, _enriched, content_hash) in enumerate(batch):
+        for index, (site, url, enriched, content_hash) in enumerate(batch):
             ext = _to_extraction(by_index.get(index))
             if ext is None:
                 continue
             self._store.cache_extract(
                 content_hash, model, EXTRACT_VERSION, _extraction_to_json(ext)
             )
-            applied += int(self._apply_extraction(site, url, ext))
+            applied += int(
+                self._apply_extraction(
+                    site, url, ext, location=getattr(enriched.job, "location", None)
+                )
+            )
         return applied
 
-    def _apply_extraction(self, site: str, url: str, ext: "_Extraction") -> bool:
-        """Persist a mined salary and/or employer onto the row; return whether anything wrote.
+    def _apply_extraction(
+        self, site: str, url: str, ext: "_Extraction", *, location: str | None = None
+    ) -> bool:
+        """Persist a mined salary/employer/geography onto the row; return whether anything wrote.
 
         Salary only fills a row that has none (``set_salary`` guards it, so a source figure
         always wins); a non-empty employer records the cleaner name and repoints the §16
-        dedup key at its canonical form. An all-empty extraction writes nothing."""
+        dedup key at its canonical form. A geo answer routes by string class (§4.12): a
+        rules-'partial'/'fail' string fills the value LEDGER (paid once, reused by every
+        row carrying the string); a bare-marker string's answer is POSTING-LOCAL (mined
+        from this description). Both fills are first-writer-wins in the store. When the
+        location arms are on, the row is stamped (``loc_llm_at``) even for an empty
+        answer, so the marker arm never re-selects this content."""
         from jobcrawler.runtime.normalize import canonical_company
 
         wrote = False
@@ -706,6 +772,30 @@ class Matcher:
                 canonical=canonical_company(ext.hiring_company),
             )
             wrote = True
+        if self._extract_locations:
+            loc = (location or "").strip()
+            geo_answer = ext.location_geo
+            if geo_answer is not None and loc:
+                model = cast(str, self._extract_model)
+                if self._store.location_needs_llm(site, loc):
+                    wrote |= self._store.set_location_value_llm(
+                        site,
+                        loc,
+                        places=geo_answer.get("places") or [],
+                        fence=geo_answer.get("fence") or [],
+                        remote=geo_answer.get("remote") or "none",
+                        model=model,
+                    )
+                elif parse_location(loc).quality == "marker":
+                    wrote |= self._store.set_position_location_llm(
+                        site,
+                        url,
+                        places=geo_answer.get("places") or [],
+                        fence=geo_answer.get("fence") or [],
+                        remote=geo_answer.get("remote") or "none",
+                        model=model,
+                    )
+            self._store.mark_location_extracted(site, url)
         return wrote
 
 
@@ -918,12 +1008,14 @@ _SALARY_PERIODS: frozenset[str] = frozenset({"year", "month", "hour"})
 
 @dataclass(frozen=True, slots=True)
 class _Extraction:
-    """One posting's LLM-mined salary + employer (§4.7).
+    """One posting's LLM-mined salary + employer + geography (§4.7).
 
     A salary is present only as a whole: ``salary_min`` is None whenever the description
     stated no usable figure OR no currency (an amount with no currency is ambiguous), and in
     that case every salary field is None. ``hiring_company`` is "" when the text named no
-    clearer employer than the board already did.
+    clearer employer than the board already did. ``location_geo`` is the validated §4.12
+    geo answer ({places, remote, fence} — vocabulary-checked against the gazetteer) or
+    None when the posting stated no geography (or the model's answer was unusable).
     """
 
     salary_min: float | None
@@ -931,20 +1023,25 @@ class _Extraction:
     salary_currency: str | None
     salary_period: str | None
     hiring_company: str
+    location_geo: dict[str, Any] | None = None
 
 
 def _extract_digest(index: int, enriched: _Enriched) -> dict[str, object]:
-    """The compact per-job payload sent to the extractor (title/company/description).
+    """The compact per-job payload sent to the extractor.
 
     A wider description window than the matcher's (2000 vs 1200 chars): salary and the
     real employer often sit deep in a posting (benefits block, "About <Company>" footer),
-    past where the fit signal is decided.
+    past where the fit signal is decided. The board's ``location`` string and derived
+    ``workplace`` ride along for the §4.12 geo answer — without them the model could
+    only ever mine the description.
     """
     job = enriched.job
     return {
         "index": index,
         "title": getattr(job, "title", None),
         "company": getattr(job, "company", None),
+        "location": getattr(job, "location", None),
+        "workplace": getattr(enriched, "workplace", None),
         "description": (getattr(job, "description", "") or "")[:2000],
     }
 
@@ -997,7 +1094,64 @@ def _to_extraction(item: object) -> _Extraction | None:
         salary_currency=currency,
         salary_period=period,
         hiring_company=hiring,
+        location_geo=_valid_location_geo(item.get("location_geo")),
     )
+
+
+def _valid_location_geo(raw: object) -> dict[str, Any] | None:
+    """Validate an LLM geo answer against the §4.12 vocabulary — drop junk, never coerce.
+
+    Countries must be gazetteer ISO2 (case-folded to UPPER; anything else reads as
+    unresolved, not as a guess); fence tokens must be ISO2 or a known macro key. An
+    answer with no places, no fence, and no worldwide claim reads as None — absence
+    of geography is recorded per-posting via ``loc_llm_at``, never as an empty fact.
+    """
+    from jobcrawler.runtime.geo import COUNTRY_CODES, MACRO_KEYS
+
+    if not isinstance(raw, dict):
+        return None
+    remote_raw = raw.get("remote")
+    remote = (
+        remote_raw.strip().lower()
+        if isinstance(remote_raw, str)
+        and remote_raw.strip().lower() in ("none", "fenced", "worldwide")
+        else "none"
+    )
+    places: list[dict[str, Any]] = []
+    raw_places = raw.get("places")
+    for entry in raw_places if isinstance(raw_places, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        city = entry.get("city")
+        sub = entry.get("subdivision")
+        country = entry.get("country")
+        country_norm = (
+            country.strip().upper()
+            if isinstance(country, str) and country.strip().upper() in COUNTRY_CODES
+            else None
+        )
+        place = {
+            "city": city.strip() if isinstance(city, str) and city.strip() else None,
+            "subdivision": (
+                sub.strip() if isinstance(sub, str) and sub.strip() else None
+            ),
+            "country": country_norm,
+        }
+        if any(place.values()):
+            places.append(place)
+    fence: list[str] = []
+    raw_fence = raw.get("fence")
+    for token in raw_fence if isinstance(raw_fence, list) else []:
+        if not isinstance(token, str) or not token.strip():
+            continue
+        text = token.strip()
+        if text.upper() in COUNTRY_CODES:
+            fence.append(text.upper())
+        elif text.lower() in MACRO_KEYS:
+            fence.append(text.lower())
+    if not places and not fence and remote != "worldwide":
+        return None
+    return {"places": places, "remote": remote, "fence": fence}
 
 
 def _parse_extraction_list(raw: object) -> list[object]:
@@ -1038,6 +1192,7 @@ def _extraction_to_json(ext: _Extraction) -> str:
             "salary_currency": ext.salary_currency,
             "salary_period": ext.salary_period,
             "hiring_company": ext.hiring_company,
+            "location_geo": ext.location_geo,
         },
         ensure_ascii=False,
     )
@@ -1065,6 +1220,9 @@ def _extraction_from_json(cached: object) -> _Extraction | None:
         if isinstance(data.get("salary_period"), str)
         else None,
         hiring_company=str(data.get("hiring_company") or ""),
+        # Re-validated on the way out of the cache: the vocabulary can only have
+        # gotten stricter since the entry was written.
+        location_geo=_valid_location_geo(data.get("location_geo")),
     )
 
 

@@ -1296,6 +1296,15 @@ class StateStore:
         )
         self._conn.commit()
 
+    def location_llm_stamped(self, site: str, url: str) -> bool:
+        """True when this posting's current content already has an extract answer —
+        the §4.7 marker-arm gate reads it to keep re-runs free."""
+        row = self._conn.execute(
+            "SELECT loc_llm_at FROM positions WHERE site = ? AND url = ?",
+            (site, url),
+        ).fetchone()
+        return bool(row is not None and row["loc_llm_at"])
+
     def _backfill_locations(self) -> None:
         """One sweep per GEO_PARSER_VERSION: parse every stored string, project every row.
 
