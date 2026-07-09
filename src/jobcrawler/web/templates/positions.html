@@ -53,6 +53,8 @@
   </div>
   <div class="filter-line refine">
     <input type="text" name="workplace" placeholder="Workplace" value="{{ filters.workplace }}" size="8">
+    <input type="text" name="country" placeholder="Country (US)" value="{{ filters.country }}" size="8" title="ISO country code — offices there or remote fenced to it (§4.12)">
+    <input type="text" name="remote_in" placeholder="Remote in (BR)" value="{{ filters.remote_in }}" size="10" title="ISO country code — remotely workable from there: fence includes it (regions like EMEA expand) or worldwide">
     <input type="text" name="level" placeholder="Level" value="{{ filters.level }}" size="8">
     <input type="number" name="min_score" placeholder="Min score" value="{{ filters.min_score }}" min="0" max="100">
     <input type="number" name="min_salary" placeholder="Min $/yr" value="{{ filters.min_salary }}" title="Minimum annualized USD salary">
@@ -94,7 +96,7 @@
         <span class="pos-sub">
           {% if p.company_canonical %}<a href="/positions?company_canonical={{ p.company_canonical | urlencode }}">{{ p.hiring_company or p.company }}</a>{% else %}<span>{{ p.hiring_company or p.company }}</span>{% endif %}
           <span class="sep">·</span>
-          <span class="loc">{{ p.location_normalized or p.location }}{% if p.workplace and p.workplace != 'unspecified' %} · {{ p.workplace }}{% endif %}</span>
+          <span class="loc">{{ p.location_display or p.location_normalized or p.location }}{% if p.workplace and p.workplace != 'unspecified' %} · {{ p.workplace }}{% endif %}</span>
           {% if p.remote_scope == 'anywhere' %}<span class="scope scope-anywhere" title="Open to candidates anywhere">anywhere</span>{% elif p.remote_scope == 'restricted' %}<span class="scope scope-restricted" title="Remote but geographically restricted — see location">restricted</span>{% endif %}
           {% if p.relocation == 'offered' %}<span class="scope scope-relo" title="Relocation or visa support mentioned in the posting">relocation</span>{% endif %}
           {% set csize = cluster_sizes.get(encode_pid(p.site, p.url)) if cluster_sizes is defined else none %}
@@ -106,9 +108,9 @@
             <div class="locmenu-list">
               {% for v in rvars %}
               {% if v.site == p.site and v.url == p.url %}
-              <span class="locmenu-item is-current"><span class="locmenu-go"><span class="locmenu-loc">{{ v.location_normalized or v.location or 'Location unlisted' }}</span><span class="locmenu-board">{{ site_names.get(v.site, v.site) }} · this row</span></span></span>
+              <span class="locmenu-item is-current"><span class="locmenu-go"><span class="locmenu-loc">{{ v.location_display or v.location_normalized or v.location or 'Location unlisted' }}</span><span class="locmenu-board">{{ site_names.get(v.site, v.site) }} · this row</span></span></span>
               {% else %}
-              <span class="locmenu-item"><a class="locmenu-go" href="/positions/{{ encode_pid(v.site, v.url) }}"><span class="locmenu-loc">{{ v.location_normalized or v.location or 'Location unlisted' }}</span><span class="locmenu-board">{{ site_names.get(v.site, v.site) }}</span></a><a class="ext" href="{{ v.ext }}" target="_blank" rel="noopener noreferrer" title="Open this variant's posting">↗</a></span>
+              <span class="locmenu-item"><a class="locmenu-go" href="/positions/{{ encode_pid(v.site, v.url) }}"><span class="locmenu-loc">{{ v.location_display or v.location_normalized or v.location or 'Location unlisted' }}</span><span class="locmenu-board">{{ site_names.get(v.site, v.site) }}</span></a><a class="ext" href="{{ v.ext }}" target="_blank" rel="noopener noreferrer" title="Open this variant's posting">↗</a></span>
               {% endif %}
               {% endfor %}
             </div>

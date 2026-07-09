@@ -1305,6 +1305,27 @@ class StateStore:
         ).fetchone()
         return bool(row is not None and row["loc_llm_at"])
 
+    def position_locations(self, site: str, url: str) -> list[dict[str, Any]]:
+        """The position's §4.12 projection rows in stated order (detail page + API)."""
+        rows = self._conn.execute(
+            "SELECT kind, city, subdivision, country, macro_region, display, source, "
+            "confidence FROM position_locations WHERE site = ? AND url = ? ORDER BY seq",
+            (site, url),
+        ).fetchall()
+        return [
+            {
+                "kind": r["kind"],
+                "city": r["city"],
+                "subdivision": r["subdivision"],
+                "country": r["country"],
+                "macro_region": r["macro_region"],
+                "display": r["display"],
+                "source": r["source"],
+                "confidence": r["confidence"],
+            }
+            for r in rows
+        ]
+
     def _backfill_locations(self) -> None:
         """One sweep per GEO_PARSER_VERSION: parse every stored string, project every row.
 
@@ -2329,12 +2350,14 @@ class StateStore:
             rows = self._conn.execute(
                 f"WITH page(site, url) AS (VALUES {values}) "
                 "SELECT page.site AS s, page.url AS u, p.site, p.url, "
-                "p.location, p.location_normalized, p.apply_url "
+                "p.location, p.location_normalized, p.location_display, p.apply_url "
                 "FROM page "
                 "JOIN position_role_groups me ON me.site = page.site AND me.url = page.url "
                 "JOIN position_role_groups sib ON sib.group_id = me.group_id "
                 "JOIN positions p ON p.site = sib.site AND p.url = sib.url "
                 "WHERE p.status = 'open' "
+                # Ordering stays on the §17 bucket key (location_normalized-else-raw)
+                # — location_display is a LABEL here, never the grouping/order source.
                 "ORDER BY lower(COALESCE(NULLIF(p.location_normalized, ''), p.location, '')), "
                 "p.site, p.url",
                 params,
@@ -2346,6 +2369,7 @@ class StateStore:
                         "url": row["url"],
                         "location": row["location"],
                         "location_normalized": row["location_normalized"],
+                        "location_display": row["location_display"],
                         "apply_url": row["apply_url"],
                     }
                 )
@@ -2635,6 +2659,8 @@ class StateStore:
         workplace: str | None = None,
         remote_scope: str | None = None,
         relocation_offered: bool = False,
+        country: str | None = None,
+        remote_in: str | None = None,
         level: str | None = None,
         min_score: int | None = None,
         min_salary: float | None = None,
@@ -2665,6 +2691,12 @@ class StateStore:
           "remote anywhere" filter; ``'restricted'``/``'unspecified'`` also selectable).
         - ``relocation_offered``  keep only rows whose posting states relocation/visa support
           (``relocation = 'offered'``, §4.6) — the "offers relocation" filter.
+        - ``country``  ISO2 (case-folded): rows with ANY §4.12 resolved row in that country —
+          an office there or remote fenced to it ("show me everything touching DE").
+        - ``remote_in``  ISO2: rows REMOTELY WORKABLE from that country — kind-scoped to
+          fence/worldwide rows (an office place never qualifies), with macro fences
+          ('EMEA') expanded through ``geo_region_members``. Both are additive EXISTS
+          filters: with no projection rows they simply match nothing.
         - ``min_score``  only rows whose **effective** (§4.7 freshness-decayed) score is at/above
           it (drops unscored); ``sort='score'`` likewise orders by the effective score, so an
           old great fit ranks below a fresh comparable one but stays above weaker leads.
@@ -2727,9 +2759,12 @@ class StateStore:
             clauses.append(
                 "(lower(title) LIKE ? OR lower(company) LIKE ? "
                 "OR lower(location) LIKE ? OR lower(COALESCE(location_normalized, '')) LIKE ? "
+                # §4.12 synonym bridge: the display carries full English country names,
+                # so q='brazil' hits a raw-'Brasil' row. Extends, never repoints.
+                "OR lower(COALESCE(location_display, '')) LIKE ? "
                 "OR lower(COALESCE(description, '')) LIKE ?)"
             )
-            params += [like, like, like, like, like]
+            params += [like, like, like, like, like, like]
         if site:
             clauses.append("site = ?")
             params.append(site)
@@ -2756,6 +2791,24 @@ class StateStore:
             params.append(remote_scope.lower())
         if relocation_offered:
             clauses.append("lower(COALESCE(relocation, '')) = 'offered'")
+        if country:
+            clauses.append(
+                "EXISTS (SELECT 1 FROM position_locations pl "
+                "WHERE pl.site = positions.site AND pl.url = positions.url "
+                "AND pl.country = ?)"
+            )
+            params.append(country.strip().upper())
+        if remote_in:
+            code = remote_in.strip().upper()
+            clauses.append(
+                "EXISTS (SELECT 1 FROM position_locations pl "
+                "WHERE pl.site = positions.site AND pl.url = positions.url "
+                "AND (pl.kind = 'remote_anywhere' "
+                "OR (pl.kind = 'remote_fence' AND (pl.country = ? "
+                "OR EXISTS (SELECT 1 FROM geo_region_members gm "
+                "WHERE gm.region = pl.macro_region AND gm.country = ?)))))"
+            )
+            params += [code, code]
         if level:
             clauses.append("lower(COALESCE(level, '')) = ?")
             params.append(level.lower())

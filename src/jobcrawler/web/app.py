@@ -259,6 +259,9 @@ def _position_dict(p: PositionRecord) -> dict[str, Any]:
         "company_canonical": p.company_canonical,
         "location": p.location,
         "location_normalized": p.location_normalized,
+        # §4.12 canonical display summary; NULL when the string parsed to nothing
+        # structured (consumers fall back to location_normalized/location).
+        "location_display": p.location_display,
         "workplace": p.workplace,
         "remote_scope": p.remote_scope,
         "relocation": p.relocation,
@@ -372,6 +375,10 @@ def _read_filters(
         # 'anywhere' only ever lands on a workplace='remote' row, so it stands alone.
         "remote_scope": "anywhere" if remote_anywhere else None,
         "relocation_offered": relocation_offered,
+        # §4.12 structured geo filters (ISO2, case-folded store-side): country=
+        # matches offices AND fences; remote_in= only remote eligibility.
+        "country": _s("country"),
+        "remote_in": _s("remote_in"),
         "level": _s("level"),
         "min_score": _int_param(params, "min_score"),
         "min_salary": _float_param(params, "min_salary"),
@@ -391,6 +398,8 @@ def _read_filters(
         "status": params.get("status") or "",
         "track_status": track_status or "",
         "workplace": params.get("workplace") or "",
+        "country": params.get("country") or "",
+        "remote_in": params.get("remote_in") or "",
         "level": params.get("level") or "",
         "min_score": params.get("min_score") or "",
         "min_salary": params.get("min_salary") or "",
@@ -1007,6 +1016,8 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
                 "crawlable": rec.site in known_slugs,
                 "siblings": siblings,
                 "role_variants": role_variants,
+                # §4.12 resolved places/fences for the Locations panel.
+                "locations": store.position_locations(site, url),
             },
         )
 
@@ -1112,7 +1123,11 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
     @app.get("/api/positions/{pid}")
     def api_position(pid: str) -> JSONResponse:
         site, url = decode_pid(pid)
-        return JSONResponse(_position_dict(_require(site, url)))
+        payload = _position_dict(_require(site, url))
+        # Detail-only additive key (the list endpoint stays one query): the §4.12
+        # resolved rows, in stated order.
+        payload["locations"] = store.position_locations(site, url)
+        return JSONResponse(payload)
 
     @app.post("/api/positions/track")
     def api_track(body: "TrackBody") -> JSONResponse:

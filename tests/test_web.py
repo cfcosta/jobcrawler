@@ -1202,3 +1202,98 @@ async def test_dashboard_top_matches_only_attainable_rows() -> None:
             assert encode_pid("board", "https://c.test/fenced") not in html
     finally:
         s.close()
+
+
+# -- §4.12 structured locations on the web surface -----------------------------
+
+
+def _loc_store() -> StateStore:
+    """Three rows spanning the projection shapes: a resolved place (display carries
+    the English country name), an explicit fence, and a bare marker (no projection,
+    display NULL → raw-string fallback)."""
+    s = StateStore(":memory:")
+    rows = [
+        ("https://acme.test/sp", "São Paulo, Brasil", "hybrid", "SP Engineer"),
+        ("https://acme.test/fenced", "Remote - US", "hybrid", "Fenced Engineer"),
+        ("https://acme.test/bare", "Remote", "remote", "Bare Engineer"),
+    ]
+    for url, loc, wp, title in rows:
+        s.upsert_position(
+            "acme",
+            url,
+            fields={**FIELDS, "title": title, "location": loc, "workplace": wp},
+            content_hash=url,
+        )
+        s.refresh_position_locations(
+            "acme", url, location=loc, workplace=wp, force=True
+        )
+    return s
+
+
+async def test_positions_rows_render_location_display_first() -> None:
+    store = _loc_store()
+    try:
+        async with _client(create_app(store)) as c:
+            html = (await c.get("/positions")).text
+            assert "São Paulo, Brazil" in html  # display, not the raw 'Brasil'
+            assert "Remote (United States)" in html  # the fence made visible
+    finally:
+        store.close()
+
+
+async def test_country_and_remote_in_filters_flow_through_the_form() -> None:
+    store = _loc_store()
+    try:
+        async with _client(create_app(store)) as c:
+            html = (await c.get("/positions?country=br")).text
+            assert "SP Engineer" in html
+            assert "Fenced Engineer" not in html
+            html = (await c.get("/positions?remote_in=us")).text
+            assert "Fenced Engineer" in html
+            assert "SP Engineer" not in html
+            # the form inputs round-trip the active values
+            assert 'name="country"' in html and 'value="us"' in html
+    finally:
+        store.close()
+
+
+async def test_api_carries_structured_location_keys() -> None:
+    store = _loc_store()
+    try:
+        async with _client(create_app(store)) as c:
+            rows = (await c.get("/api/positions")).json()
+            by_title = {r["title"]: r for r in rows}
+            assert by_title["SP Engineer"]["location_display"] == "São Paulo, Brazil"
+            assert by_title["Bare Engineer"]["location_display"] is None
+            pid = by_title["Fenced Engineer"]["pid"]
+            detail = (await c.get(f"/api/positions/{pid}")).json()
+            assert detail["location_display"] == "Remote (United States)"
+            assert detail["locations"] == [
+                {
+                    "kind": "remote_fence",
+                    "city": None,
+                    "subdivision": None,
+                    "country": "US",
+                    "macro_region": None,
+                    "display": "Remote (United States)",
+                    "source": "rules",
+                    "confidence": "high",
+                }
+            ]
+    finally:
+        store.close()
+
+
+async def test_detail_page_shows_locations_panel_and_display_provenance() -> None:
+    store = _loc_store()
+    try:
+        async with _client(create_app(store)) as c:
+            pid = encode_pid("acme", "https://acme.test/fenced")
+            html = (await c.get(f"/positions/{pid}")).text
+            # header + Locations panel carry the resolved fence; provenance keeps
+            # raw and normalized AND now names the display form.
+            assert html.count("Remote (United States)") >= 2
+            assert "Location (display)" in html
+            assert "Remote - US" in html  # raw provenance row unchanged
+    finally:
+        store.close()

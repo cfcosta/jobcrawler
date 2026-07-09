@@ -2275,6 +2275,59 @@ def test_backfill_locations_sweeps_a_legacy_db(tmp_path: object) -> None:
         s3.close()
 
 
+def test_search_positions_country_and_remote_in_filters(store: StateStore) -> None:
+    # §4.12 structured filters: country= matches any resolved place or fence;
+    # remote_in= is kind-scoped (an office place never satisfies it), expands
+    # macros through geo_region_members, and worldwide matches every country.
+    rows = [
+        ("berlin", "Berlin, Germany", "hybrid"),
+        ("fenced-us", "Remote - US", "remote"),
+        ("emea", "Home based - EMEA", "remote"),
+        ("anywhere", "Anywhere in the World", "remote"),
+        ("mystery", "Zorgville", "remote"),
+    ]
+    for url, loc, wp in rows:
+        store.upsert_position(
+            "acme",
+            url,
+            fields={**FIELDS, "location": loc, "workplace": wp},
+            content_hash=url,
+        )
+        store.refresh_position_locations(
+            "acme", url, location=loc, workplace=wp, force=True
+        )
+
+    def urls(
+        *, country: str | None = None, remote_in: str | None = None
+    ) -> list[str]:
+        return sorted(
+            r.url
+            for r in store.search_positions(country=country, remote_in=remote_in)
+        )
+
+    assert urls(country="DE") == ["berlin"]
+    assert urls(country="de") == ["berlin"]  # case-folded
+    assert urls(country="US") == ["fenced-us"]
+    assert urls(remote_in="DE") == ["anywhere", "emea"]  # EMEA expands; office DE doesn't
+    assert urls(remote_in="US") == ["anywhere", "fenced-us"]
+    assert urls(remote_in="BR") == ["anywhere"]
+    assert urls(country="ES") == []
+
+
+def test_search_query_bridges_synonyms_through_location_display(
+    store: StateStore,
+) -> None:
+    # Raw says 'Brasil'; the projection's display carries the English country name,
+    # so q='brazil' now finds the row even with location_normalized unset.
+    store.upsert_position(
+        "acme", "sp", fields={**FIELDS, "location": "São Paulo, Brasil"}, content_hash="h"
+    )
+    store.refresh_position_locations(
+        "acme", "sp", location="São Paulo, Brasil", workplace="hybrid", force=True
+    )
+    assert [r.url for r in store.search_positions("brazil")] == ["sp"]
+
+
 def test_search_positions_salary_sort_and_filter_are_usd_coherent(
     store: StateStore,
 ) -> None:

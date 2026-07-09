@@ -5,7 +5,7 @@
 
   <header class="detail-head">
     <h1>{{ p.title }}</h1>
-    <p class="sub">{% if p.company_canonical %}<a href="/positions?company_canonical={{ p.company_canonical | urlencode }}">{{ p.hiring_company or p.company }}</a>{% else %}{{ p.hiring_company or p.company }}{% endif %} · {{ p.location_normalized or p.location }}{% if p.workplace %} · {{ p.workplace }}{% if p.remote_scope == 'anywhere' %} <span class="scope scope-anywhere" title="Open to candidates anywhere">anywhere</span>{% elif p.remote_scope == 'restricted' %} <span class="scope scope-restricted" title="Remote but geographically restricted — see location">restricted</span>{% endif %}{% endif %}{% if p.relocation == 'offered' %} <span class="scope scope-relo" title="Relocation or visa support mentioned in the posting">relocation</span>{% endif %}</p>
+    <p class="sub">{% if p.company_canonical %}<a href="/positions?company_canonical={{ p.company_canonical | urlencode }}">{{ p.hiring_company or p.company }}</a>{% else %}{{ p.hiring_company or p.company }}{% endif %} · {{ p.location_display or p.location_normalized or p.location }}{% if p.workplace %} · {{ p.workplace }}{% if p.remote_scope == 'anywhere' %} <span class="scope scope-anywhere" title="Open to candidates anywhere">anywhere</span>{% elif p.remote_scope == 'restricted' %} <span class="scope scope-restricted" title="Remote but geographically restricted — see location">restricted</span>{% endif %}{% endif %}{% if p.relocation == 'offered' %} <span class="scope scope-relo" title="Relocation or visa support mentioned in the posting">relocation</span>{% endif %}</p>
     <p class="meta">
       <span class="lifecycle lc-{{ p.status }}">{{ p.status }}</span>
       {% if p.match_score is not none %}<span class="score-chip band-{{ score_band(p) }}" title="freshness-adjusted; base fit {{ p.match_score }}">{{ score_of(p) }}{% if p.match_verdict %} · {{ p.match_verdict }}{% endif %}</span>{% endif %}
@@ -108,7 +108,7 @@
     <ul class="siblings">
       {% for v in role_variants %}
       <li>
-        <a href="/positions/{{ encode_pid(v.site, v.url) }}">{{ v.location_normalized or v.location or 'Location unlisted' }}</a>
+        <a href="/positions/{{ encode_pid(v.site, v.url) }}">{{ v.location_display or v.location_normalized or v.location or 'Location unlisted' }}</a>
         <span class="tag">{{ site_names.get(v.site, v.site) }}</span>
         {% if v.match_score is not none %}<span class="score-chip band-{{ score_band(v) }}" title="this variant's score">{{ score_of(v) }}</span>{% endif %}
         {% if v.applied_at %}<span class="tag">applied</span>{% endif %}
@@ -118,6 +118,24 @@
       {% endfor %}
     </ul>
     <p class="empty">Same title at this company, different locations — each is a separate posting; apply to the one that fits.</p>
+  </section>
+  {% endif %}
+
+  {# ---- Locations (§4.12): resolved places + remote eligibility -------- #}
+  {% if locations %}
+  <section class="panel">
+    <h2>Locations</h2>
+    <ul class="siblings">
+      {% for l in locations %}
+      <li>
+        {% if l.kind == 'place' %}<span class="tag">{{ l.display }}</span>
+        {% elif l.kind == 'remote_anywhere' %}<span class="scope scope-anywhere" title="The posting states work-from-anywhere">{{ l.display }}</span>
+        {% else %}<span class="scope scope-restricted" title="Remote work limited to this geography">{{ l.display }}</span>{% endif %}
+        {% if l.kind != 'place' %}<span class="tag">remote eligibility</span>{% endif %}
+        {% if l.source != 'rules' %}<span class="tag" title="Read by the §4.7 extract pass, not the rules parser">LLM</span>{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
   </section>
   {% endif %}
 
@@ -169,6 +187,7 @@
       <dt>Company (canonical)</dt><dd>{{ p.company_canonical or '—' }}</dd>
       <dt>Location (raw)</dt><dd>{{ p.location }}</dd>
       <dt>Location (normalized)</dt><dd>{{ p.location_normalized or '—' }}</dd>
+      <dt>Location (display)</dt><dd>{{ p.location_display or '—' }}</dd>
       <dt>Posted</dt><dd>{{ p.posted_at | date }}</dd>
       <dt>Expires</dt><dd>{{ p.expires_at | date }}</dd>
       <dt>First seen</dt><dd>{{ p.first_seen | date }}</dd>
