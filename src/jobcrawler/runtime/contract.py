@@ -35,9 +35,9 @@ from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime
 from typing import Protocol, cast, runtime_checkable
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-from jobcrawler.urls import normalize_host
+from jobcrawler.urls import normalize_host, sanitize_apply_url
 
 
 class Job(BaseModel):
@@ -81,6 +81,16 @@ class Job(BaseModel):
     # Stable ATS identity + the canonical apply link.
     external_id: str | None = None  # stable ATS id, when the source exposes one
     apply_url: str | None = None
+
+    @field_validator("apply_url", mode="after")
+    @classmethod
+    def _sanitize_apply_url(cls, v: str | None) -> str | None:
+        """Coerce ``apply_url`` to the stored contract: an absolute ``http(s)``/``mailto:``
+        link, a bare email promoted to ``mailto:``, else ``None`` (a relative, obfuscated,
+        or whitespace value is dropped). See :func:`jobcrawler.urls.sanitize_apply_url` — a
+        raw email or fragment would otherwise render as a relative ``<a href>`` that 404s
+        under ``/positions/…`` in the §16 UI."""
+        return sanitize_apply_url(v)
 
 
 @runtime_checkable

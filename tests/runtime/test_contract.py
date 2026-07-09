@@ -96,6 +96,21 @@ def test_job_accepts_all_optional_fields() -> None:
     assert job.apply_url == "https://x.com/apply/1"
 
 
+def test_apply_url_is_sanitized_to_the_stored_contract() -> None:
+    # A bare email (an email-apply posting) is promoted to mailto: so the §16 UI
+    # renders a working link instead of a relative <a href> that 404s.
+    email = Job.model_validate({**_fields(), "apply_url": "careers@velixuslabs.com"})
+    assert email.apply_url == "mailto:careers@velixuslabs.com"
+    # Leading whitespace is trimmed; an already-absolute link survives.
+    spaced = Job.model_validate({**_fields(), "apply_url": " https://airtable.com/f "})
+    assert spaced.apply_url == "https://airtable.com/f"
+    # A relative/obfuscated fragment is unusable as a link → dropped to None.
+    junk = Job.model_validate(
+        {**_fields(), "apply_url": "/cdn-cgi/l/email-protection#a"}
+    )
+    assert junk.apply_url is None
+
+
 @pytest.mark.parametrize("missing", _REQUIRED)
 def test_job_rejects_missing_required(missing: str) -> None:
     fields = _fields()

@@ -140,3 +140,35 @@ def valid_on_domain_url(url: str, allowed: Collection[str]) -> bool:
     if parts.scheme not in ("http", "https") or not parts.hostname:
         return False
     return host_on_domain(parts.hostname, allowed)
+
+
+# A bare email address (``local@domain.tld``, no scheme/whitespace/path) — the shape an
+# email-apply posting yields when the source prints an address rather than an <a href>.
+_BARE_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def sanitize_apply_url(apply_url: str | None) -> str | None:
+    """Coerce a crawler's raw ``apply_url`` into a valid clickable link, or ``None``.
+
+    The stored ``apply_url`` contract — assumed by the §16 web UI's ``<a href>`` and the
+    apply-page resolver — is: an absolute ``http(s)`` or ``mailto:`` URL, else ``None``;
+    never a bare email or a relative fragment. A crawler that reads an application address
+    off a page can hand back a raw ``careers@acme.com`` (an email-apply posting) or a
+    stray-whitespace URL; stored verbatim, the template renders it as a *relative* link
+    that resolves under ``/positions/…`` and 404s.
+
+    So: trim; keep an already-absolute ``http(s)``/``mailto:`` link; promote a bare email
+    to ``mailto:``; drop anything else (a relative path, a Cloudflare email-protection
+    stub, junk). A missing apply link is strictly better than a broken one — the
+    posting's own ``url`` stays the fallback everywhere.
+    """
+    if not apply_url:
+        return None
+    raw = apply_url.strip()
+    if not raw:
+        return None
+    if raw.lower().startswith(("http://", "https://", "mailto:")):
+        return raw
+    if _BARE_EMAIL.match(raw):
+        return "mailto:" + raw
+    return None

@@ -14,6 +14,7 @@ from jobcrawler.urls import (
     canonicalize_url,
     host_on_domain,
     normalize_host,
+    sanitize_apply_url,
     valid_on_domain_url,
 )
 
@@ -137,3 +138,43 @@ def test_valid_on_domain_url() -> None:
     assert not valid_on_domain_url("https://evil.com/x", {"example.com"})
     assert not valid_on_domain_url("ftp://example.com/x", {"example.com"})
     assert not valid_on_domain_url("not a url", {"example.com"})
+
+
+def test_sanitize_apply_url_keeps_absolute_links() -> None:
+    assert sanitize_apply_url("https://boards.greenhouse.io/acme/1") == (
+        "https://boards.greenhouse.io/acme/1"
+    )
+    assert sanitize_apply_url("http://acme.test/apply") == "http://acme.test/apply"
+    assert sanitize_apply_url("mailto:jobs@acme.com") == "mailto:jobs@acme.com"
+    # scheme match is case-insensitive; the value itself is preserved verbatim.
+    assert sanitize_apply_url("HTTPS://Acme.test/Apply") == "HTTPS://Acme.test/Apply"
+
+
+def test_sanitize_apply_url_promotes_bare_email_to_mailto() -> None:
+    assert (
+        sanitize_apply_url("careers@velixuslabs.com")
+        == "mailto:careers@velixuslabs.com"
+    )
+    assert (
+        sanitize_apply_url("lucas@blockpact.capital")
+        == "mailto:lucas@blockpact.capital"
+    )
+
+
+def test_sanitize_apply_url_trims_whitespace() -> None:
+    assert sanitize_apply_url("  https://airtable.com/app/form  ") == (
+        "https://airtable.com/app/form"
+    )
+    assert sanitize_apply_url("  careers@acme.com ") == "mailto:careers@acme.com"
+
+
+def test_sanitize_apply_url_drops_unusable_values() -> None:
+    # A relative fragment (renders as a broken /positions/... link), a Cloudflare
+    # email-protection stub, non-http schemes, and empties all become None.
+    assert sanitize_apply_url("/cdn-cgi/l/email-protection#abc") is None
+    assert sanitize_apply_url("/apply") is None
+    assert sanitize_apply_url("ftp://acme.test/x") is None
+    assert sanitize_apply_url("just some text") is None
+    assert sanitize_apply_url("") is None
+    assert sanitize_apply_url("   ") is None
+    assert sanitize_apply_url(None) is None
