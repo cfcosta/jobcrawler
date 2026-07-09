@@ -1130,3 +1130,41 @@ async def test_dashboard_top_matches_collapse_role_variants() -> None:
             assert pid_ny not in html  # its sibling folded into it
     finally:
         store.close()
+
+
+async def test_dashboard_top_matches_one_card_per_company() -> None:
+    # Two scored roles at one employer are genuinely separate leads, but the
+    # shortlist shows only the company's best; another company keeps its slot,
+    # and unattributed rows (blank company) never fold into each other.
+    s = StateStore(":memory:")
+    for url, title, company, ch in [
+        ("https://acme.test/platform", "Platform Engineer", "Acme", "c1"),
+        ("https://acme.test/support", "Support Engineer", "Acme", "c2"),
+        ("https://beta.test/eng", "Engineer", "Beta", "c3"),
+        ("https://mystery.test/1", "Ghost Role A", "", "c4"),
+        ("https://mystery.test/2", "Ghost Role B", "", "c5"),
+    ]:
+        s.upsert_position(
+            "board",
+            url,
+            fields={**FIELDS, "title": title, "company": company},
+            content_hash=ch,
+        )
+    for url, score in [
+        ("https://acme.test/platform", 90),
+        ("https://acme.test/support", 80),
+        ("https://beta.test/eng", 70),
+        ("https://mystery.test/1", 65),
+        ("https://mystery.test/2", 62),
+    ]:
+        s.set_match("board", url, score=score, verdict="strong", reasons="[]")
+    try:
+        async with _client(create_app(s)) as c:
+            html = (await c.get("/")).text
+            assert encode_pid("board", "https://acme.test/platform") in html
+            assert encode_pid("board", "https://acme.test/support") not in html
+            assert encode_pid("board", "https://beta.test/eng") in html
+            assert encode_pid("board", "https://mystery.test/1") in html
+            assert encode_pid("board", "https://mystery.test/2") in html
+    finally:
+        s.close()

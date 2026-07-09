@@ -637,7 +637,10 @@ recomputed host-side on every upsert and kept **out** of `content_hash` (which h
 `company`), so refreshing it never forces a re-dedup or a match-cache miss. It backs the top-matches
 rule "show a company's roles only until I've applied to one of them": `matches(exclude_company_applied=…)`
 drops every open row whose canonical company already has an `applied_at` stamp — most employers accept
-one application company-wide, so a second lead at a company you're already in is noise. Grouping
+one application company-wide, so a second lead at a company you're already in is noise. The dashboard
+shortlist leans on the same key from the other side: at most one card per company — its best-effective-fit
+row — since eight slots read further when each names a different employer (every role stays in
+`/positions`; a blank key never groups). Grouping
 COALESCEs the key to `lower(company)` for rows written before the column existed (they converge on
 their next crawl), and an empty key groups with nothing. Company grouping is orthogonal to the §17
 *job-identity* overlay: this folds a company's many roles; §17 folds one role's many board copies.

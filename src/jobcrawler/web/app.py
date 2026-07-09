@@ -45,6 +45,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from jobcrawler import config, tracking
+from jobcrawler.runtime.dedup import company_key
 from jobcrawler.state import PositionRecord, StateStore
 
 _log = logging.getLogger("jobcrawler.web")
@@ -741,6 +742,37 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
             },
         ]
 
+        # §17: the shortlist collapses clusters AND role groups (gated on the UI
+        # consumer flag) — inherited verdicts give every sibling a score, so
+        # without this one strong job fills the list via its board copies and
+        # location variants. On top of that, one card per employer: distinct
+        # roles at one company are genuinely separate leads (nothing here merges
+        # them), but eight slots read further when a company's best role stands
+        # for it. matches() ranks best-effective-fit-first, so the first row per
+        # company key IS that best; a blank key is an unattributed row and never
+        # groups (the applied-company exclusion's convention). limit=64 is
+        # bounded over-fetch headroom for prolific employers, not a page size.
+        top_matches: list[PositionRecord] = []
+        seen_companies: set[str] = set()
+        for rec in store.matches(
+            0,
+            limit=64,
+            exclude_applied=True,
+            exclude_dismissed=True,
+            exclude_company_applied=True,
+            collapse_duplicates=ui_on,
+            exclude_cluster_handled=ui_on,
+            collapse_role_groups=ui_on,
+        ):
+            ck = company_key(rec.company, rec.company_canonical)
+            if ck in seen_companies:
+                continue
+            if ck:
+                seen_companies.add(ck)
+            top_matches.append(rec)
+            if len(top_matches) >= 8:
+                break
+
         return templates.TemplateResponse(
             request=request,
             name="dashboard.html",
@@ -752,20 +784,7 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
                 "dismissed": tcounts.get("dismissed", 0),
                 "lifecycle": lifecycle,
                 "distribution": distribution,
-                # §17: the top-8 collapses clusters AND role groups (gated on the UI
-                # consumer flag) — inherited verdicts give every sibling a score, so
-                # without this one strong job fills the list via its board copies and
-                # location variants.
-                "top_matches": store.matches(
-                    0,
-                    limit=8,
-                    exclude_applied=True,
-                    exclude_dismissed=True,
-                    exclude_company_applied=True,
-                    collapse_duplicates=ui_on,
-                    exclude_cluster_handled=ui_on,
-                    collapse_role_groups=ui_on,
-                ),
+                "top_matches": top_matches,
                 "coverage": {
                     "total": len(visible) + len(idle),
                     "counts": cov_counts,
