@@ -195,6 +195,12 @@ class PositionRecord:
     notes: str | None
     dismissed: bool
     track_updated_at: datetime | None
+    # §4.12 structured locations: the crawler's raw multi-location array (JSON text),
+    # the store-derived canonical display summary, and the extract-pass answer stamp.
+    # All three read None on queries that predate the columns' SELECT list.
+    locations_json: str | None = None
+    location_display: str | None = None
+    loc_llm_at: datetime | None = None
     # §17 verdict provenance: 'llm' | 'cache' | 'cluster:<site>\n<url>' | None (legacy
     # rows). Inherited verdicts are excluded from trainsets and reversible in bulk.
     match_origin: str | None = None
@@ -384,6 +390,61 @@ CREATE TABLE IF NOT EXISTS identity_key_blocklist (
     reason     TEXT,
     created_at TEXT NOT NULL
 );
+-- §4.12 structured locations: the value-keyed parse ledger. One row per EXACT raw
+-- location string as served by one site (a positions.location value or one element
+-- of positions.locations_json); keyed (site, value) so an LLM fill for an ambiguous
+-- site-specific format never leaks to another board's identical string.
+-- parse_source='rules' rows are DISPOSABLE (re-derived on any GEO_PARSER_VERSION
+-- bump); parse_source='llm' rows are DURABLE facts paid once via the §4.7 extract
+-- pass and reused by every posting that ever carries the same string. Immune to
+-- crawl-upsert clobber by construction — no crawl path writes here.
+CREATE TABLE IF NOT EXISTS location_values (
+    site           TEXT NOT NULL,
+    value          TEXT NOT NULL,
+    places_json    TEXT NOT NULL DEFAULT '[]',
+    fence_json     TEXT NOT NULL DEFAULT '[]',
+    remote_marker  INTEGER NOT NULL DEFAULT 0,
+    worldwide      INTEGER NOT NULL DEFAULT 0,
+    parse_quality  TEXT NOT NULL,
+    parse_source   TEXT NOT NULL DEFAULT 'rules',
+    parser_version INTEGER NOT NULL,
+    llm_model      TEXT,
+    parsed_at      TEXT NOT NULL,
+    PRIMARY KEY (site, value)
+);
+-- §4.12 per-position resolved places: a presentation/filter overlay in the §17
+-- style — source='rules' rows are a disposable projection of positions ×
+-- location_values, rebuilt at any time; source='llm' rows are POSTING-LOCAL facts
+-- (description-derived fences) purged when the posting's content changes.
+-- kind: 'place' | 'remote_fence' | 'remote_anywhere'; country: ISO 3166-1 alpha-2
+-- UPPER (NULL when unresolved); macro_region: a geo.MACRO_KEYS key; display: the
+-- canonical human form with full English country names ("São Paulo, Brazil",
+-- "Remote (United States)"). Matching, notify, lifecycle, and dedup never read it.
+CREATE TABLE IF NOT EXISTS position_locations (
+    site         TEXT NOT NULL,
+    url          TEXT NOT NULL,
+    seq          INTEGER NOT NULL,
+    kind         TEXT NOT NULL,
+    city         TEXT,
+    subdivision  TEXT,
+    country      TEXT,
+    macro_region TEXT,
+    display      TEXT NOT NULL,
+    source       TEXT NOT NULL DEFAULT 'rules',
+    confidence   TEXT NOT NULL DEFAULT 'high',
+    raw_fragment TEXT,
+    PRIMARY KEY (site, url, seq)
+);
+CREATE INDEX IF NOT EXISTS pl_by_country ON position_locations (country, kind);
+-- §4.12 macro-region membership (geo.GEO_REGION_MEMBERS materialized for SQL):
+-- powers macro-expanded remote_in= filters. Reseeded whole (DELETE + INSERT)
+-- whenever GEO_REGION_SEED_VERSION moves — approximate recall data, never
+-- eligibility truth.
+CREATE TABLE IF NOT EXISTS geo_region_members (
+    region  TEXT NOT NULL,
+    country TEXT NOT NULL,
+    PRIMARY KEY (region, country)
+);
 """
 
 # Columns of ``positions`` the runner supplies per crawl via ``upsert_position(fields=)``.
@@ -419,6 +480,12 @@ _POSITION_FIELDS: frozenset[str] = frozenset(
         "department",
         "posted_at",
         "expires_at",
+        # §4.12 crawler-supplied raw multi-location array (JSON list of verbatim
+        # strings, e.g. Greenhouse offices[] / Lever allLocations). Crawler-owned
+        # like `location` itself — always refreshed by the crawl; the DERIVED
+        # location surfaces (location_display, position_locations) are store-owned
+        # and deliberately absent from this set.
+        "locations_json",
     }
 )
 
@@ -487,6 +554,18 @@ _POSITION_ADD_COLUMNS: tuple[tuple[str, str], ...] = (
     ("notes", "TEXT"),
     ("dismissed", "INTEGER NOT NULL DEFAULT 0"),
     ("track_updated_at", "TEXT"),
+    # §4.12 crawler-supplied raw multi-location array (in _POSITION_FIELDS, refreshed
+    # every crawl). Nullable; rows from boards whose crawler predates the field read
+    # NULL and parse from the flat `location` string alone.
+    ("locations_json", "TEXT"),
+    # §4.12 canonical display summary derived from the parsed places — store-owned
+    # (NOT in _POSITION_FIELDS: the hiring_company pattern), kept out of content_hash,
+    # NULL falls back to location_normalized/location in every renderer.
+    ("location_display", "TEXT"),
+    # §4.12 stamp: the §4.7 extract pass answered a location question for this
+    # posting (EVEN an empty answer), so the marker-arm gate never re-selects it.
+    # Store-owned; reset when the posting's content changes.
+    ("loc_llm_at", "TEXT"),
 )
 
 
@@ -671,6 +750,29 @@ class StateStore:
         self._backfill_salary_usd()
         self._backfill_relocation()
         self._backfill_notify_ledger()
+        self._seed_geo_regions()
+
+    def _seed_geo_regions(self) -> None:
+        """Materialize geo.GEO_REGION_MEMBERS into SQL (§4.12), reseeding on version bumps.
+
+        The whole table is a projection of the in-code dict — DELETE + INSERT keeps it
+        byte-faithful (stale members from an older vocabulary can't linger), and the meta
+        guard makes every later open a no-op until GEO_REGION_SEED_VERSION moves.
+        """
+        from jobcrawler.runtime import geo
+
+        if self.get_meta("geo_region_seed_version") == str(geo.GEO_REGION_SEED_VERSION):
+            return
+        self._conn.execute("DELETE FROM geo_region_members")
+        self._conn.executemany(
+            "INSERT OR IGNORE INTO geo_region_members (region, country) VALUES (?, ?)",
+            [
+                (region, country)
+                for region, members in geo.GEO_REGION_MEMBERS.items()
+                for country in members
+            ],
+        )
+        self.set_meta("geo_region_seed_version", str(geo.GEO_REGION_SEED_VERSION))
 
     def _backfill_notify_ledger(self, *, force: bool = False) -> None:
         """One-time §17 notify-ledger seed: pre-feature strong matches count as notified.
@@ -2835,6 +2937,13 @@ def _to_position(row: sqlite3.Row) -> PositionRecord:
         notes=row["notes"],
         dismissed=bool(row["dismissed"]),
         track_updated_at=_dt("track_updated_at"),
+        locations_json=(
+            row["locations_json"] if "locations_json" in row.keys() else None
+        ),
+        location_display=(
+            row["location_display"] if "location_display" in row.keys() else None
+        ),
+        loc_llm_at=(_dt("loc_llm_at") if "loc_llm_at" in row.keys() else None),
         match_origin=(row["match_origin"] if "match_origin" in row.keys() else None),
         # Present only when the query computed it (matches/search/get_position, §6).
         effective_score=(

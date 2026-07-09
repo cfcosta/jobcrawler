@@ -1869,6 +1869,83 @@ def test_migration_backfills_relocation(tmp_path: object) -> None:
         s.close()
 
 
+def test_migration_adds_structured_location_surfaces(tmp_path: object) -> None:
+    # §4.12: opening a legacy DB must ALTER-in the three structured-location columns,
+    # create the ledger/projection/region tables, and seed geo_region_members from the
+    # in-code dict (meta-versioned so a GEO_REGION_SEED_VERSION bump reseeds).
+    db = f"{tmp_path}/legacy.db"  # type: ignore[str-bytes-safe]
+    raw = sqlite3.connect(db)
+    raw.executescript(
+        """
+        CREATE TABLE positions (
+            site TEXT NOT NULL, url TEXT NOT NULL, content_hash TEXT NOT NULL,
+            title TEXT NOT NULL, company TEXT NOT NULL, location TEXT NOT NULL,
+            first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
+            PRIMARY KEY (site, url)
+        );
+        INSERT INTO positions (site, url, content_hash, title, company, location, first_seen, last_seen)
+        VALUES ('acme', 'u', 'h', 'T', 'C', 'Berlin, Germany',
+            '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
+        """
+    )
+    raw.commit()
+    raw.close()
+
+    s = StateStore(db)
+    try:
+        cols = {row["name"] for row in s._conn.execute("PRAGMA table_info(positions)")}
+        assert {"locations_json", "location_display", "loc_llm_at"} <= cols
+        tables = {
+            row["name"]
+            for row in s._conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        assert {"location_values", "position_locations", "geo_region_members"} <= tables
+        assert s._conn.execute(
+            "SELECT 1 FROM geo_region_members WHERE region = 'eu' AND country = 'DE'"
+        ).fetchone()
+        assert s.get_meta("geo_region_seed_version") is not None
+        # Reseed on version change: a poisoned table heals at the next open.
+        s._conn.execute("DELETE FROM geo_region_members WHERE region = 'eu' AND country = 'DE'")
+        s._conn.execute("INSERT INTO geo_region_members (region, country) VALUES ('eu', 'ZZ')")
+        s.set_meta("geo_region_seed_version", "0")
+        s._conn.commit()
+    finally:
+        s.close()
+
+    s2 = StateStore(db)
+    try:
+        assert s2._conn.execute(
+            "SELECT 1 FROM geo_region_members WHERE region = 'eu' AND country = 'DE'"
+        ).fetchone()
+        assert not s2._conn.execute(
+            "SELECT 1 FROM geo_region_members WHERE country = 'ZZ'"
+        ).fetchone()
+    finally:
+        s2.close()
+
+
+def test_upsert_accepts_locations_json_and_the_record_reads_it_back(
+    store: StateStore,
+) -> None:
+    # locations_json is crawler-owned (in _POSITION_FIELDS); location_display and
+    # loc_llm_at are store-owned and must NOT be settable through a crawl upsert.
+    store.upsert_position(
+        "acme",
+        "u",
+        fields={
+            **FIELDS,
+            "locations_json": '["Berlin", "London"]',
+            "location_display": "sneaky",
+            "loc_llm_at": "sneaky",
+        },
+        content_hash="h",
+    )
+    rec = store.open_positions("acme")[0]
+    assert rec.locations_json == '["Berlin", "London"]'
+    assert rec.location_display is None
+    assert rec.loc_llm_at is None
+
+
 def test_search_positions_salary_sort_and_filter_are_usd_coherent(
     store: StateStore,
 ) -> None:
