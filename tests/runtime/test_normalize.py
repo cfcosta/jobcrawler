@@ -440,6 +440,39 @@ def test_parse_salary_description_rate_markers_still_fire() -> None:
     assert parsed.period == "hour"
 
 
+def test_salary_from_fields_normalizes_stated_period_vocab() -> None:
+    # Ashby serves intervals as '1 MONTH'/'1 YEAR'/'1 HOUR'; crawlers pass them
+    # as stated and the host maps them (§4.6 fix-once-fleet-wide). A stated
+    # period we cannot map refuses the figure — defaulting it would mislabel.
+    monthly = enrich(
+        _job(
+            salary_min=8000.0,
+            salary_max=10000.0,
+            salary_currency="SGD",
+            salary_period="1 MONTH",
+        )
+    )
+    assert monthly.salary is not None and monthly.salary.period == "month"
+    yearly = enrich(
+        _job(
+            salary_min=100000.0,
+            salary_max=120000.0,
+            salary_currency="USD",
+            salary_period="Annual",
+        )
+    )
+    assert yearly.salary is not None and yearly.salary.period == "year"
+    odd = enrich(
+        _job(
+            salary_min=1000.0,
+            salary_max=2000.0,
+            salary_currency="USD",
+            salary_period="biweekly",
+        )
+    )
+    assert odd.salary is None
+
+
 def test_salary_from_fields_refuses_zero_and_negative_bounds() -> None:
     # devjobsscanner-style APIs send salaryMin=0 for "unstated" — zero is
     # absence, never a floor.

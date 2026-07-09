@@ -57,7 +57,7 @@ def _salary_from_compensation(comp):
     if currencies:
         salary["salary_currency"] = currencies[0]
     if intervals:
-        salary["salary_interval"] = intervals[0]
+        salary["salary_period"] = intervals[0]
     return salary
 
 

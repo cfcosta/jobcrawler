@@ -1229,6 +1229,21 @@ def _default_period(currency: str) -> str:
     return "month" if currency == "BRL" else "year"
 
 
+# The stated-period vocabulary crawlers pass through as-is (§4.6): the closed
+# contract values plus the wordings ATS APIs actually serve (Ashby '1 YEAR').
+_STATED_PERIODS: dict[str, str] = {
+    "year": "year", "1 year": "year", "yearly": "year", "annual": "year",
+    "annually": "year", "per year": "year",
+    "month": "month", "1 month": "month", "monthly": "month", "per month": "month",
+    "hour": "hour", "1 hour": "hour", "hourly": "hour", "per hour": "hour",
+}
+
+
+def _normalize_stated_period(raw: str) -> str | None:
+    """Map a crawler-stated period wording onto year|month|hour, else None."""
+    return _STATED_PERIODS.get(raw.strip().lower())
+
+
 def parse_salary(raw: str, description: str = "") -> SalaryRange | None:
     """Extract a :class:`SalaryRange` from verbatim salary text, or ``None``.
 
@@ -1368,7 +1383,14 @@ def _salary_from_fields(job: Job) -> SalaryRange | None:
     if lo > hi:
         lo, hi = hi, lo
     currency = job.salary_currency or ""
-    period = job.salary_period or _default_period(currency)
+    if job.salary_period:
+        # Stated wordings map through the closed vocabulary; one we can't map
+        # (biweekly, per-day) refuses the figure — defaulting would mislabel.
+        period = _normalize_stated_period(job.salary_period)
+        if period is None:
+            return None
+    else:
+        period = _default_period(currency)
     return SalaryRange(float(lo), float(hi), currency, period)
 
 

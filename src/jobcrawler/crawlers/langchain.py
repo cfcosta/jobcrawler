@@ -76,7 +76,7 @@ def crawl(ctx):
                 _set_if_present(out, "salary_min", min_value)
                 _set_if_present(out, "salary_max", max_value)
                 _set_if_present(out, "salary_currency", currency)
-                _set_if_present(out, "salary_interval", interval)
+                _set_if_present(out, "salary_period", interval)
                 break
 
         yield out

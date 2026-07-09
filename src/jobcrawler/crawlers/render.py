@@ -45,7 +45,7 @@ def _salary_fields(job):
         if currency:
             fields["salary_currency"] = currency
         if interval:
-            fields["salary_interval"] = interval
+            fields["salary_period"] = interval
         return fields
     return {}
 

@@ -70,7 +70,7 @@ def _compensation(job):
     if currency:
         out["salary_currency"] = currency
     if interval:
-        out["salary_interval"] = interval
+        out["salary_period"] = interval
     return out
 
 def crawl(ctx):

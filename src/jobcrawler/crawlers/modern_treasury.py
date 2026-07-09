@@ -46,7 +46,7 @@ def _salary(job):
             "salary_min": component.get("minValue"),
             "salary_max": component.get("maxValue"),
             "salary_currency": component.get("currencyCode"),
-            "salary_interval": component.get("interval"),
+            "salary_period": component.get("interval"),
         }
     return {}
 

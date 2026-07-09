@@ -69,7 +69,7 @@ def _job_record(job):
             if currency:
                 record["salary_currency"] = currency
             if interval:
-                record["salary_interval"] = interval
+                record["salary_period"] = interval
             if min_value is not None or max_value is not None or currency or interval:
                 break
 

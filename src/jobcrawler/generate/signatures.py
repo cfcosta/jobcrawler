@@ -36,7 +36,11 @@ class GenerateCrawler(dspy.Signature):
            * Greenhouse: boards-api.greenhouse.io/v1/boards/<token>/jobs?content=true
              — whole board in one call (meta.total); ``content`` is the FULL
              description but HTML-entity-ESCAPED, so html.unescape() then strip
-             tags; location.name is one flattened string; no salary fields.
+             tags; location.name is one flattened string. Append
+             &pay_transparency=true to the SAME call: many boards then serve
+             per-job ``pay_input_ranges`` [{min_cents, max_cents, currency_type}]
+             — map cents/100 into the structured salary quartet (single-currency
+             boards only; skip when ranges mix currencies).
            * Lever: api.lever.co/v0/postings/<token>?mode=json — ``description`` is
              the INTRO ONLY; reconstruct the full body as
              description + every lists[].content + additional; workplaceType and
@@ -79,7 +83,13 @@ class GenerateCrawler(dspy.Signature):
     categories.allLocations, Ashby location + secondaryLocations[].location,
     Workable locations[]), pass EVERY element verbatim as ``locations`` (a list
     of strings) instead of joining them — ``location`` stays the source's primary
-    display string, and the host parses each element (§4.12). NEVER fabricate a
+    display string, and the host parses each element (§4.12). Structured
+    compensation maps onto EXACTLY these Job fields:
+    salary_min/salary_max/salary_currency/salary_period (never `salary_interval`
+    or any other invented key — unknown keys are dropped silently); pass the
+    source's period wording as stated ('1 YEAR', 'hourly' — the host maps it)
+    and put the printed text, when the source shows one, in ``salary`` verbatim.
+    NEVER fabricate a
     salary or a date: leave a field unset when the source is silent — unset means
     omitted or None, never an empty string (a "" fails schema validation). On a
     single-company board hard-code ``company`` from the operator hint.

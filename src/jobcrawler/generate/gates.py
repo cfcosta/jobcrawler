@@ -129,6 +129,14 @@ def check_ast(source: str) -> GateResult:
                 "attribute/index access at runtime, past this gate (the "
                 "'{0.__class__}' escape); build strings with f-strings instead"
             )
+        elif isinstance(node, ast.Constant) and node.value == "salary_interval":
+            # Not a Job field — pydantic would drop it SILENTLY (extra='ignore'),
+            # which is how 13 generated crawlers shipped period-less salaries.
+            failures.append(
+                "misnamed contract field: 'salary_interval' — the Job field is "
+                "salary_period (pass the source's interval wording as stated; "
+                "the host maps '1 YEAR'/'1 MONTH'/'1 HOUR')"
+            )
 
     failures.extend(_check_contract(tree))
     return GateResult(not failures, tuple(failures))

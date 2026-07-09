@@ -903,3 +903,17 @@ def test_must_observe_scrape_requires_consulting_feeds() -> None:
         )
         is None
     )
+
+
+def test_check_ast_rejects_the_invented_salary_interval_key() -> None:
+    # The 13-crawler incident: pydantic silently drops unknown Job keys, so a
+    # misnamed field vanishes fleet-wide with no error. The gate now names the
+    # real field at admission time.
+    src = (
+        'SITE = "https://a.com"\n'
+        "def crawl(ctx):\n"
+        '    yield {"salary_interval": "1 YEAR"}\n'
+    )
+    result = check_ast(src)
+    assert not result.passed
+    assert any("salary_period" in failure for failure in result.failures)

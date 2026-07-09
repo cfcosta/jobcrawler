@@ -43,7 +43,7 @@ def _salary(job):
             if currency is not None:
                 salary["salary_currency"] = currency
             if interval is not None:
-                salary["salary_interval"] = interval
+                salary["salary_period"] = interval
             return salary
     return {}
 

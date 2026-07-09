@@ -38,7 +38,7 @@ def _add_compensation(job, compensation):
         if max_value is not None:
             job["salary_max"] = max_value
         _put(job, "salary_currency", currency)
-        _put(job, "salary_interval", interval)
+        _put(job, "salary_period", interval)
         if min_value is not None or max_value is not None or currency or interval:
             return
 

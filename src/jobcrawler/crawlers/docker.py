@@ -51,7 +51,7 @@ def _salary_fields(job):
             if currency:
                 fields["salary_currency"] = currency
             if component.get("interval"):
-                fields["salary_interval"] = component.get("interval")
+                fields["salary_period"] = component.get("interval")
             return fields
     return {}
 

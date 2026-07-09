@@ -75,6 +75,6 @@ def crawl(ctx):
             if currency:
                 item["salary_currency"] = currency
             if interval:
-                item["salary_interval"] = interval
+                item["salary_period"] = interval
 
         yield item
