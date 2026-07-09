@@ -2122,18 +2122,21 @@
 
 - slug: redpanda
   name: "Redpanda"
-  url: https://www.redpanda.com/jobs
-  render: browser
+  url: https://api.ashbyhq.com/posting-api/job-board/redpanda-data?includeCompensation=true
+  render: static
   company: "Redpanda"
-  enumerates_all: false
+  # Redpanda's careers page (www.redpanda.com/jobs) is a browser-rendered shell over an
+  # Ashby board; the naked page yielded nothing and the crawler kept reaching for the
+  # Ashby API unauthorized. Point straight at the machine-readable feed (token
+  # `redpanda-data`) like uniswap_labs. Ashby serves the feed from api.ashbyhq.com (the
+  # registry host) but each posting's canonical link lives on the sibling host
+  # jobs.ashbyhq.com — authorize it explicitly (§8); a sibling is not on-domain of api.*.
+  extra_hosts:
+    - jobs.ashbyhq.com
   hints: >-
-    Official Redpanda careers page. Prefer same-host structured data when present:
-    schema.org JobPosting ld+json, Next.js/Remix/Astro embedded JSON, or server-rendered job
-    cards. Fetch detail pages on the same host for full descriptions; do not mark missing
-    jobs closed unless the source enumerates the whole open board. Set
-    `enumerates_all:false` when crawling only a search/listing window. Fit: streaming data
-    platform, Kafka-compatible systems, storage, cloud infrastructure and distributed
-    systems engineering.
+    Ashby job board API, token `redpanda-data`. Parse the standard Ashby fields. Fit:
+    streaming data platform, Kafka-compatible systems, storage, cloud infrastructure and
+    distributed systems engineering.
 
 - slug: zero_x
   name: "0x"
