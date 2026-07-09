@@ -2275,6 +2275,50 @@ def test_backfill_locations_sweeps_a_legacy_db(tmp_path: object) -> None:
         s3.close()
 
 
+def test_migration_adds_salary_raw_and_source(tmp_path: object) -> None:
+    # §4.6 salary provenance: opening a legacy DB ALTERs in the verbatim printed
+    # salary text (crawler-owned) and the provenance marker ('structured'|'text'|
+    # 'llm'; NULL = pre-provenance rows).
+    db = f"{tmp_path}/legacy.db"  # type: ignore[str-bytes-safe]
+    raw = sqlite3.connect(db)
+    raw.executescript(
+        """
+        CREATE TABLE positions (
+            site TEXT NOT NULL, url TEXT NOT NULL, content_hash TEXT NOT NULL,
+            title TEXT NOT NULL, company TEXT NOT NULL, location TEXT NOT NULL,
+            first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
+            PRIMARY KEY (site, url)
+        );
+        """
+    )
+    raw.commit()
+    raw.close()
+    s = StateStore(db)
+    try:
+        cols = {row["name"] for row in s._conn.execute("PRAGMA table_info(positions)")}
+        assert {"salary_raw", "salary_source"} <= cols
+    finally:
+        s.close()
+
+
+def test_upsert_accepts_salary_raw_and_source_and_reads_them_back(
+    store: StateStore,
+) -> None:
+    store.upsert_position(
+        "acme",
+        "u",
+        fields={
+            **FIELDS,
+            "salary_raw": "$150K – $200K",
+            "salary_source": "text",
+        },
+        content_hash="h",
+    )
+    rec = store.open_positions("acme")[0]
+    assert rec.salary_raw == "$150K – $200K"
+    assert rec.salary_source == "text"
+
+
 def test_search_positions_country_and_remote_in_filters(store: StateStore) -> None:
     # §4.12 structured filters: country= matches any resolved place or fence;
     # remote_in= is kind-scoped (an office place never satisfies it), expands

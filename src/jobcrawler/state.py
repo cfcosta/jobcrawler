@@ -175,6 +175,11 @@ class PositionRecord:
     salary_period: str | None
     salary_usd_min: float | None
     salary_usd_max: float | None
+    # §4.6 salary provenance: the verbatim printed compensation text (crawler-owned,
+    # re-parseable offline) and where the structured figures came from
+    # ('structured' | 'text' | 'llm'; NULL = pre-provenance row).
+    salary_raw: str | None
+    salary_source: str | None
     employment_type: str | None
     department: str | None
     posted_at: datetime | None
@@ -478,6 +483,12 @@ _POSITION_FIELDS: frozenset[str] = frozenset(
         "salary_period",
         "salary_usd_min",
         "salary_usd_max",
+        # §4.6 provenance pair: salary_raw is ALWAYS keyed by the runner (crawler-
+        # owned verbatim text, cleared when the board stops printing one);
+        # salary_source rides inside the omit-when-absent salary block ('structured'
+        # | 'text') and set_salary stamps 'llm' on the backfill path.
+        "salary_raw",
+        "salary_source",
         "employment_type",
         "department",
         "posted_at",
@@ -568,6 +579,14 @@ _POSITION_ADD_COLUMNS: tuple[tuple[str, str], ...] = (
     # posting (EVEN an empty answer), so the marker-arm gate never re-selects it.
     # Store-owned; reset when the posting's content changes.
     ("loc_llm_at", "TEXT"),
+    # §4.6 verbatim printed compensation text, crawler-owned and always refreshed —
+    # the offline re-parse source a grammar fix heals stored rows from. Out of
+    # content_hash like every derived/side surface.
+    ("salary_raw", "TEXT"),
+    # §4.6 provenance of the structured salary figures: 'structured' (source data) |
+    # 'text' (host parse of the printed string) | 'llm' (§4.7 extract backfill);
+    # NULL = row predates provenance.
+    ("salary_source", "TEXT"),
 )
 
 
@@ -3593,6 +3612,10 @@ def _to_position(row: sqlite3.Row) -> PositionRecord:
         salary_period=row["salary_period"],
         salary_usd_min=row["salary_usd_min"],
         salary_usd_max=row["salary_usd_max"],
+        salary_raw=(row["salary_raw"] if "salary_raw" in row.keys() else None),
+        salary_source=(
+            row["salary_source"] if "salary_source" in row.keys() else None
+        ),
         employment_type=row["employment_type"],
         department=row["department"],
         posted_at=_dt("posted_at"),
