@@ -602,3 +602,42 @@ kbd {
 .slideover-body { flex: 1; overflow: auto; padding: 20px 24px; }
 .slideover-body .detail > .cols:first-of-type { margin-top: 0; }
 .slideover-body h1 { font-size: 18px; }
+
+/* ---- responsive / mobile ------------------------------------------------------------ */
+/* The tracker runs on loopback but gets opened on a phone too. Two things overflow a
+   narrow viewport: the single-row topbar (brand + nav + search + rescore, ~730px of
+   content) and the six-column positions grid. Unfold the topbar into stacked rows and
+   shed the two secondary table columns so the score · title · stage triad always fits.
+   (The existing `.cols` → 1-col rule at 780px handles the dashboard/detail two-uppers.) */
+
+@media (max-width: 768px) {
+  /* Topbar: stop pinning it (a wrapped bar would eat the viewport) and let it stack.
+     Row 1 = brand + nav links (scroll sideways if they run long); row 2 = search + rescore. */
+  .topbar {
+    position: static; height: auto;
+    flex-wrap: wrap; gap: 10px; padding: 10px 14px;
+  }
+  .nav {
+    flex: 1 1 100%; min-width: 0;
+    overflow-x: auto; scrollbar-width: none;
+  }
+  .nav::-webkit-scrollbar { display: none; }
+  .search {
+    flex: 1 1 auto;
+    min-width: 0; max-width: none; margin-left: 0;
+  }
+  .rescore { margin-left: 0; }
+  /* Topbar is no longer sticky, so the sticky table header pins to the top edge itself. */
+  .grid.positions thead th { top: 0; }
+  .content { padding: 18px 14px 40px; }
+}
+
+@media (max-width: 600px) {
+  /* Drop Salary (4th col) + Age (6th col); both stay one tap away in the detail slide-over. */
+  .grid.positions thead th:nth-child(4),
+  .grid.positions td.salary,
+  .grid.positions thead th:nth-child(6),
+  .grid.positions td.age { display: none; }
+  .content { padding: 16px 12px 36px; }
+  h1 { font-size: 18px; }
+}
