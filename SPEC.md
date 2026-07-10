@@ -1865,3 +1865,59 @@ counters stay raw). **Never call an LLM (§3)** — keys are pure functions of s
 LLM the pipeline runs remains the §4.7 matcher, which §17 makes *rarer*, never different. All
 thresholds, families, allowlists, and the blocklist live host-side (§8), never authored or visible
 to generated code.
+
+## 18. Auto-apply prefill (operator-triggered form filling in the operator's Chrome)
+
+**What it is.** Every position whose apply target is an http(s) URL (per-job `apply_url` when the
+crawler captured one, else the listing URL; `mailto:` targets are out — the resolver is
+`state.autofill_target()`, kept in `state.py` so the web layer never imports the dspy/CDP-heavy
+worker) gets a detail-page button: *Pre-fill application in Chrome*. Pressing it opens the apply
+page as a new tab in the operator's own logged-in Chrome (CDP over the `chrome://inspect` remote-
+debugging port, default 9222) and an LLM loop fills the form from `PROFILE.md` — text fields,
+selects, checkboxes, radio groups, the CV file upload — then leaves the tab open for the operator
+to review and submit. **It never submits**, and the guarantee is mechanical, not prompted (below).
+
+**Boundary (§16 pattern).** The web process only enqueues: the button's POST writes a row to
+`autofill_runs` (`status='queued'`; idempotent per position while a run is queued/running) and
+redirects. The daemon drains the queue on its **own asyncio task** (the §4.7-drain lesson: a
+generation-heavy tick must not starve it), claiming the oldest row (`queued→running`, atomic),
+driving the browser, and finishing it `done`/`failed`. The poll (default 3 s,
+`JOBCRAWLER_AUTOFILL_POLL`) *is* the cadence — no due/mark timer — and the inner loop drains the
+backlog back-to-back before sleeping again. Operator-initiated work is autonomy-exempt (like
+"crawl now"). One long-lived CDP connection is kept across runs so Chrome's "Allow debugging"
+consent fires once per daemon lifetime; a daemon killed mid-run leaves its row `running`, and a
+boot sweep (`reset_stale_autofill`, the autofill `reap_orphans`) fails those so the position's
+idempotent re-request isn't wedged.
+
+**The loop (worker = `autofill.AutofillWorker`, CDP client = `cdp.CdpBrowser` on aiohttp).** Per
+round (max `JOBCRAWLER_AUTOFILL_ROUNDS`, default 6): a JS sweep walks the DOM (main document +
+same-origin iframes; cross-origin frames are counted, not entered) and builds a digest of form
+controls and buttons — each element stashed in `window.__jcAF` under an opaque per-round ref id.
+The LLM (dspy `Predict(AutofillStep)`, `JOBCRAWLER_AUTOFILL_MODEL` else the match model,
+temperature 0) sees profile + position context + digest and answers a JSON action list:
+`fill`/`select`/`check`/`click`/`upload`/`done`. Executors resolve refs against `__jcAF` — the
+model never writes JS or selectors. Navigation resets the world, so every round re-sweeps; fills
+use the native value setter + `input`/`change` events (no keystrokes, so no accidental Enter-
+submit); `upload` attaches only the operator-configured `JOBCRAWLER_AUTOFILL_RESUME` path via
+`DOM.setFileInputFiles`. Optional `APPLY.md` (`JOBCRAWLER_AUTOFILL_NOTES`) rides along with the
+profile for form-only facts (phone, links, salary expectation, notice period).
+
+**The no-submit guard (mechanical).** The `click` executor — the only executor that can activate
+a control — refuses, in shared Python/JS pattern source (`_words_pattern`; text NFD-folded,
+accents stripped, lowercased): (a) submit-worded controls anywhere (*submit, enviar, finalizar
+candidatura, send application, …*); (b) submit-**typed** controls (`type=submit|image`, including
+a form-embedded `<button>` with no type attribute, which defaults to submit) inside a `<form>`;
+(c) wizard-advance words (*next, continue, continuar, próximo, avançar, …*) inside a form —
+multi-step ATS wizards often validate-and-advance-and-submit. "Apply"/"candidatar" words are
+deliberately **not** blocked: on Lever/Ashby/Gupy they reveal the form and must stay clickable;
+"enviar" catches the actual final ("Enviar candidatura"). There is no raw-JS action, no Enter
+keystroke, and no way for the model to name a file path.
+
+**Self-improvement log (the §4.7 `generation_log` pattern).** `autofill_runs` is queue *and*
+audit log: every round's page digest, raw LLM output, and per-action results land in
+`transcript_json`, with `model`, `profile_hash`, `rounds`, `actions_applied`, `fields_filled`,
+and a human `summary`/`error` on the row. Reads for the detail panel exclude the transcript
+column (it can be hundreds of KB); finished rows are pruned behind a retain window (200),
+queued/running rows never. Knobs: `JOBCRAWLER_AUTOFILL` (default on; worker construction fails
+soft to "off" when no model is configured), `_MODEL`, `_TOKENS` (default 6000), `_ROUNDS`,
+`_POLL`, `_CDP` (default `http://127.0.0.1:9222`), `_RESUME`, `_NOTES`.

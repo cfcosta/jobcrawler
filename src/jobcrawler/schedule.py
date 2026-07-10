@@ -102,6 +102,13 @@ FxRefresh = Callable[[], Awaitable[dict[str, float]]]
 # returns {} (derived state — never a reason to disturb the crawl loop).
 DedupSweep = Callable[[], Awaitable[dict[str, object]]]
 
+# The §18 auto-apply prefill seam: claim ONE queued autofill run, drive the operator's
+# Chrome + the LLM through it, persist the outcome; None ⇒ the queue was empty. Injected
+# because the worker (CDP endpoint, LM, PROFILE.md) is daemon wiring (cli); the
+# scheduler owns only the poll cadence. Never raises — every failure lands on the run
+# row so the UI sees it.
+AutofillDrain = Callable[[], Awaitable[dict[str, object] | None]]
+
 
 class Site(BaseModel):
     """One entry of the §4.1 site registry — a job board to crawl on a cadence."""
@@ -247,6 +254,8 @@ class Scheduler:
         fx_check: str | None = None,
         dedup_sweep: DedupSweep | None = None,
         dedup_check: str | None = None,
+        autofill_drain: AutofillDrain | None = None,
+        autofill_poll: float | None = None,
         expired_markers: tuple[str, ...] | None = None,
         heal_cooldown: str | None = None,
         description_quality_floor: float | None = None,
@@ -353,6 +362,15 @@ class Scheduler:
         )
         self._dedup_sweep = dedup_sweep
         self._next_dedup: datetime | None = None
+        # §18 auto-apply prefill drain: operator-initiated (a web button press), so —
+        # like the match drain — EXEMPT from the master autonomy brake. No due/mark
+        # timer: the poll IS the cadence (a queued run should start within seconds of
+        # the click, not on the next 10-minute tick). Disabled when no seam is wired
+        # (JOBCRAWLER_AUTOFILL=0, no model, or a crawl-only deployment).
+        self._autofill_drain = autofill_drain
+        self._autofill_poll = (
+            autofill_poll if autofill_poll is not None else config.autofill_poll()
+        )
         # §4.8 event-driven healing: a drifted crawl assesses immediately (not waiting
         # for the periodic sweep), rate-limited per-site by this cooldown (None = off).
         self._heal_cooldown = _optional_interval(
@@ -1201,7 +1219,7 @@ class Scheduler:
         """
         _log.info(
             "scheduler starting sites=%d interval=%ss autonomy=%s "
-            "regen=%s reopt=%s recheck=%s match_drain=%s fx=%s dedup=%s",
+            "regen=%s reopt=%s recheck=%s match_drain=%s fx=%s dedup=%s autofill=%s",
             len(self._sites),
             interval,
             "on" if self._autonomy else "OFF",
@@ -1213,6 +1231,7 @@ class Scheduler:
             "off"
             if self._dedup_interval is None or self._dedup_sweep is None
             else self._dedup_interval,
+            "off" if self._autofill_drain is None else f"{self._autofill_poll}s",
         )
         # The §4.7 match drain rides its OWN task, not the tick loop: a bootstrap/
         # generation pass can hold tick() for an hour-plus (LM generation × wave), and
@@ -1224,6 +1243,16 @@ class Scheduler:
         drain_task = (
             asyncio.create_task(self._match_drain_loop(stop, poll=interval))
             if self._match_drain is not None and self._match_drain_interval is not None
+            else None
+        )
+        # The §18 autofill drain likewise rides its own task: a button press must open
+        # Chrome within seconds even while a tick is deep in a generation pass, and the
+        # sequential one-form-at-a-time worker must never block crawling in return.
+        autofill_task = (
+            asyncio.create_task(
+                self._autofill_drain_loop(stop, poll=self._autofill_poll)
+            )
+            if self._autofill_drain is not None
             else None
         )
         try:
@@ -1256,12 +1285,47 @@ class Scheduler:
                 except asyncio.TimeoutError:
                     pass
         finally:
-            if drain_task is not None:
-                # Unblock the drain poll on every exit path (stop is already set on the
+            if drain_task is not None or autofill_task is not None:
+                # Unblock the drain polls on every exit path (stop is already set on the
                 # normal one) and let an in-flight pass finish rather than cancelling
-                # mid-scoring — the spend was reserved up front either way.
+                # mid-scoring / mid-form — the spend was reserved up front either way.
                 stop.set()
+            if drain_task is not None:
                 await drain_task
+            if autofill_task is not None:
+                await autofill_task
+
+    async def _autofill_drain_loop(self, stop: asyncio.Event, *, poll: float) -> None:
+        """Drain §18 autofill requests until ``stop`` is set (its own task, see run()).
+
+        The inner loop drains the whole backlog back-to-back (the seam returns None
+        when the queue is empty), then sleeps ``poll`` seconds — so a fresh button
+        press starts within one poll, and successive requests never wait a poll each.
+        The seam itself never raises (failures land on the run row); the guard here
+        is for claim-time store errors, keeping the same fail-open posture as the
+        other loops.
+        """
+        drain = self._autofill_drain
+        if drain is None:  # pragma: no cover - gated by the run() task creation
+            return
+        while not stop.is_set():
+            try:
+                while not stop.is_set():
+                    result = await drain()
+                    if result is None:
+                        break
+                    _log.info(
+                        "autofill run %s %s site=%s",
+                        result.get("id"),
+                        result.get("status"),
+                        result.get("site"),
+                    )
+            except Exception:
+                _log.exception("autofill drain pass failed; continuing")
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=poll)
+            except asyncio.TimeoutError:
+                pass
 
     async def _match_drain_loop(self, stop: asyncio.Event, *, poll: float) -> None:
         """Run §4.7 match-drain passes on their own cadence until ``stop`` is set.

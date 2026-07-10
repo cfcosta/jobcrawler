@@ -80,6 +80,29 @@
     {% if not reasons and not concerns %}<p class="empty">No reasons or concerns recorded.</p>{% endif %}
   </section>
 
+  {# ---- Auto-fill (§18): pre-fill the application form in Chrome ------- #}
+  {% if autofill_target %}
+  <section class="panel">
+    <h2>Auto-fill application</h2>
+    <form method="post" action="/positions/{{ pid }}/autofill">
+      <button type="submit">⚡ Pre-fill application in Chrome</button>
+    </form>
+    <p class="empty">Opens the apply page in your Chrome and fills the form from PROFILE.md. It never submits — review the tab and send it yourself.</p>
+    {% if autofill_runs %}
+    <ul class="siblings">
+      {% for r in autofill_runs %}
+      <li>
+        <span class="tag{% if r.status == 'failed' %} tag-pending{% endif %}">{{ r.status }}</span>
+        <span class="tag">{% if r.finished_dt %}{{ r.finished_dt | age }} ago{% elif r.requested_dt %}queued {{ r.requested_dt | age }} ago{% else %}—{% endif %}</span>
+        {% if r.fields_filled %}<span class="tag">{{ r.fields_filled }} field{{ 's' if r.fields_filled != 1 else '' }} filled</span>{% endif %}
+        {% if r.summary %}{{ r.summary }}{% elif r.error %}<span class="mono">{{ r.error }}</span>{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </section>
+  {% endif %}
+
   {# ---- Cluster siblings (§17): the same job on other boards ----------- #}
   {% if siblings is defined and siblings %}
   <section class="panel">

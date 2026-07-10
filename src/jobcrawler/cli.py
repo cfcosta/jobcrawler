@@ -1506,6 +1506,28 @@ def cmd_run(args: argparse.Namespace) -> int:
         except (FileNotFoundError, yaml.YAMLError, ValidationError, OSError):
             return sites  # unreadable mid-edit; fall back to the boot roster
 
+    # §18 auto-apply prefill: the web button only enqueues; this seam is the daemon
+    # side that drives the operator's Chrome + the LLM. Import lazily (the module
+    # pulls dspy + aiohttp) and fail soft to "off" — a missing model config must not
+    # take the crawl daemon down. A daemon killed mid-prefill leaves its claimed row
+    # 'running', which would wedge that position's idempotent re-request forever, so
+    # sweep those to failed before the drain starts (the autofill reap_orphans).
+    autofill_drain = None
+    if config.autofill_enabled():
+        from jobcrawler.autofill import AutofillWorker
+
+        stale_autofill = store.reset_stale_autofill()
+        if stale_autofill:
+            _log.warning(
+                "failed %d autofill run(s) orphaned by a prior daemon", stale_autofill
+            )
+        try:
+            autofill_worker = AutofillWorker(store)
+        except RuntimeError as exc:
+            _log.warning("autofill disabled: %s", exc)
+        else:
+            autofill_drain = autofill_worker.run_once
+
     scheduler = Scheduler(
         sites,
         store=store,
@@ -1524,6 +1546,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         # would never close. A host-side polite GET (per-host paced + robots, no page
         # budget) mirrors the crawl fetch path so the sweep activates in production.
         recheck_fetch=build_recheck_fetch(),
+        # §18 auto-apply prefill drain (own task; None ⇒ feature off, loop untouched).
+        autofill_drain=autofill_drain,
     )
 
     # §16 tracker UI runs IN-PROCESS with the scheduler (there is no separate `serve`),

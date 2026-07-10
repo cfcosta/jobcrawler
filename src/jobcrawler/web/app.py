@@ -46,7 +46,7 @@ from pydantic import BaseModel
 
 from jobcrawler import config, tracking
 from jobcrawler.runtime.dedup import company_key
-from jobcrawler.state import PositionRecord, StateStore
+from jobcrawler.state import PositionRecord, StateStore, autofill_target
 
 _log = logging.getLogger("jobcrawler.web")
 
@@ -128,6 +128,16 @@ def decode_pid(pid: str) -> tuple[str, str]:
 
 def _iso(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt is not None else None
+
+
+def _parse_iso(raw: object) -> datetime | None:
+    """ISO text (e.g. an §18 autofill run stamp) → datetime for the ``age`` filter."""
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return None
 
 
 def reasons_list(raw: str | None) -> list[str]:
@@ -1029,6 +1039,18 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
                 "role_variants": role_variants,
                 # §4.12 resolved places/fences for the Locations panel.
                 "locations": store.position_locations(site, url),
+                # §18 auto-apply prefill: None ⇒ apply target is mailto/absent, so
+                # the panel is hidden. Run rows carry ISO strings; parse the ones
+                # the template ages, since the `age` filter takes datetimes.
+                "autofill_target": autofill_target(rec),
+                "autofill_runs": [
+                    {
+                        **run,
+                        "requested_dt": _parse_iso(run.get("requested_at")),
+                        "finished_dt": _parse_iso(run.get("finished_at")),
+                    }
+                    for run in store.autofill_runs_for(site, url)
+                ],
             },
         )
 
@@ -1064,6 +1086,24 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
         on = dismissed in {"1", "true", "on", "yes"}
         store.set_dismissed(site, url, on)
         return _back(request, f"/positions/{pid}", "Dismissed" if on else "Restored")
+
+    @app.post("/positions/{pid}/autofill")
+    def post_autofill(request: Request, pid: str) -> Response:
+        # §18: enqueue only — the daemon's drain task opens Chrome and runs the LLM
+        # (the web process never touches CDP or dspy). Idempotent while queued/running.
+        site, url = decode_pid(pid)
+        rec = _require(site, url)
+        target = autofill_target(rec)
+        if target is None:
+            raise HTTPException(
+                status_code=400, detail="position has no http(s) apply link"
+            )
+        store.request_autofill(site, url, target)
+        return _back(
+            request,
+            f"/positions/{pid}",
+            "Auto-fill queued — the daemon will open Chrome and pre-fill the form",
+        )
 
     @app.post("/positions/bulk")
     def post_bulk(

@@ -214,6 +214,24 @@ class PositionRecord:
     effective_score: float | None = None
 
 
+def autofill_target(rec: PositionRecord) -> str | None:
+    """The http(s) page a §18 auto-apply prefill should open for ``rec``, or None.
+
+    None means the position applies by email (a ``mailto:`` apply_url) or has no
+    web page at all — the auto-fill affordance is only offered when there is a real
+    form to drive. A missing apply_url falls back to the posting URL: on the common
+    ATS boards the listing page *is* (or links one click from) the application form.
+    Lives here rather than in :mod:`jobcrawler.autofill` so the web layer can gate
+    the button without importing the dspy/CDP-heavy worker module.
+    """
+    apply_url = rec.apply_url
+    if apply_url:
+        return apply_url if apply_url.startswith(("http://", "https://")) else None
+    if rec.url.startswith(("http://", "https://")):
+        return rec.url
+    return None
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS items (
     site        TEXT NOT NULL,
@@ -346,6 +364,33 @@ CREATE TABLE IF NOT EXISTS generation_log (
     llm_log    TEXT
 );
 CREATE INDEX IF NOT EXISTS generation_log_by_site ON generation_log (site, id DESC);
+-- §18 auto-apply prefill: queue + durable audit log in one table. The web UI only
+-- INSERTs 'queued' rows (it never drives Chrome or an LLM — the same enqueue-only
+-- boundary as crawl_requests); the daemon's autofill drain claims them
+-- (queued→running) and writes the outcome back (done/failed). transcript_json
+-- keeps every per-round page digest + raw LLM output + executed action results so
+-- later self-improvement can mine real page→actions traces, mirroring
+-- generation_log.llm_log for the §4.2 generator.
+CREATE TABLE IF NOT EXISTS autofill_runs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    site            TEXT NOT NULL,
+    url             TEXT NOT NULL,
+    apply_url       TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'queued',
+    requested_at    TEXT NOT NULL,
+    started_at      TEXT,
+    finished_at     TEXT,
+    model           TEXT,
+    profile_hash    TEXT,
+    rounds          INTEGER NOT NULL DEFAULT 0,
+    actions_applied INTEGER NOT NULL DEFAULT 0,
+    fields_filled   INTEGER NOT NULL DEFAULT 0,
+    summary         TEXT,
+    error           TEXT,
+    transcript_json TEXT
+);
+CREATE INDEX IF NOT EXISTS autofill_runs_by_position ON autofill_runs (site, url, id DESC);
+CREATE INDEX IF NOT EXISTS autofill_runs_by_status ON autofill_runs (status, id);
 -- §17 read-derived duplicate clustering. position_identity_keys and position_clusters
 -- are DISPOSABLE PROJECTIONS: the reconciliation sweep rebuilds them from positions
 -- alone; DROP + resweep is lossless. Nothing durable may key on cluster_id.
@@ -3267,6 +3312,148 @@ class StateStore:
             self._conn.execute("DELETE FROM crawl_requests")
             self._conn.commit()
             return [row["slug"] for row in rows]
+
+    # -- §18 auto-apply prefill queue + audit log -------------------------------
+    #
+    # Same enqueue-only boundary as crawl_requests: the web UI writes a 'queued' row
+    # and the daemon's autofill drain does the CDP + LLM work. One table serves as
+    # both queue (status='queued'/'running') and durable log — finished rows keep the
+    # full LLM transcript for later self-improvement, mirroring generation_log.llm_log.
+
+    def request_autofill(self, site: str, url: str, apply_url: str) -> int:
+        """Queue a §18 auto-apply prefill of one position; returns the run id.
+
+        Idempotent while pending: a second button press before the daemon claims the
+        row (or while it runs) returns the existing run instead of queueing a second
+        browser session against the same form.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id FROM autofill_runs WHERE site = ? AND url = ? "
+                "AND status IN ('queued', 'running') ORDER BY id DESC LIMIT 1",
+                (site, url),
+            ).fetchone()
+            if row is not None:
+                return int(row["id"])
+            cur = self._conn.execute(
+                "INSERT INTO autofill_runs (site, url, apply_url, status, requested_at) "
+                "VALUES (?, ?, ?, 'queued', ?)",
+                (site, url, apply_url, self._clock().isoformat()),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid or 0)
+
+    def claim_autofill(self) -> dict[str, object] | None:
+        """Atomically claim the oldest queued §18 run (queued → running), or None.
+
+        Read-then-update under the write lock (single connection), so two drain
+        passes can never run the same request. The daemon drains sequentially —
+        one browser, one form at a time — so no lease/timeout column is needed;
+        a daemon killed mid-run is swept by :meth:`reset_stale_autofill` on boot.
+        """
+        now = self._clock().isoformat()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM autofill_runs WHERE status = 'queued' ORDER BY id LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return None
+            self._conn.execute(
+                "UPDATE autofill_runs SET status = 'running', started_at = ? "
+                "WHERE id = ?",
+                (now, row["id"]),
+            )
+            self._conn.commit()
+            claimed = dict(row)
+            claimed["status"] = "running"
+            claimed["started_at"] = now
+            return claimed
+
+    def finish_autofill(
+        self,
+        run_id: int,
+        *,
+        status: str,
+        summary: str | None = None,
+        error: str | None = None,
+        model: str | None = None,
+        profile_hash: str | None = None,
+        rounds: int = 0,
+        actions_applied: int = 0,
+        fields_filled: int = 0,
+        transcript: list[dict[str, object]] | None = None,
+        retain: int = 200,
+    ) -> None:
+        """Persist a §18 run's outcome (``status`` 'done' | 'failed') + LLM transcript.
+
+        ``transcript`` is the per-round list of ``{page, llm_raw, results}`` dicts the
+        worker accumulated — stored as JSON even on failure, since a failed trace is
+        exactly what self-improvement wants to see. ``retain`` bounds table growth
+        like :meth:`record_generation`: finished rows older than the newest ``retain``
+        are pruned on write (queued/running rows are never pruned; 0 = keep all).
+        """
+        payload = json.dumps(transcript) if transcript is not None else None
+        now = self._clock().isoformat()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE autofill_runs SET status = ?, finished_at = ?, summary = ?, "
+                "error = ?, model = ?, profile_hash = ?, rounds = ?, "
+                "actions_applied = ?, fields_filled = ?, transcript_json = ? "
+                "WHERE id = ?",
+                (
+                    status,
+                    now,
+                    summary,
+                    error,
+                    model,
+                    profile_hash,
+                    rounds,
+                    actions_applied,
+                    fields_filled,
+                    payload,
+                    run_id,
+                ),
+            )
+            if retain:
+                self._conn.execute(
+                    "DELETE FROM autofill_runs WHERE status IN ('done', 'failed') "
+                    "AND id <= (SELECT MAX(id) FROM autofill_runs) - ?",
+                    (retain,),
+                )
+            self._conn.commit()
+
+    def autofill_runs_for(
+        self, site: str, url: str, *, limit: int = 5
+    ) -> list[dict[str, object]]:
+        """Recent §18 runs for one position, newest first (the detail-page panel).
+
+        ``transcript_json`` is deliberately NOT selected — it can be hundreds of KB
+        per run and the panel only shows status/counters/summary.
+        """
+        rows = self._conn.execute(
+            "SELECT id, site, url, apply_url, status, requested_at, started_at, "
+            "finished_at, model, profile_hash, rounds, actions_applied, "
+            "fields_filled, summary, error "
+            "FROM autofill_runs WHERE site = ? AND url = ? ORDER BY id DESC LIMIT ?",
+            (site, url, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def reset_stale_autofill(self) -> int:
+        """Fail every 'running' §18 row a dead daemon left behind; returns the count.
+
+        The boot-time companion to :meth:`reap_orphans`: a daemon killed mid-prefill
+        leaves its claimed row 'running' forever, which would wedge the position's
+        idempotent re-request. Called once at startup, before the drain task exists.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE autofill_runs SET status = 'failed', finished_at = ?, "
+                "error = 'daemon restarted mid-run' WHERE status = 'running'",
+                (self._clock().isoformat(),),
+            )
+            self._conn.commit()
+            return cur.rowcount or 0
 
     # -- meta (small persisted key/value scalars) ------------------------------
 

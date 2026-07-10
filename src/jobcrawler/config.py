@@ -743,6 +743,83 @@ def match_drain_cap() -> int:
     return _int("JOBCRAWLER_MATCH_DRAIN_CAP", 200)
 
 
+# --- auto-apply prefill (§18) -------------------------------------------------
+# The §18 worker drives the operator's OWN Chrome over CDP and bills LLM tokens per
+# round, so every knob here either bounds that spend or points at operator-local
+# resources (browser endpoint, resume file). Runs are operator-initiated (a web
+# button press) — there is no autonomous trigger to cap.
+
+
+def autofill_enabled() -> bool:
+    """Master switch for the §18 auto-apply prefill drain (default on). Off ⇒ the
+    daemon never opens Chrome or calls the LLM for prefill; the web button still
+    queues rows, which simply wait (and survive) until the switch is on again."""
+    return _bool("JOBCRAWLER_AUTOFILL", True)
+
+
+def autofill_model() -> str | None:
+    """Dedicated §18 form-navigation LM slug (``JOBCRAWLER_AUTOFILL_MODEL``). Optional:
+    unset, the worker borrows the §4.7 match model chain via
+    :func:`require_autofill_model` (form-filling is bursty and operator-initiated, so
+    the cheap match-tier model is the right default)."""
+    return _opt("JOBCRAWLER_AUTOFILL_MODEL")
+
+
+def require_autofill_model() -> str:
+    """The §18 prefill LM, erroring only if *no* usable model is configured at all.
+
+    Resolves ``JOBCRAWLER_AUTOFILL_MODEL`` first, then the §4.7 match chain
+    (:func:`require_match_model`: match model → ``sub_lm``) — deliberately never the
+    root planner, mirroring the matcher's cost posture."""
+    return autofill_model() or require_match_model()
+
+
+def autofill_max_tokens() -> int:
+    """Per-round completion budget for the §18 prefill LM. A round emits a JSON action
+    list over every visible field, so it needs more headroom than a match verdict;
+    default 6000. (Dropped for ``chatgpt/*`` slugs, like every build_lm cap.)"""
+    return _int("JOBCRAWLER_AUTOFILL_MAX_TOKENS", 6000)
+
+
+def autofill_max_rounds() -> int:
+    """Max look→act rounds one §18 run may spend on a page (default 6). Each round is
+    one LLM call over a fresh page digest; the cap bounds a form the model can't
+    finish (infinite validation loops, unreachable fields) to a fixed spend."""
+    return _int("JOBCRAWLER_AUTOFILL_MAX_ROUNDS", 6)
+
+
+def autofill_poll() -> float:
+    """Seconds between the daemon's §18 queue polls (default 3). The drain runs on its
+    own scheduler task (like the §4.7 match drain) so a button press feels live even
+    mid-crawl; the poll is one indexed SELECT, so a short cadence is cheap."""
+    return _float("JOBCRAWLER_AUTOFILL_POLL", 3.0)
+
+
+def autofill_cdp_url() -> str:
+    """HTTP endpoint of the operator's Chrome remote-debugging port the §18 worker
+    connects to (default ``http://127.0.0.1:9222`` — Chrome's
+    ``chrome://inspect/#remote-debugging`` toggle). The worker drives the operator's
+    real, logged-in browser profile; Chrome may show an "Allow debugging" prompt on
+    the daemon's first connection per browser session."""
+    return _str("JOBCRAWLER_AUTOFILL_CDP", "http://127.0.0.1:9222")
+
+
+def autofill_resume_path() -> str | None:
+    """Path to the resume/CV file the §18 worker may attach to a form's file input
+    (``JOBCRAWLER_AUTOFILL_RESUME``). Optional: unset, upload actions report "no
+    resume configured" and the field is left for the operator. Only THIS configured
+    path ever reaches ``DOM.setFileInputFiles`` — the LLM cannot name a file."""
+    return _opt("JOBCRAWLER_AUTOFILL_RESUME")
+
+
+def autofill_notes_path() -> str:
+    """Optional markdown file of operator-provided application answers appended to the
+    §18 prefill context (default ``APPLY.md``, silently skipped when absent): phone,
+    LinkedIn/GitHub URLs, salary expectation, notice period — the form-only facts
+    that don't belong in ``PROFILE.md``'s matching profile."""
+    return _str("JOBCRAWLER_AUTOFILL_NOTES", "APPLY.md")
+
+
 # --- identity overlay / dedup (§17) -----------------------------------------
 # Pure host-side string mechanics: keys and clusters are *derived* state, rebuilt
 # from immutable positions rows by a deterministic sweep — never an LLM call.
