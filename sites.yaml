@@ -2822,3 +2822,20 @@
     linked inside a description. Fit: columnar-database/OLAP infrastructure — core
     database internals (C++), cloud platform, distributed systems, Rust/Go tooling,
     SRE and backend platform roles; many roles remote across regions.
+
+- slug: codeminer42
+  name: "Codeminer42"
+  url: https://www.codeminer42.com/careers
+  render: static
+  company: "Codeminer42"
+  hints: >-
+    First-party WordPress careers page; fully static. The listing at /careers links each
+    opening as `<a href="/careers/<slug>">` with the title in the card heading — collect
+    those same-host anchors (skip /careers itself and non-job pages like /about, /services,
+    /contact). Each detail page is static HTML: title in the `<h1>`/heading, a short
+    location marker near the top (e.g. `LatAm`), and the full description in the page body
+    ("Our challenges", requirements, benefits — strip nav/cookie-banner/footer boilerplate).
+    No JSON API, no salary, no posted dates; use the detail-page slug as external_id and
+    the page URL as apply_url (the page hosts the application CTA). Small board (~6 open
+    roles). Fit: Brazilian/LatAm remote software consultancy — Ruby on Rails, fullstack
+    JS/TS, Golang, DevOps and AI-specialist engineering roles, senior-friendly.
