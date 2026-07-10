@@ -1898,9 +1898,11 @@ temperature 0) sees profile + position context + digest and answers a JSON actio
 `fill`/`select`/`check`/`click`/`upload`/`done`. Executors resolve refs against `__jcAF` — the
 model never writes JS or selectors. Navigation resets the world, so every round re-sweeps; fills
 use the native value setter + `input`/`change` events (no keystrokes, so no accidental Enter-
-submit); `upload` attaches only the operator-configured `JOBCRAWLER_AUTOFILL_RESUME` path via
-`DOM.setFileInputFiles`. Optional `APPLY.md` (`JOBCRAWLER_AUTOFILL_NOTES`) rides along with the
-profile for form-only facts (phone, links, salary expectation, notice period).
+submit); `upload` attaches only the operator-configured `JOBCRAWLER_AUTOFILL_RESUME` path
+(default `CV.pdf` — the repo-root convention beside `PROFILE.md`; upload reports unavailable
+when the file is absent) via `DOM.setFileInputFiles`. Optional `APPLY.md`
+(`JOBCRAWLER_AUTOFILL_NOTES`) rides along with the profile for form-only facts (phone, links,
+salary expectation, notice period).
 
 **The no-submit guard (mechanical).** The `click` executor — the only executor that can activate
 a control — refuses, in shared Python/JS pattern source (`_words_pattern`; text NFD-folded,

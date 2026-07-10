@@ -283,7 +283,7 @@ def _worker_fixture(tmp_path: Path) -> tuple[StateStore, AutofillWorker, FakeBro
         max_rounds=3,
         profile_path=str(profile),
         notes_path=str(tmp_path / "APPLY.md"),  # absent — quietly skipped
-        resume_path=None,
+        resume_path="",  # pinned off: None would fall back to the CV.pdf default
         browser=cast(CdpBrowser, fake),
     )
     return store, worker, fake, run_id
@@ -361,7 +361,7 @@ async def test_run_once_lands_failures_on_the_row(tmp_path: Path) -> None:
         model="openai/test",
         profile_path=str(tmp_path / "missing-profile.md"),
         notes_path="",
-        resume_path=None,
+        resume_path="",
         browser=cast(CdpBrowser, FakeBrowser()),
     )
     out = await worker.run_once()

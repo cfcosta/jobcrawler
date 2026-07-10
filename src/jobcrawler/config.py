@@ -806,10 +806,12 @@ def autofill_cdp_url() -> str:
 
 def autofill_resume_path() -> str | None:
     """Path to the resume/CV file the §18 worker may attach to a form's file input
-    (``JOBCRAWLER_AUTOFILL_RESUME``). Optional: unset, upload actions report "no
-    resume configured" and the field is left for the operator. Only THIS configured
-    path ever reaches ``DOM.setFileInputFiles`` — the LLM cannot name a file."""
-    return _opt("JOBCRAWLER_AUTOFILL_RESUME")
+    (``JOBCRAWLER_AUTOFILL_RESUME``, default ``CV.pdf`` — the repo-root convention,
+    like ``PROFILE.md``/``APPLY.md``; silently unavailable when the file is absent,
+    so upload actions report "no resume configured" and the field is left for the
+    operator). Only THIS configured path ever reaches ``DOM.setFileInputFiles`` —
+    the LLM cannot name a file."""
+    return _str("JOBCRAWLER_AUTOFILL_RESUME", "CV.pdf")
 
 
 def autofill_notes_path() -> str:
