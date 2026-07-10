@@ -2,6 +2,7 @@
 import html
 import json
 import re
+from urllib.parse import urlsplit
 
 SITE = "https://sailonchain.com/"
 EXTRA_HOSTS = []
@@ -145,6 +146,35 @@ def _jobposting_from(page):
     return None
 
 
+def _apply_url(page):
+    """The "Visit job opening page" CTA's external target, or None.
+
+    Job pages render the CTA as ``<a class="job-outbound-cta ..." href="...">``
+    (twice — top and bottom, same href). The href is the company's real posting
+    on its own ATS. None when the anchor is absent or points back at
+    sailonchain.com, so the caller omits ``apply_url`` and a previously stored
+    value is never clobbered by a transient miss.
+    """
+    tag = re.search(
+        r'<a\b[^>]*\bclass=["\'][^"\']*\bjob-outbound-cta\b[^"\']*["\'][^>]*>',
+        page,
+        re.IGNORECASE,
+    )
+    if not tag:
+        return None
+    href = re.search(r'\bhref=["\']([^"\']+)["\']', tag.group(0), re.IGNORECASE)
+    if not href:
+        return None
+    url = html.unescape(href.group(1)).strip()
+    if not url.lower().startswith(("http://", "https://")):
+        return None
+    # Host check only — the CTA tags its target with ?ref=sailonchain.com.
+    host = urlsplit(url).netloc.lower()
+    if host == "sailonchain.com" or host.endswith(".sailonchain.com"):
+        return None
+    return url
+
+
 def crawl(ctx):
     sitemap = ctx.fetch("https://sailonchain.com/sitemaps/jobs.xml")
     urls = re.findall(r"<loc>\s*([^<]+?)\s*</loc>", sitemap)
@@ -181,6 +211,7 @@ def crawl(ctx):
         }
 
         optional = {
+            "apply_url": _apply_url(page),
             "employment_type": _clean_text(data.get("employmentType")),
             "workplace_type": _clean_text(data.get("jobLocationType")),
             "department": _clean_text(data.get("occupationalCategory") or data.get("industry")),
