@@ -2303,30 +2303,6 @@
     closure. Fetch detail pages on the same host for the full description. Fit: remote tech
     jobs with strong Latin America reach, including programming, data and DevOps roles.
 
-- slug: programathor_go
-  name: "ProgramaThor — Go"
-  url: https://programathor.com.br/jobs-go
-  render: static
-  enumerates_all: false
-  hints: >-
-    Job-board listing/search source. Multi-company source; do not stamp a fixed `company`.
-    Parse company from each posting/card/detail page. Treat as a windowed source unless the
-    API explicitly returns all active matching jobs; use detail 404/expired markers for
-    closure. Fetch detail pages on the same host for the full description. Fit: Brazilian Go
-    developer job board; useful for Portuguese-language remote/PJ/CLT roles.
-
-- slug: programathor_rust
-  name: "ProgramaThor — Rust"
-  url: https://programathor.com.br/jobs-rust
-  render: static
-  enumerates_all: false
-  hints: >-
-    Job-board listing/search source. Multi-company source; do not stamp a fixed `company`.
-    Parse company from each posting/card/detail page. Treat as a windowed source unless the
-    API explicitly returns all active matching jobs; use detail 404/expired markers for
-    closure. Fetch detail pages on the same host for the full description. Fit: Brazilian
-    Rust developer job board; useful for Portuguese-language remote/PJ/CLT roles.
-
 - slug: python_jobs
   name: "Python.org Jobs"
   url: https://www.python.org/jobs/
