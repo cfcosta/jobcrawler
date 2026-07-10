@@ -68,10 +68,25 @@ def _parse_detail(url, body):
     types_html = _first(r'<span class=["\']listing-job-type["\']>(.*?)</span>', article)
     job_types = _text(types_html)
 
+    # The Contact Info block gives up to three channels: a contact name, an
+    # e-mail, and an optional "Web" link — the employer's real application page
+    # (e.g. jobs.micro1.ai/post/…). Prefer the Web link; the mailto is the apply
+    # target only when it is all the posting offers. Board self-links are
+    # skipped so a stray python.org href can't masquerade as the employer's.
     apply_url = None
-    m = re.search(r'<a[^>]+href=["\'](mailto:[^"\']+)["\']', desc_html or "", re.I)
+    m = re.search(
+        r'<li>\s*<strong>\s*Web\s*</strong>\s*:\s*<a[^>]+href=["\'](https?://[^"\']+)["\']',
+        desc_html or "",
+        re.I,
+    )
     if m:
-        apply_url = html.unescape(m.group(1))
+        url_candidate = html.unescape(m.group(1))
+        if "python.org" not in url_candidate.lower():
+            apply_url = url_candidate
+    if not apply_url:
+        m = re.search(r'<a[^>]+href=["\'](mailto:[^"\']+)["\']', desc_html or "", re.I)
+        if m:
+            apply_url = html.unescape(m.group(1))
 
     external_id = None
     m = re.search(r'/jobs/(\d+)/', url)
