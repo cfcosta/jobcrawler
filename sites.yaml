@@ -2839,3 +2839,1144 @@
     the page URL as apply_url (the page hosts the application CTA). Small board (~6 open
     roles). Fit: Brazilian/LatAm remote software consultancy — Ruby on Rails, fullstack
     JS/TS, Golang, DevOps and AI-specialist engineering roles, senior-friendly.
+
+# --- rustlang.com.br/empresas import (2026-07-10): 46 company boards discovered and
+# verified by the per-company probe fleet; tokens/endpoints confirmed with live fetches. ---
+
+- slug: accenture_brasil
+  name: "Accenture Brasil"
+  url: https://accenture.wd103.myworkdayjobs.com/wday/cxs/accenture/AccentureCareers/jobs
+  render: static
+  company: "Accenture Brasil"
+  enumerates_all: false
+  hints: >-
+    Workday CXS API. tenant `accenture`, host `accenture.wd103.myworkdayjobs.com`, site
+    `AccentureCareers`. LIST: POST
+    https://accenture.wd103.myworkdayjobs.com/wday/cxs/accenture/AccentureCareers/jobs,
+    Content-Type application/json, body
+    `{"appliedFacets":{"locationCountry":["1a29bb1357b240ab99a2fa755cc87c0e"]},"limit":20,"offset":0,"searchText":""}`
+    — that facet id is Brazil. Response `{total, jobPostings:[...], facets:[...]}`. PAGINATION
+    GOTCHA: limit>20 returns HTTP 400, so hard-page offset 0,20,40… until offset>=total (186
+    now). Each list item: `title`, `externalPath` (e.g. /job/So-Paulo---Barueri/…_R00342259),
+    `bulletFields`=[jobReqId, locationText], `postedOn` ("Posted Today"/"Posted 30+ Days Ago" —
+    relative, not a date). BODY: GET same host + /wday/cxs/accenture/AccentureCareers +
+    externalPath → `jobPostingInfo`: stable `jobReqId` (external_id, e.g. R00342259; some legacy
+    reqs are numeric like 14446767), `title`, `jobDescription` (HTML-entity-escaped ->
+    html.unescape then strip tags), `location`, `country.descriptor`, `timeType`, `remoteType`
+    (Remote/Hybrid/On-Site), `startDate`+`postedOn`, `externalUrl` (public apply/detail page for
+    apply_url). No salary fields anywhere. MEGA-BOARD: url is the global Accenture Workday
+    (Software Engineering 26,792 and India 47,313 globally; display total caps at 2000) — the
+    body's `locationCountry` facet is what scopes it to Brazil (186, all functions). To tighten
+    to tech, add a jobFamilyGroup facet to appliedFacets: Software Engineering
+    `bb69a804fb120130e52200ed1301d275` (43), AI & Data `99f04fef1b5710010b161504c3910000` (25),
+    Security `bb69a804fb1201653003f3ec1301ba75` (9), Engineering & Networks
+    `bb69a804fb120147d2f209ed1301e275` (7). Fit: Brazil delivery-center software roles — heavy
+    SAP/Salesforce/mainframe consulting plus AI/Data and platform engineering.
+
+- slug: avra_ai
+  name: "Avra"
+  url: https://api.ashbyhq.com/posting-api/job-board/avra?includeCompensation=true
+  render: static
+  company: "Avra"
+  hints: >-
+    Ashby posting API, token `avra`. Single GET
+    https://api.ashbyhq.com/posting-api/job-board/avra?includeCompensation=true returns
+    {apiVersion, jobs:[]} = the WHOLE board, no server pagination. Per item: UUID `id` (stable
+    external_id), `title`, `department` + `team`, `employmentType` (FullTime), `location` (plain
+    string, e.g. "São Paulo") plus
+    `address.postalAddress.{addressLocality,addressRegion,addressCountry}` and
+    `secondaryLocations[]`, `isRemote` bool, `workplaceType` (Remote|Hybrid), `publishedAt`
+    ISO8601 -> posted_at. Body is already inline: `descriptionHtml` (HTML, html.unescape+strip)
+    and `descriptionPlain` (pre-stripped text) — no second detail fetch needed;
+    `jobUrl`/`applyUrl` are the ashby links. Gotcha: keep only `isListed==true` (all 9 currently
+    listed). Salary: pass includeCompensation=true, but every posting has
+    shouldDisplayCompensationOnJobPostings=false and empty compensationTiers -> no pay data
+    today. Fit: São Paulo-based, remote-first Brazilian AI foundation-model startup —
+    Staff/Senior Software, Data Platform, Security Engineer and Research Scientist roles are a
+    strong Rust/backend-infra match.
+
+- slug: btg_pactual
+  name: "BTG Pactual"
+  url: https://boards-api.greenhouse.io/v1/boards/btgpactual/jobs?content=true
+  render: static
+  company: "BTG Pactual"
+  hints: >-
+    Greenhouse board API, token `btgpactual`. Whole board in one GET — `?content=true` inlines
+    every description, `meta.total`=274 (no server pagination to chase). Parse standard fields
+    per job: stable numeric `id` (== the `gh_jid` in `absolute_url`, use as external_id),
+    `title`, `location.name` (free-text, bilingual/messy: "São Paulo", "Rio de Janeiro, Rio De
+    Janeiro, Brazil", "São Paulo / Rio de Janeiro"), `absolute_url` (points at the first-party
+    embed `carreiras.btgpactual.com/vagas?gh_jid=<id>` — good apply_url), `content` =
+    HTML-entity-escaped description (html.unescape then strip tags). Because content is already
+    inlined, no per-job fetch is needed; if you want one anyway, GET
+    `https://boards-api.greenhouse.io/v1/boards/btgpactual/jobs/<id>?content=true` (verified
+    200, same field set). Gotchas: `departments[].name` and `offices[].name` carry a trailing "
+    - <numeric code>" (e.g. "TECHNOLOGY BRAZIL - 8453", "BR - SAO PAULO") — strip it if you want
+    a clean label; a job can have multiple offices. Rich `metadata[]` of
+    {name,value,value_type}: "Empresa", "Área - Página de Carreiras", "Rank Corporativo"
+    (seniority band), "Programa" — usable facets, but NO salary anywhere.
+    `updated_at`/`first_published` are ISO8601 with tz. Not a mega-board (274<300) so enumerate
+    all; if you ever want tech-only, filter client-side on `departments[].name =~
+    /TECHNOLOGY|IT/`. Fit: large Brazilian investment bank; ~101 roles in TECHNOLOGY BRAZIL plus
+    many backend (Java/.NET/C#/Node.js), data-engineering, DBRE and infra roles in São Paulo/Rio
+    — backend-heavy and Brazil-based.
+
+- slug: backblaze
+  name: "Backblaze"
+  url: https://boards-api.greenhouse.io/v1/boards/backblaze/jobs?content=true
+  render: static
+  company: "Backblaze"
+  hints: >-
+    Greenhouse board API, token `backblaze`. Whole board in one GET (`?content=true`); response
+    is `{jobs:[...], meta:{total}}` with no server-side pagination (meta.total matched
+    len(jobs)=40). Per item parse: stable numeric `id`, `title`, `location.name` (free-text,
+    often multi-city semicolon-joined e.g. "Remote - Argentina; Remote - Colombia ; Remote -
+    Costa Rica ; Remote - Mexico" — split on ';' and trim), `absolute_url`
+    (job-boards.greenhouse.io/backblaze/jobs/<id>), `updated_at`, `first_published`,
+    `departments[].name` and `offices[]` for taxonomy. `content` = HTML-entity-escaped
+    description (double-escaped: html.unescape then strip tags). No salary/compensation fields
+    present (metadata only carries a "Critical Role" yes_no flag; no US pay-transparency ranges
+    surfaced in this feed). Fit: remote-first cloud object-storage company; heavy roster of
+    backend/storage/SRE/infrastructure roles hiring remote across LATAM (AR/CO/CR/MX) plus US
+    and Bangalore — strong match for Rust/backend, though no Brazil-specific location tag.
+
+- slug: banco_bradesco
+  name: "Banco Bradesco"
+  url: https://us.api.csod.com/rec-job-search/external/jobs
+  render: static
+  company: "Banco Bradesco"
+  hints: >-
+    Cornerstone OnDemand (CSOD) "Player" career site — NOT one of the standard ATSs
+    (ats_family=other). Tenant `bradesco`, careerSiteId=1. Two plain GETs + one POST, NO
+    browser/JS-eval needed. BOOTSTRAP (token source): GET
+    `https://bradesco.csod.com/ux/ats/careersite/1/home?c=bradesco`; the HTML embeds a
+    `csod.context={...}` JSON literal in an inline `<script>` — regex/parse it for `.token`
+    (anonymous JWT, user -100, ~2h TTL, so fetch fresh every run) and `.endpoints.cloud` (here
+    `https://us.api.csod.com/`; host is tenant-specific, don't hardcode across tenants). FEED:
+    POST `{cloud}rec-job-search/external/jobs` with header `Authorization: Bearer <token>` and
+    JSON body
+    `{careerSiteId:1,careerSitePageId:1,pageNumber:1,pageSize:500,cultureId:12,searchText:"",cultureName:"pt-BR",states:[],countryCodes:[],cities:[],placeID:null,radius:0,postingsWithinDays:null,customFieldCheckboxKeys:[],customFieldDropdowns:[],customFieldRadios:[]}`.
+    Response: `data.totalCount` + `data.requisitions[]`; pageSize:500 returns the whole board
+    (~210) in ONE call (no server pagination). Per item: stable `requisitionId` (external_id),
+    `displayJobTitle` (title), `locations[]`={city,state,country} (all BR),
+    `postingEffectiveDate`/`postingExpirationDate` (dd/mm/yyyy), and `externalDescription` =
+    full body delivered INLINE as PLAIN TEXT (no HTML tags/entities, no unescape needed) — no
+    per-job detail GET required. GOTCHAS (each is a hard/silent failure): pageNumber is
+    1-INDEXED (0 => HTTP 400 ValidationError InvalidData); `radius` must be a NUMBER, use 0
+    (null => 400); `postingsWithinDays` must be null or omitted — 0 or -1 return totalCount:0
+    while still HTTP 200; the human `/requisition/<id>` SPA route redirects to a login page, so
+    always use the inline `externalDescription`. No salary fields. Fit: large Brazilian retail
+    bank, ~33/210 reqs are engineering/tech (Backend Java devs, Fullstack Tech Leads, Cloud
+    Security, BI/data), 100% Brazil (mostly Osasco/São Paulo).
+
+- slug: banco_pan
+  name: "Banco PAN"
+  url: https://boards-api.greenhouse.io/v1/boards/bancopan/jobs?content=true
+  render: static
+  company: "Banco PAN"
+  hints: >-
+    Greenhouse board API, token `bancopan`. A single GET with `?content=true` returns the WHOLE
+    board (meta.total=47) with every description inline — no server pagination, no per-job fetch
+    (drop content=true and `content` comes back null). Parse standard fields per job: stable
+    numeric `id` (matches the slug in `absolute_url`), `title`, `location.name` (free-text
+    single string; mostly "São Paulo", occasionally "City, State, Brazil"), `absolute_url`
+    (apply link on job-boards.greenhouse.io), `content` = HTML-entity-escaped HTML
+    (html.unescape then strip tags), plus `updated_at`, `first_published`, `requisition_id`,
+    `language` (pt-BR). Gotcha: `departments` and `offices` are effectively one flat node
+    ("BANCO PAN") — do NOT use them to classify function; the role/seniority signal lives in the
+    `title` and in the `metadata[]` name/value array ("Rank Corporativo" e.g. "AN - Analyst",
+    "Programa", "Empresa"="Banco Pan", plus yes/no flags "Destaque"=featured and "Vaga
+    Oculta"=hidden — consider skipping Vaga Oculta=true). No salary fields (Brazilian
+    Greenhouse). Second gotcha: the bank's own careers surface (www.bancopan.com.br,
+    carreiras.bancopan.com.br) is behind Akamai and 403s automated GETs — go straight to the
+    Greenhouse API, don't scrape the site. Fit: single-company Brazil board, all roles São
+    Paulo/BR, engineering-heavy — backend (Java/.NET/C#), data engineering, DBRE,
+    platform/analytics, ML — matches Rust/backend remote-BR targeting.
+
+- slug: bellroy
+  name: "Bellroy"
+  url: https://boards-api.greenhouse.io/v1/boards/bellroy/jobs?content=true
+  render: static
+  company: "Bellroy"
+  hints: >-
+    Greenhouse board API, token `bellroy`. Whole board in one GET (append `?content=true` to
+    inline descriptions; response also carries `meta.total`, here 10 — no server pagination).
+    Parse standard fields per job: stable numeric `id`, `title`, `location.name` (single
+    free-text string like "Remote", "Collingwood, Victoria, Australia", "China"), `absolute_url`
+    (note the newer `job-boards.greenhouse.io/bellroy/...` host), `departments[].name`,
+    `offices[].name` (offices are HQ-tagged, e.g. "New York, US", so trust `location.name` for
+    the real posting geo, not offices), `first_published` and `updated_at` timestamps. `content`
+    = HTML-entity-escaped description (single html.unescape pass -> HTML, then strip tags). No
+    salary/compensation fields. Because content=true embeds the body, no per-job detail GET is
+    needed. Fit: Melbourne-based carry-goods/accessories maker (wallets, bags) and a well-known
+    functional-programming (Haskell) shop — hence the rustlang.com.br listing; board is mostly
+    retail/ops but surfaces occasional backend/FP + front-end engineering roles, AU-based with
+    some Remote.
+
+- slug: blue_robotics
+  name: "Blue Robotics"
+  url: https://ats.rippling.com/blue-robotics/jobs
+  render: static
+  company: "Blue Robotics"
+  hints: >-
+    Rippling ATS (boardType RIPPLING, slug `blue-robotics`), a Next.js SSR app on
+    ats.rippling.com (assets/API on ats.us1.rippling.com). LISTING: a single static GET of the
+    board root embeds the WHOLE board in `<script id="__NEXT_DATA__">` ->
+    props.pageProps.dehydratedState.queries[0].state.data = {items[], totalItems, totalPages,
+    page, pageSize}. Each item: `id` (UUID, stable external_id), `name` (title; may have stray
+    whitespace, trim), `url` (absolute detail URL), `department.name`, `locations[]` each {name,
+    city, state, country, countryCode, workplaceType in ON_SITE|REMOTE}. GOTCHA: the SSR
+    dehydrated query is page 0 / pageSize 20, so boards >20 postings only ship their first page
+    here (page the API for the rest); Blue Robotics has totalItems=6/totalPages=1 so one GET is
+    the whole board. BODY: same-host /blue-robotics/jobs/<uuid> static GET ->
+    props.pageProps.apiData.jobPost (NOT in dehydratedState — different subtree than the
+    listing). jobPost has: `description` = dict {`company`, `role`} of HTML, entity-escaped
+    (&quot; etc.) with heavy inline styles -> concat company+role, html.unescape then strip
+    tags; `createdOn` (ISO8601 = posted_at, only present on detail, not on listing items);
+    `employmentType`; `workLocations[]` (plain strings); `department.name`; `companyName`.
+    SALARY: jobPost.payRangeDetails[] = {location, currency, frequency (MONTH|YEAR|HOUR),
+    rangeStart, rangeEnd, isRemote} — structured, keep as salary_raw/source; present on at least
+    the BR remote role (USD 3000-5000/MONTH). Fit: small marine-robotics hardware shop; 5 of 6
+    roles are on-site US/Canada (Torrance CA, Victoria BC), but exactly one Software/BlueOS
+    Software Developer is REMOTE in Florianopolis, Brazil — the direct BR/remote-engineer fit.
+
+- slug: bosch_brasil
+  name: "Bosch Brasil"
+  url: https://api.smartrecruiters.com/v1/companies/BoschGroup/postings?country=br&limit=100
+  render: static
+  company: "Bosch Brasil"
+  enumerates_all: false
+  hints: >-
+    SmartRecruiters Posting API, company token `BoschGroup` (NOT `bosch` — that token is empty).
+    Mega-board: 4703 jobs globally, so filter to Brazil with `?country=br&limit=100` -> JSON
+    {totalFound, content:[...]}. 90 BR jobs today, all in one page (limit max 100; paginate with
+    &offset= only if it ever exceeds 100). List item fields: stable numeric `id`, `name` (title
+    — NB Bosch appends a ref suffix like ` - 35252`/`(35200)` to titles), `refNumber` (REF…R),
+    `location.{city,region,country,remote,hybrid,fullLocation}`, `function.label`,
+    `typeOfEmployment.label`, `experienceLevel.label`, `industry.label`, `customField[]`
+    (Contract type / Legal Entity / Working Location). GOTCHA: the `function` facet is noisy —
+    mechanical `PROJETISTA DE MÁQUINAS` roles are tagged `Information Technology`, so filter
+    roles by title/description, not by `function`. For the body, GET the detail endpoint
+    /v1/companies/BoschGroup/postings/<id> -> jobAd.sections: concat HTML
+    `companyDescription`+`jobDescription`+`qualifications`+`additionalInformation` (each
+    `.text`, HTML — strip tags); detail also carries `postingUrl`, `applyUrl` (real apply link)
+    and top-level `releasedDate` = posted_at. No salary fields anywhere. Fit: Bosch Brasil hires
+    backend/embedded/data/security engineers (JUNIOR PEN TESTER, BI DATA ANALYST, vision-system
+    designers) across SP/PR/SC — mostly on-site/hybrid, ~6 fully remote.
+
+- slug: cpqd
+  name: "CPQD"
+  url: https://cpqd.recruitee.com/api/offers/
+  render: static
+  company: "CPQD"
+  hints: >-
+    Recruitee public offers API, token `cpqd` (host cpqd.recruitee.com). A single GET of
+    https://cpqd.recruitee.com/api/offers/ returns the WHOLE board — top-level {offers:[...]},
+    the ONLY key, no pagination wrapper. Crucially the list objects already embed the full body,
+    so no per-offer fetch is needed: concat HTML `description` + `requirements` (both
+    HTML-tagged; html.unescape then strip tags). Per item: numeric `id` (stable external_id),
+    `slug`, `title`, `department` (may be null), `category_code` (e.g. information_technology),
+    `employment_type_code`, `experience_code`; workplace booleans `remote`/`hybrid`/`on_site`
+    plus `locations[]` (city/state/country/country_code) and flat `city`/`country`.
+    `published_at`=posted_at; every offer here has status==published (filter on it anyway).
+    `salary` object is present but null-filled (min/max/currency/period all null). Public
+    detail/apply URLs come prebuilt in `careers_url`/`careers_apply_url` — GOTCHA: these point
+    at a DIFFERENT host (estagiocpqd.recruitee.com) than the API host, so don't assume host
+    parity when building links. Fit: Brazilian R&D institute in Campinas/SP — on-site/hybrid
+    backend (Java/Python), ML/GenAI, QA and cybersecurity/PD&I roles; no remote and no explicit
+    Rust listings.
+
+- slug: capgemini
+  name: "Capgemini"
+  url: https://cg-jobstream-api.azurewebsites.net/api/job-search?country_code=pt-br&size=100
+  render: static
+  company: "Capgemini"
+  enumerates_all: false
+  hints: >-
+    Custom first-party "Jobstream" JSON API (Azure-hosted) that backs the WordPress `cg-jobs`
+    plugin on capgemini.com/careers. Base is `window.cg_jobs_jobstream_url ||
+    https://cg-jobstream-api.azurewebsites.net/api`; the listing endpoint is `/job-search`
+    taking `page`, `size`, `search`, `country_code` and arbitrary filter params. A single static
+    GET of `/job-search?country_code=pt-br&size=100` returns the WHOLE Brazil slice inline in
+    one shot (34 rows; the global board is 6289 so `page`+`size` pagination exists if you drop
+    the country filter). Envelope: `{count, total, data:[...], max_score}`. Each item: stable
+    `id` (e.g. "513991-en_US_SAPBTP"), `ref`, `source`, `title`, `location` (bare city string
+    e.g. "Barueri"/"Sao Paulo"/"Recife"), `country_code`=="pt-br", `contract_type`,
+    `experience_level`, `brand`, `professional_communities` (e.g. "Software Engineering" — the
+    tech axis, filter client-side), `updated_at` (ISO8601 → posted/updated), `status`=="1" means
+    active, and `apply_job_url` (real careers.capgemini.com apply link → use as apply_url). Body
+    is INLINE, no detail fetch needed: `description` is HTML entity-escaped (html.unescape then
+    strip tags); `description_stripped` is doubly-escaped so prefer `description`. No salary
+    fields; `country_name`/`department`/`site` frequently empty. Gotchas: `country_code=BR`
+    returns 0 — the value is the locale `pt-br`; the `professional_community`/department query
+    params are ignored server-side (a combined pt-br+community query still returned all 34), so
+    narrow tech roles via the `professional_communities` field, not a query param. Global-board
+    facets live at `/api/job-filters/` (types: country_code, professional_community,
+    experience_level, location, contract_type, brand). Fit: Brazil dev-heavy —
+    Java/Fullstack/.NET/Node.js/Data Engineer/Tech Lead/Java Solutions Architect roles across
+    Barueri, São Paulo, Recife, Campinas, Brasília.
+
+- slug: collabora
+  name: "Collabora"
+  url: https://api.lever.co/v0/postings/collabora?mode=json
+  render: static
+  company: "Collabora"
+  hints: >-
+    Lever postings API, token `collabora`. A single GET of
+    `https://api.lever.co/v0/postings/collabora?mode=json` returns the WHOLE board as a
+    top-level JSON array (no pagination; ~4 live roles). Per item: `id` (stable UUID
+    external_id), `text`=title, `hostedUrl`=absolute_url, `applyUrl`, `createdAt`=epoch-ms
+    posted_at, `country` (ISO2), `workplaceType` (e.g. 'remote'), and `categories`{`location`,
+    `allLocations`[], `team`, `commitment`}. Body = `descriptionPlain` (or HTML `description`)
+    as the intro, then concat each `lists[]` entry ({`text`: section heading, `content`: HTML}),
+    then `additional`; html.unescape + strip tags. No salary fields anywhere. Gotcha: assert
+    every `hostedUrl` contains `/collabora/` and drop strays — a rare transient on
+    `api.lever.co/v0/postings/collabora` surfaced an unrelated tenant's board once (not
+    reproducible; 4 repeat GETs were clean). Detail hostedUrl pages also render static HTML if
+    you ever need a fallback. Fit: remote-first Linux kernel / GPU / audio-stack consultancy —
+    Rust-heavy low-level engineering roles, Anywhere-remote friendly.
+
+- slug: flex_flextronics
+  name: "Flex"
+  url: https://flextronics.wd1.myworkdayjobs.com/wday/cxs/flextronics/Careers/jobs
+  render: static
+  company: "Flex"
+  enumerates_all: false
+  hints: >-
+    Workday CxS board, tenant `flextronics`, site `Careers` (host
+    flextronics.wd1.myworkdayjobs.com, verified from flex.com's own /careers link). MEGA-BOARD:
+    unfiltered total=1383, so filter to the technology/software slice via POST-body
+    appliedFacets `jobFamilyGroup:["7cf41477d20d430899fbfda307b4e9fd"]` (the "IT" Job Category,
+    50 live). LIST: POST /wday/cxs/flextronics/Careers/jobs, header Content-Type:
+    application/json, body
+    {"appliedFacets":{"jobFamilyGroup":["7cf41477d20d430899fbfda307b4e9fd"]},"limit":20,"offset":0,"searchText":""}
+    -> {total, jobPostings:[{title, externalPath, locationsText, postedOn (relative "Posted
+    Today"/"Posted 30+ Days Ago"), bulletFields:[jobReqId e.g. WD222539]}]}. Page by offset +=
+    20 (limit caps at 20) until offset>=total; 50 rows = 3 pages. BODY/detail: GET
+    /wday/cxs/flextronics/Careers<externalPath> -> jobPostingInfo{title, jobReqId (stable
+    external_id, e.g. WD222539), jobDescription = HTML (strip tags), location,
+    country.descriptor, startDate = YYYY-MM-DD (real posted_at, better than the relative
+    postedOn), externalUrl = public apply page, canApply, timeType}. No salary/compensation
+    fields anywhere in Workday. Facet ids are opaque hashes that can drift on re-seed — re-read
+    them from an unfiltered /jobs call's facets[] where facetParameter=="jobFamilyGroup" rather
+    than trusting the hardcoded id. To widen past internal-IT toward hardware/embedded, add
+    jobFamilyGroup "Design, Process & Technology Engineering" (id
+    635bbc507eb14932a381c14a29d8a00f, 125 jobs). Fit: global EMS/electronics-manufacturing
+    giant; the IT slice is mostly enterprise-IT/ERP/business-systems-analyst plus the odd
+    Unreal/graphics dev — thin on pure Rust/product-backend, so the rustlang.com.br listing is
+    aspirational.
+
+- slug: fullstory
+  name: "Fullstory"
+  url: https://api.ashbyhq.com/posting-api/job-board/fullstory?includeCompensation=true
+  render: static
+  company: "Fullstory"
+  hints: >-
+    Ashby public posting-API, board token `fullstory`. One plain GET of
+    https://api.ashbyhq.com/posting-api/job-board/fullstory returns the WHOLE board as
+    {"jobs":[...],"apiVersion"} — no server pagination. Filter to keep only `isListed`==true.
+    Per-job fields: string UUID `id` (stable external_id), `title`, `department`, `team`,
+    `employmentType` (e.g. FullTime), `location` (plain string) plus `secondaryLocations[]` and
+    structured `address.postalAddress` (addressCountry / addressLocality), `isRemote` (bool),
+    `workplaceType` (Remote|Hybrid|OnSite), `publishedAt` (ISO 8601 -> posted_at). Links:
+    `jobUrl` = https://jobs.ashbyhq.com/fullstory/<id>, `applyUrl` = same + /application. Body
+    is served inline: `descriptionHtml` (ready-to-strip HTML) or `descriptionPlain` (already
+    plain text) — no second fetch needed. Salary: append `?includeCompensation=true` to populate
+    `compensation` (compensationTierSummary / compensationTiers[]), but this tenant returns them
+    empty and `shouldDisplayCompensationOnJobPostings`=false, so treat as no-salary. Fit:
+    remote-first digital-experience / behavioral-analytics platform (Rust/backend hires per
+    rustlang.com.br); openings rotate — right now only a single London sales role is live.
+
+- slug: gft
+  name: "GFT"
+  url: https://jobs.gft.com/tile-search-results/?optionsFacetsDD_country=BR&startrow=0
+  render: static
+  company: "GFT"
+  enumerates_all: false
+  hints: >-
+    SAP SuccessFactors Career Site Builder, host `jobs.gft.com` (company `gfttechnol`, backend
+    career5.successfactors.eu). ats_family=other (SuccessFactors not in enum). The board is
+    served as STATIC HTML tiles by the AJAX fragment `GET /tile-search-results/?startrow=N` —
+    walk `startrow` in steps of 25 (0,25,50,…) until a short page. Each tile: `<li
+    class="job-tile job-id-<external_id>" data-url="/job/<City-Title-ReqID>/<external_id>/">`
+    containing `<a class="jobTitle-link …">` (title text is HTML-entity-escaped and sits on the
+    NEXT line after the opening tag — flatten newlines before extracting; html.unescape it),
+    `<span class="jobLocation">`, and `<span class="jobDate">` (locale-formatted, e.g. '10 de
+    jul. de 2026'). external_id = trailing numeric segment of data-url (stable). Country filter
+    = `&optionsFacetsDD_country=<ISO2>` — the proposed URL pins BR = 88 jobs (25/page → startrow
+    0,25,50,75). Body: GET same-host data-url `/job/<slug>/<id>/` (static): description is in
+    `<div class="jobdescription">` / `itemprop="description"`; a JSON-LD JobPosting
+    (hiringOrganization) is embedded. No salary fields anywhere. GOTCHAS: (1) the pretty
+    `/go/brazil/4412501/` landing shows the 88 count but its deeper pages are JS-only —
+    startrow/page/pageNumber are all ignored, so use the tile-search-results feed, not the /go/
+    page; (2) `optionsFacetsDD_country` needs the ISO2 CODE (BR, DE, US, CH, FR, IT, PL, MX,
+    CO…), not the country name — value 'Brazil' returns 0; (3) free-text `location=` is
+    unreliable (returns 0 or the full page); (4) drop the country param for the GLOBAL 335-job
+    board (would be enumerates_all=true). Fit: global IT/financial-services consultancy — the BR
+    slice is Java/.NET/AWS backend, fullstack, cloud and data-engineering roles (São Paulo /
+    Alphaville-Barueri, many hybrid), squarely Brazil-friendly backend hiring.
+
+- slug: globant
+  name: "Globant"
+  url: https://career.globant.com/api/sap/job-requisition-v1
+  render: static
+  company: "Globant"
+  hints: >-
+    First-party JSON feed on Globant's bespoke Next.js career portal (backed by SAP
+    SuccessFactors, but consume Globant's own API — the standard SF endpoints are dead).
+    Endpoint: POST https://career.globant.com/api/sap/job-requisition-v1 with `Content-Type:
+    application/json` and body `{"page":N}` (1-based). Send a browser UA and `Referer:
+    https://career.globant.com/`. Response: `{error, jobRequisition:[...], total, showMore,
+    totalPages}`. Page size is FIXED at 10 (server ignores limit/pageSize/size/offset — only
+    `page` works), so loop page=1..totalPages (total=98 -> 10 pages) or until showMore=false;
+    concat the jobRequisition arrays. Per job: `jobReqId` = stable string external_id (e.g.
+    "78810"); `jobTitle`; `jobDescription` = the FULL job body as HTML, inline in the LISTING
+    response (~17k chars) so NO separate detail GET is needed (html.unescape then strip tags);
+    `country`; `location` = free-text "City, Country"; `createdDateTime` = ISO-8601 posted_at;
+    `externalCode` = ISO-2 country code that mirrors `country` (NOT a requisition id — don't use
+    as external_id); `status` = always "Approved" in this feed (only live reqs returned); `area`
+    = array of {optionId,label} job-function tags (e.g. "Software Engineering") — use to filter
+    eng roles; `questions` = screening questions, empty in the listing. No salary fields.
+    Human/apply page (SSR, 200): https://career.globant.com/job/<TitleSlugNoSpaces>/<jobReqId>
+    where the slug is jobTitle with spaces+punctuation stripped (accents/case kept) —
+    reconstructable, not needed for parsing. Sibling `/api/sap/job-requisition-v2` is the
+    single-record/related endpoint (requires {"job_id":...}); don't use it to enumerate. Fit:
+    strongly on-target — 58 of 98 reqs are engineering (Go, C++, Node.js, Java, Data/Cloud/AI
+    Engineering, SRE), LATAM-heavy with remote-friendly and Brazil-based roles.
+
+- slug: growe
+  name: "Growe"
+  url: https://boards-api.greenhouse.io/v1/boards/growe/jobs?content=true
+  render: static
+  company: "Growe"
+  hints: >-
+    Greenhouse board API, token `growe` (the board renders at job-boards.eu.greenhouse.io/growe,
+    but the JSON API is served from the GLOBAL host boards-api.greenhouse.io — note
+    boards-api.eu.greenhouse.io does NOT resolve, so always hit the global api host). Whole
+    board in one GET of /v1/boards/growe/jobs?content=true (meta.total, no server pagination;
+    returned==total). Parse the standard fields per job: stable numeric `id`, `title`,
+    `location.name` (free-text region strings like "Anywhere", "Europe", "Warsaw", "Anywhere;
+    Europe" — NOT a city; treat as remote/region), `absolute_url`
+    (job-boards.eu.greenhouse.io/growe/jobs/<id>), `content` = HTML-entity-escaped description
+    (html.unescape then strip tags), `updated_at`/`first_published`, `offices[]` (country names
+    e.g. Poland/Ukraine), `departments[]` (embedded per job), and `metadata[]` carrying a
+    "Specialization" single_select (Legal/HR/etc). No salary/compensation/pay fields (EU/remote
+    board, US pay-transparency not triggered). Gotcha: the /departments endpoint exists but is
+    extremely noisy (120+ mostly-empty regional/historical depts) — ignore it and use the
+    departments embedded in the ?content=true jobs feed. Fit: iGaming/sports-betting (Apostas)
+    platform, remote-first ("Anywhere"/"Europe") backend/platform/security engineering (.NET,
+    DevSecOps, endpoint security, front-end) plus compliance/KYC/legal.
+
+- slug: grupo_carone
+  name: "Grupo Carone"
+  url: https://api.quickin.io/public/6409d3f1988fca0014f2d9c1/jobs
+  render: static
+  company: "Grupo Carone"
+  hints: >-
+    Quickin ATS public JSON API (Brazilian recruiter platform; human board at
+    jobs.quickin.io/carone/jobs, Nuxt2 SSR). The board is keyed by the company account `_id`,
+    NOT the slug `carone`: GET https://api.quickin.io/public/6409d3f1988fca0014f2d9c1/jobs
+    (account _id was lifted from window.__NUXT__ / the _nuxt bundle's
+    `$axios.get("/public/"+account._id+"/jobs")`). Response is Mongo-paginate: {docs:[...],
+    total, limit:30, page, pages}. Server hard-caps `limit` at 30 (larger values ignored), so
+    enumerate the whole board by walking ?page=1..pages (currently 11 pages / 303 rows). Each
+    doc carries the FULL body inline — no detail GET needed: stable 24-hex `_id`, `title`,
+    HTML-entity-escaped `description` + `requirements` + `benefits` (html.unescape then strip
+    tags), `city` + `region` + `country`(BR), `workplace_type` (on-site|hybrid|remote),
+    `position_category`, `code`, `career_url` (public detail/apply page on jobs.quickin.io =
+    external_url), `contract_id.name` (e.g. CLT), `company_id.name` ("Grupo Carone"),
+    `created_at` (ISO = posted_at). `publicate`=="published" on all live rows. No salary field
+    anywhere. Gotcha: this is a regional Espirito Santo supermarket — ~all 303 rows are on-site
+    retail/ops (baggers/cashiers/stockers), heavily duplicated PCD affirmative-action posts; to
+    narrow to engineering append `?position_category=it` (dedicated tech facet, currently 1
+    role: "Programador de Sistemas", in-house software team). Fit: retail employer with a small
+    ES-based dev team and only sporadic backend/systems openings.
+
+- slug: carrefour_brasil
+  name: "Grupo Carrefour Brasil"
+  url: https://corporativo-grupocarrefourbrasil.pandape.infojobs.com.br/
+  render: static
+  company: "Grupo Carrefour Brasil"
+  enumerates_all: false
+  hints: >-
+    Pandapé (InfoJobs Brasil) hosted career site, server-rendered — no JSON feed, but every job
+    carries a schema.org JSON-LD block. LISTING: GET the board root (= page 1, 20 cards);
+    paginate with GET `/vacancy/index?PageNumber=N&PageSize=20`. GOTCHAS: PageSize is capped at
+    20 (larger is ignored) and a plain `?page=N` on the root is IGNORED (always returns page 1)
+    — you MUST use `/vacancy/index?PageNumber=N`; walk PageNumber=1.. until a page yields <20
+    cards (corporate board = 61 -> pages 1-3 full + 1 on page 4). Each card: `<a class="card
+    card-vacancy" href="/Detail/<id>">` with title in child `<h3 class="link ... " title="...">`
+    (HTML-entity escaped -> html.unescape). BODY: GET same-host `/Detail/<id>` (static HTML);
+    parse the single `<script type="application/ld+json">` JobPosting -> `title`, `description`
+    (HTML, html.unescape + strip tags), `datePosted` (ISO 8601 = posted_at), `employmentType`
+    (e.g. full-time), `hiringOrganization.name`,
+    `jobLocation.address`{`addressLocality`,`addressRegion`,`addressCountry`}. Fallbacks: `<h1
+    class="fw-600 color-title">` and `id="description"`. external_id = the numeric Detail id
+    (stable). apply_url = same-host `/Apply/<id>`. NO salary exposed anywhere (JobPosting has no
+    baseSalary; BR 'a combinar'). SCOPE GOTCHA: this is the CORPORATE subdomain (corporativo-…)
+    where the tech/engineering roles live; store hiring is on sibling Pandapé boards
+    (carrefour., atacadao.). Fit: corporate SRE/cloud/full-stack + BI/analytics/UX roles at a
+    Brazil retail giant — Rust-adjacent backend/platform hiring.
+
+- slug: grupo_olx
+  name: "Grupo OLX"
+  url: https://vemsergrupoolx.gupy.io/
+  render: static
+  company: "Grupo OLX"
+  hints: >-
+    Gupy public career page (Next.js SSR), token `vemsergrupoolx`. A single static GET of the
+    board root embeds the WHOLE board in `<script id="__NEXT_DATA__">` -> props.pageProps.jobs[]
+    (28 items, no server pagination). List-item shape is NESTED: numeric `id` (stable
+    external_id), `title`, `department` (code-prefixed, e.g. `0108018 - [MARK] GROWTH`), `type`
+    (vacancy_type_effective|associate|talent_pool),
+    `workplace.address.{city,stateShortName,state,country}` and `workplace.workplaceType`
+    (remote|hybrid|on-site). For the body, same-host GET /jobs/<id> and read props.pageProps.job
+    — note the FLATTENED shape there: `name` (title),
+    `addressCity`/`addressState`/`addressStateShortName`/`addressCountry`, `workplaceType`;
+    concat HTML `description`+`responsibilities`+`prerequisites`+`relevantExperiences`;
+    `publishedAt`=posted_at, `expiresAt` present, keep `status`==published. Gupy exposes no
+    salary. Fit: Brazil's OLX classifieds group (Autos/Imóveis) hiring backend, staff-data, QA
+    and eng-manager roles, ~12 of 28 fully remote.
+
+- slug: helius
+  name: "Helius"
+  url: https://api.ashbyhq.com/posting-api/job-board/helius?includeCompensation=true
+  render: static
+  company: "Helius"
+  hints: >-
+    Ashby posting-api, token `helius`. Whole board in a single static GET (no pagination): JSON
+    {apiVersion, jobs[]}. Each item is self-contained — the body ships inline, so no per-job
+    detail fetch is needed. Fields: UUID `id` (stable external_id), `title`, `department`,
+    `team`, `employmentType` (e.g. FullTime), `location` (free-text string),
+    `workplaceType`/`isRemote`, `isListed` (keep ==true), `publishedAt` (posted_at),
+    `address.postalAddress.addressCountry`, `secondaryLocations[]`, `jobUrl`
+    (jobs.ashbyhq.com/helius/<id>), `applyUrl` (.../application). Body: `descriptionHtml` (real
+    HTML tags — strip them) or the ready-made `descriptionPlain`. Pass
+    `?includeCompensation=true` for salary, but it is gated per-posting by
+    `shouldDisplayCompensationOnJobPostings` (only the GTM role exposes it here; all Engineering
+    roles hide it -> compensation object is empty); when present read
+    `compensation.scrapeableCompensationSalarySummary` (e.g. "$225K - $300K") or the structured
+    `summaryComponents[]` (minValue/maxValue/currencyCode/interval). Fit: remote-first,
+    North-America Solana/blockchain infrastructure — heavy on Staff/Sr backend, performance, and
+    platform engineering, plus a little GTM.
+
+- slug: jbs
+  name: "JBS"
+  url: https://grupojbs.gupy.io/
+  render: static
+  company: "JBS"
+  hints: >-
+    Gupy public career page (Next.js SSR), tenant `grupojbs` (careerPage id 200024, companyId
+    79535). A single static GET of the board root embeds the WHOLE board in `<script
+    id="__NEXT_DATA__">` -> props.pageProps.jobs[] (425 items, no server pagination; the
+    `?jobName=` search param is IGNORED server-side, so any filtering is client-side). Each lite
+    item: numeric `id` (stable external_id), `title`, `type` (vacancy_type_*), `department`,
+    `workplace.address{country,state,stateShortName,city,district}`, `workplace.workplaceType`
+    (on-site|remote|hybrid), `quickApply`. For the body GET same-host /jobs/<id> ->
+    props.pageProps.job: concat HTML
+    `description`+`responsibilities`+`prerequisites`+`relevantExperiences`;
+    `publishedAt`=posted_at (ISO), keep `status`=='published', `expiresAt`/`registerEndDate` =
+    expiry, `skills[]`; apply happens on the same /jobs/<id> page (no separate apply_url field).
+    Gupy exposes no salary. MEGA-BOARD: ~421/425 are operational/commercial/factory roles
+    (Produção 100, Comercial 121, Manutenção 31); for a backend fleet filter client-side to
+    department=='T.I' (4 live) and optionally scan titles for desenvolvedor/software/dados. Fit:
+    world's-largest-protein-processor enterprise IT, but current software roles are on-site São
+    Paulo legacy-stack analyst jobs (C#/SQL, Oracle PL/SQL, TOTVS RM), not remote Rust/backend.
+
+- slug: jalasoft
+  name: "Jalasoft"
+  url: https://apply.workable.com/api/v1/widget/accounts/jalasoft
+  render: static
+  company: "Jalasoft"
+  hints: >-
+    Workable public widget API, account token `jalasoft`. A single static GET of
+    https://apply.workable.com/api/v1/widget/accounts/jalasoft returns {name, description,
+    jobs:[]} = the WHOLE board in one shot (top-level keys are only name/description/jobs; no
+    total/next field, no server pagination). Each jobs[] item: `shortcode` (stable alnum
+    external_id, e.g. 6F2D1F2056), `title`, `department`, `employment_type`, `telecommuting`
+    (bool), `function`, `experience`, flat `country`/`city`/`state`, plus a `locations[]` array
+    of {country,countryCode,city}. For the body do a per-job GET
+    https://apply.workable.com/api/v1/accounts/jalasoft/jobs/<shortcode> (note the path is
+    /accounts/ NOT /widget/accounts/ — the widget variant 404s) -> concat HTML
+    `description`+`requirements`+`benefits`; keep `state`==published; take apply link from
+    `url`/`application_url`. No salary/comp fields anywhere. GOTCHA: the board multiplies each
+    role into a separate posting (its own shortcode) per country — 13 distinct roles fan out to
+    70 postings (e.g. "AI Tech Lead" appears 5x for CO/PE/BR/DO/BO), and every posting also
+    re-lists all sibling countries in locations[]; dedup on title+department if you don't want
+    per-country duplicates. Fit: remote-first LATAM software+AI consultancy, all 70 postings
+    telecommuting=true with Brazil among the hiring countries (10 postings) — strong
+    Brazil/remote backend, AI/ML and DevOps fit.
+
+- slug: kevel
+  name: "Kevel"
+  url: https://ats.rippling.com/embed/kevel-careers/jobs
+  render: static
+  company: "Kevel"
+  hints: >-
+    Rippling Recruiting (Rippling ATS, boardType RIPPLING), slug `kevel-careers`. Discovered via
+    a Webflow embed on www.kevel.com/careers/jobs: `<div id="rr-job-board"
+    data-job-board-id="kevel-careers">` +
+    static-assets.ripplingcdn.com/ats/embeds/job-board.v1.js, which iframes
+    `https://ats.rippling.com/embed/${boardId}/jobs`. That URL is a Next.js SSR page: ONE static
+    GET embeds the whole board in `<script id="__NEXT_DATA__">` ->
+    props.pageProps.dehydratedState.queries[0].state.data = {items[], page, pageSize(=20),
+    totalItems, totalPages}. No server pagination in practice (totalItems=5, totalPages=1); if a
+    tenant exceeds pageSize you'd have to re-fetch — there is no plain JSON API (guesses at
+    /api/board/<slug>/job-posts 404 behind Cloudflare; a _next/data/<buildId>/... route exists
+    but buildId churns, so parse __NEXT_DATA__ from the HTML). List item fields: `id` (uuid =
+    stable external_id), `name` (title; GOTCHA: trailing whitespace, e.g. "Principal Engineer "
+    -> .strip()), `department.name`, `url` (absolute ats.rippling.com/kevel-careers/jobs/<id>),
+    `locations[]` = {name, country, countryCode, state, stateCode, city, workplaceType in
+    REMOTE|ON_SITE|HYBRID}. For the body, GET the same-host detail `url`; its __NEXT_DATA__ is
+    DIFFERENT-shaped -> props.pageProps.apiData.jobPost, where `description` is a DICT {company,
+    role} of two HTML strings (assemble body = company + role, then html.unescape and strip
+    tags; the styled <p>/<span> inline CSS is noise). Detail also has `createdOn` (ISO8601 ->
+    posted_at), `uuid`, `employmentType.label` (e.g. SALARIED_FT), `workLocations[]` (plain
+    string names), `companyName`. Salary: `payRangeDetails` array is present on both jobPost and
+    apiData but EMPTY for these postings (Rippling supports pay ranges; this tenant omits them)
+    -> treat as no-salary; `jsonLd` was null on the posting checked. Fit: remote-first ad-tech
+    infra; the R&D "Principal Engineer" is Remote (Brazil) and explicitly wants
+    Rust/Clojure/Scala/Kotlin backend on high-throughput distributed ad-serving systems ->
+    squarely the rustlang.com.br backend/Rust niche.
+
+- slug: mercado_livre
+  name: "Mercado Livre Brasil"
+  url: https://mercadolibre.eightfold.ai/api/pcsx/search?domain=mercadolibre.com&query=&location=Brazil&start=0&filter_department=IT
+  render: static
+  company: "Mercado Livre Brasil"
+  enumerates_all: false
+  hints: >-
+    Eightfold.ai PCSX career site (tenant `mercadolibre`, domain param `mercadolibre.com`).
+    Shared LatAm mega-board (782 jobs across AR/BR/MX/CL/CO/UY), so this url is a FILTERED
+    slice: technology/engineering in Brazil. Feed is a plain GET returning JSON:
+    `data.positions[]` + `data.count` (total for the current filter, here 27). Page size is
+    fixed at 10 — paginate with `&start=` in steps of 10 until start>=count (no `num` param
+    honored). Filter grammar (verified in pcsxPwa.js): each facet appends as
+    `filter_<snake_case(category)>=<value>`; the top-level `location=` param is separate and
+    geocodes — `location=Brazil` scopes to Brazil AND auto-adds remote (response echoes
+    appliedFilters `{includeRemote:1, department:IT}`, all results BR). `filter_department=IT`
+    is Mercado Libre's whole tech org (Software/Backend/Android/ML/Data
+    Science/Cybersecurity/Infra). Per-position fields: numeric `id` (stable external_id; also
+    builds `positionUrl`=`/careers/job/<id>`), `displayJobId`==`atsJobId` (human req id e.g.
+    "122225"), `name` (title), `standardizedLocations[]`/`locations[]` (e.g. ["BR","Sao Paulo,
+    SP, BR"]), `department`, `workLocationOption` (onsite|hybrid|remote),
+    `postedTs`/`creationTs` (epoch secs). For the body do a same-host GET
+    `/api/pcsx/position_details?position_id=<id>&domain=mercadolibre.com&hl=pt` ->
+    `data.jobDescription` = HTML (html.unescape then strip tags); also `data.publicUrl`,
+    `data.location` (e.g. "Sudeste,Brazil"). No salary fields (Eightfold never exposes pay).
+    Gotchas: the legacy `/api/apply/v2/jobs` endpoint is DISABLED here (403 "Not authorized for
+    PCSX") — must use `/api/pcsx/search`. Endpoint rate-limits fast bursts (429 "Please try
+    again later") — throttle. Only a browser User-Agent is required (no Referer/CSRF for the
+    search GET); add `&hl=pt` or responses default to Spanish. Fit: LatAm's largest
+    e-commerce+fintech platform, heavy Brazil backend/platform/cloud/ML hiring, remote-friendly
+    — squarely matches the rustlang backend/Brazil context.
+
+- slug: mitel
+  name: "Mitel"
+  url: https://mitel.wd3.myworkdayjobs.com/wday/cxs/mitel/mitelcareers/jobs
+  render: static
+  company: "Mitel"
+  hints: >-
+    Workday CXS, tenant `mitel`, host `mitel.wd3.myworkdayjobs.com`, site `mitelcareers`. LIST =
+    POST /wday/cxs/mitel/mitelcareers/jobs with JSON body
+    {"appliedFacets":{},"limit":20,"offset":N,"searchText":""} -> {total, jobPostings:[{title,
+    externalPath, locationsText, postedOn (RELATIVE e.g. "Posted Yesterday" — do not use as
+    date), bulletFields:[jobReqId]}]}. Server-paginates 20/page: loop offset 0,20,40,... until
+    collected == `total` (68 now). BODY = GET /wday/cxs/mitel/mitelcareers{externalPath} (append
+    externalPath to the cxs base) -> jobPostingInfo: `jobReqId` (e.g. R012904 = stable
+    external_id; also present as bulletFields[0] in the list, so you can key without the detail
+    GET), `title`, `jobDescription` (HTML, html.unescape+strip), `location`, `startDate` (ISO
+    YYYY-MM-DD = real posted_at), `country`, `timeType`, `externalUrl` (canonical apply link),
+    `canApply`. No salary fields anywhere. Location/facet filters exist via appliedFacets but 68
+    jobs total so unfiltered full enumeration is correct. Fit: Mitel runs an R&D center in
+    Curitiba, Brazil (R&D Internship + Technical Support reqs there) plus a São Paulo hybrid
+    office; global req mix skews SAP/full-stack/software-engineer — no explicit Rust title live,
+    listed on rustlang.com.br for the BR backend/systems R&D presence.
+
+- slug: nexus_xyz
+  name: "Nexus"
+  url: https://api.ashbyhq.com/posting-api/job-board/nexus.xyz?includeCompensation=true
+  render: static
+  company: "Nexus"
+  hints: >-
+    Ashby posting API, board token `nexus.xyz` — the token is LITERAL and includes the dot;
+    plain `nexus`/`nexuslabs`/`nexus-xyz` all 404, so the `.xyz` is load-bearing. Token isn't in
+    the homepage HTML or sitemap; it's embedded in the site's Next.js JS chunks (app/layout +
+    app/page reference `jobs.ashbyhq.com/nexus.xyz`). A single GET returns the WHOLE board as
+    `{jobs:[...], apiVersion}` — no server pagination. Per job parse: string UUID `id` (stable
+    external_id), `title`, `department` + `team` (both "Engineering" today), `employmentType`
+    (Contract|FullTime), `location` + `secondaryLocations[]` + `isRemote`/`workplaceType`,
+    `publishedAt` (ISO8601 = posted_at), `isListed` (keep == true), `jobUrl` and `applyUrl` (=
+    jobUrl + "/application"). Body is served INLINE — `descriptionHtml` (HTML, html.unescape
+    then strip tags) and `descriptionPlain` (already plain text) — so no per-job detail fetch is
+    needed. `?includeCompensation=true` adds a `compensation` object, but it's gated per-job by
+    `shouldDisplayCompensationOnJobPostings` (currently false on all roles → no salary shown).
+    Fit: remote-first, LATAM-heavy Rust backend + infrastructure + systems engineering roles for
+    a verifiable-finance blockchain (SF-HQ, Buenos Aires presence).
+
+- slug: openmined
+  name: "OpenMined"
+  url: https://apply.workable.com/api/v1/widget/accounts/openmined
+  render: static
+  company: "OpenMined"
+  hints: >-
+    Workable board, token `openmined`. Primary feed: single GET
+    `https://apply.workable.com/api/v1/widget/accounts/openmined` -> {name, description,
+    jobs[]}; whole board, no server pagination. GOTCHA: jobs[] is duplicated once per location
+    row (25 rows for 6 real jobs here) -> dedup by `shortcode`. Per item: `shortcode` (stable
+    external_id, e.g. 0C52D130E3), `title`, `department`, `telecommuting` (bool remote),
+    `country`/`city`/`state` + `locations[]`, `published_on`/`created_at`, and `application_url`
+    = https://apply.workable.com/j/<shortcode>/apply. Cleaner alt list: POST
+    `https://apply.workable.com/api/v3/accounts/openmined/jobs` body
+    {"query":"","location":[],"department":[],"worktype":[],"remote":[]} -> {results[], total}
+    already deduped, adds numeric `id`, `workplace`, `state`==published, `published` (ISO). Both
+    lists carry NO body: for the description GET
+    `https://apply.workable.com/api/v2/accounts/openmined/jobs/<shortcode>` (v1 path also works;
+    note the v3 detail path 404s) -> `description`+`requirements`+`benefits` as HTML
+    (html.unescape then strip tags). The public /openmined/j/<shortcode>/ page is a JS shell (no
+    JSON-LD) and the hosted openmined.workable.com/spi/v3 API is OAuth-walled (401), so use
+    api/v2 for bodies. No salary fields. Fit: remote-first 501(c)(3) nonprofit building
+    Syft/PySyft (privacy-preserving ML infra); the two Engineering roles (Staff SWE, Staff QA
+    SWE) are the backend fit, but all roles are US-scoped (country=US, US-only healthcare)
+    despite remote=true, which may exclude BR applicants.
+
+- slug: pagbank_pagseguro
+  name: "PagBank PagSeguro"
+  url: https://pagseguro.gupy.io/
+  render: static
+  company: "PagBank PagSeguro"
+  hints: >-
+    Gupy public career page (Next.js SSR), tenant `pagseguro` (companyId 400, careerPageId 376).
+    A single static GET of the board root https://pagseguro.gupy.io/ embeds the WHOLE board in
+    `<script id="__NEXT_DATA__">` -> props.pageProps.jobs[] (610 items, no server pagination).
+    Each list item: numeric `id` (stable external_id), `title`, `type`, `department`,
+    `workplace.address {country,state,stateShortName,city,district}`, `workplace.workplaceType`
+    (on-site|hybrid|remote), `quickApply`. MEGA-BOARD: 610 jobs dominated by COMERCIAL (442) +
+    VAREJO (59); SSR ignores query params (?name/?workplaceType/?department are echoed in
+    NEXT_DATA.query but jobs stays 610) and Gupy public search APIs 404, so NO server-filtered
+    URL exists -> filter CLIENT-SIDE to department == "TECNOLOGIA DA INFORMAÇÃO*" (note the
+    literal trailing asterisk; safest to match prefix "TECNOLOGIA DA INFORMAÇÃO") = 31 real
+    engineering roles (Eng. de Software Java/Android/SRE/Front End, Eng. de Dados/IA, AppSec,
+    Full Stack React|TS|Node, DBA). Body GET same-host /jobs/<id> -> props.pageProps.job: concat
+    HTML `description`+`responsibilities`+`prerequisites`+`relevantExperiences`;
+    `publishedAt`=posted_at (ISO), `expiresAt` present, keep `status`=="published"; build
+    location from `workplaceType`+`addressCity`/`addressState`/`addressCountry`; `skills`[]
+    array; apply via same /jobs/<id> page (`quickApply` flag). Gupy exposes no salary. Fit: BR
+    fintech/payments platform (UOL group) with a steady Java/SRE/data-eng backend hiring stream,
+    a few fully-remote.
+
+- slug: picpay
+  name: "PicPay"
+  url: https://epdm.fa.la1.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions?onlyData=true&finder=findReqs;siteNumber=CX_1,limit=200,sortBy=POSTING_DATES_DESC&expand=requisitionList.secondaryLocations,requisitionList.workLocation
+  render: static
+  company: "PicPay"
+  hints: >-
+    Oracle Recruiting Cloud (Fusion HCM Candidate Experience), tenant
+    `epdm.fa.la1.oraclecloud.com`, siteNumber `CX_1` (human site: picpay.com/carreiras ->
+    .../hcmUI/CandidateExperience/pt-BR/sites/PicPay). LIST: GET
+    recruitingCEJobRequisitions?onlyData=true&finder=findReqs;siteNumber=CX_1,limit=200,sortBy=POSTING_DATES_DESC&expand=requisitionList.secondaryLocations,requisitionList.workLocation
+    -> items[0].requisitionList[] holds the WHOLE board; grand total at items[0].TotalJobsCount.
+    Default limit is tiny so you MUST pass a big limit — there is no cursor pagination once
+    limit>=count. Per item: stable numeric `Id` (external_id), `Title`,
+    `PrimaryLocation`+`PrimaryLocationCountry`, `secondaryLocations[]`,
+    `PostedDate`/`PostingEndDate`, `JobType`, `WorkerType`, `ShortDescriptionStr`. BODY: GET
+    recruitingCEJobRequisitionDetails?expand=all&onlyData=true&finder=ById;Id=%22<Id>%22,siteNumber=CX_1
+    -> items[0]; concat HTML
+    `ExternalDescriptionStr`+`ExternalQualificationsStr`+`ExternalResponsibilitiesStr` (many
+    reqs pack everything into ExternalDescriptionStr and leave the other two ''), then
+    html.unescape + strip tags. Apply/detail URL per job:
+    .../hcmUI/CandidateExperience/pt-BR/sites/PicPay/job/<Id>. Gotchas: in the list expand
+    `JobFunction` comes back None and `WorkplaceType` '' — remote status is only hinted by a
+    '[Remoto]' tag in the Title, so read the detail for truth; no salary fields anywhere; the
+    finder is semicolon/comma-delimited inside the query string, and the Id quotes must be
+    URL-encoded (%22). Fit: São Paulo-based, remote-friendly fintech with a deep
+    backend/full-stack/SRE/mobile/data bench (23 of 81 reqs are engineering).
+
+- slug: prex
+  name: "Prex"
+  url: https://prex.bamboohr.com/careers/list
+  render: static
+  company: "Prex"
+  hints: >-
+    BambooHR public careers API (ats_family "other"), subdomain token `prex`. Whole board in one
+    bare GET of https://prex.bamboohr.com/careers/list -> JSON {meta:{totalCount},
+    result:[...]}; totalCount(16) == len(result), no server pagination, no auth/special headers
+    (returns application/json even to a plain GET). Each list item: string `id` (stable
+    external_id), `jobOpeningName` (title), `departmentLabel` (e.g. Core Engineering,
+    Infrastructure, IT, Credit Risk, Artificial Intelligence), `employmentStatusLabel` (e.g.
+    "Employee - Full Time"), `location.{city,state}` (note: `city` frequently holds the COUNTRY,
+    e.g. "Argentina" with `state`=="*" when unspecified; real cities appear as "Montevideo",
+    "Buenos Aires", "Santiago de Chile"), `locationType`, `isRemote` (observed null). For the
+    body, same-host GET /careers/<id>/detail -> result.jobOpening: `description` = HTML
+    (html.unescape then strip tags), `datePosted` (YYYY-MM-DD -> posted_at),
+    `minimumExperience`, `addressCountry`, `jobOpeningShareUrl` (=
+    https://prex.bamboohr.com/careers/<id>, use as absolute_url/apply link),
+    `jobOpeningStatus`=="Open". `compensation` field exists but is null — no salary anywhere.
+    Fit: LATAM (Uruguay/Argentina/Chile) fintech digital-wallet; board is backend/infra/AI-heavy
+    and carries a live "Rust Developer" (Core Engineering) plus Database Reliability Engineer
+    and AIOps — precisely why it is on rustlang.com.br.
+
+- slug: r2_capital
+  name: "R2"
+  url: https://r2.bamboohr.com/careers/list
+  render: static
+  company: "R2"
+  hints: >-
+    BambooHR public careers JSON, token `r2` (ATS family = BambooHR, not in the standard enum ->
+    "other"). Whole board (17 live) in ONE static GET of https://r2.bamboohr.com/careers/list ->
+    {meta:{totalCount}, result:[...]}; no server pagination. Each item: string `id` (stable
+    external_id), `jobOpeningName` (title), `departmentLabel`, `employmentStatusLabel`
+    (Full-Time/Contractor/Internship). GOTCHA: the structured location is almost always empty
+    (location.city/state and atsLocation.* = null, locationType="1", isRemote=null) — the real
+    location is baked into a parenthetical suffix in the title, e.g. "(LatAm Only)", "(São
+    Paulo, BR)", "(CDMX or São Paulo)", "(Colombia Only)"; parse the suffix if you need geo. For
+    the body, same-host GET https://r2.bamboohr.com/careers/<id>/detail ->
+    result.jobOpening.description = HTML (html.unescape + strip tags);
+    result.jobOpening.jobOpeningShareUrl (== https://r2.bamboohr.com/careers/<id>) is the
+    canonical/apply URL; result.formFields lists application questions. No salary fields. Fit:
+    LatAm-only, remote/São Paulo-friendly Engineering (Senior/Staff Software Engineer,
+    Application Security) + Data Science roles at a LatAm SMB embedded-credit fintech — matches
+    the Rust/backend, Brazil-friendly rustlang.com.br profile.
+
+- slug: sap
+  name: "SAP"
+  url: https://jobs.sap.com/tile-search-results/?q=&optionsFacetsDD_department=Software-Design%20and%20Development&startrow=0
+  render: static
+  company: "SAP"
+  enumerates_all: false
+  hints: >-
+    SAP SuccessFactors "Jobs2Web" (j2w) self-hosted career site (same parsing shape as many
+    SuccessFactors employers; note /platform/js/j2w/ assets). Mega-board = 1264 jobs total, so
+    the url pins the engineering department `Software-Design and Development` (234) via the URL
+    facet param `optionsFacetsDD_department`. ENUMERATE through the tile feed
+    `/tile-search-results/?q=&optionsFacetsDD_department=Software-Design and
+    Development&startrow=N`, N stepping by 25; each response is an HTML fragment of `<li
+    class="job-tile job-id-<id>" data-url="/job/<slug>/<id>/" ...>` — parse the numeric `<id>`
+    (stable external_id) and the title from the tile's `<a href="/job/...">` text. Stop when a
+    page returns zero tiles (past ~234; verified startrow=225->9, startrow=250->0). For the
+    BODY, GET the same-host detail page `https://jobs.sap.com/job/<slug>/<id>/` (fully static)
+    and read the `data-careersite-propertyid` spans: `title`, `location` (e.g. "Palo Alto, CA,
+    US, 94304"), `date` (posted, "Jul 10, 2026"), `department`, `customfield3` (career level:
+    Professional/Graduate/Student/Management/…), and `description` (~10k-char HTML body ->
+    html.unescape + strip tags). No JSON-LD JobPosting and no structured salary field (US pay
+    ranges, when present, are inline prose inside `description`). GOTCHAS: free-text `q=` is
+    fuzzy/relevance-ranked (q=software engineer returns 1255/1264), NOT a real filter — always
+    use the department facet; the country facet takes ISO codes, so `optionsFacetsDD_country=BR`
+    = 44 Brazil jobs (the literal "Brazil" does NOT work). Facet values/counts come from `POST
+    /services/jobs/options/facetValues/` (JSON body with
+    facetquery.fields=["department","customfield3","country"]). To widen: swap/add other eng
+    depts `Software-Development Operations` (50), `Information Technology` (116),
+    `Software-Research`/`-Quality Assurance`/`-User Experience`, or drop the param for the whole
+    1264-job board. Fit: large-enterprise platform/backend/cloud-infra engineering (heavy
+    ABAP/Java + cloud systems, some Rust-adjacent low-level roles), globally distributed incl.
+    Brazil-friendly.
+
+- slug: schonfeld_strategic
+  name: "Schonfeld Strategic Advisors"
+  url: https://boards-api.greenhouse.io/v1/boards/schonfeld/jobs?content=true
+  render: static
+  company: "Schonfeld Strategic Advisors"
+  hints: >-
+    Greenhouse board API, token `schonfeld`. Whole board in one GET (append `?content=true`); no
+    server pagination and `meta.total` confirms the count (54 at probe). Parse the standard
+    fields per item in `jobs[]`: stable integer `id` (use as external_id; `requisition_id` and
+    `internal_job_id` also present), `title`, `location.name` = a single free-text string
+    (usually "City, State/Region, Country"; multi-site roles semicolon-join, e.g. "Miami,
+    Florida, United States; New York, New York, United States" — split on ';' if you need
+    per-city), `absolute_url` (job-boards.greenhouse.io/schonfeld/jobs/<id>), and `content` =
+    HTML-entity-escaped description (html.unescape then strip tags). Also useful:
+    `departments[].name` and `offices[].name` for team/site facets,
+    `updated_at`/`first_published` ISO-8601 timestamps for posted_at. No structured salary:
+    `pay_input_ranges` and `metadata` are null — but US roles (New York/Miami, 22 of 54 at
+    probe) disclose an inline base-pay range in the body text ("expected to be between $175,000
+    and $225,000"); non-US roles (Brazil/London/HK/Singapore) do not, so any salary must be
+    regex-scraped from `content` and treated as US-only. Fit: quant hedge-fund platform/infra +
+    quant-dev + software engineering; notably a 12-role São Paulo LATAM quant/strat/risk desk
+    (Brazil-friendly) alongside the NY software org.
+
+- slug: sequencing
+  name: "Sequencing"
+  url: https://jobs.gem.com/api/public/graphql
+  render: static
+  company: "Sequencing"
+  hints: >-
+    Gem public job board (human page jobs.gem.com/sequencing), a React SPA with NO SSR — the
+    board root HTML is an empty shell, so hit the GraphQL API directly. Endpoint: POST
+    https://jobs.gem.com/api/public/graphql, Content-Type: application/json, body
+    `{"operationName":"JobBoardList","variables":{"boardId":"sequencing"},"query":"query
+    JobBoardList($boardId:String!){oatsExternalJobPostings(boardId:$boardId){jobPostings{id
+    extId title locations{id name city isoCountry isRemote} job{department{name} locationType
+    employmentType}}}}"}`. ONE POST returns the WHOLE board in
+    `data.oatsExternalJobPostings.jobPostings[]` (no pagination, no cursors). Per item: opaque
+    base64 `id`, stable string `extId` (use as external_id AND as the detail key), `title`,
+    `locations[]`{name,city,isoCountry,isRemote}, `job`{`department.name`,
+    `locationType`=REMOTE|HYBRID|ONSITE, `employmentType`=FULL_TIME|…}. For the body do a second
+    POST operationName=`ExternalJobPostingQuery`, variables `{boardId,extId}`, read
+    `data.oatsExternalJobPosting.descriptionHtml` (HTML-entity-escaped, e.g. `&nbsp;` ->
+    html.unescape then strip tags) and `firstPublishedTsSec` (unix epoch seconds = posted_at);
+    `requisitionId` also present. No salary fields anywhere in the schema. Gotchas:
+    introspection is disabled (returns data.__schema=null with a generic error); `title` and
+    location `name` carry stray leading/trailing whitespace (e.g. " Head of Finance", "United
+    States ") — trim; the board slug is the vanity path `sequencing`. Fit:
+    consumer-genomics/DNA-app platform hiring REMOTE backend/platform/security/full-stack+AI
+    engineering with Latin America (LATAM)/South America explicitly listed as eligible locations
+    — Brazil-friendly.
+
+- slug: serasa_experian
+  name: "Serasa Experian"
+  url: https://api.smartrecruiters.com/v1/companies/Experian/postings?country=br&limit=100
+  render: static
+  company: "Serasa Experian"
+  enumerates_all: false
+  hints: >-
+    SmartRecruiters public Posting API, company token `Experian` (the global tenant; "Serasa
+    Experian" is a brand inside it). List: GET /v1/companies/Experian/postings?country=br ->
+    JSON {totalFound, offset, limit, content[]}. Server-paginates: limit max 100, step `offset`
+    by 100 until offset+len(content) >= totalFound (Brazil scope ~212 rows; the ungated global
+    board is 567). Each content item: stable numeric-string `id`, `name`=title, `refNumber`,
+    `releasedDate` (ISO -> posted_at),
+    `location{city,region,country,fullLocation,remote,hybrid}`, `department{id,label}`,
+    `typeOfEmployment.label`, and `customField[]` — note the `Brands` field (fieldId
+    60bf852122069d3816fd7cd0) whose valueLabel pins `Serasa Experian` (178 of the 212 BR rows vs
+    other Experian brands). Body: GET /v1/companies/Experian/postings/{id} ->
+    jobAd.sections{companyDescription,jobDescription,qualifications,additionalInformation}, each
+    {title, text=HTML}; concat the four `text` blocks (already HTML, strip tags), keep
+    active==true; `applyUrl`/`postingUrl` are the jobs.smartrecruiters.com detail/apply links.
+    No salary field (compensation:null). To narrow to pure tech append `&department=13221468`
+    (Technology, ~70 BR rows), but backend/data roles also sit under 'Information Technology &
+    Systems', 'Product Development', 'Data Management' and 'Analytics' departments, so
+    country=br is the safer engineering net. Fit: Java + AWS cloud-native shop with a deep SRE /
+    observability / FinOps + software-engineering bench at the São Carlos (SP) R&D hub and São
+    Paulo HQ; hybrid, Brazil-based (not Rust-specific).
+
+- slug: shopify
+  name: "Shopify"
+  url: https://www.shopify.com/careers.data
+  render: static
+  company: "Shopify"
+  hints: >-
+    First-party React Router v7 careers site, Ashby-backed but fully white-labeled (the public
+    Ashby posting-api is OFF — job-board/`shopify` and variants all 404; do NOT route to Ashby).
+    Whole board in ONE static GET of the single-fetch feed
+    `https://www.shopify.com/careers.data` (105 job entries, no server pagination); the
+    identical payload is also embedded in the `/careers` HTML. GOTCHA: the payload is React
+    Router turbo-stream, NOT plain JSON — it is a flat reference-graph array where objects are
+    `{"_<keyIndex>": <valueIndex>}` and BOTH keys and values are indices into the array
+    (interned/deduped strings), so you cannot read `.jobs[]` directly; resolve the index
+    references (or run a turbo-stream decoder) to rebuild each job. Per-job Ashby fields: `id`
+    (UUID == `ashby_jid`, stable external_id), `title`, `departmentName`, `teamName`,
+    `locationName`/`locationExternalName`, `isRemote`, `workplaceType` (Remote/Hybrid),
+    `employmentType` (FullTime/Contract), `publishedDate`=posted_at, `applicationDeadline`,
+    `isListed` (keep ==true), `externalLink`/`applyLink` = apply URL
+    `shopify.com/careers?ashby_jid=<id>`. Salary: `shouldDisplayCompensationOnJobBoard` +
+    `compensationTierSummary` (present only for pay-transparency jurisdictions). BODY: GET
+    same-host `/careers/<slug>_<id>.data` and read `descriptionHtml` (full HTML body;
+    `description` = plain text); the detail HTML page carries it too. Fit: Digital-by-Design
+    remote-first commerce platform, Ruby/Rust/Go shop — infrastructure/backend/ML-infra roles
+    live in the feed, good remote-friendly backend fit.
+
+- slug: skydropx
+  name: "Skydropx"
+  url: https://api.ashbyhq.com/posting-api/job-board/skydropx?includeCompensation=true
+  render: static
+  company: "Skydropx"
+  hints: >-
+    Ashby posting-api, token `skydropx`. One GET returns the WHOLE board as JSON `{jobs:[...],
+    apiVersion:1}` — no pagination (34 live postings, all `isListed`==true; skip any that are
+    false). Per item: UUID `id` (stable external_id), `title`, `department` (+ mirror `team`),
+    `employmentType` (e.g. FullTime), primary `location` string plus `secondaryLocations[]` and
+    `address.postalAddress.addressCountry`; `isRemote` bool and `workplaceType`
+    (Remote|Hybrid|OnSite); `publishedAt`=posted_at; `jobUrl` (human page) and `applyUrl`
+    (jobUrl + /application). Body ships INLINE — no detail fetch needed: use `descriptionHtml`
+    (HTML entity-escaped, html.unescape then strip tags) or `descriptionPlain` (already-clean
+    text). Salary: pass `?includeCompensation=true`, but `compensation` is populated on only
+    ~2/34 (gate on `shouldDisplayCompensationOnJobPostings`==true, then read
+    `compensation.compensationTierSummary` / `compensationTiers[]` / `summaryComponents[]`);
+    otherwise all null. Gotchas: two evergreen talent-pool entries carry no real req ('Postúlate
+    aquí' pub 2023, dept 'Y si te gustaría compartirnos tu CV:'; and 'Banco de Talentos – PCD')
+    — filter by department if you want only real openings; content is multilingual ES/PT. Fit:
+    `department`=='Tech' (8 roles) holds the Rust/backend jobs — 'Senior Software Engineer
+    (Rails & Rust)', '(Node.JS & Rust)', Applied AI Engineer, DevOps — remote
+    LATAM/Brazil-friendly.
+
+- slug: spread_tecnologia
+  name: "Spread Tecnologia"
+  url: https://spread.gupy.io/
+  render: static
+  company: "Spread Tecnologia"
+  hints: >-
+    Gupy public career page (Next.js SSR), tenant `spread`. A single static GET of the board
+    root (https://spread.gupy.io/) embeds the WHOLE board in `<script id="__NEXT_DATA__"
+    type="application/json">` -> props.pageProps.jobs[] (74 live jobs, no server pagination).
+    Each board item: numeric `id` (stable external_id), `title` (ALL-CAPS, carries a trailing
+    internal req code e.g. ` - RHA2611` — strip/normalize for display), `type`
+    (vacancy_type_effective|vacancy_legal_entity|vacancy_type_talent_pool|vacancy_type_apprentice),
+    `department` (Tecnologia|Administrativo), `workplace` =
+    {address:{country,state,stateShortName,city,district}, workplaceType
+    (remote|on-site|hybrid)} — address subfields are frequently empty strings, so trust
+    workplaceType and fall back to the detail page for city/state. For the body do a same-host
+    GET /jobs/<id> and read props.pageProps.job: concat the HTML fields
+    `description`+`responsibilities`+`prerequisites`+`relevantExperiences`; `name`=title,
+    `publishedAt`=posted_at, keep `status`=='published'; location from
+    addressCity/addressState/addressStateShortName/addressCountry; also `code` (internal req
+    id), `skills`[], `jobType`, `expiresAt`/`registerEndDate` for freshness. No salary fields
+    anywhere (Gupy exposes none). GOTCHA: the root SSR intermittently returns a minimal shell
+    (~24KB, pageProps has only i18n keys, `jobs` absent) on a cold/challenged request — retry
+    until props.pageProps.jobs is present (a warm response is ~163KB). The REST-style
+    /api/job?jobBoardSource=gupy_portal, /api/v1/jobs, and portal.api.gupy.io paths all 404 on
+    this tenant; use the __NEXT_DATA__ route only. Fit: Brazilian IT-services/consultancy,
+    remote-friendly BR roles, but the live board skews heavily to .NET/Microsoft-stack developer
+    + analyst positions rather than Rust-specific work.
+
+- slug: super_technologies
+  name: "Super Technologies"
+  url: https://boards-api.greenhouse.io/v1/boards/super/jobs?content=true
+  render: static
+  company: "Super Technologies"
+  hints: >-
+    Greenhouse board API, token `super` on the GLOBAL host boards-api.greenhouse.io — NOT an EU
+    api host (boards-api.eu.greenhouse.io does not resolve), even though rendered postings live
+    on job-boards.eu.greenhouse.io. One static GET of /v1/boards/super/jobs?content=true returns
+    the WHOLE board (meta.total=186, no server pagination). Standard fields per job: stable
+    numeric `id` (external_id), `title`, `location.name` (country or city string; NO 'Remote'
+    values — roles are geo-tagged, Brazil=14), `absolute_url`, `updated_at`/`first_published`,
+    plus `departments[].name` and `offices[].name` for optional filtering, and `content` =
+    HTML-entity-escaped description (html.unescape then strip tags). No salary/compensation
+    fields anywhere (metadata carries none). GOTCHA: one transient fetch returned a DIFFERENT
+    tenant for this same token (company_name 'XP Inc.', São Paulo roles) then self-corrected
+    (8/9 fetches = Super Technologies) — guard ingest by asserting company_name=='Super
+    Technologies' or absolute_url host=='job-boards.eu.greenhouse.io'. Single-job body fallback:
+    /v1/boards/super/jobs/<id>. Fit: Superbet's tech arm ('The Playstack'), a
+    sports/gaming/betting platform spanning Europe + Brazil with heavy
+    Engineering/Data/AI/backend hiring.
+
+- slug: toptal
+  name: "Toptal"
+  url: https://api.lever.co/v0/postings/toptal?mode=json
+  render: static
+  company: "Toptal"
+  hints: >-
+    Lever postings API (v0), token `toptal`. A single GET of
+    https://api.lever.co/v0/postings/toptal?mode=json returns the WHOLE board as a JSON array
+    (no server pagination). Per item: UUID `id` (stable external_id), `text`=title,
+    `categories.location` (free-text) plus `categories.allLocations[]`, `country` (ISO-2),
+    `workplaceType` (remote/onsite/hybrid), `categories.commitment` (e.g. Full-time;
+    occasionally null), `categories.team` and `categories.department`, `createdAt` (epoch ms) =
+    posted_at, `hostedUrl` = public job page, `applyUrl` = apply page. Body: `description` is
+    HTML (html.unescape then strip tags); all 16 current postings carry the full body in
+    `description` and leave `lists[]`/`additional` empty, but assemble defensively as
+    description + concat(lists[].content) + additional so future structured postings still
+    parse. No salary fields. Gotcha: this is Toptal's CORPORATE board
+    (executive/sales/services/talent-ops, all remote), NOT the freelancer talent network at
+    toptal.com/careers. Fit: thin for a Rust/backend crawler — remote-first company but the
+    board skews leadership/GTM and currently lists zero engineering roles.
+
+- slug: tractian
+  name: "Tractian"
+  url: https://api.lever.co/v0/postings/tractian?mode=json
+  render: static
+  company: "Tractian"
+  hints: >-
+    Lever postings API v0, token `tractian`. A single GET of `/v0/postings/tractian?mode=json`
+    returns the WHOLE board as a JSON array (no pagination). Per item: stable UUID `id`, `text`
+    = title, `categories.{department,team,location,commitment,allLocations}`, top-level
+    `country` (ISO-2) and `workplaceType` (remote|onsite|hybrid), `createdAt` (epoch ms ->
+    posted_at), `hostedUrl` (public detail page jobs.lever.co/tractian/<id>) and `applyUrl`.
+    Body is already in the payload: `description` (HTML intro) + `lists[]` (each {`text`
+    heading, `content` HTML} for Responsibilities/Requirements/Preferred
+    Qualifications/Technical Skills) + `additional`; `descriptionPlain`/`descriptionBodyPlain`
+    are plaintext mirrors. No salary/compensation fields exposed. GOTCHA: multi-city roles are
+    posted once per location (the ADR role appears 8x across Sao
+    Paulo/Dublin/Atlanta/Toronto/LA/San Diego/Austin/Mexico City, each with its own id) ->
+    dedupe on title+department if collapsing variants; Sales is 53 of 111 so engineering is a
+    minority. Fit: Senior/Staff Backend, AI, Data, Firmware and Mobile engineering roles are
+    remote and Brazil-based (Sao Paulo) -> strong Rust/backend-in-Brazil fit.
+
+- slug: truelogic
+  name: "Truelogic"
+  url: https://api.ashbyhq.com/posting-api/job-board/truelogic?includeCompensation=true
+  render: static
+  company: "Truelogic"
+  hints: >-
+    Ashby posting API, token `truelogic`. A single static GET of the url returns the WHOLE board
+    in `jobs[]` (no pagination) AND — because of `includeCompensation=true` — embeds each
+    posting's body inline, so NO per-job body GET is needed. Per item: `id` (UUID string, stable
+    external_id), `title`, `department`+`team`, `employmentType` (FullTime/Contract), `location`
+    (string, e.g. 'LatAm'/'Brazil'/'Sao Paulo'), `secondaryLocations[]`, `isRemote` (bool),
+    `workplaceType` (Remote/Hybrid), `publishedAt` (ISO8601 -> posted_at), `jobUrl` (public
+    posting), `applyUrl`. Body = `descriptionHtml` which is ALREADY real HTML (starts
+    `<h1><strong>About Truelogic</strong>...`), NOT entity-escaped — strip tags directly, do NOT
+    html.unescape; `descriptionPlain` is a ready plain-text mirror. `compensation` object is
+    present but every tier/summary is empty (Truelogic publishes no salary). GOTCHA: heavy
+    location-variant duplication — 215 postings collapse to ~114 distinct titles / ~41 base
+    roles; the same req is reposted per country (Brazil/Colombia/Mexico/Uruguay/Dominican
+    Republic/LatAm), so dedup on (title minus trailing location/country suffix) and fan out
+    `location`+`secondaryLocations`. `department` is misleading: ~198 sit under 'Operations'
+    (client-delivery placements) — do NOT filter by department. 7 evergreen 'Pipeline' 'Open
+    Application' reqs (Senior Front-end/Back-end/DevOps/Data/Quality/Mobile + Other Profiles)
+    are talent-pool posts. Fit: LatAm nearshore staff-augmentation consultancy — nearly every
+    role is remote senior engineering (Elixir/React, .NET/Angular, DevOps, SDET, Mobile, Data),
+    Brazil-friendly.
+
+- slug: very_good_ventures
+  name: "Very Good Ventures"
+  url: https://boards-api.greenhouse.io/v1/boards/verygoodventures/jobs?content=true
+  render: static
+  company: "Very Good Ventures"
+  hints: >-
+    Greenhouse board API, token `verygoodventures`. Whole board in one GET (`meta.total`=4, no
+    pagination). Parse the standard fields per item in `jobs[]`: stable numeric `id`, `title`,
+    `absolute_url` (job-boards.greenhouse.io detail page), `location.name` (free-text geo, e.g.
+    "United States/LATAM"), `departments[].name` (e.g. "Engineering"), `offices[].name` (coarse,
+    e.g. "Remote" — trust `location.name` for real geo), `first_published`=posted_at and
+    `updated_at`. Body = `content`: HTML-entity-escaped description (html.unescape once -> real
+    HTML tags, then strip). No salary/compensation fields anywhere. The public careers page
+    (verygood.ventures/careers) is a JS `<greenhouse-jobs data-board-token="verygoodventures">`
+    web component that hits this exact endpoint, so skip the HTML and go straight to the API.
+    Fit: global Flutter/mobile consultancy; small board mixing US-based BizDev/PM roles with the
+    occasional remote backend/infrastructure engineer role open to LATAM — that's the
+    Rust/backend hook.
+
+- slug: weg
+  name: "WEG"
+  url: https://weg.gupy.io/
+  render: static
+  company: "WEG"
+  hints: >-
+    Gupy public career page (Next.js SSR), tenant `weg` (companyId 22312, careerPageId 48454). A
+    single static GET of the board root https://weg.gupy.io/ embeds the WHOLE board in `<script
+    id="__NEXT_DATA__">` -> props.pageProps.jobs[] (90 items, no server pagination; pageProps
+    has no total/pagination object). List item schema is slim: numeric `id` (stable
+    external_id), `title`, `department`, `type`, and nested
+    `workplace.address.{city,state,stateShortName,country}` + `workplace.workplaceType`
+    (on-site/hybrid/remote). Gotcha: `type` is `vacancy_type_effective` (real opening, 62 of 90)
+    vs `vacancy_type_talent_pool` (evergreen pipeline, 28 of 90) — filter out talent pools. The
+    list blob has no dates/status/url. For the body, GET same-host https://weg.gupy.io/jobs/<id>
+    and read props.pageProps.job: note title is `name` here (not `title`); concat HTML
+    `description`+`responsibilities`+`prerequisites`+`relevantExperiences` (Quill markup ->
+    strip tags); `publishedAt`=posted_at (ISO), `expiresAt`/`registerEndDate` also present, keep
+    `status`=='published'; addressCity/addressState/workplaceType at job root. Gupy exposes no
+    salary. Fit: large Santa Catarina industrial manufacturer (motors/electrical/appliances);
+    board skews to plant/ferramentaria/administrative roles (many titles are `<code> - <CITY> -
+    <ROLE>`, several PcD/disability-exclusive) with a steady trickle of SAP/IT analyst openings
+    rather than remote software engineering.
+
+- slug: xp_inc
+  name: "XP Inc."
+  url: https://boards-api.greenhouse.io/v1/boards/xpinc/jobs?content=true
+  render: static
+  company: "XP Inc."
+  hints: >-
+    Greenhouse board API, token `xpinc`. Whole public board in one GET (158 live jobs);
+    `meta.total` confirms the count and there is no server pagination. The URL passes
+    `content=true`, so each job object ALREADY embeds its full description — no separate detail
+    GET needed. Parse the standard fields: stable numeric `id` (external_id, also the tail of
+    `absolute_url` = https://job-boards.greenhouse.io/xpinc/jobs/<id>), `title`, `location.name`
+    (free-text, e.g. "São Paulo, SP"), `departments[].name` (e.g. "Engenharia Software",
+    "Engenharia Dados", "Product" — use to filter tech), `offices[]` (all under "Brasil"),
+    `updated_at`, `first_published` (=posted_at), `requisition_id`, `company_name`="XP Inc.".
+    `content` = HTML that is entity-escaped (html.unescape once, then strip tags). `metadata[]`
+    is recruiter-internal noise (job level, budget key) — ignore. No salary fields. Board is
+    Portuguese, Brazil-only (mostly São Paulo). Fit: backend/data-platform engineering roles at
+    a large BR fintech, Rust-adjacent.
+
