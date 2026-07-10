@@ -1896,7 +1896,15 @@ controls and buttons — each element stashed in `window.__jcAF` under an opaque
 The LLM (dspy `Predict(AutofillStep)`, `JOBCRAWLER_AUTOFILL_MODEL` else the match model,
 temperature 0) sees profile + position context + digest and answers a JSON action list:
 `fill`/`select`/`check`/`click`/`upload`/`done`. Executors resolve refs against `__jcAF` — the
-model never writes JS or selectors. Navigation resets the world, so every round re-sweeps; fills
+model never writes JS or selectors. A `done` that follows a successful `click` in the same round
+is **deferred**, not honored — the model is declaring done for a page it hasn't seen (the
+BambooHR-modal / WWR→ATS-hop zero-fill bug); the loop re-sweeps and plans one more round. The
+click path also stays in the driven tab: anchor `target=_blank` is rewritten to `_self` before
+clicking, and when page JS opens a popup anyway (`window.open` apply flows) the worker adopts it —
+`Target.getTargets`, restricted to targets whose `openerId` is one of the run's own tabs, so an
+operator's unrelated tabs are never grabbed. After any click round it settles
+(`_POST_CLICK_SETTLE_S`, 2 s — SPA modals render past `readyState=complete`) before re-reading.
+Navigation resets the world, so every round re-sweeps; fills
 use the native value setter + `input`/`change` events (no keystrokes, so no accidental Enter-
 submit); `upload` attaches only the operator-configured `JOBCRAWLER_AUTOFILL_RESUME` path
 (default `CV.pdf` — the repo-root convention beside `PROFILE.md`; upload reports unavailable

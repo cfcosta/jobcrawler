@@ -16,6 +16,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any, cast
 
+import jobcrawler.autofill as autofill_mod
 from jobcrawler.autofill import (
     _SUBMIT_RE,
     _WIZARD_RE,
@@ -211,19 +212,31 @@ def test_click_js_embeds_the_guard_patterns_and_the_ref() -> None:
     assert json.dumps("b2") in js
     assert json.dumps(_SUBMIT_RE) in js
     assert json.dumps(_WIZARD_RE) in js
+    # target=_blank apply anchors must navigate the tab we drive, not a new one
+    assert "el.target = '_self'" in js
 
 
 # -- the worker, end to end over a fake browser ----------------------------------
 
 
 class FakeBrowser:
-    """Dispatches ``evaluate()`` on the ``/*jc-*/`` markers the harness JS carries."""
+    """Dispatches ``evaluate()`` on the ``/*jc-*/`` markers the harness JS carries.
+
+    ``sweeps`` is an optional queue of per-round digests (popped front-first; the
+    default ``sweep`` serves once it drains) so tests can model a page that
+    changes after a click. ``targets`` is the ``Target.getTargets`` reply used by
+    the popup-adoption path.
+    """
 
     def __init__(self) -> None:
         self.connected = True
         self.opened: list[str] = []
+        self.attached: list[str] = []
         self.cmds: list[str] = []
         self.acted: list[str] = []
+        self.sids: set[str] = set()
+        self.sweeps: list[dict[str, Any]] = []
+        self.targets: list[dict[str, Any]] = []
         self.sweep: dict[str, Any] = {
             "url": "https://apply.acme.test/a",
             "title": "Apply — Acme",
@@ -242,21 +255,25 @@ class FakeBrowser:
         return "T1"
 
     async def attach(self, target_id: str) -> str:
-        assert target_id == "T1"
-        return "S1"
+        self.attached.append(target_id)
+        sid = "S" + target_id.lstrip("T")
+        self.sids.add(sid)
+        return sid
 
     async def cmd(self, method: str, params: dict | None = None, *, session_id=None, timeout=None) -> dict:
         self.cmds.append(method)
+        if method == "Target.getTargets":
+            return {"targetInfos": list(self.targets)}
         return {}
 
     async def evaluate(self, sid: str, expression: str, *, await_promise: bool = False, timeout=None):
-        assert sid == "S1"
+        assert sid in self.sids
         if "/*jc-ready*/" in expression:
             return "complete"
         if "/*jc-count*/" in expression:
             return 3
         if "/*jc-sweep*/" in expression:
-            return json.dumps(self.sweep)
+            return json.dumps(self.sweeps.pop(0) if self.sweeps else self.sweep)
         if "/*jc-act*/" in expression:
             self.acted.append(expression)
             return json.dumps({"ok": True})
@@ -341,6 +358,123 @@ async def test_run_once_fills_and_logs_the_transcript(tmp_path: Path) -> None:
     assert transcript[0]["results"][0]["result"]["ok"] is True
     # queue is empty now
     assert await worker.run_once() is None
+
+
+_BUTTON_ONLY_PAGE: dict[str, Any] = {
+    "url": "https://apply.acme.test/a",
+    "title": "Acme careers",
+    "controls": [],
+    "controls_total": 0,
+    "buttons": [
+        {
+            "ref": "b1",
+            "tag": "button",
+            "type": "button",
+            "text": "Apply for This Job",
+            "in_form": False,
+        }
+    ],
+    "cross_origin_frames": 0,
+}
+
+
+async def test_done_right_after_a_click_is_deferred_to_a_fresh_sweep(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """The zero-fill bug: [click "Apply", done] in one batch must not end the run.
+
+    The click reveals/navigates to the real form (BambooHR modal, WWR→ATS hop);
+    honoring the same-round done means the form is never even swept. The done is
+    deferred and the next round plans against the refreshed page.
+    """
+    monkeypatch.setattr(autofill_mod, "_POST_CLICK_SETTLE_S", 0.0)
+    store, worker, fake, run_id = _worker_fixture(tmp_path)
+    fake.sweeps = [dict(_BUTTON_ONLY_PAGE)]  # round 2 falls back to the form sweep
+    contexts: list[str] = []
+
+    def fake_llm(profile: str, context: str, page: str) -> str:
+        contexts.append(context)
+        if len(contexts) == 1:
+            return json.dumps(
+                [
+                    {"op": "click", "ref": "b1", "why": "open the form"},
+                    {"op": "done", "summary": "opened the form; nothing visible yet"},
+                ]
+            )
+        return json.dumps(
+            [
+                {"op": "fill", "ref": "c1", "value": "Jane Doe"},
+                {"op": "done", "summary": "name filled"},
+            ],
+            ensure_ascii=False,
+        )
+
+    worker._call_llm = fake_llm  # ty: ignore[invalid-assignment]
+    out = await worker.run_once()
+    assert out is not None and out["status"] == "done"
+    runs = store.autofill_runs_for("acme", "https://acme.test/a")
+    assert runs[0]["summary"] == "name filled"  # not the round-1 guess
+    assert runs[0]["rounds"] == 2
+    assert runs[0]["fields_filled"] == 1
+    # round 2's context told the model its done was deferred
+    assert "DEFERRED" in contexts[1]
+    # the transcript records the deferral for the self-improvement log
+    raw = store._conn.execute(
+        "SELECT transcript_json FROM autofill_runs WHERE id = ?", (run_id,)
+    ).fetchone()[0]
+    round1 = json.loads(raw)[0]
+    assert round1["results"][-1]["result"].get("deferred")
+
+
+async def test_a_tab_the_page_opens_is_adopted_and_driven(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """window.open apply flows: the form lands in a new tab — follow it there."""
+    monkeypatch.setattr(autofill_mod, "_POST_CLICK_SETTLE_S", 0.0)
+    store, worker, fake, run_id = _worker_fixture(tmp_path)
+    fake.sweeps = [dict(_BUTTON_ONLY_PAGE)]
+    fake.targets = [
+        {"type": "page", "targetId": "T1", "url": "https://apply.acme.test/a"},
+        {
+            "type": "page",
+            "targetId": "T2",
+            "openerId": "T1",
+            "url": "https://ats.example.test/apply",
+        },
+        # someone else's tab: no opener — must never be grabbed
+        {"type": "page", "targetId": "T9", "url": "https://mail.example.test/"},
+    ]
+    rounds = 0
+
+    def fake_llm(profile: str, context: str, page: str) -> str:
+        nonlocal rounds
+        rounds += 1
+        if rounds == 1:
+            return json.dumps([{"op": "click", "ref": "b1", "why": "open the form"}])
+        return json.dumps(
+            [
+                {"op": "fill", "ref": "c1", "value": "Jane Doe"},
+                {"op": "done", "summary": "filled on the ATS tab"},
+            ],
+            ensure_ascii=False,
+        )
+
+    worker._call_llm = fake_llm  # ty: ignore[invalid-assignment]
+    out = await worker.run_once()
+    assert out is not None and out["status"] == "done"
+    # the popup was attached and round 2 ran against it (S2 accepted the sweep)
+    assert fake.attached == ["T1", "T2"]
+    runs = store.autofill_runs_for("acme", "https://acme.test/a")
+    assert runs[0]["summary"] == "filled on the ATS tab"
+    assert runs[0]["fields_filled"] == 1
+    raw = store._conn.execute(
+        "SELECT transcript_json FROM autofill_runs WHERE id = ?", (run_id,)
+    ).fetchone()[0]
+    round1 = json.loads(raw)[0]
+    assert round1["popup"] == {
+        "target_id": "T2",
+        "url": "https://ats.example.test/apply",
+    }
 
 
 async def test_run_once_ends_cleanly_when_the_model_returns_prose(tmp_path: Path) -> None:

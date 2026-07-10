@@ -40,6 +40,9 @@ _log = logging.getLogger("jobcrawler.autofill")
 _MAX_ACTIONS_PER_ROUND = 40
 _PAGE_JSON_BUDGET = 24_000  # chars of page digest per prompt
 _PROFILE_BUDGET = 16_000
+# SPA apply flows (BambooHR's modal, client-side route hops) keep rendering well
+# past readyState=complete — give a click's effect a beat before re-reading.
+_POST_CLICK_SETTLE_S = 2.0
 
 # Guard wordlists (folded: lowercase, accents stripped — the JS folds the button
 # text the same way before testing). SUBMIT words block a click anywhere; WIZARD
@@ -277,6 +280,9 @@ _CLICK_JS = r"""/*jc-act*/ (() => {
     return JSON.stringify({ ok: false, blocked: 'submit-guard', text: text.slice(0, 80) });
   if (inForm && new RegExp(__WIZARD_RE__, 'i').test(text))
     return JSON.stringify({ ok: false, blocked: 'wizard-guard', text: text.slice(0, 80) });
+  // target=_blank apply links (WWR-style) would open the form in a tab this
+  // session isn't driving — keep the navigation in the tab we control.
+  if (el.tagName === 'A' && el.target) el.target = '_self';
   try { el.scrollIntoView({ block: 'center' }); } catch (e) {}
   el.click();
   return JSON.stringify({ ok: true, clicked: text.slice(0, 80) });
@@ -333,6 +339,9 @@ class AutofillStep(dspy.Signature):
         first-person sentences grounded in the profile and the role.
       * If the page shows no form controls yet, click the apply button/link that
         reveals or navigates to the form (and dismiss cookie banners).
+      * NEVER put "done" after a "click" in the same array — you have not seen
+        what the click revealed. End the array at the click; the refreshed page
+        arrives next round. (A "done" following a click is deferred, not honored.)
 
     Actions (JSON array, executed in order):
       {"op": "fill",   "ref": "c3", "value": "text to type"}
@@ -344,8 +353,9 @@ class AutofillStep(dspy.Signature):
         operator's configured file; you cannot choose a path)
       {"op": "done", "summary": "what was filled; what is left for the human"}
 
-    Output ONLY the JSON array, no commentary. Emit "done" (as the final element,
-    possibly alone) once everything fillable on this page is handled.
+    Output ONLY the JSON array, no commentary. Emit "done" once everything
+    fillable on this page is handled — alone, or after fill/select/check/upload
+    actions (never after a click).
     """
 
     profile: str = dspy.InputField(
@@ -512,6 +522,7 @@ class AutofillWorker:
 
         history: list[str] = []
         summary = "round budget exhausted before the model finished"
+        mine = {target_id}  # tabs this run drives; grows when the page opens one
         for rnd in range(1, self._max_rounds + 1):
             counters["rounds"] = rnd
             digest = await self._sweep(sid)
@@ -534,6 +545,27 @@ class AutofillWorker:
             any_ok = False
             for action in actions:
                 if str(action.get("op", "")).lower() == "done":
+                    if navigated:
+                        # The model is declaring done for a page it hasn't seen:
+                        # a click just ran this round and may have navigated or
+                        # revealed the form (BambooHR modal, WWR→Breezy hop).
+                        # Defer — next round plans against the fresh sweep.
+                        results.append(
+                            {
+                                "action": action,
+                                "result": {
+                                    "ok": False,
+                                    "deferred": "done after a click in the same "
+                                    "round — the page is re-read first",
+                                },
+                            }
+                        )
+                        history.append(
+                            "  - done -> DEFERRED (a click ran this round; "
+                            "plan again from the fresh page)"
+                        )
+                        summary = str(action.get("summary") or summary)
+                        break
                     done = str(action.get("summary") or "prefill complete")
                     break
                 result = await self._act(sid, action)
@@ -555,6 +587,15 @@ class AutofillWorker:
                 summary = f"stalled: no action succeeded in round {rnd}"
                 break
             if navigated:
+                await asyncio.sleep(_POST_CLICK_SETTLE_S)
+                adopted = await self._adopt_popup(mine)
+                if adopted is not None:
+                    target_id, sid, popup_url = adopted
+                    mine.add(target_id)
+                    entry["popup"] = {"target_id": target_id, "url": popup_url}
+                    history.append(
+                        f"  - (the page opened a new tab; now driving it: {popup_url})"
+                    )
                 await self._wait_ready(sid)  # bounded; covers reveal-click navigations
             else:
                 await asyncio.sleep(1.0)  # async validation / dependent fields settle
@@ -635,6 +676,42 @@ class AutofillWorker:
             if isinstance(count, (int, float)) and count > 0:
                 return
             await asyncio.sleep(0.5)
+
+    async def _adopt_popup(self, mine: set[str]) -> tuple[str, str, str] | None:
+        """Adopt a tab the page opened from one of ours (window.open flows).
+
+        The click executor rewrites anchor targets to ``_self``, but JS-driven
+        apply buttons still spawn tabs — and then the form lives in a tab this
+        session isn't driving. Returns ``(target_id, session_id, url)`` to switch
+        to, or None to stay put. Best-effort: never raises. Only targets whose
+        ``openerId`` is one of this run's tabs qualify, so tabs the operator
+        opens by hand are never grabbed.
+        """
+        try:
+            res = await self._browser.cmd("Target.getTargets")
+        except CdpError:
+            return None
+        infos = res.get("targetInfos", [])
+        popups = [
+            t
+            for t in infos
+            if isinstance(t, dict)
+            and t.get("type") == "page"
+            and str(t.get("openerId") or "") in mine
+            and str(t.get("targetId") or "") not in mine
+        ]
+        if not popups:
+            return None
+        chosen = popups[-1]  # newest when several appeared
+        tid = str(chosen["targetId"])
+        try:
+            sid = await self._browser.attach(tid)
+            await self._browser.cmd("Page.enable", session_id=sid)
+            await self._browser.cmd("Runtime.enable", session_id=sid)
+            await self._browser.cmd("DOM.enable", session_id=sid)
+        except CdpError:
+            return None
+        return tid, sid, str(chosen.get("url") or "")
 
     async def _sweep(self, sid: str) -> dict[str, Any]:
         value = await self._browser.evaluate(sid, _SWEEP_JS)
