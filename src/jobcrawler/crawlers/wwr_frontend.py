@@ -27,15 +27,34 @@ def _parse_date(date_str):
         return None
 
 
-def _build_location(region, country, state):
-    parts = []
-    if state and state.strip():
-        parts.append(state.strip())
-    if region and region.strip():
-        parts.append(region.strip())
-    if country and country.strip():
-        parts.append(country.strip())
-    return ", ".join(parts) if parts else None
+def _countries(item):
+    """Per-country tuple from the RSS ``<country>`` GeoLock, or () when unlocked.
+
+    WWR's ``<region>`` is the employer-chosen listing bucket (near-always
+    "Anywhere in the World" — it maximizes visibility), while the real hiring
+    restriction is the GeoLock the detail page shows as country boxes. The feed
+    mirrors that allowlist into ``<country>`` as flag-decorated English names:
+    "🇨🇦 Canada and 🇺🇸 United States of America". Trusting the region alone made a
+    US/Canada-only posting score as Brazil-eligible "Remote (Worldwide)", so when
+    the allowlist is present it — not the region — is the location. The feed's
+    ``<state>`` is deliberately ignored: it is an employer-address artifact
+    ("Alabama", "Delaware", even "London") on fully-remote listings, and joining
+    it into the location (as this crawler once did) invents a US-state signal
+    the posting never made.
+
+    Names are split on the flag emoji (a regional-indicator pair), NOT on the
+    separators: the list mixes ", ", " and ", and ", and", and country names
+    themselves contain " and " (Bosnia and Herzegovina).
+    """
+    raw = (item.findtext("country") or "").strip()
+    if not raw:
+        return ()
+    out = []
+    for part in re.split(r"[\U0001F1E6-\U0001F1FF]{2}", raw):
+        name = re.sub(r"[\s,]+(?:and[\s,]*)?$", "", part.strip())
+        if name:
+            out.append(name)
+    return tuple(out)
 
 
 def _text_or_none(elem):
@@ -44,35 +63,51 @@ def _text_or_none(elem):
     return None
 
 
-def _apply_url(ctx, page_url):
-    """Return the external application URL for a WWR listing, or None.
+_SALARY_RE = re.compile(
+    r'href="/remote-[^"]*-salary-jobs"[^>]*>\s*<span[^>]*>(.*?)</span>',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _detail(ctx, page_url):
+    """(apply_url, salary) read from the WWR listing page — one fetch serves both.
 
     The RSS feed never carries the real per-job apply link — only the WWR listing
     page and the company's homepage. The apply link is the "Apply now" button on the
     listing page itself: ``<a id="job-cta-alt" href="https://company-ats/...">``. So
-    fetch the page and read that href. Returns None on any fetch/parse failure, when the
-    button is absent, or when it points back at WWR (an in-house form, not a distinct
-    target). The caller then omits ``apply_url`` entirely, so a transient miss never
-    clobbers a value a previous crawl already stored.
+    fetch the page and read that href. apply_url is None on any fetch/parse failure,
+    when the button is absent, or when it points back at WWR (an in-house form, not a
+    distinct target). The caller then omits ``apply_url`` entirely, so a transient
+    miss never clobbers a value a previous crawl already stored.
+
+    The same page's "About the job" sidebar prints a salary band behind WWR's
+    salary-taxonomy link (``href="/remote-100k-or-more-salary-jobs"`` →
+    "$100,000 or more USD") that the feed omits; it is returned verbatim for the
+    Job.salary seam — parsing is normalize.parse_salary's job host-side. Same
+    fail-open contract: None never clobbers a stored value.
     """
     if not page_url:
-        return None
+        return None, None
     try:
         page = ctx.fetch(page_url)
     except Exception:
-        return None
+        return None, None
+    apply_url = None
     tag = re.search(r'<a\b[^>]*\bid=["\']job-cta-alt["\'][^>]*>', page, re.IGNORECASE)
-    if not tag:
-        return None
-    href = re.search(r'\bhref=["\']([^"\']+)["\']', tag.group(0), re.IGNORECASE)
-    if not href:
-        return None
-    url = html.unescape(href.group(1)).strip()
-    if not url.lower().startswith(("http://", "https://")):
-        return None
-    if "weworkremotely.com" in url.lower():
-        return None
-    return url
+    if tag:
+        href = re.search(r'\bhref=["\']([^"\']+)["\']', tag.group(0), re.IGNORECASE)
+        if href:
+            url = html.unescape(href.group(1)).strip()
+            if url.lower().startswith(("http://", "https://")) and (
+                "weworkremotely.com" not in url.lower()
+            ):
+                apply_url = url
+    salary = None
+    m = _SALARY_RE.search(page)
+    if m:
+        text = html.unescape(re.sub(r"<[^>]+>", "", m.group(1))).strip()
+        salary = text or None
+    return apply_url, salary
 
 
 def crawl(ctx):
@@ -97,9 +132,11 @@ def crawl(ctx):
             continue
 
         region = _text_or_none(item.find("region")) or ""
-        country = _text_or_none(item.find("country")) or ""
-        state = _text_or_none(item.find("state")) or ""
-        location = _build_location(region, country, state)
+        countries = _countries(item)
+        if countries:
+            location = "Remote (" + ", ".join(countries) + ")"
+        else:
+            location = region or None
 
         employment_type = _text_or_none(item.find("type"))
         posted_at = _parse_date(_text_or_none(item.find("pubDate")))
@@ -123,9 +160,13 @@ def crawl(ctx):
             job["expires_at"] = expires_at
         if guid:
             job["external_id"] = guid
+        if countries:
+            job["locations"] = countries
 
-        apply = _apply_url(ctx, url)
+        apply, salary = _detail(ctx, url)
         if apply:
             job["apply_url"] = apply
+        if salary:
+            job["salary"] = salary
 
         yield job
