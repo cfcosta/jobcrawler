@@ -4038,3 +4038,23 @@
     supermarket ERP/PDV product company (Limeira-SP + Recife/POA/MG offices); mostly
     PO/CS/support roles with occasional Delphi/backend engineering.
 
+- slug: anza_xyz
+  name: "Anza"
+  url: https://apply.workable.com/api/v1/widget/accounts/anza-xyz
+  render: static
+  company: "Anza"
+  hints: >-
+    Workable widget API, account `anza-xyz`. Start at the account endpoint on
+    apply.workable.com and follow the same-host detail URLs
+    (/api/v1/accounts/anza-xyz/jobs/<shortcode>). The widget expands one posting into one
+    entry per location (same shortcode repeated ~4×): crawl each shortcode once — the detail
+    payload carries the full locations list. Parse published-state postings with
+    id/shortcode, title, locations, department, employment type, remote flag, published
+    date, and description/requirements/benefits from the detail payload. Company is fixed.
+    IMPORTANT: store the account-scoped public URLs
+    (https://apply.workable.com/anza-xyz/j/<shortcode>/ and …/apply/), NOT the widget's
+    account-less /j/<shortcode> shortlinks — the §17 Workable identity key only fires on the
+    /<account>/j/<code> shape, and remote3 carries Anza copies on exactly that shape that
+    must cluster with these rows. Fit: Solana R&D lab (Agave validator client); Rust
+    systems, distributed consensus/protocol engineering.
+
