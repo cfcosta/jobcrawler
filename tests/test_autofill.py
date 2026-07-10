@@ -308,6 +308,7 @@ def _worker_fixture(tmp_path: Path) -> tuple[StateStore, AutofillWorker, FakeBro
         profile_path=str(profile),
         notes_path=str(tmp_path / "APPLY.md"),  # absent — quietly skipped
         resume_path="",  # pinned off: None would fall back to the CV.pdf default
+        sites_path=str(tmp_path / "sites.yaml"),  # absent — no Found-via line
         browser=cast(CdpBrowser, fake),
     )
     return store, worker, fake, run_id
@@ -363,6 +364,56 @@ async def test_run_once_fills_and_logs_the_transcript(tmp_path: Path) -> None:
     assert transcript[0]["page"]["controls"][0]["ref"] == "c1"
     assert "Jane Doe" in transcript[0]["llm_raw"]
     assert transcript[0]["results"][0]["result"]["ok"] is True
+    # no registry in this fixture — the source-board line is dropped, not invented
+    assert "Found via" not in seen[0][1]
+
+
+def _capture_context(worker: AutofillWorker) -> list[str]:
+    seen: list[str] = []
+
+    def fake_llm(profile: str, context: str, page: str) -> str:
+        seen.append(context)
+        return json.dumps([{"op": "done", "summary": "nothing to fill"}])
+
+    worker._call_llm = fake_llm  # ty: ignore[invalid-assignment]
+    return seen
+
+
+async def test_context_names_the_board_the_position_came_from(tmp_path: Path) -> None:
+    store, worker, fake, run_id = _worker_fixture(tmp_path)
+    # aggregator entry (no company): the registry name answers "how did you hear"
+    (tmp_path / "sites.yaml").write_text(
+        '- slug: acme\n  name: "Acme Board"\n  url: https://acme.test/jobs\n'
+    )
+    seen = _capture_context(worker)
+    await worker.run_once()
+    assert "Found via: the Acme Board job board" in seen[0]
+    assert "how you heard" in seen[0]
+
+
+async def test_context_says_own_careers_site_for_a_company_board(tmp_path: Path) -> None:
+    store, worker, fake, run_id = _worker_fixture(tmp_path)
+    (tmp_path / "sites.yaml").write_text(
+        "- slug: acme\n"
+        '  name: "Acme"\n'
+        "  url: https://acme.test/jobs\n"
+        '  company: "Acme"\n'
+    )
+    seen = _capture_context(worker)
+    await worker.run_once()
+    assert "Found via: the company's own careers site" in seen[0]
+
+
+async def test_a_slug_missing_from_the_registry_drops_the_found_via_line(
+    tmp_path: Path,
+) -> None:
+    store, worker, fake, run_id = _worker_fixture(tmp_path)
+    (tmp_path / "sites.yaml").write_text(
+        '- slug: other_board\n  name: "Other"\n  url: https://other.test/jobs\n'
+    )
+    seen = _capture_context(worker)
+    await worker.run_once()
+    assert "Found via" not in seen[0]
     # queue is empty now
     assert await worker.run_once() is None
 

@@ -1914,7 +1914,10 @@ submit); `upload` attaches only the operator-configured `JOBCRAWLER_AUTOFILL_RES
 (default `CV.pdf` — the repo-root convention beside `PROFILE.md`; upload reports unavailable
 when the file is absent) via `DOM.setFileInputFiles`. Optional `APPLY.md`
 (`JOBCRAWLER_AUTOFILL_NOTES`) rides along with the profile for form-only facts (phone, links,
-salary expectation, notice period).
+salary expectation, notice period). The position context also names the board the row was
+crawled from (the registry `name`; a single-company board — registry `company` set — reads as
+the employer's own careers site, fail-soft dropped for a retired slug), so "how did you hear
+about us?" questions get the true source instead of a generic "job board".
 
 **The no-submit guard (mechanical).** The `click` executor — the only executor that can activate
 a control — refuses, in shared Python/JS pattern source (`_words_pattern`; text NFD-folded,

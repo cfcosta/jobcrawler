@@ -28,11 +28,14 @@ import re
 from typing import Any
 
 import dspy
+import yaml
+from pydantic import ValidationError
 
 from jobcrawler import config
 from jobcrawler.cdp import CdpBrowser, CdpError
 from jobcrawler.lm import build_lm
 from jobcrawler.profile import load_profile
+from jobcrawler.sites import find_site, load_sites
 from jobcrawler.state import PositionRecord, StateStore, autofill_target
 
 _log = logging.getLogger("jobcrawler.autofill")
@@ -342,8 +345,10 @@ class AutofillStep(dspy.Signature):
         do not attempt them. The human reviews and submits.
       * Fill only from facts in the profile. Never invent employment history,
         references, IDs, or numbers. Leave a field blank rather than guessing.
-      * Demographic / EEO survey questions: pick the "decline to answer" /
-        "prefer not to say" option when one exists, otherwise skip the question.
+      * Demographic / EEO survey questions: answer only when the profile's
+        operator-provided application answers state the fact; otherwise pick the
+        "decline to answer" / "prefer not to say" option when one exists, else
+        skip the question.
       * Free-text motivation or cover-letter fields: write 2–4 specific,
         first-person sentences grounded in the profile and the role.
       * If the page shows no form controls yet, click the apply button/link that
@@ -371,7 +376,8 @@ class AutofillStep(dspy.Signature):
         desc="the candidate: contact facts, background, preferences, application answers"
     )
     context: str = dspy.InputField(
-        desc="the position being applied to, resume-file availability, and actions already executed"
+        desc="the position being applied to, the board it was found on, "
+        "resume-file availability, and actions already executed"
     )
     page: str = dspy.InputField(
         desc="JSON snapshot of the page: form controls (ref ids), buttons/links, headings"
@@ -432,6 +438,7 @@ class AutofillWorker:
         profile_path: str | None = None,
         notes_path: str | None = None,
         resume_path: str | None = None,
+        sites_path: str | None = None,
         browser: CdpBrowser | None = None,
     ) -> None:
         self._store = store
@@ -449,6 +456,7 @@ class AutofillWorker:
         self._resume_path = (
             resume_path if resume_path is not None else config.autofill_resume_path()
         )
+        self._sites_path = sites_path if sites_path is not None else config.sites_path()
         self._browser = browser or CdpBrowser(cdp_url or config.autofill_cdp_url())
         # One predictor reused across runs; the LM is bound per call via dspy.context
         # (temperature 0), mirroring Matcher. Tests overwrite with a fake predictor.
@@ -538,6 +546,7 @@ class AutofillWorker:
             fresh = autofill_target(rec)
             if fresh:
                 target = fresh  # the row may have gained a better apply_url since enqueue
+        board = self._board_label(str(req["site"]))
         if not self._browser.connected:
             await self._browser.connect()
         target_id = await self._browser.open_tab(target)
@@ -563,7 +572,7 @@ class AutofillWorker:
             raw = await asyncio.to_thread(
                 self._call_llm,
                 profile_text,
-                self._context(rec, target, history),
+                self._context(rec, target, history, board),
                 json.dumps(digest, ensure_ascii=False)[:_PAGE_JSON_BUDGET],
             )
             entry["llm_raw"] = raw
@@ -645,12 +654,21 @@ class AutofillWorker:
         return str(prediction.actions)
 
     def _context(
-        self, rec: PositionRecord | None, target: str, history: list[str]
+        self,
+        rec: PositionRecord | None,
+        target: str,
+        history: list[str],
+        board: str | None = None,
     ) -> str:
         parts: list[str] = []
         if rec is not None:
             parts.append(
                 f"Applying to: {rec.title} at {rec.hiring_company or rec.company}"
+            )
+        if board:
+            parts.append(
+                f"Found via: {board}. When the form asks how you heard about the "
+                "role/company, answer with this (pick the closest offered option)."
             )
         parts.append(f"Application page: {target}")
         parts.append(
@@ -669,6 +687,24 @@ class AutofillWorker:
 
     def _resume_available(self) -> bool:
         return bool(self._resume_path) and os.path.isfile(str(self._resume_path))
+
+    def _board_label(self, slug: str) -> str | None:
+        """Where the operator found this position — the "how did you hear" answer.
+
+        A single-company board (registry ``company`` set) is the employer's own
+        posting, so the truthful answer is their careers site; an aggregator
+        answers with its registry name. Fail-soft None (unreadable registry,
+        retired slug): the context line is dropped rather than failing the run.
+        """
+        try:
+            site = find_site(load_sites(self._sites_path), slug)
+        except (FileNotFoundError, yaml.YAMLError, ValidationError, OSError):
+            return None
+        if site is None:
+            return None
+        if site.company:
+            return "the company's own careers site"
+        return f"the {site.name or slug} job board"
 
     def _load_profile_text(self) -> tuple[str, str]:
         """The prefill context: PROFILE.md verbatim + optional APPLY.md answers."""
