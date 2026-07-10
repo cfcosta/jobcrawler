@@ -1925,6 +1925,53 @@ def test_match_drain_due_requires_both_a_cadence_and_a_seam() -> None:
     assert both.match_drain_due(T0) is True
 
 
+async def test_match_drain_is_not_starved_by_a_wedged_tick(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§4.7: the drain rides its own task — a slow tick must not starve scoring.
+
+    When the drain shared the main loop, ``run()`` awaited ``tick()`` inline and only
+    then checked ``match_drain_due``, so a bootstrap/generation pass holding the tick
+    for an hour held scoring with it (observed live: one drain in four hours against a
+    15k rescore backlog). A tick wedged for the whole window must not block the drain.
+    """
+    drained = asyncio.Event()
+
+    async def drain() -> dict[str, int]:
+        drained.set()
+        return {"requeued": 0, "rows": 0, "unscorable": 0, "prefiltered": 0}
+
+    sched = Scheduler(
+        [Site(slug="s0", url="https://x.com")],
+        store=StateStore(":memory:"),
+        crawl=_ok_crawl,
+        clock=lambda: T0,
+        match_drain_check="10m",
+        match_drain=drain,
+    )
+
+    stop = asyncio.Event()
+    tick_started = asyncio.Event()
+
+    async def wedged_tick() -> list[CrawlSummary]:
+        tick_started.set()
+        await stop.wait()  # wedged for the whole test window; released at shutdown
+        return []
+
+    monkeypatch.setattr(sched, "tick", wedged_tick)
+
+    async def stopper() -> None:
+        await asyncio.wait_for(tick_started.wait(), timeout=5)
+        try:
+            # The tick is still wedged here — the drain must fire regardless.
+            await asyncio.wait_for(drained.wait(), timeout=2)
+        finally:
+            stop.set()
+
+    await asyncio.gather(sched.run(stop=stop, interval=0.005), stopper())
+    assert drained.is_set()
+
+
 async def test_match_drain_tick_invokes_the_seam_and_marks_the_timer() -> None:
     calls: list[str] = []
 

@@ -1193,8 +1193,9 @@ class Scheduler:
         off the same loop on their own cadences — never ``.compile()`` in-band (that
         offline GEPA work is handed off to a detached single-flight subprocess). The §4.9
         recheck sweep rides the loop too, closing positions that 404/expire (observation,
-        so it runs even with autonomy off), as does the §4.7 match drain (profile watch +
-        store-side pending rescoring — judgement, so likewise autonomy-exempt). The §4.11
+        so it runs even with autonomy off). The §4.7 match drain (profile watch +
+        store-side pending rescoring — judgement, so likewise autonomy-exempt) runs on
+        its OWN task so generation-heavy ticks cannot starve scoring. The §4.11
         P4c post-adoption regression watcher rides every iteration (marker-gated, so it's
         a cheap no-op until an adoption is under probation).
         """
@@ -1213,35 +1214,74 @@ class Scheduler:
             if self._dedup_interval is None or self._dedup_sweep is None
             else self._dedup_interval,
         )
+        # The §4.7 match drain rides its OWN task, not the tick loop: a bootstrap/
+        # generation pass can hold tick() for an hour-plus (LM generation × wave), and
+        # when the drain shared the loop that starvation held *scoring* hostage too
+        # (observed live: one drain in four hours against a 15k rescore backlog). The
+        # drain's heavy work already runs off-loop via ``to_thread``, the store and the
+        # match governor are lock-serialized, and this task remains the timer's single
+        # owner — same due/mark semantics, just on an unstarvable cadence.
+        drain_task = (
+            asyncio.create_task(self._match_drain_loop(stop, poll=interval))
+            if self._match_drain is not None and self._match_drain_interval is not None
+            else None
+        )
+        try:
+            while not stop.is_set():
+                try:
+                    await self.tick()
+                    now = self._clock()
+                    if self.regen_due(now):
+                        await self.regen_tick()
+                        self.mark_regen(now, completed=not self._regen_incomplete)
+                    if self.reopt_due(now):
+                        self.reopt_tick()
+                        self.mark_reopt(now)
+                    if self.recheck_due(now):
+                        await self.recheck_tick()
+                        self.mark_recheck(now)
+                    if self.fx_due(now):
+                        await self.fx_tick()
+                        self.mark_fx(now)
+                    if self.dedup_due(now):
+                        await self.dedup_tick()
+                        self.mark_dedup(now)
+                    self.adopt_watch_tick(now)
+                except Exception:
+                    # Last-resort guard: an unexpected error in a tick or sweep must not
+                    # terminate the daemon — log it and carry on to the next interval.
+                    _log.exception("scheduler loop iteration failed; continuing")
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=interval)
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            if drain_task is not None:
+                # Unblock the drain poll on every exit path (stop is already set on the
+                # normal one) and let an in-flight pass finish rather than cancelling
+                # mid-scoring — the spend was reserved up front either way.
+                stop.set()
+                await drain_task
+
+    async def _match_drain_loop(self, stop: asyncio.Event, *, poll: float) -> None:
+        """Run §4.7 match-drain passes on their own cadence until ``stop`` is set.
+
+        Polls ``match_drain_due`` every ``poll`` seconds (the run-loop interval) and
+        fires ``match_drain_tick`` when due — identical timer semantics to the old
+        inline branch, minus the starvation: a tick wedged in a long generation pass
+        no longer delays scoring. Failures are logged and the cadence keeps going
+        (same fail-open posture as the main loop's guard).
+        """
         while not stop.is_set():
-            try:
-                await self.tick()
-                now = self._clock()
-                if self.regen_due(now):
-                    await self.regen_tick()
-                    self.mark_regen(now, completed=not self._regen_incomplete)
-                if self.reopt_due(now):
-                    self.reopt_tick()
-                    self.mark_reopt(now)
-                if self.recheck_due(now):
-                    await self.recheck_tick()
-                    self.mark_recheck(now)
-                if self.match_drain_due(now):
+            now = self._clock()
+            if self.match_drain_due(now):
+                try:
                     await self.match_drain_tick()
-                    self.mark_match_drain(now)
-                if self.fx_due(now):
-                    await self.fx_tick()
-                    self.mark_fx(now)
-                if self.dedup_due(now):
-                    await self.dedup_tick()
-                    self.mark_dedup(now)
-                self.adopt_watch_tick(now)
-            except Exception:
-                # Last-resort guard: an unexpected error in a tick or sweep must not
-                # terminate the daemon — log it and carry on to the next interval.
-                _log.exception("scheduler loop iteration failed; continuing")
+                except Exception:
+                    _log.exception("match drain pass failed; continuing")
+                self.mark_match_drain(now)
             try:
-                await asyncio.wait_for(stop.wait(), timeout=interval)
+                await asyncio.wait_for(stop.wait(), timeout=poll)
             except asyncio.TimeoutError:
                 pass
 
