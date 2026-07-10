@@ -377,6 +377,7 @@ class Matcher:
         extract_min_score: int = 60,
         extract_cap: int = 50,
         extract_locations: bool = True,
+        concurrency: int = 1,
     ) -> None:
         self._store = store
         self._profile = profile
@@ -399,6 +400,12 @@ class Matcher:
         # §4.12 location arms of the extract gate (kill-switch, default on). False
         # reverts the gate to salary-only and stops all location routing/stamping.
         self._extract_locations = extract_locations
+        # Concurrent scoring batches in flight (§4.7). The governor paces every
+        # batch START regardless (its lock serializes the waits), so concurrency
+        # overlaps model LATENCY without raising the request rate; the store is
+        # lock-serialized and the spend grant is charged atomically up front, so
+        # workers share them safely. 1 = the classic sequential loop.
+        self._concurrency = max(1, concurrency)
         # A verdict is ~200 tokens; even a full batch fits comfortably in 4k. Bounding
         # the request matters beyond cost: providers reject a call whose max_tokens
         # exceeds the remaining credit balance, so an unbounded (provider-default)
@@ -511,17 +518,49 @@ class Matcher:
             self._store.set_match_pending(site, url)
             pending_n += 1
 
-        # (b) batched LLM scoring of the reserved misses.
+        # (b) batched LLM scoring of the reserved misses — overlapped when
+        # ``concurrency`` > 1. Each worker paces its own START through the shared
+        # governor (thread-safe), so N workers overlap model latency while call
+        # starts stay rate-spaced; per-batch failure semantics are unchanged.
         scored_n = 0
-        for batch in _chunks(to_score, self._batch):
+        batches = list(_chunks(to_score, self._batch))
+
+        def _run(batch: Sequence[tuple[str, str, _Enriched, str]]) -> list[
+            tuple[str, str, MatchVerdict]
+        ]:
             self._governor.pace()  # (d) pace the LLM calls
-            try:
-                applied = self._score_batch(batch)
-            except Exception as exc:  # (e) fail-open — a bad batch is parked, not fatal
+            return self._score_batch(batch)
+
+        outcomes: list[
+            tuple[
+                Sequence[tuple[str, str, _Enriched, str]],
+                list[tuple[str, str, MatchVerdict]] | None,
+                Exception | None,
+            ]
+        ] = []
+        if self._concurrency > 1 and len(batches) > 1:
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=self._concurrency) as pool:
+                futures = [(batch, pool.submit(_run, batch)) for batch in batches]
+                for batch, future in futures:
+                    try:
+                        outcomes.append((batch, future.result(), None))
+                    except Exception as exc:  # noqa: BLE001 — per-batch fail-open
+                        outcomes.append((batch, None, exc))
+        else:
+            for batch in batches:
+                try:
+                    outcomes.append((batch, _run(batch), None))
+                except Exception as exc:  # noqa: BLE001 — per-batch fail-open
+                    outcomes.append((batch, None, exc))
+
+        for batch, applied, exc in outcomes:
+            if applied is None:  # (e) fail-open — a bad batch is parked, not fatal
                 _log.warning(
                     "match batch of %d job(s) failed, parking pending: %s: %s",
                     len(batch),
-                    type(exc).__name__,
+                    type(exc).__name__ if exc else "Exception",
                     str(exc)[:200],
                 )
                 for site, url, _enriched, _hash in batch:

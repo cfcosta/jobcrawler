@@ -1435,6 +1435,7 @@ an `openrouter/…` slug billed per token. Selected knobs:
 | `JOBCRAWLER_MATCH_DAILY_CAP` | `2000` | hard per-UTC-day LLM-scored jobs; cache hits free; overflow → `match_pending` |
 | `JOBCRAWLER_MATCH_DRAIN_FLOOR` | `160` | §4.7 slice of the daily cap fresh scoring holds back for the backlog drain (fresh spends ≤ `cap − floor`; drain spends the floor + fresh's leftover); `0` = one shared budget |
 | `JOBCRAWLER_MATCH_RATE` | `20/m` | governor pacing for match LLM calls (≠ the daily volume cap) |
+| `JOBCRAWLER_MATCH_CONCURRENCY` | `4` | §4.7 scoring batches in flight; the governor still paces every batch START, so this overlaps model latency without raising the request rate (`1` = sequential) |
 | `JOBCRAWLER_EXTRACT_MODEL` | `sub_model()` fallback | the §4.7 match-time salary/employer extract LM; `require_extract_model` falls back to the cheap `sub_lm`, **never** the root planner; unset with no `sub_lm` ⇒ extraction is simply **off** |
 | `JOBCRAWLER_EXTRACT_MIN_SCORE` | `60` | 0–100 match score at/above which a salary-less posting is mined (below the notify threshold, above the noise floor) |
 | `JOBCRAWLER_EXTRACT_CAP` | `50` | hard per-run ceiling on *fresh* (cache-miss) description extractions; cache hits free; overflow retried next run |

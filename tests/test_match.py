@@ -252,6 +252,7 @@ def _matcher(
     extract_min_score=60,
     extract_cap=50,
     extract_locations=True,
+    concurrency=1,
 ):
     return Matcher(
         store,
@@ -266,6 +267,7 @@ def _matcher(
         extract_min_score=extract_min_score,
         extract_cap=extract_cap,
         extract_locations=extract_locations,
+        concurrency=concurrency,
     )
 
 
@@ -1370,6 +1372,61 @@ def test_extraction_set_salary_guard_blocks_a_second_fill() -> None:
     assert store.hiring_set[0][2:] == ("Umbrella", "umbrella")
     # employer write still counts as an applied change.
     assert summary["extracted"] == 1
+
+
+# --- concurrent batch scoring -------------------------------------------------
+
+
+def test_concurrent_scoring_overlaps_llm_calls() -> None:
+    # With concurrency > 1 the batch calls overlap: wall clock stops being one
+    # model latency per batch. The governor still paces every start; the store
+    # and spend reservation are lock-serialized/atomic already.
+    import threading
+    import time as time_mod
+
+    store = FakeStore()
+    active = {"now": 0, "max": 0}
+    lock = threading.Lock()
+
+    class OverlapPredictor(FakePredictor):
+        def __call__(self, *, profile: str, jobs: str) -> SimpleNamespace:
+            with lock:
+                active["now"] += 1
+                active["max"] = max(active["max"], active["now"])
+            try:
+                time_mod.sleep(0.15)
+                return super().__call__(profile=profile, jobs=jobs)
+            finally:
+                with lock:
+                    active["now"] -= 1
+
+    matcher = _matcher(store, batch=1, concurrency=3)
+    matcher._predict = OverlapPredictor(_all_score(85))
+    summary = matcher.score_new(_candidates(3))
+    assert summary["scored"] == 3
+    assert active["max"] >= 2  # calls genuinely overlapped
+    assert len(store.set_match_calls) == 3
+
+
+def test_concurrent_batch_failure_parks_only_its_own_batch() -> None:
+    store = FakeStore()
+
+    def respond(jobs):
+        if any("boom" in (j.get("title") or "") for j in jobs):
+            raise RuntimeError("LM exploded for this batch")
+        return _all_score(85)(jobs)
+
+    matcher = _matcher(store, batch=1, concurrency=3)
+    matcher._predict = FakePredictor(respond)
+    good_a = ("acme", "https://acme.example/a", FakeEnriched(job=FakeJob(title="Senior A")))
+    bad = ("acme", "https://acme.example/boom", FakeEnriched(job=FakeJob(title="boom role")))
+    good_b = ("acme", "https://acme.example/b", FakeEnriched(job=FakeJob(title="Senior B")))
+    summary = matcher.score_new([good_a, bad, good_b])
+    assert summary["scored"] == 2
+    assert summary["pending"] == 1
+    assert ("acme", "https://acme.example/boom") in store.pending_calls
+    scored_urls = {c[1] for c in store.set_match_calls}
+    assert scored_urls == {"https://acme.example/a", "https://acme.example/b"}
 
 
 # --- §4.12 extraction location arms ------------------------------------------

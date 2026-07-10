@@ -287,6 +287,15 @@ def match_drain_floor() -> int:
     return max(0, _int("JOBCRAWLER_MATCH_DRAIN_FLOOR", 160))
 
 
+def match_concurrency() -> int:
+    """Concurrent §4.7 scoring batches in flight. The rate governor still paces
+    every batch START (thread-safe), so this overlaps model LATENCY without
+    raising the request rate — with a 20/m rate and ~20-30s verdict latencies a
+    sequential loop wastes most of its budget waiting on one call at a time.
+    Default 4; 1 restores the sequential loop."""
+    return max(1, _int("JOBCRAWLER_MATCH_CONCURRENCY", 4))
+
+
 def match_rate() -> str:
     """Governor pacing for the §4.7 match LM calls (``requests/interval``, e.g. the
     default ``20/m``). Smooths the batched match calls so a big new-position sweep can't
