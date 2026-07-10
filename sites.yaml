@@ -3956,3 +3956,85 @@
     Portuguese, Brazil-only (mostly São Paulo). Fit: backend/data-platform engineering roles at
     a large BR fintech, Rust-adjacent.
 
+- slug: botcity
+  name: "BotCity"
+  url: https://api.quickin.io/public/67f6b4c5dcf76400135d3538/jobs
+  render: static
+  company: "BotCity"
+  hints: >-
+    Quickin ATS public JSON API — same platform and shape as grupo_carone (human board at
+    jobs.quickin.io/botcity/jobs, Nuxt SSR; the account `_id` in the URL was lifted from the
+    /botcity root page's templatebuilder.quickin.io builder_url). Response is Mongo-paginate
+    {docs:[...], total, limit:30, page, pages}; the server hard-caps `limit` at 30, so walk
+    ?page=1..pages (currently 10 rows on one page). Each doc is complete inline — no detail
+    GET and EXTRA_HOSTS stays empty: stable 24-hex `_id` (external_id), `title`, HTML
+    `description` + `requirements` (concat, strip tags), free-text `city`/`region`/`country`
+    (e.g. "Global"/"SP"/"BR"), `workplace_type` (remote|hybrid|on-site), `position_category`,
+    `code`, `career_url` (public detail/apply page on jobs.quickin.io = url + apply_url),
+    `created_at` (ISO = posted_at), `publicate`=="published" on live rows. No salary field and
+    — unlike grupo_carone — no `company_id`; the company is pinned above. Closure marker: an
+    `_id` gone from the paginated list. Fit: RPA / Python+AI governance product company
+    (Orchestrator, Sentinel, devtools), remote-first with SF/Lisbon/Campinas hubs; board is
+    majority engineering (Python, frontend, Java backend, QA) — strong Python/backend match.
+
+- slug: speedio
+  name: "Speedio"
+  url: https://apigw.solides.com.br/jobs/v3/home/vacancy?take=12&slug=speediojobs&title=&locations=&page=1
+  render: static
+  company: "Speedio"
+  hints: >-
+    Sólides ATS gateway JSON — board slug is `speediojobs`, NOT `speedio`. The human board at
+    speediojobs.vagas.solides.com.br is a JS shell with no jobs in its static HTML (its
+    __NEXT_DATA__ carries only company info) — never scrape it; enumerate ONLY via this
+    unauthenticated gateway GET, walking `page` until `data.totalPages` (data.count = total
+    rows, currently 4 on one page). Items in `data.data[]` are complete inline — no detail
+    fetch, EXTRA_HOSTS empty: numeric `id` (external_id), `title`, HTML `description`,
+    `city.name` + `state.code` (objects, e.g. São Paulo/SP), `jobType` ("remoto"/"hibrido"/
+    "presencial" — trust it over the `homeOffice` bool), `seniority[].name`,
+    `salary.initialRange`/`finalRange` when `salary.showRangeToApplicant` (BRL/month; 0 lower
+    bound means unset), `createdAt` (YYYY-MM-DD = posted_at), `companyName`. Build the job URL
+    as https://speediojobs.vagas.solides.com.br/vaga/{id} — the API's `redirectLink` is
+    malformed ("https://speediojobs./vacancies/…"), never use it. Closure: id gone from the
+    paginated list. Fit: B2B lead-gen big-data SaaS (São Paulo); low-volume board, currently
+    all marketing/CS/sales, but they historically hired remote senior Golang backend — worth
+    monitoring for eng roles.
+
+- slug: thoughtly
+  name: "Thoughtly"
+  url: https://feed.homerun.co/thoughtly
+  render: static
+  company: "Thoughtly"
+  hints: >-
+    Homerun ATS Atom feed (the source behind thoughtly.com/company/careers). Every open role
+    is an <entry>: <id> is the stable external_id (shape job_XXXX), <title type="text"> the
+    title, <link rel="alternate"> the human detail page on thoughtly.homerun.co, and
+    <description type="html"> ALREADY carries the full job body inline (CDATA HTML — strip
+    tags); ignore the truncated <summary>/<content> twins. The feed has no location or salary:
+    GET the alternate link (static HTML, authorize thoughtly.homerun.co in EXTRA_HOSTS) and
+    parse its schema.org JobPosting JSON-LD for employmentType and jobLocation
+    (addressLocality "New York"); salary appears only in the body text (e.g. "$200,000 –
+    $250,000"), not as structured baseSalary. GOTCHA: removed/unknown job slugs return 302 to
+    the board root, not 404 — the closure marker is disappearance from the feed, never per-URL
+    status. Fit: NYC voice-AI product startup (Afore/Greycroft-backed, customers 2U/Siemens);
+    4 roles now incl. Senior Software Engineer, Product (hybrid NYC, $200–250k).
+
+- slug: vr_software
+  name: "VR Software"
+  url: https://vrsoftware.rhgestor.com.br/vagas
+  render: static
+  company: "VR Software"
+  hints: >-
+    RH Gestor ATS (multi-tenant Brazilian ATS, one subdomain per tenant) — server-rendered
+    static HTML, no JSON API anywhere; parse markup. LISTING: /vagas is a single page, no
+    pagination (~12 rows); each job is an anchor href="/vagas/detalhes/{id}" (mixed-case
+    alphanumeric id, e.g. HO9IJyu06850G638hbF) whose title sits in a child strong.corgeral
+    with the location text ("Limeira - SP") beside it. DETAIL: GET /vagas/detalhes/{id} —
+    static HTML, server-side <title> "… - VR Software", full description and location in the
+    body. Apply links go to /login?returnUrl=…&vaga={id} (login-gated): keep the detail page
+    as the job url and leave apply_url unset. Closure: id gone from the /vagas listing.
+    GOTCHA: the site's WAF 403s datacenter/bot egress (Anthropic's fetcher was blocked on
+    every URL) while residential IPs pass even with python-requests — fine for this crawler's
+    home egress, but treat a sudden all-URLs 403 as a WAF block, not mass closure. Fit:
+    supermarket ERP/PDV product company (Limeira-SP + Recife/POA/MG offices); mostly
+    PO/CS/support roles with occasional Delphi/backend engineering.
+
