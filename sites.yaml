@@ -1433,19 +1433,6 @@
     employment type and apply_url. Remote-first aggregator; enumerates_all:false because
     listings are a recent slice. Strong source for remote backend/platform roles.
 
-- slug: hn_whos_hiring
-  name: "Hacker News — Who is Hiring"
-  url: https://hn.algolia.com/api/v1/search_by_date?query=Ask%20HN%3A%20Who%20is%20hiring%3F&tags=story
-  render: static
-  enumerates_all: false
-  hints: >-
-    Use the public HN Algolia API to locate the newest monthly `Ask HN: Who is hiring?`
-    thread, then fetch its comments from the same API and parse
-    company/role/location/remote/salary/application snippets from comments. This source is
-    unstructured and windowed; keep enumerates_all:false and require dedupe against company
-    boards. High signal for startup backend, infra, Rust, Go and remote roles that may never
-    reach major ATS boards.
-
 - slug: hacker_jobs
   name: "Hacker Jobs"
   url: https://www.hacker-jobs.com/
@@ -1454,7 +1441,7 @@
   hints: >-
     Hacker Jobs restructures the monthly Hacker News Who-is-hiring thread into searchable
     postings. Windowed HTML/API crawl: collect newest structured postings, parse
-    company/title/location/remote/salary/url/description, and dedupe against hn_whos_hiring.
+    company/title/location/remote/salary/url/description, and dedupe against company boards.
     Good supplemental source for startup backend, distributed-systems, Rust, Go and infra
     roles.
 
