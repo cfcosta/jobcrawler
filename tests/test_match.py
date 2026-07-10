@@ -210,6 +210,7 @@ def _prefs(
     disciplines=(),
     levels=(),
     workplace=(),
+    locations=(),
     exclude_keywords=(),
     exclude_companies=(),
     exclude_locations=(),
@@ -219,7 +220,7 @@ def _prefs(
         disciplines=frozenset(disciplines),
         levels=frozenset(levels),
         workplace=frozenset(workplace),
-        locations=(),
+        locations=tuple(locations),
         min_salary=min_salary,
         languages=(),
         exclude_keywords=tuple(exclude_keywords),
@@ -472,6 +473,39 @@ def test_prefilter_keeps_worldwide_remote_despite_lock_list() -> None:
     )
     prefs = _prefs(exclude_locations=("remote, us", "united states", "north america"))
     assert prefilter(enriched, prefs) == (True, "")
+
+
+def test_prefilter_country_lock_spares_own_country_allowlist() -> None:
+    # The WWR GeoLock case: an allowlist writes out EVERY eligible country, so a
+    # location naming both an excluded marker and the candidate's own country
+    # ("... Brazil ... United States ...") is Brazil-eligible, not US-locked — it
+    # must reach the LLM instead of dying on the "united states" substring.
+    enriched = FakeEnriched(
+        job=FakeJob(
+            location="Remote (Bolivia, Brazil, Canada, United States of America)"
+        ),
+        workplace="remote",
+    )
+    prefs = _prefs(
+        exclude_locations=("united states", "remote, canada"),
+        locations=("São Paulo, Brazil",),
+    )
+    assert prefilter(enriched, prefs) == (True, "")
+
+
+def test_prefilter_country_lock_still_fires_without_own_country() -> None:
+    # The own-country guard is surgical: the same shape of allowlist WITHOUT the
+    # candidate's country stays a definite reject.
+    enriched = FakeEnriched(
+        job=FakeJob(location="Remote (Canada, United States of America)"),
+        workplace="remote",
+    )
+    prefs = _prefs(
+        exclude_locations=("united states",),
+        locations=("São Paulo, Brazil",),
+    )
+    keep, reason = prefilter(enriched, prefs)
+    assert keep is False and "location" in reason
 
 
 def test_prefilter_country_lock_only_applies_to_remote() -> None:

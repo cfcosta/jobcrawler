@@ -326,6 +326,26 @@ def prefilter(enriched: _Enriched, prefs: ProfilePrefs) -> tuple[bool, str]:
     if prefs.exclude_locations and enriched.workplace == "remote":
         raw_location = (job.location or "").lower()
         normalized_location = normalize_location(job.location or "").lower()
+        # Own-country guard: a location that names the candidate's own country is
+        # never a *definite* reject. WWR-style GeoLock allowlists write out every
+        # eligible country ("... Brazil, ... United States of America ..."), so an
+        # excluded marker hitting that string means "the lock includes both them and
+        # us", not "locked away from us" — the job must reach the LLM. Tokens come
+        # from ``prefs.locations`` ("São Paulo, Brazil" → "são paulo" / "brazil"),
+        # matched the same case-insensitive-substring way the markers are; tokens
+        # under 3 chars are skipped so a bare "US"-style part can't pass everything
+        # via substring accidents ("business").
+        own_tokens = [
+            token
+            for loc in prefs.locations
+            for token in (part.strip().lower() for part in loc.split(","))
+            if len(token) >= 3
+        ]
+        if any(
+            token in raw_location or token in normalized_location
+            for token in own_tokens
+        ):
+            return (True, "")
         for marker in prefs.exclude_locations:
             marker_lower = marker.lower()
             if marker_lower and (
