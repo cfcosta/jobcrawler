@@ -973,11 +973,15 @@
 
 - slug: uniswap_labs
   name: "Uniswap Labs"
-  url: https://api.ashbyhq.com/posting-api/job-board/uniswap?includeCompensation=true
+  url: https://jobs.ashbyhq.com/uniswap
   render: static
   company: "Uniswap Labs"
   hints: >-
-    Ashby job board API, token `uniswap`. Parse the standard Ashby fields. Strong match
+    Ashby job board, token `uniswap` — fetch the posting API at
+    api.ashbyhq.com/posting-api/job-board/uniswap?includeCompensation=true and yield the
+    jobs.ashbyhq.com/uniswap/<id> posting links as job urls (the board page is the SITE so
+    those hosts are evidenced; the api-endpoint-as-SITE shape made the §6 gate read the
+    posting links as off-domain). Parse the standard Ashby fields. Strong match
     for DeFi, protocol infrastructure, exchange systems, smart contracts and backend
     infrastructure roles.
 
