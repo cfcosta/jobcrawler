@@ -2359,10 +2359,15 @@
   enumerates_all: false
   hints: >-
     Job-board listing/search source. Multi-company source; do not stamp a fixed `company`.
-    Parse company from each posting/card/detail page. Treat as a windowed source unless the
-    API explicitly returns all active matching jobs; use detail 404/expired markers for
-    closure. Fetch detail pages on the same host for the full description. Fit: remote Web3,
-    crypto, blockchain and DeFi roles, including developer/backend positions.
+    Next.js RSC pages: concat every `self.__next_f.push` chunk and read the embedded
+    `"initialJobs":[...]` array (Flight `key:T<hexlen>,` records carry long descriptions).
+    TWO listing surfaces, both must be walked: the main feed at `/` (paginate `/?page=N` up
+    to its `totalPages`) AND the archive index `/top-web3-job-list` (`?page=N`, 200+ pages
+    sorted by recency — walk only the first ~5 pages as a freshness window; its first pages
+    carry postings that never appear on the main feed). Job detail =
+    `/remote-jobs/<slug>`; dedupe by that URL across surfaces. Treat as a windowed source;
+    use detail 404/expired markers for closure. Fit: remote Web3, crypto, blockchain and
+    DeFi roles, including developer/backend positions.
 
 - slug: findweb3_engineering
   name: "FindWeb3 — Engineering"

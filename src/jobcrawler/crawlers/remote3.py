@@ -160,6 +160,27 @@ def _page_url(page_number):
         return SITE
     return urljoin(SITE, "/?page=%d" % page_number)
 
+# /top-web3-job-list is a 200+-page archive index sorted by recency; its first
+# pages carry postings that never surface on the main feed. Walk only a small
+# freshness window of it — closure for anything older rides on detail probes.
+TOP_LIST_PAGES = 5
+
+def _top_list_url(page_number):
+    if page_number <= 1:
+        return urljoin(SITE, "/top-web3-job-list")
+    return urljoin(SITE, "/top-web3-job-list?page=%d" % page_number)
+
+def _emit_page(payload, seen):
+    records = _flight_text_records(payload)
+    for record in _initial_jobs(payload):
+        job = _job_from_record(record, records)
+        if not job:
+            continue
+        if job["url"] in seen:
+            continue
+        seen.add(job["url"])
+        yield job
+
 def crawl(ctx):
     first_html = ctx.fetch(SITE)
     first_payload = _rsc_payload(first_html)
@@ -167,15 +188,9 @@ def crawl(ctx):
 
     seen = set()
     for page in range(1, pages + 1):
-        page_html = first_html if page == 1 else ctx.fetch(_page_url(page))
-        payload = first_payload if page == 1 else _rsc_payload(page_html)
-        records = _flight_text_records(payload)
+        payload = first_payload if page == 1 else _rsc_payload(ctx.fetch(_page_url(page)))
+        yield from _emit_page(payload, seen)
 
-        for record in _initial_jobs(payload):
-            job = _job_from_record(record, records)
-            if not job:
-                continue
-            if job["url"] in seen:
-                continue
-            seen.add(job["url"])
-            yield job
+    for page in range(1, TOP_LIST_PAGES + 1):
+        payload = _rsc_payload(ctx.fetch(_top_list_url(page)))
+        yield from _emit_page(payload, seen)
