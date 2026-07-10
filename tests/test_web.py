@@ -1284,6 +1284,40 @@ async def test_api_carries_structured_location_keys() -> None:
         store.close()
 
 
+async def test_relocation_non_us_checkbox_filters_and_round_trips() -> None:
+    # One checkbox = relocation offered AND no resolved US office/fence: visa
+    # entry to the US is the hard one, so US-destination relocations drop while
+    # unknown-geography relocation rows stay.
+    s = StateStore(":memory:")
+    try:
+        rows = [
+            ("https://a.test/de", "DE Engineer", "Berlin, Germany", "offered"),
+            ("https://a.test/us", "US Engineer", "San Francisco, CA", "offered"),
+            ("https://a.test/fence", "Fence Engineer", "Remote - US", "offered"),
+            ("https://a.test/norelo", "NoRelo Engineer", "Berlin, Germany", "unspecified"),
+        ]
+        for url, title, loc, relo in rows:
+            s.upsert_position(
+                "acme",
+                url,
+                fields={**FIELDS, "title": title, "location": loc,
+                        "workplace": "hybrid", "relocation": relo},
+                content_hash=url,
+            )
+            s.refresh_position_locations(
+                "acme", url, location=loc, workplace="hybrid", force=True
+            )
+        async with _client(create_app(s)) as c:
+            html = (await c.get("/positions?relocation_no_us=1")).text
+            assert "DE Engineer" in html
+            assert "US Engineer" not in html
+            assert "Fence Engineer" not in html
+            assert "NoRelo Engineer" not in html
+            assert 'name="relocation_no_us"' in html and "checked" in html
+    finally:
+        s.close()
+
+
 async def test_keyboard_help_overlay_lists_both_modes() -> None:
     # '?' toggles the shortcut card (base shell, every page): it must document the
     # list bindings AND the panel-mode bindings that act on the shown position.

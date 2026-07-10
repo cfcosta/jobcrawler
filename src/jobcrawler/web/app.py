@@ -365,6 +365,10 @@ def _read_filters(
     applied = _flag("applied")
     remote_anywhere = _flag("remote_anywhere")
     relocation_offered = _flag("relocation_offered")
+    # "Relocation (non-US)": relocation offered AND no resolved US office/fence —
+    # a US destination means the visa entry the operator wants to avoid. Unresolved
+    # rows stay (an exclusion never fires on absence of evidence, §4.12).
+    relocation_no_us = _flag("relocation_no_us")
     status = _s("status")  # None/'all' => both open and closed
     track_status = _s("track_status")
     sort = _s("sort") or "score"
@@ -379,11 +383,12 @@ def _read_filters(
         # "Remote anywhere" is a geographic-scope filter over remote roles; scope
         # 'anywhere' only ever lands on a workplace='remote' row, so it stands alone.
         "remote_scope": "anywhere" if remote_anywhere else None,
-        "relocation_offered": relocation_offered,
+        "relocation_offered": relocation_offered or relocation_no_us,
         # §4.12 structured geo filters (ISO2, case-folded store-side): country=
         # matches offices AND fences; remote_in= only remote eligibility.
         "country": _s("country"),
         "remote_in": _s("remote_in"),
+        "exclude_country": "US" if relocation_no_us else None,
         "level": _s("level"),
         "min_score": _int_param(params, "min_score"),
         "min_salary": _float_param(params, "min_salary"),
@@ -414,6 +419,7 @@ def _read_filters(
         "applied": applied,
         "remote_anywhere": remote_anywhere,
         "relocation_offered": relocation_offered,
+        "relocation_no_us": relocation_no_us,
         "collapse": collapse,
     }
     return kwargs, raw

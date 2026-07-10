@@ -2844,6 +2844,7 @@ class StateStore:
         relocation_offered: bool = False,
         country: str | None = None,
         remote_in: str | None = None,
+        exclude_country: str | None = None,
         level: str | None = None,
         min_score: int | None = None,
         min_salary: float | None = None,
@@ -2880,6 +2881,10 @@ class StateStore:
           fence/worldwide rows (an office place never qualifies), with macro fences
           ('EMEA') expanded through ``geo_region_members``. Both are additive EXISTS
           filters: with no projection rows they simply match nothing.
+        - ``exclude_country``  ISO2, the mirror of ``country``: DROP rows with any §4.12
+          resolved office or remote fence in that country. An exclusion never fires on
+          absence of evidence — unresolved rows stay. Composed with
+          ``relocation_offered`` it is the "relocation, but not into the US" view.
         - ``min_score``  only rows whose **effective** (§4.7 freshness-decayed) score is at/above
           it (drops unscored); ``sort='score'`` likewise orders by the effective score, so an
           old great fit ranks below a fresh comparable one but stays above weaker leads.
@@ -2992,6 +2997,13 @@ class StateStore:
                 "WHERE gm.region = pl.macro_region AND gm.country = ?)))))"
             )
             params += [code, code]
+        if exclude_country:
+            clauses.append(
+                "NOT EXISTS (SELECT 1 FROM position_locations pl "
+                "WHERE pl.site = positions.site AND pl.url = positions.url "
+                "AND pl.country = ?)"
+            )
+            params.append(exclude_country.strip().upper())
         if level:
             clauses.append("lower(COALESCE(level, '')) = ?")
             params.append(level.lower())

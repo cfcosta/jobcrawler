@@ -2518,6 +2518,45 @@ def test_search_positions_country_and_remote_in_filters(store: StateStore) -> No
     assert urls(country="ES") == []
 
 
+def test_search_exclude_country_drops_only_resolved_matches(
+    store: StateStore,
+) -> None:
+    # The mirror of country=: drop rows with ANY resolved office or remote fence
+    # in that country. Composable with relocation_offered — the "relocation but
+    # not to the US" view: a US office or a US-only fence means the relocation
+    # destination needs a US visa; unknown geography stays in (only confirmed-US
+    # drops — an exclusion never fires on absence of evidence).
+    rows = [
+        ("berlin-relo", "Berlin, Germany", "hybrid", "offered"),
+        ("sf-relo", "San Francisco, CA", "hybrid", "offered"),
+        ("usfence-relo", "Remote - US", "hybrid", "offered"),
+        ("mystery-relo", "Zorgville", "remote", "offered"),
+        ("berlin-norelo", "Berlin, Germany", "hybrid", "unspecified"),
+    ]
+    for url, loc, wp, relo in rows:
+        store.upsert_position(
+            "acme",
+            url,
+            fields={**FIELDS, "location": loc, "workplace": wp, "relocation": relo},
+            content_hash=url,
+        )
+        store.refresh_position_locations(
+            "acme", url, location=loc, workplace=wp, force=True
+        )
+
+    hits = sorted(
+        r.url
+        for r in store.search_positions(relocation_offered=True, exclude_country="us")
+    )
+    assert hits == ["berlin-relo", "mystery-relo"]
+    # Alone it is just the mirror filter.
+    assert sorted(r.url for r in store.search_positions(exclude_country="US")) == [
+        "berlin-norelo",
+        "berlin-relo",
+        "mystery-relo",
+    ]
+
+
 def test_search_query_bridges_synonyms_through_location_display(
     store: StateStore,
 ) -> None:

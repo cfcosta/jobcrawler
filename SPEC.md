@@ -1045,7 +1045,9 @@ labels, detail header + Locations panel, API `location_display`/`locations` keys
 one LIKE over `location_display` (the synonym bridge: `q=brazil` finds a raw `Brasil` row) and
 two structured filters: `country=` (any resolved office or fence in that ISO2) and `remote_in=`
 (remotely workable from there: fence match, macro fences expanded through `geo_region_members`,
-`remote_anywhere` matches everything; office places never do).
+`remote_anywhere` matches everything; office places never do), plus `exclude_country=` — the
+mirror drop, which never fires on unresolved rows (powering the §16 "Relocation (non-US)"
+checkbox: relocation offered and no resolved US office/fence).
 
 **Boundaries (what it must not do).** Never write `location`, `location_normalized`,
 `workplace`, `remote_scope`, or `relocation` (their writers are §4.6's, frozen). Never enter
