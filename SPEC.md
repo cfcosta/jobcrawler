@@ -1919,6 +1919,26 @@ crawled from (the registry `name`; a single-company board — registry `company`
 the employer's own careers site, fail-soft dropped for a retired slug), so "how did you hear
 about us?" questions get the true source instead of a generic "job board".
 
+**Comboboxes (react-select et al.).** ARIA comboboxes (`input[role=combobox]` — every dropdown
+on Greenhouse job-boards) are swept as selects-with-a-twist: `fill` refuses them, and `select`
+runs a worker-orchestrated open → poll → (type) → pick sequence. Two constraints shape it,
+both proven live on the Nubank form: a choice commits **only** by clicking a rendered
+`[role=option]` (writing the input's value reports ok and the form stays empty), and the click
+must be a **trusted CDP Input event** — Greenhouse's React build ignores
+`dispatchEvent`-synthesized events wholesale, so page JS only *locates* (instant
+`scrollIntoView`, else smooth-scroll animation makes the coordinates stale — observed as clicks
+sailing over the page) and *reports coordinates/labels*, while the worker does the touching:
+`Input.dispatchMouseEvent` pressed/released to open the menu and to pick the matched option,
+`Input.insertText` for typeahead filter text (async option fetch — location search), a trusted
+Escape only to close a menu that survives a failed match. All waiting lives worker-side
+(`asyncio.sleep` between sync one-shot evals): page timers in a backgrounded tab throttle to
+~one wake per minute, so any in-page polling would hang the eval. Option matching folds accents
+and tries exact → prefix → substring → word-boundary; a miss reports the widget's real labels,
+which `_history_line` feeds back to the model so the next round can retry with the page's own
+wording ("Heterosexual" → "Straight", "I don't wish to answer" → "I prefer not to disclose").
+The committed value is read back from the value container (the input stays empty in
+react-select) and re-verified by the next round's sweep.
+
 **The no-submit guard (mechanical).** The `click` executor — the only executor that can activate
 a control — refuses, in shared Python/JS pattern source (`_words_pattern`; text NFD-folded,
 accents stripped, lowercased): (a) submit-worded controls anywhere (*submit, enviar, finalizar

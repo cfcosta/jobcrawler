@@ -22,6 +22,7 @@ from jobcrawler.autofill import (
     _WIZARD_RE,
     AutofillWorker,
     _click_js,
+    _history_line,
     _parse_actions,
 )
 from jobcrawler.cdp import CdpBrowser, CdpError
@@ -695,3 +696,140 @@ async def test_autofill_drain_loop_survives_a_raising_seam() -> None:
     stop.set()
     await asyncio.wait_for(task, timeout=2)
     assert calls["n"] >= 2
+
+
+# -- combobox select: trusted CDP input orchestration --------------------------
+
+
+class ComboFakeBrowser(FakeBrowser):
+    """Scripts the combobox micro-protocol per ``/*jc-combo-*/`` marker.
+
+    Each marker maps to a reply queue (popped front-first, the last entry
+    repeats — count polling asks the same question until options mount);
+    trusted ``Input.*`` commands are recorded with their params.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.combo: dict[str, list[dict[str, Any]]] = {}
+        self.input_events: list[tuple[str, dict[str, Any]]] = []
+
+    async def cmd(
+        self, method: str, params: dict | None = None, *, session_id=None, timeout=None
+    ) -> dict:
+        if method.startswith("Input."):
+            self.input_events.append((method, dict(params or {})))
+            return {}
+        return await super().cmd(method, params, session_id=session_id, timeout=timeout)
+
+    async def evaluate(
+        self, sid: str, expression: str, *, await_promise: bool = False, timeout=None
+    ):
+        for marker, queue in self.combo.items():
+            if marker in expression:
+                return json.dumps(queue.pop(0) if len(queue) > 1 else queue[0])
+        return await super().evaluate(
+            sid, expression, await_promise=await_promise, timeout=timeout
+        )
+
+
+def _combo_worker(fake: FakeBrowser) -> AutofillWorker:
+    # _combo_select needs only the browser; skip full worker construction.
+    worker = AutofillWorker.__new__(AutofillWorker)
+    worker._browser = cast(CdpBrowser, fake)
+    worker._COMBO_POLL_S = 0.0
+    return worker
+
+
+async def test_select_on_a_combobox_routes_to_trusted_clicks() -> None:
+    fake = ComboFakeBrowser()
+    fake.sids.add("S1")
+    fake.combo = {
+        "/*jc-select*/": [{"ok": False, "combo": True, "error": "combobox"}],
+        "/*jc-combo-open*/": [
+            {"ok": True, "x": 100, "y": 200, "open": False, "options": 0}
+        ],
+        "/*jc-combo-count*/": [{"ok": True, "options": 2, "open": True}],
+        "/*jc-combo-pick*/": [{"ok": True, "x": 110, "y": 240, "value": "Yes"}],
+        "/*jc-combo-value*/": [{"ok": True, "open": False, "value": "Yes"}],
+    }
+    worker = _combo_worker(fake)
+    result = await worker._act("S1", {"op": "select", "ref": "c9", "value": "Yes"})
+    assert result == {"ok": True, "value": "Yes"}
+    # two trusted clicks: open the menu at the control, pick the matched option
+    assert [
+        (p["type"], p["x"], p["y"])
+        for m, p in fake.input_events
+        if m == "Input.dispatchMouseEvent"
+    ] == [
+        ("mousePressed", 100, 200),
+        ("mouseReleased", 100, 200),
+        ("mousePressed", 110, 240),
+        ("mouseReleased", 110, 240),
+    ]
+    # menu closed on its own after the pick — no Escape, no typed filter text
+    assert all(m == "Input.dispatchMouseEvent" for m, _ in fake.input_events)
+
+
+async def test_combo_typeahead_inserts_trusted_text_when_menu_starts_empty() -> None:
+    class TypeaheadBrowser(ComboFakeBrowser):
+        async def evaluate(
+            self, sid: str, expression: str, *, await_promise: bool = False, timeout=None
+        ):
+            if "/*jc-combo-count*/" in expression:
+                typed = any(m == "Input.insertText" for m, _ in self.input_events)
+                return json.dumps({"ok": True, "options": 3 if typed else 0, "open": True})
+            return await super().evaluate(
+                sid, expression, await_promise=await_promise, timeout=timeout
+            )
+
+    fake = TypeaheadBrowser()
+    fake.sids.add("S1")
+    fake.combo = {
+        "/*jc-combo-open*/": [{"ok": True, "x": 10, "y": 20, "open": False, "options": 0}],
+        "/*jc-combo-pick*/": [
+            {"ok": True, "x": 11, "y": 24, "value": "São Paulo, Sao Paulo, Brazil"}
+        ],
+        "/*jc-combo-value*/": [
+            {"ok": True, "open": False, "value": "São Paulo, Sao Paulo, Brazil"}
+        ],
+    }
+    worker = _combo_worker(fake)
+    result = await worker._combo_select("S1", "c3", "São Paulo")
+    # the widget's committed readback (typeaheads expand the label) is reported
+    assert result == {"ok": True, "value": "São Paulo, Sao Paulo, Brazil"}
+    assert ("Input.insertText", {"text": "São Paulo"}) in fake.input_events
+
+
+async def test_combo_miss_reports_real_options_and_escapes_the_menu() -> None:
+    fake = ComboFakeBrowser()
+    fake.sids.add("S1")
+    fake.combo = {
+        "/*jc-combo-open*/": [{"ok": True, "x": 1, "y": 2, "open": True, "options": 6}],
+        "/*jc-combo-pick*/": [
+            {
+                "ok": False,
+                "error": "no option matches Latino",
+                "options": ["Asian", "Black", "Brown"],
+            }
+        ],
+        "/*jc-combo-value*/": [{"ok": True, "open": True, "value": ""}],
+    }
+    worker = _combo_worker(fake)
+    result = await worker._combo_select("S1", "c4", "Latino")
+    assert result["ok"] is False
+    assert result["options"] == ["Asian", "Black", "Brown"]
+    # menu was already open (no open click); failed match clicks nothing and
+    # closes with a trusted Escape so the next sweep reads a quiet page
+    assert [m for m, _ in fake.input_events] == [
+        "Input.dispatchKeyEvent",
+        "Input.dispatchKeyEvent",
+    ]
+    assert all(p["key"] == "Escape" for _, p in fake.input_events)
+    # the widget's real choices ride the history line into the next round
+    line = _history_line({"op": "select", "ref": "c4", "value": "Latino"}, result)
+    assert "options: 'Asian', 'Black', 'Brown'" in line
+
+
+def test_fill_js_refuses_comboboxes_toward_select() -> None:
+    assert "combobox — use select" in autofill_mod._FILL_JS

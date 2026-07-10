@@ -12,10 +12,12 @@ Boundary contract (mirrors §4.7 scoring):
   and no raw JS (the LLM only names ``ref`` ids from our own page sweep); the
   ``click`` executor refuses submit-typed controls inside a form and
   submit-worded controls anywhere, and refuses wizard next/continue advances
-  inside a form; no Enter keystroke is ever dispatched (fills use the native
-  value setter + input/change events, not the keyboard); file uploads can only
-  attach the one operator-configured resume path. The tab is deliberately left
-  OPEN so the operator reviews and submits themselves.
+  inside a form; no Enter keystroke is ever dispatched — trusted CDP input is
+  limited to left-clicks at coordinates our own sweep located, combobox filter
+  text, and Escape (plain fills use the native value setter + input/change
+  events, not the keyboard); file uploads can only attach the one
+  operator-configured resume path. The tab is deliberately left OPEN so the
+  operator reviews and submits themselves.
 """
 
 from __future__ import annotations
@@ -123,6 +125,22 @@ _SWEEP_JS = r"""/*jc-sweep*/ (() => {
       return r.width > 0 && r.height > 0 && st.visibility !== 'hidden' && st.display !== 'none';
     } catch (e) { return true; }
   };
+  const isCombo = (el) => el.tagName === 'INPUT' && (
+    (el.getAttribute('role') || '').toLowerCase() === 'combobox'
+    || el.getAttribute('aria-autocomplete') === 'list'
+    || el.getAttribute('aria-haspopup') === 'listbox');
+  const comboValue = (el) => {
+    // React-select keeps its <input> empty even after a choice commits; the
+    // selection renders in a sibling "value container" (single-value/chips)
+    // alongside a placeholder div. Read that, minus placeholder and input.
+    try {
+      const vc = el.closest('[class*="value-container"], [class*="ValueContainer"]');
+      if (!vc) return '';
+      const c = vc.cloneNode(true);
+      for (const kill of c.querySelectorAll('input, [class*="placeholder"], [id$="placeholder"]')) kill.remove();
+      return clip(c.textContent, 100);
+    } catch (e) { return ''; }
+  };
   const labelFor = (el, doc) => {
     let t = '';
     try {
@@ -173,6 +191,10 @@ _SWEEP_JS = r"""/*jc-sweep*/ (() => {
         item.value = el.files && el.files.length ? clip(el.files[0].name, 80) : '';
       } else {
         item.value = clip(el.value, 160);
+        if (isCombo(el)) {
+          item.combobox = true;
+          if (!item.value) item.value = comboValue(el);
+        }
       }
       controls.push(item);
     }
@@ -225,6 +247,12 @@ _FILL_JS = r"""/*jc-act*/ (() => {
   const value = __VALUE__;
   try { el.scrollIntoView({ block: 'center' }); } catch (e) {}
   const tag = el.tagName;
+  if (tag === 'INPUT' && ((el.getAttribute('role') || '').toLowerCase() === 'combobox'
+      || el.getAttribute('aria-autocomplete') === 'list'
+      || el.getAttribute('aria-haspopup') === 'listbox'))
+    // Typed text in a React/ARIA combobox only filters the menu — it never
+    // commits a choice (run 7 "filled" these ok and the form stayed empty).
+    return JSON.stringify({ ok: false, error: 'combobox — use select with the visible option text' });
   if (tag === 'INPUT' || tag === 'TEXTAREA') {
     const proto = tag === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
     const desc = Object.getOwnPropertyDescriptor(proto, 'value');
@@ -244,25 +272,159 @@ _FILL_JS = r"""/*jc-act*/ (() => {
   return JSON.stringify({ ok: false, error: 'not a fillable element: ' + tag });
 })()"""
 
-_SELECT_JS = r"""/*jc-act*/ (() => {
+_SELECT_JS = r"""/*jc-act*/ /*jc-select*/ (() => {
   const el = (window.__jcAF || {})[__REF__];
   if (!el) return JSON.stringify({ ok: false, error: 'stale ref — re-read the page' });
-  if (el.tagName !== 'SELECT') return JSON.stringify({ ok: false, error: 'not a <select>' });
   const want = String(__VALUE__);
+  const fold = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ').trim().toLowerCase();
+  const clip = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim().slice(0, 60);
+  try { el.scrollIntoView({ block: 'center' }); } catch (e) {}
+  if (el.tagName !== 'SELECT') {
+    if (el.tagName === 'INPUT' && ((el.getAttribute('role') || '').toLowerCase() === 'combobox'
+        || el.getAttribute('aria-autocomplete') === 'list' || el.getAttribute('aria-haspopup') === 'listbox'))
+      // Sentinel: the worker drives comboboxes as a multi-step open/poll/pick
+      // sequence (page timers throttle in background tabs, so the waiting
+      // between steps happens worker-side, never in page JS).
+      return JSON.stringify({ ok: false, combo: true, error: 'combobox' });
+    return JSON.stringify({ ok: false, error: 'not a <select> or combobox' });
+  }
   let hit = null;
   for (const o of el.options) if (o.value === want) { hit = o; break; }
   if (!hit) {
-    const lw = want.trim().toLowerCase();
-    for (const o of el.options) if (o.textContent.trim().toLowerCase() === lw) { hit = o; break; }
-    if (!hit) for (const o of el.options) if (o.textContent.toLowerCase().includes(lw)) { hit = o; break; }
+    const lw = fold(want);
+    for (const o of el.options) if (fold(o.textContent) === lw) { hit = o; break; }
+    if (!hit) for (const o of el.options) if (fold(o.textContent).includes(lw)) { hit = o; break; }
   }
-  if (!hit) return JSON.stringify({ ok: false, error: 'no option matches ' + want.slice(0, 60) });
-  try { el.scrollIntoView({ block: 'center' }); } catch (e) {}
+  if (!hit) return JSON.stringify({
+    ok: false, error: 'no option matches ' + want.slice(0, 60),
+    options: [...el.options].slice(0, 12).map((o) => clip(o.textContent)),
+  });
   el.value = hit.value;
   el.dispatchEvent(new Event('input', { bubbles: true }));
   el.dispatchEvent(new Event('change', { bubbles: true }));
   return JSON.stringify({ ok: true, value: hit.textContent.trim().slice(0, 120) });
 })()"""
+
+# React/ARIA combobox steps (Greenhouse job-boards renders every dropdown as a
+# react-select <input role=combobox>): options mount only while the menu is
+# open, and a selection commits by CLICKING an option — assigning the input's
+# value never sticks (run 7 "filled" these ok:true and the form stayed empty).
+# These snippets only READ the page (find the widget, count/match options,
+# report click coordinates); the worker performs the actual click/typing with
+# TRUSTED CDP Input events, because bot-hardened React builds (Greenhouse's
+# Remix app) ignore dispatchEvent-synthesized events outright — isTrusted is
+# the one thing page JS cannot fake. Waits also live worker-side: page timers
+# in a backgrounded tab are throttled to ~one wake per minute.
+
+_COMBO_HELPERS_JS = r"""
+  const fold = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ').trim().toLowerCase();
+  const clip = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim().slice(0, 60);
+  const doc = el.ownerDocument;
+  const shown = (o) => { const r = o.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const center = (n) => {
+    const r = n.getBoundingClientRect();
+    return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+  };
+  const expanded = () => el.getAttribute('aria-expanded') === 'true';
+  const optionsNow = () => {
+    // Prefer the listbox the combobox points at; fall back to any visible
+    // option (menus often portal elsewhere). Visibility filtering keeps other
+    // widgets' mounted-but-hidden lists (intl-tel-input) out of the pool.
+    const ctl = (el.getAttribute('aria-controls') || el.getAttribute('aria-owns') || '').split(/\s+/)[0];
+    if (ctl) {
+      const box = doc.getElementById(ctl);
+      if (box) {
+        const own = [...box.querySelectorAll('[role="option"]')].filter(shown);
+        if (own.length) return own;
+      }
+    }
+    return [...doc.querySelectorAll('[role="option"]')].filter(shown);
+  };
+  const comboVal = () => {
+    try {
+      const vc = el.closest('[class*="value-container"], [class*="ValueContainer"]');
+      if (!vc) return '';
+      const c = vc.cloneNode(true);
+      for (const kill of c.querySelectorAll('input, [class*="placeholder"], [id$="placeholder"]')) kill.remove();
+      return clip(c.textContent);
+    } catch (e) { return ''; }
+  };
+"""
+
+_COMBO_OPEN_JS = (
+    r"""/*jc-act*/ /*jc-combo-open*/ (() => {
+  const el = (window.__jcAF || {})[__REF__];
+  if (!el) return JSON.stringify({ ok: false, error: 'stale ref — re-read the page' });
+"""
+    + _COMBO_HELPERS_JS
+    + r"""
+  // Click target: the widget's control container (react-select opens on a
+  // control mousedown), not the bare input. Scroll must be INSTANT — the page
+  // may set scroll-behavior:smooth, and an animated scroll would make the
+  // rect we report stale by the time the worker clicks it (observed live:
+  // y=-369, the click sailed over the page).
+  const ctl = el.closest('[class*="control"], [class*="Control"]') || el;
+  try { ctl.scrollIntoView({ block: 'center', behavior: 'instant' }); } catch (e) {}
+  const c = center(ctl);
+  return JSON.stringify({ ok: true, x: c.x, y: c.y, open: expanded(), options: optionsNow().length });
+})()"""
+)
+
+_COMBO_COUNT_JS = (
+    r"""/*jc-act*/ /*jc-combo-count*/ (() => {
+  const el = (window.__jcAF || {})[__REF__];
+  if (!el) return JSON.stringify({ ok: false, error: 'stale ref — re-read the page' });
+"""
+    + _COMBO_HELPERS_JS
+    + r"""
+  return JSON.stringify({ ok: true, options: optionsNow().length, open: expanded() });
+})()"""
+)
+
+_COMBO_PICK_JS = (
+    r"""/*jc-act*/ /*jc-combo-pick*/ (() => {
+  const el = (window.__jcAF || {})[__REF__];
+  if (!el) return JSON.stringify({ ok: false, error: 'stale ref — re-read the page' });
+  const want = String(__VALUE__);
+"""
+    + _COMBO_HELPERS_JS
+    + r"""
+  const opts = optionsNow();
+  if (!opts.length) return JSON.stringify({ ok: false, error: 'combobox opened but no options appeared' });
+  const fw = fold(want);
+  const hit = opts.find((o) => fold(o.textContent) === fw)
+    || opts.find((o) => fold(o.textContent).startsWith(fw))
+    || opts.find((o) => fold(o.textContent).includes(fw))
+    || opts.find((o) => {
+      // Last resort: a short option ("Yes") stated as a word inside a wordy
+      // value ("Yes, I can work from the office").
+      const fo = fold(o.textContent);
+      if (fo.length < 2 || fo.length > 40) return false;
+      const esc = fo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return new RegExp('(^|\\W)' + esc + '(\\W|$)').test(fw);
+    });
+  if (!hit) return JSON.stringify({
+    ok: false, error: 'no option matches ' + want.slice(0, 60),
+    options: opts.slice(0, 12).map((o) => clip(o.textContent)),
+  });
+  try { hit.scrollIntoView({ block: 'nearest', behavior: 'instant' }); } catch (e) {}
+  const c = center(hit);
+  return JSON.stringify({ ok: true, x: c.x, y: c.y, value: clip(hit.textContent) });
+})()"""
+)
+
+_COMBO_VALUE_JS = (
+    r"""/*jc-act*/ /*jc-combo-value*/ (() => {
+  const el = (window.__jcAF || {})[__REF__];
+  if (!el) return JSON.stringify({ ok: false, error: 'stale ref — re-read the page' });
+"""
+    + _COMBO_HELPERS_JS
+    + r"""
+  return JSON.stringify({ ok: true, open: expanded(), value: comboVal() });
+})()"""
+)
 
 _CHECK_JS = r"""/*jc-act*/ (() => {
   const el = (window.__jcAF || {})[__REF__];
@@ -315,6 +477,24 @@ def _select_js(ref: str, value: str) -> str:
     )
 
 
+def _combo_open_js(ref: str) -> str:
+    return _COMBO_OPEN_JS.replace("__REF__", json.dumps(ref))
+
+
+def _combo_count_js(ref: str) -> str:
+    return _COMBO_COUNT_JS.replace("__REF__", json.dumps(ref))
+
+
+def _combo_pick_js(ref: str, value: str) -> str:
+    return _COMBO_PICK_JS.replace("__REF__", json.dumps(ref)).replace(
+        "__VALUE__", json.dumps(value)
+    )
+
+
+def _combo_value_js(ref: str) -> str:
+    return _COMBO_VALUE_JS.replace("__REF__", json.dumps(ref))
+
+
 def _check_js(ref: str, on: bool) -> str:
     return _CHECK_JS.replace("__REF__", json.dumps(ref)).replace(
         "__ON__", "true" if on else "false"
@@ -349,6 +529,10 @@ class AutofillStep(dspy.Signature):
         operator-provided application answers state the fact; otherwise pick the
         "decline to answer" / "prefer not to say" option when one exists, else
         skip the question.
+      * Controls marked ``"combobox": true`` are dropdown widgets, not text
+        fields: use select with the option's visible text (short, e.g. "Yes" —
+        never a sentence). fill is refused on them. A failed select reports the
+        widget's real option labels; retry next round with one of those.
       * Free-text motivation or cover-letter fields: write 2–4 specific,
         first-person sentences grounded in the profile and the role.
       * If the page shows no form controls yet, click the apply button/link that
@@ -360,6 +544,7 @@ class AutofillStep(dspy.Signature):
     Actions (JSON array, executed in order):
       {"op": "fill",   "ref": "c3", "value": "text to type"}
       {"op": "select", "ref": "c7", "value": "option value or visible text"}
+        — for <select> controls AND for "combobox": true inputs
       {"op": "check",  "ref": "c9", "on": true}
       {"op": "click",  "ref": "b2", "why": "short reason"}
       {"op": "upload", "ref": "c4"}                  — resume file input; only
@@ -413,6 +598,12 @@ def _history_line(action: dict[str, Any], result: dict[str, Any]) -> str:
         outcome = f"REFUSED ({result['blocked']})"
     else:
         outcome = f"failed: {str(result.get('error', '?'))[:80]}"
+        options = result.get("options")
+        if isinstance(options, list) and options:
+            # A missed select reports the widget's real choices — feed them back
+            # so the next round retries with an option that actually exists.
+            listed = ", ".join(repr(str(o)[:40]) for o in options[:8])
+            outcome += f" (options: {listed})"
     detail = str(action.get("value") or action.get("why") or "")[:60]
     return f"  - {op} {ref}{f' {detail!r}' if detail else ''} -> {outcome}"
 
@@ -824,9 +1015,14 @@ class AutofillWorker:
                     sid, _fill_js(ref, str(action.get("value", "")))
                 )
             if op == "select":
-                return await self._eval_action(
+                result = await self._eval_action(
                     sid, _select_js(ref, str(action.get("value", "")))
                 )
+                if result.get("combo"):
+                    return await self._combo_select(
+                        sid, ref, str(action.get("value", ""))
+                    )
+                return result
             if op == "check":
                 return await self._eval_action(
                     sid, _check_js(ref, bool(action.get("on", True)))
@@ -838,6 +1034,101 @@ class AutofillWorker:
             return {"ok": False, "error": f"unknown op {op!r}"}
         except CdpError as exc:
             return {"ok": False, "error": str(exc)[:300]}
+
+    # Combobox menu polling: options usually mount within one React render of
+    # the open click; async typeaheads (location search) need network time.
+    # The waits live HERE, in the worker — page timers in a backgrounded tab
+    # are throttled to ~one wake per minute, so any in-page polling would hang.
+    _COMBO_POLLS = 12
+    _COMBO_TYPED_POLLS = 16
+    _COMBO_POLL_S = 0.15
+
+    async def _combo_select(self, sid: str, ref: str, want: str) -> dict[str, Any]:
+        """Commit a choice in a React/ARIA combobox (Greenhouse job-boards etc.).
+
+        Two hard-won facts drive this shape. A choice commits ONLY by clicking
+        a rendered [role=option] — writing the input's value "succeeds" and the
+        form stays empty (run 7). And the clicks/keys must be TRUSTED CDP Input
+        events: Greenhouse's React build ignores dispatchEvent-synthesized
+        events wholesale (verified live — full propagation, zero handler
+        response; a trusted click opened the menu instantly). So page JS only
+        locates things and reports coordinates; this method does the touching.
+        """
+        opened = await self._eval_action(sid, _combo_open_js(ref))
+        if not opened.get("ok"):
+            return opened
+        if not opened.get("open"):
+            await self._trusted_click(sid, opened["x"], opened["y"])
+        typed = False
+        count = int(opened.get("options") or 0)
+        for _ in range(self._COMBO_POLLS):
+            if count:
+                break
+            await asyncio.sleep(self._COMBO_POLL_S)
+            res = await self._eval_action(sid, _combo_count_js(ref))
+            if not res.get("ok"):
+                return res
+            count = int(res.get("options") or 0)
+        if not count:
+            # Async typeahead: no options until the query text arrives. The
+            # open click focused the input; insertText types like a real IME.
+            typed = True
+            await self._browser.cmd(
+                "Input.insertText", {"text": want}, session_id=sid
+            )
+            for _ in range(self._COMBO_TYPED_POLLS):
+                await asyncio.sleep(self._COMBO_POLL_S)
+                res = await self._eval_action(sid, _combo_count_js(ref))
+                if not res.get("ok"):
+                    return res
+                count = int(res.get("options") or 0)
+                if count:
+                    break
+        if not count:
+            await self._combo_settle(sid, ref)
+            return {"ok": False, "error": "combobox opened but no options appeared"}
+        picked = await self._eval_action(sid, _combo_pick_js(ref, want))
+        if not picked.get("ok"):
+            await self._combo_settle(sid, ref)
+            return picked
+        await self._trusted_click(sid, picked["x"], picked["y"])
+        # A committed pick normally closes the menu; multi-selects keep it
+        # open — settle and read back what the widget actually shows now.
+        await asyncio.sleep(self._COMBO_POLL_S)
+        committed = await self._combo_settle(sid, ref)
+        result: dict[str, Any] = {"ok": True, "value": picked.get("value")}
+        if committed and typed:
+            result["value"] = committed
+        return result
+
+    async def _combo_settle(self, sid: str, ref: str) -> str:
+        """Close a still-open menu (trusted Escape) and read the shown value."""
+        res = await self._eval_action(sid, _combo_value_js(ref))
+        if res.get("open"):
+            await self._press_escape(sid)
+        return str(res.get("value") or "")
+
+    async def _trusted_click(self, sid: str, x: float, y: float) -> None:
+        """A real left click through the browser's input pipeline (isTrusted)."""
+        for kind in ("mousePressed", "mouseReleased"):
+            await self._browser.cmd(
+                "Input.dispatchMouseEvent",
+                {"type": kind, "x": x, "y": y, "button": "left", "clickCount": 1},
+                session_id=sid,
+            )
+
+    async def _press_escape(self, sid: str) -> None:
+        for kind in ("keyDown", "keyUp"):
+            await self._browser.cmd(
+                "Input.dispatchKeyEvent",
+                {
+                    "type": kind,
+                    "key": "Escape",
+                    "code": "Escape",
+                    "windowsVirtualKeyCode": 27,
+                },
+                session_id=sid,
+            )
 
     async def _eval_action(self, sid: str, js: str) -> dict[str, Any]:
         value = await self._browser.evaluate(sid, js)
