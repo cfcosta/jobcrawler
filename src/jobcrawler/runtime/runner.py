@@ -331,6 +331,7 @@ def _process(
             location=job.location,
             locations_json=cast("str | None", fields["locations_json"]),
             workplace=enriched.workplace,
+            title=job.title,
             force=outcome != "unchanged",
             purge_llm=outcome == "changed",
         )

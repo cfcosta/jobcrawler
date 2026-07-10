@@ -29,7 +29,8 @@ from dataclasses import dataclass, field
 
 # v2: Brazilian state codes resolve under Brazilian context (v1 read
 # 'Campo Grande, MS, Brasil' as Mississippi and briefly reached a live ledger).
-GEO_PARSER_VERSION = 2
+# v3: title fences ('[EUROPE ONLY] …') demote false-worldwide projections.
+GEO_PARSER_VERSION = 3
 
 # Bump when GEO_REGION_MEMBERS changes so the store reseeds geo_region_members.
 GEO_REGION_SEED_VERSION = 1
@@ -992,6 +993,52 @@ def _group_units(toks: list[_Tok]) -> tuple[list[_Unit], bool, bool, set[int], s
             remote_segs.add(tok.seg)
         # WORKPLACE / NOISE / TZ / ZIP / URL / UNK never form units.
     return units, remote_marker, worldwide, remote_segs, city_segs
+
+
+def title_fence(title: str) -> tuple[GeoPlace, ...]:
+    """Explicit '<place> only' fences read from a JOB TITLE.
+
+    Posters put the fence in the title while the board's region field claims
+    worldwide ('[EUROPE ONLY] …' filed under 'Anywhere in the World'). The rule
+    is deliberately narrow: the literal word 'only' AND resolvable geography must
+    share one bracket/paren/dash segment — 'Read-Only Systems Engineer' and
+    'Engineer (Berlin) - GmbH only' never fence. Returns country/macro-level
+    entries; the callers use them to downgrade an 'anywhere' claim, never to
+    invent places.
+    """
+    if not title or not re.search(r"\bonly\b", _fold(title)):
+        return ()
+    out: list[GeoPlace] = []
+    seen: set[tuple[str | None, str | None]] = set()
+    for segment in _segments_of(title):
+        if not re.search(r"\bonly\b", _fold(segment)):
+            continue
+        for part in segment.split(","):
+            for tok in _classify_part(part):
+                country = macro = None
+                if tok.cls == "COUNTRY":
+                    country = tok.payload
+                elif tok.cls == "MACRO":
+                    macro = tok.payload
+                elif tok.cls == "US_REGION":
+                    country = "US"
+                elif tok.cls in ("US_STATE", "CA_PROV", "CODE2"):
+                    country = "CA" if tok.cls == "CA_PROV" else "US"
+                else:
+                    continue
+                key = (country, macro)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(
+                    GeoPlace(
+                        country=country,
+                        macro=macro,
+                        confidence="medium",
+                        raw=segment.strip(),
+                    )
+                )
+    return tuple(out)
 
 
 def parse_location(raw: str) -> LocationParse:

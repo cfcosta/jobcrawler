@@ -768,6 +768,7 @@ class StateStore:
             "WHERE applied_at IS NOT NULL"
         )
         self._backfill_remote_scope()
+        self._repair_title_fenced_scope()
         self._backfill_salary_usd()
         self._backfill_relocation()
         self._backfill_notify_ledger()
@@ -973,16 +974,16 @@ class StateStore:
     def _backfill_remote_scope(self) -> None:
         """Fill ``remote_scope`` for rows written before the column existed (§4.6).
 
-        The scope derives from ``workplace``+``location`` via the very classifier a fresh
-        crawl runs (:func:`classify_remote_scope`), so a populated DB gains the geographic
-        scope immediately instead of waiting for every board's next crawl to re-serve the
-        row. Idempotent and cheap: it only reads rows still NULL with a known ``workplace``,
-        and the classifier never returns NULL — so once filled, a later open matches nothing
-        and skips. (Rows with a NULL ``workplace`` stay NULL, which the filters/display read
-        as ``unspecified`` anyway.)
+        The scope derives from ``workplace``+``location``+``title`` via the very classifier
+        a fresh crawl runs (:func:`classify_remote_scope`), so a populated DB gains the
+        geographic scope immediately instead of waiting for every board's next crawl to
+        re-serve the row. Idempotent and cheap: it only reads rows still NULL with a known
+        ``workplace``, and the classifier never returns NULL — so once filled, a later open
+        matches nothing and skips. (Rows with a NULL ``workplace`` stay NULL, which the
+        filters/display read as ``unspecified`` anyway.)
         """
         rows = self._conn.execute(
-            "SELECT site, url, workplace, location FROM positions "
+            "SELECT site, url, workplace, location, title FROM positions "
             "WHERE remote_scope IS NULL AND workplace IS NOT NULL"
         ).fetchall()
         if not rows:
@@ -994,7 +995,7 @@ class StateStore:
             [
                 (
                     classify_remote_scope(
-                        row["workplace"] or "", row["location"] or ""
+                        row["workplace"] or "", row["location"] or "", row["title"] or ""
                     ),
                     row["site"],
                     row["url"],
@@ -1002,6 +1003,38 @@ class StateStore:
                 for row in rows
             ],
         )
+
+    def _repair_title_fenced_scope(self) -> None:
+        """One-shot §4.6 heal: 'anywhere' rows whose TITLE carries an explicit fence.
+
+        Rows classified before ``classify_remote_scope`` learned the title fence read
+        'anywhere' while their title says '[EUROPE ONLY]'/'USA Only' — false worldwide
+        claims that leak into the §16 attainable gate. Reclassify exactly those rows
+        with the current classifier; everything else is untouched. Meta-guarded like
+        every other one-shot sweep.
+        """
+        if self.get_meta("title_fence_scope_repair") is not None:
+            return
+        rows = self._conn.execute(
+            "SELECT site, url, workplace, location, title FROM positions "
+            "WHERE remote_scope = 'anywhere'"
+        ).fetchall()
+        if rows:
+            from jobcrawler.runtime.normalize import classify_remote_scope
+
+            updates = []
+            for row in rows:
+                scope = classify_remote_scope(
+                    row["workplace"] or "", row["location"] or "", row["title"] or ""
+                )
+                if scope != "anywhere":
+                    updates.append((scope, row["site"], row["url"]))
+            if updates:
+                self._conn.executemany(
+                    "UPDATE positions SET remote_scope = ? WHERE site = ? AND url = ?",
+                    updates,
+                )
+        self.set_meta("title_fence_scope_repair", "1")
 
     def _backfill_salary_usd(self) -> None:
         """Fill the annualized-USD band for salaried rows written before the columns existed.
@@ -1149,6 +1182,7 @@ class StateStore:
         location: str,
         locations_json: str | None = None,
         workplace: str | None = None,
+        title: str | None = None,
         force: bool = False,
         purge_llm: bool = False,
     ) -> None:
@@ -1183,6 +1217,7 @@ class StateStore:
                 location=location,
                 locations_json=locations_json,
                 workplace=workplace,
+                title=title,
                 purge_llm=purge_llm,
             )
             self._conn.commit()
@@ -1196,7 +1231,10 @@ class StateStore:
         locations_json: str | None,
         workplace: str | None,
         purge_llm: bool,
+        title: str | None = None,
     ) -> None:
+        from jobcrawler.runtime import geo
+
         strings: list[str] = []
         for candidate in [location, *_json_list(locations_json)]:
             text = (candidate or "").strip()
@@ -1204,6 +1242,29 @@ class StateStore:
                 strings.append(text)
         entries = [self._ledger_entry(site, s) for s in strings]
         rows = _compose_projection(entries, workplace)
+        # An explicit '<place> only' TITLE fence beats a location-claimed
+        # worldwide ('[EUROPE ONLY] …' filed under 'Anywhere in the World'):
+        # the anywhere row becomes the titled fence, so remote_in= filters and
+        # the display stop overstating reach. Row-level (the title is not part
+        # of the value-keyed ledger).
+        if title and any(r["kind"] == "remote_anywhere" for r in rows):
+            fences = geo.title_fence(title)
+            if fences:
+                rows = [r for r in rows if r["kind"] != "remote_anywhere"]
+                for f in fences:
+                    name = geo.country_name(f.country) or geo.macro_label(f.macro)
+                    rows.append(
+                        {
+                            "kind": "remote_fence",
+                            "country": f.country,
+                            "subdivision": None,
+                            "macro_region": f.macro,
+                            "display": f"Remote ({name})" if name else "Remote",
+                            "source": "rules",
+                            "confidence": "medium",
+                            "raw_fragment": f.raw or None,
+                        }
+                    )
 
         kept: list[sqlite3.Row] = []
         if purge_llm:
@@ -1340,7 +1401,7 @@ class StateStore:
                 ),
             )
             carriers = self._conn.execute(
-                "SELECT url, location, locations_json, workplace FROM positions "
+                "SELECT url, title, location, locations_json, workplace FROM positions "
                 "WHERE site = ? AND location = ?",
                 (site, key),
             ).fetchall()
@@ -1351,6 +1412,7 @@ class StateStore:
                     location=carrier["location"],
                     locations_json=carrier["locations_json"],
                     workplace=carrier["workplace"],
+                    title=carrier["title"],
                     purge_llm=False,
                 )
             self._conn.commit()
@@ -1502,7 +1564,7 @@ class StateStore:
         if self.get_meta("geo_parser_version") == str(geo.GEO_PARSER_VERSION):
             return
         rows = self._conn.execute(
-            "SELECT site, url, location, locations_json, workplace FROM positions"
+            "SELECT site, url, title, location, locations_json, workplace FROM positions"
         ).fetchall()
         for row in rows:
             self._refresh_locations_locked(
@@ -1511,6 +1573,7 @@ class StateStore:
                 location=row["location"] or "",
                 locations_json=row["locations_json"],
                 workplace=row["workplace"],
+                title=row["title"],
                 purge_llm=False,
             )
         self.set_meta("geo_parser_version", str(geo.GEO_PARSER_VERSION))

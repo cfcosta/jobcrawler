@@ -2025,6 +2025,71 @@ def test_refresh_promotes_countries_to_fence_only_for_remote_rows(
         assert _display(store, "acme", url) == display, url
 
 
+def test_refresh_title_fence_demotes_a_false_worldwide(store: StateStore) -> None:
+    # The board's region string parses worldwide, but the title says
+    # '[EUROPE ONLY]' — the projection becomes the fence, not remote_anywhere,
+    # so remote_in= filters and the display stop lying.
+    store.upsert_position(
+        "wwr",
+        "u",
+        fields={**FIELDS, "location": "Anywhere in the World"},
+        content_hash="h",
+    )
+    store.refresh_position_locations(
+        "wwr",
+        "u",
+        location="Anywhere in the World",
+        workplace="remote",
+        title="[EUROPE ONLY] GTM MarTech Engineer",
+        force=True,
+    )
+    rows = _projection(store, "wwr", "u")
+    assert [(r[1], r[5]) for r in rows] == [("remote_fence", "europe")]
+    assert _display(store, "wwr", "u") == "Remote (Europe)"
+    # Without a fenced title the worldwide claim stands (pinned elsewhere too).
+    store.upsert_position(
+        "wwr", "w", fields={**FIELDS, "location": "Anywhere in the World"}, content_hash="w"
+    )
+    store.refresh_position_locations(
+        "wwr", "w", location="Anywhere in the World", workplace="remote",
+        title="GTM MarTech Engineer", force=True,
+    )
+    assert [(r[1],) for r in _projection(store, "wwr", "w")] == [("remote_anywhere",)]
+
+
+def test_migration_repairs_title_fenced_anywhere_rows(tmp_path: object) -> None:
+    # One-shot heal for rows classified 'anywhere' before the title fence existed.
+    db = f"{tmp_path}/legacy.db"  # type: ignore[str-bytes-safe]
+    raw = sqlite3.connect(db)
+    raw.executescript(
+        """
+        CREATE TABLE positions (
+            site TEXT NOT NULL, url TEXT NOT NULL, content_hash TEXT NOT NULL,
+            title TEXT NOT NULL, company TEXT NOT NULL, location TEXT NOT NULL,
+            workplace TEXT, remote_scope TEXT,
+            first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
+            PRIMARY KEY (site, url)
+        );
+        INSERT INTO positions VALUES
+            ('wwr', 'fenced', 'h1', '[EUROPE ONLY] Platform Engineer', 'C',
+             'Anywhere in the World', 'remote', 'anywhere',
+             '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'),
+            ('wwr', 'open', 'h2', 'Platform Engineer', 'C',
+             'Anywhere in the World', 'remote', 'anywhere',
+             '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
+        """
+    )
+    raw.commit()
+    raw.close()
+    s = StateStore(db)
+    try:
+        by_url = {r.url: r for r in s.open_positions("wwr")}
+        assert by_url["fenced"].remote_scope == "restricted"
+        assert by_url["open"].remote_scope == "anywhere"
+    finally:
+        s.close()
+
+
 def test_refresh_worldwide_and_marker_only(store: StateStore) -> None:
     store.upsert_position(
         "acme", "w", fields={**FIELDS, "location": "Anywhere in the World"}, content_hash="w"

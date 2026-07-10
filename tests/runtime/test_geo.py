@@ -428,8 +428,29 @@ def test_region_members_spot_checks() -> None:
     assert "SG" in members["southeast asia"]
 
 
+def test_title_fence_reads_explicit_only_phrases() -> None:
+    # Posters put the fence in the TITLE while the board's region field claims
+    # worldwide ('[EUROPE ONLY] …' filed under 'Anywhere in the World'). An
+    # explicit '<place> only' in a title segment is a fence; 'only' without
+    # geography in the same segment never is.
+    fence = geo.title_fence(
+        "[EUROPE ONLY] GTM MarTech Engineer (Growth & Attribution) at Video MarTech SaaS"
+    )
+    assert [f.macro for f in fence] == ["europe"]
+    fence = geo.title_fence("Senior Software Engineer - Backend/Python - USA Only (100% Remote)")
+    assert [f.country for f in fence] == ["US"]
+    fence = geo.title_fence("Embedded Linux Field Engineering Manager (Americas only)")
+    assert [f.macro for f in fence] == ["americas"]
+    assert geo.title_fence("Read-Only Systems Engineer") == ()
+    assert geo.title_fence("SQL Only Engineer") == ()
+    # 'only' in one segment, geography in another → no fence.
+    assert geo.title_fence("Engineer (Berlin) - GmbH only") == ()
+    assert geo.title_fence("Senior Rust Engineer") == ()
+
+
 def test_parser_version_pinned() -> None:
     # Bumping GEO_PARSER_VERSION triggers a whole-corpus deterministic resweep at
     # store open — any behavior change in this module must come with a bump.
-    # v2: the Brazilian state-code context rule.
-    assert geo.GEO_PARSER_VERSION == 2
+    # v2: the Brazilian state-code context rule; v3: title fences demote false
+    # worldwide projections.
+    assert geo.GEO_PARSER_VERSION == 3

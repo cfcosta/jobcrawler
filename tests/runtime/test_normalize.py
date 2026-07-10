@@ -440,6 +440,45 @@ def test_parse_salary_description_rate_markers_still_fire() -> None:
     assert parsed.period == "hour"
 
 
+def test_classify_remote_scope_title_fence_beats_a_worldwide_region() -> None:
+    # WWR-style rows: the board's region field says 'Anywhere in the World' but
+    # the poster titled the fence — the explicit '<place> only' is the more
+    # specific statement, so 'anywhere' downgrades to 'restricted'.
+    from jobcrawler.runtime.normalize import classify_remote_scope
+
+    assert (
+        classify_remote_scope(
+            "remote",
+            "Anywhere in the World",
+            title="[EUROPE ONLY] GTM MarTech Engineer",
+        )
+        == "restricted"
+    )
+    # No title fence → the region's claim stands.
+    assert (
+        classify_remote_scope("remote", "Anywhere in the World", title="GTM Engineer")
+        == "anywhere"
+    )
+    # Non-geographic 'only' never downgrades.
+    assert (
+        classify_remote_scope(
+            "remote", "Anywhere in the World", title="Read-Only Systems Engineer"
+        )
+        == "anywhere"
+    )
+
+
+def test_enrich_applies_the_title_fence_to_remote_scope() -> None:
+    fenced = enrich(
+        _job(
+            title="[EUROPE ONLY] Platform Engineer",
+            location="Anywhere in the World",
+            workplace_type="remote",
+        )
+    )
+    assert fenced.remote_scope == "restricted"
+
+
 def test_salary_from_fields_normalizes_stated_period_vocab() -> None:
     # Ashby serves intervals as '1 MONTH'/'1 YEAR'/'1 HOUR'; crawlers pass them
     # as stated and the host maps them (§4.6 fix-once-fleet-wide). A stated

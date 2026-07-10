@@ -646,14 +646,17 @@ _SCOPE_FILLER: frozenset[str] = frozenset(
 )
 
 
-def classify_remote_scope(workplace: str, location: str) -> str:
+def classify_remote_scope(workplace: str, location: str, title: str = "") -> str:
     """Coarse geographic scope of a remote role: anywhere / restricted / unspecified.
 
     Only meaningful for a ``remote`` ``workplace`` (hybrid/onsite carry their city in
     ``location`` already and return ``unspecified``). Strips remote/worldwide filler
     from the folded ``location``; a non-empty residual names a concrete place →
     ``restricted``; an empty residual with a worldwide signal → ``anywhere``; empty and
-    silent → ``unspecified``. Conservative by construction: it only ever *demotes* a
+    silent → ``unspecified``. An explicit '<place> only' fence in the TITLE (§4.12
+    ``geo.title_fence``) downgrades a location-claimed "anywhere" — posters title the
+    fence ('[EUROPE ONLY] …') while the board's region field says worldwide.
+    Conservative by construction: it only ever *demotes* a
     remote from an assumed "anywhere", never invents a worldwide claim the text
     doesn't make (the failure the operator saw: Ramp/Anthropic US-only roles reading
     as bare "Remote").
@@ -665,6 +668,11 @@ def classify_remote_scope(workplace: str, location: str) -> str:
     if residual:
         return "restricted"
     if _contains_any(folded, _SCOPE_GLOBAL):
+        if title:
+            from jobcrawler.runtime.geo import title_fence
+
+            if title_fence(title):
+                return "restricted"
         return "anywhere"
     return "unspecified"
 
@@ -1415,7 +1423,7 @@ def enrich(job: Job) -> EnrichedJob:
         discipline=classify_discipline(job.title, job.description),
         level=classify_level(job.title, job.description),
         workplace=workplace,
-        remote_scope=classify_remote_scope(workplace, job.location),
+        remote_scope=classify_remote_scope(workplace, job.location, job.title),
         relocation=classify_relocation(job.title, job.description or ""),
         salary=salary,
         salary_origin=salary_origin,
