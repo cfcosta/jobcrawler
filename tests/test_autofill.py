@@ -24,7 +24,7 @@ from jobcrawler.autofill import (
     _click_js,
     _parse_actions,
 )
-from jobcrawler.cdp import CdpBrowser
+from jobcrawler.cdp import CdpBrowser, CdpError
 from jobcrawler.runtime.runner import CrawlSummary
 from jobcrawler.schedule import Scheduler, Site
 from jobcrawler.state import StateStore, autofill_target
@@ -230,6 +230,7 @@ class FakeBrowser:
 
     def __init__(self) -> None:
         self.connected = True
+        self.tab_alive = True  # flip False to simulate the operator closing the tab
         self.opened: list[str] = []
         self.attached: list[str] = []
         self.cmds: list[str] = []
@@ -262,12 +263,18 @@ class FakeBrowser:
 
     async def cmd(self, method: str, params: dict | None = None, *, session_id=None, timeout=None) -> dict:
         self.cmds.append(method)
+        if method == "Target.getTargetInfo":
+            if not self.tab_alive:
+                raise CdpError("Target.getTargetInfo: No target with given id found")
+            return {"targetInfo": {"targetId": (params or {}).get("targetId")}}
         if method == "Target.getTargets":
             return {"targetInfos": list(self.targets)}
         return {}
 
     async def evaluate(self, sid: str, expression: str, *, await_promise: bool = False, timeout=None):
         assert sid in self.sids
+        if not self.tab_alive:
+            raise CdpError("Runtime.evaluate: Cannot find context with specified id")
         if "/*jc-ready*/" in expression:
             return "complete"
         if "/*jc-count*/" in expression:
@@ -475,6 +482,56 @@ async def test_a_tab_the_page_opens_is_adopted_and_driven(
         "target_id": "T2",
         "url": "https://ats.example.test/apply",
     }
+
+
+async def test_closing_the_tab_interrupts_the_run(tmp_path: Path) -> None:
+    """Operator closes the apply tab mid-run → prompt 'interrupted', not 'stalled'.
+
+    A dead tab fails every action identically, which the stall branch would
+    otherwise mislabel; the worker re-checks the target and raises TabClosed.
+    """
+    store, worker, fake, run_id = _worker_fixture(tmp_path)
+
+    def fake_llm(profile: str, context: str, page: str) -> str:
+        fake.tab_alive = False  # closed while the model was thinking
+        return json.dumps(
+            [{"op": "fill", "ref": "c1", "value": "Jane Doe"}], ensure_ascii=False
+        )
+
+    worker._call_llm = fake_llm  # ty: ignore[invalid-assignment]
+    out = await worker.run_once()
+    assert out is not None and out["status"] == "failed"
+    runs = store.autofill_runs_for("acme", "https://acme.test/a")
+    error = str(runs[0]["error"])
+    assert "interrupted" in error and "tab closed" in error
+    assert "stalled" not in error
+    # what ran before the close is preserved for the self-improvement log
+    raw = store._conn.execute(
+        "SELECT transcript_json FROM autofill_runs WHERE id = ?", (run_id,)
+    ).fetchone()[0]
+    transcript = json.loads(raw)
+    assert transcript[0]["results"][0]["result"]["ok"] is False
+
+
+async def test_a_transient_sweep_error_with_a_live_tab_stays_a_generic_failure(
+    tmp_path: Path,
+) -> None:
+    """The interrupt path must not swallow real CDP breakage: tab alive → re-raise."""
+    store, worker, fake, _run_id = _worker_fixture(tmp_path)
+    orig = fake.evaluate
+
+    async def flaky(sid: str, expression: str, **kw: Any) -> Any:
+        if "/*jc-sweep*/" in expression:
+            raise CdpError("Runtime.evaluate: transient")
+        return await orig(sid, expression, **kw)
+
+    fake.evaluate = flaky  # ty: ignore[invalid-assignment]
+    out = await worker.run_once()
+    assert out is not None and out["status"] == "failed"
+    runs = store.autofill_runs_for("acme", "https://acme.test/a")
+    error = str(runs[0]["error"])
+    assert error.startswith("CdpError:")
+    assert "interrupted" not in error
 
 
 async def test_run_once_ends_cleanly_when_the_model_returns_prose(tmp_path: Path) -> None:

@@ -1904,6 +1904,10 @@ clicking, and when page JS opens a popup anyway (`window.open` apply flows) the 
 `Target.getTargets`, restricted to targets whose `openerId` is one of the run's own tabs, so an
 operator's unrelated tabs are never grabbed. After any click round it settles
 (`_POST_CLICK_SETTLE_S`, 2 s — SPA modals render past `readyState=complete`) before re-reading.
+Closing the tab is the operator's interrupt: every CDP failure path re-probes the target
+(`Target.getTargetInfo`, version-stable — no error-string matching) and a vanished tab ends the
+run `failed` with `interrupted: apply tab closed in Chrome`, promptly, instead of spinning the
+wait/round budget against a dead session or mislabeling the close as *stalled*.
 Navigation resets the world, so every round re-sweeps; fills
 use the native value setter + `input`/`change` events (no keystrokes, so no accidental Enter-
 submit); `upload` attaches only the operator-configured `JOBCRAWLER_AUTOFILL_RESUME` path

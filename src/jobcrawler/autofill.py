@@ -44,6 +44,15 @@ _PROFILE_BUDGET = 16_000
 # past readyState=complete — give a click's effect a beat before re-reading.
 _POST_CLICK_SETTLE_S = 2.0
 
+
+class TabClosed(RuntimeError):
+    """The operator closed the apply tab mid-run — their interrupt signal.
+
+    Raised wherever a CDP failure turns out to be a vanished tab, so the run
+    ends promptly with a clear "interrupted" outcome instead of burning rounds
+    on a dead session or mislabeling the close as "stalled".
+    """
+
 # Guard wordlists (folded: lowercase, accents stripped — the JS folds the button
 # text the same way before testing). SUBMIT words block a click anywhere; WIZARD
 # words block only inside a <form>, where next/continue is a step-submit. Reveal
@@ -481,6 +490,24 @@ class AutofillWorker:
                 counters["fields"],
             )
             return {"id": run_id, "status": "done", "site": site, "url": url}
+        except TabClosed:
+            _log.info(
+                "autofill run %d (%s): apply tab closed by the operator — interrupted",
+                run_id,
+                site,
+            )
+            self._store.finish_autofill(
+                run_id,
+                status="failed",
+                error="interrupted: apply tab closed in Chrome",
+                model=self._model,
+                profile_hash=profile_hash,
+                rounds=counters["rounds"],
+                actions_applied=counters["actions"],
+                fields_filled=counters["fields"],
+                transcript=transcript,
+            )
+            return {"id": run_id, "status": "failed", "site": site, "url": url}
         except Exception as exc:  # noqa: BLE001 - outcome lands on the run row
             _log.exception("autofill run %d (%s) failed", run_id, site)
             self._store.finish_autofill(
@@ -518,14 +545,19 @@ class AutofillWorker:
         await self._browser.cmd("Page.enable", session_id=sid)
         await self._browser.cmd("Runtime.enable", session_id=sid)
         await self._browser.cmd("DOM.enable", session_id=sid)
-        await self._wait_ready(sid)
+        await self._wait_ready(sid, target_id)
 
         history: list[str] = []
         summary = "round budget exhausted before the model finished"
         mine = {target_id}  # tabs this run drives; grows when the page opens one
         for rnd in range(1, self._max_rounds + 1):
             counters["rounds"] = rnd
-            digest = await self._sweep(sid)
+            try:
+                digest = await self._sweep(sid)
+            except CdpError:
+                if not await self._tab_alive(target_id):
+                    raise TabClosed("apply tab closed in Chrome") from None
+                raise
             entry: dict[str, object] = {"round": rnd, "page": digest, "results": []}
             transcript.append(entry)
             raw = await asyncio.to_thread(
@@ -584,6 +616,10 @@ class AutofillWorker:
                 summary = done
                 break
             if not any_ok:
+                # A closed tab fails every action the same way — check before
+                # calling it a stall.
+                if not await self._tab_alive(target_id):
+                    raise TabClosed("apply tab closed in Chrome")
                 summary = f"stalled: no action succeeded in round {rnd}"
                 break
             if navigated:
@@ -596,7 +632,7 @@ class AutofillWorker:
                     history.append(
                         f"  - (the page opened a new tab; now driving it: {popup_url})"
                     )
-                await self._wait_ready(sid)  # bounded; covers reveal-click navigations
+                await self._wait_ready(sid, target_id)  # bounded; covers navigations
             else:
                 await asyncio.sleep(1.0)  # async validation / dependent fields settle
         # The tab is deliberately left open: the operator reviews and submits.
@@ -653,17 +689,22 @@ class AutofillWorker:
 
     # -- CDP page interaction ----------------------------------------------------
 
-    async def _wait_ready(self, sid: str) -> None:
+    async def _wait_ready(self, sid: str, target_id: str) -> None:
         """Navigation + SPA settle: readyState on a real URL, then (bounded) form controls.
 
         ATS boards render client-side, so 'complete' alone is too early; a page that
         never grows controls (a reveal-button landing page) just times the second
         loop out and proceeds — the LLM's first round handles it with a click.
+        A CDP error here is either a mid-navigation race (keep polling) or the
+        operator closing the tab (raise :class:`TabClosed` instead of spinning
+        out the full budget against a dead session).
         """
         for _ in range(60):  # ≤30s for the navigation itself
             try:
                 state = await self._browser.evaluate(sid, _READY_JS)
             except CdpError:
+                if not await self._tab_alive(target_id):
+                    raise TabClosed("apply tab closed in Chrome") from None
                 state = None
             if state == "complete":
                 break
@@ -672,10 +713,25 @@ class AutofillWorker:
             try:
                 count = await self._browser.evaluate(sid, _CONTROL_COUNT_JS)
             except CdpError:
+                if not await self._tab_alive(target_id):
+                    raise TabClosed("apply tab closed in Chrome") from None
                 count = 0
             if isinstance(count, (int, float)) and count > 0:
                 return
             await asyncio.sleep(0.5)
+
+    async def _tab_alive(self, target_id: str) -> bool:
+        """Does the tab still exist? Closing it is the operator's interrupt.
+
+        ``Target.getTargetInfo`` is browser-scoped and version-stable — a closed
+        tab raises, everything else answers — so no fragile matching on CDP
+        error strings.
+        """
+        try:
+            await self._browser.cmd("Target.getTargetInfo", {"targetId": target_id})
+        except CdpError:
+            return False
+        return True
 
     async def _adopt_popup(self, mine: set[str]) -> tuple[str, str, str] | None:
         """Adopt a tab the page opened from one of ours (window.open flows).
