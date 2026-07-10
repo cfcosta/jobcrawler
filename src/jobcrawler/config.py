@@ -14,7 +14,11 @@ from pathlib import Path
 
 from jobcrawler.durations import parse_duration
 from jobcrawler.runtime.dedup import IDENTITY_APPLY_TRACKING_PARAMS
-from jobcrawler.urls import DEFAULT_MARKETPLACE_APPLY_HOSTS, DEFAULT_TRACKING_PARAMS
+from jobcrawler.urls import (
+    DEFAULT_MARKETPLACE_APPLY_HOSTS,
+    DEFAULT_MARKETPLACE_COMPANIES,
+    DEFAULT_TRACKING_PARAMS,
+)
 
 # This module lives at the package root, so its directory *is* the package dir —
 # used to default the committed-crawlers location to the in-package crawlers/ dir.
@@ -558,6 +562,22 @@ def marketplace_apply_host_denylist() -> frozenset[str]:
     if raw is None:
         return DEFAULT_MARKETPLACE_APPLY_HOSTS
     return frozenset(h.strip().lower() for h in raw.split(",") if h.strip())
+
+
+def marketplace_company_denylist() -> frozenset[str]:
+    """Canonical company names a posting is dropped for at ingestion (§4.7).
+
+    The host denylist above misses the boards' re-lists: those carry the marketplace
+    as the *hiring company* while the apply link points back at the board itself, at
+    nothing, or at a URL shortener (lemon.io arrived all three ways). Values are
+    ``normalize.canonical_company`` keys ("Lemon.io" → "lemonio").
+    ``JOBCRAWLER_MARKETPLACE_COMPANY_DENYLIST`` (comma-separated) overrides the
+    curated default; empty string disables the filter.
+    """
+    raw = os.getenv("JOBCRAWLER_MARKETPLACE_COMPANY_DENYLIST")
+    if raw is None:
+        return DEFAULT_MARKETPLACE_COMPANIES
+    return frozenset(c.strip().lower() for c in raw.split(",") if c.strip())
 
 
 # --- gate thresholds (§6; M1 placeholders, calibrate per §14 Q8) ------------

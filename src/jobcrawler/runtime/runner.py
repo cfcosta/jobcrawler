@@ -249,6 +249,10 @@ def _process(
     # lands here is a "join our pool" link, not a real per-employer application — dropped
     # below before it is ever tracked, matched, or aged (§4.7).
     marketplace_hosts = config.marketplace_apply_host_denylist()
+    # …and the same pools by hiring company: boards re-list marketplace roles with the
+    # pool as the company while the apply link points at the board itself, at nothing,
+    # or at a shortener, so the host test never fires (lemon.io arrived all three ways).
+    marketplace_companies = config.marketplace_company_denylist()
     markers = tuple(m.lower() for m in expired_markers)
     # Snapshot the currency→USD table once per crawl (static floor + any live rates, §4.6):
     # the annualized-USD band is a pure function of the job plus these rates, and rates only
@@ -285,6 +289,14 @@ def _process(
         apply_target = apply_href if apply_href.startswith("http") else job.url
         if marketplace_hosts and host_on_domain(
             normalize_host(apply_target), marketplace_hosts
+        ):
+            marketplace_skipped += 1
+            continue
+        # The company-shaped disguise of the same pools (see marketplace_companies
+        # above): canonical company is the signal that survives a board self-link, a
+        # missing apply link, and a shortener alike.
+        if marketplace_companies and canonical_company(job.company) in (
+            marketplace_companies
         ):
             marketplace_skipped += 1
             continue

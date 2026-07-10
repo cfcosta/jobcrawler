@@ -71,6 +71,36 @@ DEFAULT_MARKETPLACE_APPLY_HOSTS: frozenset[str] = frozenset(
     }
 )
 
+# The same pools, keyed by HIRING COMPANY instead of apply host. Boards re-list
+# marketplace roles with the marketplace as the company while the apply link points
+# back at the BOARD itself, at nothing, or at a shortener — lemon.io reached the
+# tracker all three ways (remotive/remoteok self-links, WWR with no apply link,
+# nodesk behind cutt.ly), so the host test above never fired. The canonical company
+# name is the shape-independent signal. Entries MUST be
+# ``normalize.canonical_company`` outputs of the name boards print ("Lemon.io" →
+# "lemonio", "X-Team" → "xteam"); anything else can never match. Same doctrine as
+# the hosts: confirmed offenders plus the known pools as preventive insurance —
+# drop any that later prove to be a distinct real employer. arc.dev is deliberately
+# NOT here: canonical "arc" is too collision-prone a key, and its host entry
+# already covers it (JOBCRAWLER_MARKETPLACE_COMPANY_DENYLIST overrides).
+DEFAULT_MARKETPLACE_COMPANIES: frozenset[str] = frozenset(
+    {
+        # Confirmed in the corpus — 11 lemon.io rows arrived past the host filter.
+        "lemonio",
+        # Preventive: the canonical company forms of the pools host-listed above.
+        "proxify",
+        "toptal",
+        "turing",
+        "gunio",
+        "braintrust",
+        "andela",
+        "xteam",
+        "crossover",
+        "revelo",
+        "strider",
+    }
+)
+
 _DEFAULT_PORTS = {"http": "80", "https": "443"}
 _PCT = re.compile(r"%[0-9a-fA-F]{2}")
 

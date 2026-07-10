@@ -13,7 +13,10 @@ from pathlib import Path
 import pytest
 
 from jobcrawler import config
-from jobcrawler.urls import DEFAULT_MARKETPLACE_APPLY_HOSTS
+from jobcrawler.urls import (
+    DEFAULT_MARKETPLACE_APPLY_HOSTS,
+    DEFAULT_MARKETPLACE_COMPANIES,
+)
 
 
 def test_int_knob_defaults_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -147,6 +150,33 @@ def test_marketplace_denylist_empty_string_disables(
     # An explicit empty value turns the filter off — distinct from unset (curated default).
     monkeypatch.setenv("JOBCRAWLER_MARKETPLACE_HOST_DENYLIST", "")
     assert config.marketplace_apply_host_denylist() == frozenset()
+
+
+def test_marketplace_company_denylist_defaults_to_curated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("JOBCRAWLER_MARKETPLACE_COMPANY_DENYLIST", raising=False)
+    companies = config.marketplace_company_denylist()
+    assert companies is DEFAULT_MARKETPLACE_COMPANIES
+    assert "lemonio" in companies  # the confirmed corpus offender ships by default
+
+
+def test_marketplace_company_denylist_parses_csv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "JOBCRAWLER_MARKETPLACE_COMPANY_DENYLIST", "Lemonio, toptal ,turing"
+    )
+    assert config.marketplace_company_denylist() == frozenset(
+        {"lemonio", "toptal", "turing"}
+    )
+
+
+def test_marketplace_company_denylist_empty_string_disables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JOBCRAWLER_MARKETPLACE_COMPANY_DENYLIST", "")
+    assert config.marketplace_company_denylist() == frozenset()
 
 
 def test_optional_knob_none_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:

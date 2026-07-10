@@ -408,6 +408,38 @@ def test_marketplace_falls_back_to_posting_url(monkeypatch: MonkeyPatch) -> None
     store.close()
 
 
+def test_marketplace_company_dropped_despite_clean_apply_host(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    # The lemon.io shape: a board re-lists a pool's role with the marketplace as the
+    # hiring COMPANY while the apply link points back at the board itself (or at
+    # nothing, or at a shortener), so the apply-host test never fires — the canonical
+    # company name is the signal that drops it.
+    monkeypatch.delenv("JOBCRAWLER_MARKETPLACE_COMPANY_DENYLIST", raising=False)
+    store = StateStore(":memory:")
+    summary = crawl_site(
+        "s",
+        _crawl(
+            _job(
+                "https://board.example/jobs/1",
+                company="Lemon.io",
+                apply_url="https://board.example/jobs/1/apply",
+            ),
+            _job("https://board.example/jobs/2"),
+        ),
+        _ctx(),
+        store,
+    )
+    assert summary.new_positions == 1  # only the real employer's posting tracked
+    assert _open_urls(store, "s") == {
+        canonicalize_url("https://board.example/jobs/2")
+    }
+    rec = store.last_run("s")
+    assert rec is not None and rec.signals is not None
+    assert rec.signals["marketplace_skipped"] == 1
+    store.close()
+
+
 def test_incomplete_position_stays_untracked_for_re_evaluation() -> None:
     # A stub is not tracked, so once the page carries the full description the next crawl
     # tracks it — no permanent drop.
