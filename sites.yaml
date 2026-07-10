@@ -1103,17 +1103,6 @@
     retrieval infrastructure, agents, MCP-style integrations, backend platform and developer
     infrastructure.
 
-- slug: clickhouse
-  name: "ClickHouse"
-  url: https://boards-api.greenhouse.io/v1/boards/clickhouse/jobs?content=true
-  render: static
-  company: "ClickHouse"
-  hints: >-
-    Greenhouse board API, token `clickhouse`. Whole board in one GET. Each job has stable
-    `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and `content` =
-    full HTML-ENTITY-ESCAPED description. Use html.unescape, then strip tags. No salary or
-    employment_type fields. Added because the board is a strong match for distributed OLAP
-    databases, storage, observability data, cloud infrastructure and backend systems roles.
 
 - slug: planetscale
   name: "PlanetScale"
@@ -1571,21 +1560,6 @@
     location, employment_type, posted_at/expires_at and apply_url. Strong match for
     payments, banking infrastructure, compliance and ledger-adjacent startups.
 
-- slug: canapi_jobs
-  name: "Canapi Ventures Portfolio Jobs"
-  url: https://jobs.canapi.com/
-  render: static
-  enumerates_all: false
-  # The Getro board host stopped resolving (NXDOMAIN as of 2026-07) and canapi.com
-  # names no replacement board; disabled so generation stops retrying a dead host.
-  # Re-enable if the portfolio board returns.
-  enabled: false
-  hints: >-
-    Fintech and financial-infrastructure portfolio job board. Windowed listing/detail crawl.
-    Strong source for banking, payments, risk, compliance, APIs and backend/platform
-    engineering roles. Keep enumerates_all:false unless a same-host API proves whole-board
-    enumeration.
-
 - slug: framework_ventures_jobs
   name: "Framework Ventures Portfolio Jobs"
   url: https://jobs.framework.ventures/
@@ -1800,20 +1774,6 @@
     present, and full description/details from the job detail payload. Company is fixed.
     Strong match for security engineering, blockchain audits, protocol security, systems
     programming and Rust tooling.
-
-- slug: constructor
-  name: "Constructor"
-  url: https://apply.workable.com/api/v1/widget/accounts/constructor-1
-  render: static
-  company: "Constructor"
-  hints: >-
-    Workable widget API, account `constructor-1`. Start at the account endpoint on
-    apply.workable.com and follow the same-host job identifiers/detail URLs exposed by the
-    widget API. Parse active postings with id/shortcode, title, locations,
-    department/function, employment type, remote flag when present, published date when
-    present, and full description/details from the job detail payload. Company is fixed.
-    Strong match for search, ranking, retrieval, ecommerce infrastructure, Go/Rust/Python
-    backend and distributed systems roles.
 
 - slug: holepunch
   name: "Holepunch"
@@ -2379,18 +2339,6 @@
     closure. Fetch detail pages on the same host for the full description. Fit: Python
     backend/platform roles; good secondary board for infrastructure and
     data/retrieval-adjacent backend work.
-
-- slug: django_jobs
-  name: "Django Jobs"
-  url: https://djangojobs.net/jobs/
-  render: static
-  enumerates_all: false
-  hints: >-
-    Job-board listing/search source. Multi-company source; do not stamp a fixed `company`.
-    Parse company from each posting/card/detail page. Treat as a windowed source unless the
-    API explicitly returns all active matching jobs; use detail 404/expired markers for
-    closure. Fetch detail pages on the same host for the full description. Fit:
-    Python/Django backend roles; useful secondary board for senior backend opportunities.
 
 - slug: crypto_jobs
   name: "Crypto.jobs"
