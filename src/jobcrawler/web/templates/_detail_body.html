@@ -179,7 +179,7 @@
   <section class="panel">
     <h2>Provenance &amp; crawl metadata</h2>
     <dl class="kv">
-      <dt>Source board</dt><dd>{{ site_names.get(p.site, p.site) }} <span class="mono">({{ p.site }})</span></dd>
+      <dt>Source board</dt><dd><a href="/positions?site={{ p.site | urlencode }}" title="Browse every position this crawler tracks">{{ site_names.get(p.site, p.site) }}</a> <span class="mono">({{ p.site }})</span></dd>
       <dt>Lifecycle</dt><dd><span class="lifecycle lc-{{ p.status }}">{{ p.status }}</span></dd>
       <dt>Listing URL</dt><dd class="mono"><a href="{{ p.url }}" target="_blank" rel="noopener noreferrer">{{ p.url }}</a></dd>
       <dt>Apply URL</dt><dd class="mono">{% if p.apply_url %}{% if p.apply_url.startswith('mailto:') %}<a href="{{ p.apply_url }}">{{ p.apply_url[7:] }}</a>{% else %}<a href="{{ p.apply_url }}" target="_blank" rel="noopener noreferrer">{{ p.apply_url }}</a>{% endif %}{% else %}—{% endif %}</dd>

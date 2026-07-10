@@ -1284,6 +1284,18 @@ async def test_api_carries_structured_location_keys() -> None:
         store.close()
 
 
+async def test_detail_source_board_links_to_the_sites_positions() -> None:
+    # The provenance "Source board" is a filter jump: click it to browse every
+    # position the crawler currently tracks.
+    store = _seeded_store()
+    try:
+        async with _client(create_app(store)) as c:
+            html = (await c.get(f"/positions/{_ACME_PID}")).text
+            assert 'href="/positions?site=acme"' in html
+    finally:
+        store.close()
+
+
 async def test_relocation_non_us_checkbox_filters_and_round_trips() -> None:
     # One checkbox = relocation offered AND no resolved US office/fence: visa
     # entry to the US is the hard one, so US-destination relocations drop while
