@@ -1602,6 +1602,122 @@ def test_marker_arm_skips_stamped_and_low_scoring_rows() -> None:
     assert low._extract_predict.calls == 0  # marker arm is score-gated
 
 
+_REACH_BODY = (
+    "The Wikimedia Foundation is a remote-first organization with staff in 40+ "
+    "countries. Please note that we are currently able to hire in the following: "
+    "Countries: Brazil, Canada, Germany, and the United Kingdom."
+)
+
+
+def test_hiring_reach_arm_mines_concrete_location_rows() -> None:
+    # An aggregator copies the origin's sidebar ("USA, Europe") but keeps the body,
+    # whose hiring-country list is the wider, truer fence. The reach claim sends a
+    # well-matched row to the miner even though its string parsed to concrete
+    # places, and the answer lands as posting-local rows.
+    store = FakeStore()
+    matcher = _matcher(store, extract_model="openrouter/test/model")
+    matcher._predict = FakePredictor(_all_score(85))
+    matcher._extract_predict = FakeExtractPredictor(
+        _extract_all(
+            location_geo={
+                "places": [],
+                "remote": "fenced",
+                "fence": ["BR", "CA", "DE", "GB"],
+            }
+        )
+    )
+    url = "https://agg.example/1"
+    job = FakeJob(url=url, location="USA, Europe", description=_REACH_BODY)
+    matcher.score_new(
+        [
+            (
+                "acme",
+                url,
+                FakeEnriched(job=job, salary=FakeSalaryRange(1, 2, "USD", "year")),
+            )
+        ]
+    )
+    assert matcher._extract_predict.calls == 1
+    assert store.loc_posting_set == [
+        ("acme", url, [], ["BR", "CA", "DE", "GB"], "fenced", "openrouter/test/model")
+    ]
+    assert store.loc_marked == [("acme", url)]
+
+
+def test_hiring_reach_arm_skips_plain_onsite_and_stamped_rows() -> None:
+    def calls(store, *, description, workplace="remote", stamp=False):
+        url = "https://agg.example/1"
+        if stamp:
+            store.loc_stamped.add(("acme", url))
+        matcher = _matcher(store, extract_model="openrouter/test/model")
+        matcher._predict = FakePredictor(_all_score(85))
+        matcher._extract_predict = FakeExtractPredictor(_extract_all())
+        job = FakeJob(url=url, location="USA, Europe", description=description)
+        matcher.score_new(
+            [
+                (
+                    "acme",
+                    url,
+                    FakeEnriched(
+                        job=job,
+                        workplace=workplace,
+                        salary=FakeSalaryRange(1, 2, "USD", "year"),
+                    ),
+                )
+            ]
+        )
+        return matcher._extract_predict.calls
+
+    # No reach language → a concrete string stays rules-only (no slot burned)…
+    assert calls(FakeStore(), description="We build billing systems.") == 0
+    # …an onsite row's country list is company boilerplate, not this role's reach…
+    assert calls(FakeStore(), description=_REACH_BODY, workplace="onsite") == 0
+    # …and the loc_llm_at stamp still means one mine per content version.
+    assert calls(FakeStore(), description=_REACH_BODY, stamp=True) == 0
+
+
+def test_hiring_reach_routes_cached_geo_answers_posting_locally() -> None:
+    # The routing half, independent of the gate: two salary-arm rows replay their
+    # cached extractions. With the reach claim the geo answer lands posting-local;
+    # without it a concrete string's answer is still dropped (rules already parsed
+    # the string, an echo would burn the first-writer slot) — both rows stamp.
+    store = FakeStore()
+    cached = json.dumps(
+        {
+            "hiring_company": "",
+            "location_geo": {"places": [], "remote": "fenced", "fence": ["BR", "DE"]},
+        }
+    )
+    reach = FakeJob(
+        url="https://agg.example/reach",
+        location="USA, Europe",
+        description=_REACH_BODY,
+    )
+    plain = FakeJob(
+        url="https://agg.example/plain",
+        location="USA, Europe",
+        description="We build billing systems.",
+    )
+    for job in (reach, plain):
+        store.extract_cache[
+            (_content_hash(job), "openrouter/test/model", EXTRACT_VERSION)
+        ] = cached
+    matcher = _matcher(store, extract_model="openrouter/test/model")
+    matcher._predict = FakePredictor(_all_score(85))
+    matcher._extract_predict = FakeExtractPredictor(_extract_all())
+    matcher.score_new(
+        [
+            ("acme", reach.url, FakeEnriched(job=reach)),
+            ("acme", plain.url, FakeEnriched(job=plain)),
+        ]
+    )
+    assert matcher._extract_predict.calls == 0  # both replayed from cache
+    assert store.loc_posting_set == [
+        ("acme", reach.url, [], ["BR", "DE"], "fenced", "openrouter/test/model")
+    ]
+    assert store.loc_marked == [("acme", reach.url), ("acme", plain.url)]
+
+
 def test_extract_locations_kill_switch_reverts_to_the_salary_gate() -> None:
     store = FakeStore()
     store.loc_needs[("acme", "Zorgville")] = True

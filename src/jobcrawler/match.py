@@ -600,12 +600,14 @@ class Matcher:
         # (2) ledger tail — its location string rules-parsed 'partial'/'fail'
         # (SCORE-INDEPENDENT: the parse is a property of the string, reused by every
         # row that ever carries it, and deduped to one slot per distinct string per
-        # run); (3) marker — a well-matched row whose string is a bare workplace
-        # marker ('Remote') and whose description hasn't been mined yet
-        # (loc_llm_at IS NULL). Runs over cache hits AND fresh scores (a cached
-        # extraction re-applies for free), is bounded per run, and is a no-op unless
-        # an extract model is configured. Best-effort: never affects the scoring
-        # result the runner notifies on.
+        # run); (3) posting-local — a well-matched row whose description hasn't been
+        # mined yet (loc_llm_at IS NULL) and whose string is a bare workplace marker
+        # ('Remote') OR whose body claims a multi-country hiring reach ("currently
+        # able to hire in the following: …" — an aggregator's concrete sidebar with
+        # a wider, truer country list in the copied body). Runs over cache hits AND
+        # fresh scores (a cached extraction re-applies for free), is bounded per run,
+        # and is a no-op unless an extract model is configured. Best-effort: never
+        # affects the scoring result the runner notifies on.
         extracted_n = 0
         if self._extract_model is not None:
             to_extract: list[tuple[str, str, _Enriched]] = []
@@ -626,7 +628,10 @@ class Matcher:
                     elif (
                         loc
                         and verdict.score >= self._extract_min_score
-                        and parse_location(loc).quality == "marker"
+                        and (
+                            parse_location(loc).quality == "marker"
+                            or _claims_hiring_reach(enriched)
+                        )
                         and not self._store.location_llm_stamped(site, url)
                     ):
                         wants = True
@@ -745,6 +750,7 @@ class Matcher:
                         url,
                         ext,
                         location=getattr(enriched.job, "location", None),
+                        hiring_reach=_claims_hiring_reach(enriched),
                     )
                 )
             else:
@@ -799,13 +805,23 @@ class Matcher:
             )
             applied += int(
                 self._apply_extraction(
-                    site, url, ext, location=getattr(enriched.job, "location", None)
+                    site,
+                    url,
+                    ext,
+                    location=getattr(enriched.job, "location", None),
+                    hiring_reach=_claims_hiring_reach(enriched),
                 )
             )
         return applied
 
     def _apply_extraction(
-        self, site: str, url: str, ext: "_Extraction", *, location: str | None = None
+        self,
+        site: str,
+        url: str,
+        ext: "_Extraction",
+        *,
+        location: str | None = None,
+        hiring_reach: bool = False,
     ) -> bool:
         """Persist a mined salary/employer/geography onto the row; return whether anything wrote.
 
@@ -813,10 +829,14 @@ class Matcher:
         always wins); a non-empty employer records the cleaner name and repoints the §16
         dedup key at its canonical form. A geo answer routes by string class (§4.12): a
         rules-'partial'/'fail' string fills the value LEDGER (paid once, reused by every
-        row carrying the string); a bare-marker string's answer is POSTING-LOCAL (mined
-        from this description). Both fills are first-writer-wins in the store. When the
-        location arms are on, the row is stamped (``loc_llm_at``) even for an empty
-        answer, so the marker arm never re-selects this content."""
+        row carrying the string); the answer is POSTING-LOCAL (mined from this description)
+        when the string is a bare marker OR the caller flagged a hiring-reach claim in the
+        body (``hiring_reach`` — a concrete sidebar string whose copied body lists the
+        wider, truer set of hiring countries). Without either, a concrete string's geo
+        answer is dropped: rules already parsed it, and a posting-local echo would only
+        burn the row's first-writer slot. Both fills are first-writer-wins in the store.
+        When the location arms are on, the row is stamped (``loc_llm_at``) even for an
+        empty answer, so the posting-local arm never re-selects this content."""
         from jobcrawler.runtime.normalize import canonical_company
 
         wrote = False
@@ -851,7 +871,7 @@ class Matcher:
                         remote=geo_answer.get("remote") or "none",
                         model=model,
                     )
-                elif parse_location(loc).quality == "marker":
+                elif parse_location(loc).quality == "marker" or hiring_reach:
                     wrote |= self._store.set_position_location_llm(
                         site,
                         url,
@@ -1091,6 +1111,58 @@ class _Extraction:
     location_geo: dict[str, Any] | None = None
 
 
+def _extract_window(description: str) -> str:
+    """The description slice the extractor is sent (whole body, or head + tail).
+
+    Pay and hiring-policy footers live at the END of long postings: on the measured
+    gate pool, 0/88 stated salary ranges sat inside a head-only 2000-char window and
+    88/88 inside head+tail. Past 6000 chars, send the head and the tail, skip the
+    middle. The hiring-reach gate scans this same slice so it never selects a row
+    on text the model won't see.
+    """
+    if len(description) > 6000:
+        return description[:2000] + "\n[…]\n" + description[-4000:]
+    return description
+
+
+# The hiring-reach trigger (§4.7): phrase families, measured against stored postings,
+# by which a description CLAIMS a multi-country hiring reach (the Wikimedia footer
+# style "currently able to hire in the following: … Countries: Brazil, …"). The
+# count form needs a hiring-ish anchor word in the same sentence so "customers in
+# 120 countries" marketing copy stays out. Deliberately conservative — a miss keeps
+# the row's rules-parsed geography; a fire costs one extract slot and the row's
+# one-shot ``loc_llm_at`` stamp.
+_HIRING_REACH_RE = re.compile(
+    r"""(?ix)
+    \b(?:
+        (?:able\s+to|can|currently)\s+hire\s+in
+      | we\s+hire\s+(?:in|from|globally|worldwide|anywhere)
+      | hir(?:e|ing)\s+in\s+the\s+following
+      | eligible\s+countries
+      | countries\s*:
+      | (?:hires?|hired|hiring|team|employees|staff|based|colleagues)
+        [^.\n]{0,40}?
+        \b\d{1,3}\s*\+?\s+countries
+    )
+    """,
+)
+
+
+def _claims_hiring_reach(enriched: _Enriched) -> bool:
+    """True when the description claims a multi-country hiring reach (§4.7).
+
+    This widens the posting-local extraction arm past bare markers: an aggregator
+    copies a board's sidebar ("USA, Europe") but keeps the body, whose hiring-country
+    list is the wider, truer fence — mine it even though the location string parsed
+    to concrete places. Onsite rows are excluded (their geography IS the location
+    string; a body country list there is company boilerplate, not this role's reach).
+    """
+    if (getattr(enriched, "workplace", "") or "") == "onsite":
+        return False
+    description = getattr(enriched.job, "description", "") or ""
+    return _HIRING_REACH_RE.search(_extract_window(description)) is not None
+
+
 def _extract_digest(index: int, enriched: _Enriched) -> dict[str, object]:
     """The compact per-job payload sent to the extractor.
 
@@ -1101,12 +1173,7 @@ def _extract_digest(index: int, enriched: _Enriched) -> dict[str, object]:
     only ever mine the description.
     """
     job = enriched.job
-    description = getattr(job, "description", "") or ""
-    if len(description) > 6000:
-        # Pay lives in footers: on the measured gate pool, 0/88 stated ranges sat
-        # inside a head-only 2000-char window and 88/88 inside head+tail. Send
-        # the head and the tail, skip the middle.
-        description = description[:2000] + "\n[…]\n" + description[-4000:]
+    description = _extract_window(getattr(job, "description", "") or "")
     return {
         "index": index,
         "title": getattr(job, "title", None),
