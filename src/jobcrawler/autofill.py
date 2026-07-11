@@ -177,6 +177,28 @@ _SWEEP_JS = r"""/*jc-sweep*/ (() => {
         const p = el.closest('div,fieldset,li,td,section');
         if (p) { const lab = p.querySelector('label, legend'); if (lab) t = lab.textContent; }
       }
+      if (!t) {
+        // Question-card fallback: many ATS forms (Lever custom questions) put
+        // the prompt in a bare div beside the field — no <label>, no aria
+        // linkage. Walk a few ancestors up; at each level prefer the nearest
+        // "label"-classed block above the control, else the nearest preceding
+        // sibling that carries text but no controls of its own.
+        let child = el;
+        for (let hop = 0; hop < 5 && !t; hop++) {
+          const node = child.parentElement;
+          if (!node || /^(FORM|BODY|HTML)$/.test(node.tagName)) break;
+          const above = [...node.querySelectorAll('[class*="label" i]')].filter((c) =>
+            !c.contains(el) && !c.querySelector('input,textarea,select,button')
+            && c.textContent.trim() && (c.compareDocumentPosition(el) & 4));
+          if (above.length) { t = above[above.length - 1].textContent; break; }
+          for (let sib = child.previousElementSibling; sib && !t; sib = sib.previousElementSibling) {
+            if (sib.matches('input,textarea,select,button')
+              || sib.querySelector('input,textarea,select,button')) break;
+            t = (sib.textContent || '').trim();
+          }
+          child = node;
+        }
+      }
     } catch (e) {}
     return clip(t, 140);
   };

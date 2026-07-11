@@ -834,6 +834,21 @@ async def test_combo_miss_reports_real_options_and_escapes_the_menu() -> None:
 def test_fill_js_refuses_comboboxes_toward_select() -> None:
     assert "combobox — use select" in autofill_mod._FILL_JS
 
+
+def test_sweep_js_derives_labels_from_question_cards() -> None:
+    """Lever custom questions (#129) put the prompt in a bare div beside the
+    field — no <label>, no for=/aria linkage — so without the container-walk
+    fallback the sweep reports ``label: null`` and the LLM rightly refuses to
+    guess, leaving every substantive question blank."""
+    js = autofill_mod._SWEEP_JS
+    # label-classed blocks match by substring, not one ATS's exact class name
+    assert '[class*="label" i]' in js
+    # only text ABOVE the control qualifies (a container's first label div may
+    # belong to an earlier question — take the nearest preceding one)
+    assert "compareDocumentPosition" in js
+    # classless shapes fall back to the nearest preceding text-only sibling
+    assert "previousElementSibling" in js
+
 # -- apply-link pre-hop: start from the apply page, not the posting (#124) ------
 
 
