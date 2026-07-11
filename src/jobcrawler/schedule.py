@@ -60,6 +60,15 @@ class Healer(Protocol):
 
     async def assess(self, slug: str) -> HealthState: ...
 
+    def note_abandoned(self, slug: str) -> HealthState:
+        """Record a §4.9 watchdog-abandoned assess as one failed attempt.
+
+        Synchronous by design: the caller is the watchdog's timeout path, whose
+        ``assess`` coroutine has just been cancelled, so this must land its health
+        write without another cancellable await.
+        """
+        ...
+
 
 class _MatchPacer(Protocol):
     """The rate-pacing seam the §8 matcher expects (structural; matches match._Governor).
@@ -622,8 +631,13 @@ class Scheduler:
         The tick awaits every assess in-band, so an unbounded await lets a single
         wedged generation (a stuck sandbox subprocess, a hung network read) freeze
         crawling, recheck and matching fleet-wide. On expiry the await is abandoned —
-        the underlying worker thread keeps running detached and its eventual store
-        writes still land; it just can't hold the loop hostage — the site is skipped
+        the underlying ``to_thread`` worker keeps running detached, so its
+        ``generation_log`` row still lands; only the *health-record* write, which lives
+        in the now-cancelled coroutine, is lost. That loss is the bug this path guards:
+        without recording the abandoned attempt the site never bumps its failure
+        counter, so neither the geometric backoff nor the park cap engages and a
+        permanently-slow board re-generates every tick forever. ``note_abandoned``
+        books it as one failed attempt so the same budget bounds it; the site is skipped
         for this pass, and the health state machine retries it like any other failure.
         """
         timeout = self._assess_timeout or None
@@ -636,6 +650,15 @@ class Scheduler:
                 slug,
                 timeout or 0.0,
             )
+            # The cancelled coroutine never reached the healer's health-record write, so
+            # book the abandoned generation as a failed attempt here — otherwise the
+            # backoff + park machinery never sees it and the site thrashes every tick.
+            try:
+                healer.note_abandoned(slug)
+            except Exception:
+                _log.exception(
+                    "failed to record abandoned assess for %s after watchdog", slug
+                )
             return None
 
     async def _bootstrap_missing(

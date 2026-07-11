@@ -850,6 +850,7 @@ class _RecordingHealer:
 
     def __init__(self, *, raises: bool = False) -> None:
         self.assessed: list[str] = []
+        self.abandoned: list[str] = []
         self._raises = raises
 
     async def assess(self, slug: str) -> HealthState:
@@ -857,6 +858,10 @@ class _RecordingHealer:
         if self._raises:
             raise RuntimeError("regenerate blew up")
         return HealthState.HEALTHY
+
+    def note_abandoned(self, slug: str) -> HealthState:
+        self.abandoned.append(slug)
+        return HealthState.GENERATION_FAILED
 
 
 class _Clock:
@@ -1348,6 +1353,9 @@ async def test_generation_watchdog_unwedges_the_tick() -> None:
 
     await asyncio.wait_for(sched.tick(), timeout=5.0)  # the tick must complete
     assert healer.assessed == ["a", "b"]  # b still ran after a's watchdog fired
+    # The abandoned generation is booked as a failed attempt so the backoff + park cap
+    # eventually see it — without this the wedged site would thrash every tick forever.
+    assert healer.abandoned == ["a"]
 
 
 async def test_bootstrap_retries_least_recently_attempted_first() -> None:

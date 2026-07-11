@@ -273,14 +273,41 @@ class SelfHealer:
         _notify_regen(slug, outcome)
         state = self._record(slug, regeneration_state(outcome))
         if state is HealthState.GENERATION_FAILED and self._just_parked(record):
-            notify(
-                "heal.parked",
-                f"parked {slug}: generation failed {self._genfail_max_attempts}x in a "
-                "row — no longer auto-retrying; regenerate by hand once the board is "
-                "crawlable again",
-                slug=slug,
-            )
+            self._notify_parked(slug)
         return state
+
+    def note_abandoned(self, slug: str) -> HealthState:
+        """Record a §4.9 watchdog-abandoned generation as one failed attempt.
+
+        The liveness watchdog bounds a single ``assess`` by cancelling its coroutine
+        when a generation outruns the budget. Delivery runs on a detached ``to_thread``
+        worker that keeps going and still writes its ``generation_log`` row — but the
+        cancelled coroutine never reaches :meth:`_record`, so the attempt leaves no
+        health record. The consecutive-failure counter never bumps, so neither the
+        geometric backoff nor the park cap ever engages, and a permanently-slow board
+        re-generates on every tick forever (observed: a slow Workday board at 12
+        attempts / 622 LM calls with no ``site_health`` row at all). The scheduler calls
+        this from the watchdog path so an abandoned generation costs exactly one attempt
+        against the same backoff + park budget as any other failure. A later worker that
+        still promotes the crawler heals the site (→ HEALTHY) and resets the counter on
+        the next sweep; a genuinely dead board parks after ``genfail_max_attempts`` and
+        stops burning budget.
+        """
+        prior = self._store.get_health_record(slug)
+        state = self._record(slug, HealthState.GENERATION_FAILED)
+        if self._just_parked(prior):
+            self._notify_parked(slug)
+        return state
+
+    def _notify_parked(self, slug: str) -> None:
+        """Operator alert fired once when a site reaches the genfail attempt cap (§4.8)."""
+        notify(
+            "heal.parked",
+            f"parked {slug}: generation failed {self._genfail_max_attempts}x in a "
+            "row — no longer auto-retrying; regenerate by hand once the board is "
+            "crawlable again",
+            slug=slug,
+        )
 
     async def _handle_pending(self, slug: str) -> HealthState:
         """A held pending-review site: hold for a human under ``on``, else auto-promote.

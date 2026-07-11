@@ -547,7 +547,55 @@ async def test_generation_failed_is_parked_after_max_attempts(
     for i in range(6):
         clock.now = T0 + timedelta(seconds=2 * i)  # always past the 1s backoff
         assert await healer.assess("s") is HealthState.GENERATION_FAILED
-    assert regen_calls == 3  # parked after the 3rd failure; sweeps 4-6 never re-generate
+    assert (
+        regen_calls == 3
+    )  # parked after the 3rd failure; sweeps 4-6 never re-generate
+    assert [e for e, _m, _f in events].count("heal.parked") == 1
+
+
+async def test_note_abandoned_books_a_failed_attempt_and_parks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A §4.9 watchdog-abandoned generation cancels the assess coroutine after the detached
+    # worker logged the attempt but before assess writes health — so without note_abandoned
+    # the failure counter never bumps and a permanently-slow board thrashes every tick (a
+    # slow Workday board: 12 attempts / 622 LM calls, no site_health row). note_abandoned
+    # books it directly so the same backoff + park budget bounds it, and it must NOT touch
+    # the (already-cancelled) reprobe/regenerate path.
+    events = _capture_notifications(monkeypatch)
+    clock = _Clock(T0)
+    store = StateStore(":memory:", clock=clock)
+
+    async def reprobe(slug: str) -> int:
+        raise AssertionError("note_abandoned must not reprobe")
+
+    async def regenerate(slug: str) -> RegenOutcome:
+        raise AssertionError("note_abandoned must not regenerate")
+
+    healer = SelfHealer(
+        store,
+        reprobe=reprobe,
+        regenerate=regenerate,
+        clock=clock,
+        genfail_max_attempts=3,
+    )
+
+    for i in range(3):
+        clock.now = T0 + timedelta(seconds=i)
+        assert healer.note_abandoned("s") is HealthState.GENERATION_FAILED
+
+    record = store.get_health_record("s")
+    assert record is not None
+    assert record.state == HealthState.GENERATION_FAILED.value
+    assert record.attempts == 3  # each abandonment counted as one failed attempt
+    assert healer._parked(record)  # reached the cap → assess now short-circuits
+    assert [e for e, _m, _f in events].count(
+        "heal.parked"
+    ) == 1  # once, at the crossing
+
+    # A further abandonment past the cap keeps it failed but does not re-alert the operator.
+    clock.now = T0 + timedelta(seconds=10)
+    assert healer.note_abandoned("s") is HealthState.GENERATION_FAILED
     assert [e for e, _m, _f in events].count("heal.parked") == 1
 
 
