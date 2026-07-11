@@ -112,6 +112,35 @@ def _salary(job):
         return ("%s %s" % (currency or "", value)).strip() or None
     return None
 
+def _apply_link(page):
+    """The per-job apply URL from the page's Next.js data blob, or None.
+
+    The visible "Apply" CTA is a JS <button> with no href — the outbound ATS
+    link (Workable, Greenhouse, Lever, ...) ships only in the __NEXT_DATA__
+    props as ``props.pageProps.job.applicationLink``. None on any parse miss,
+    a non-http value, or a link that stays on cryptojobslist itself (an
+    in-house form, not a distinct target); the caller then omits apply_url
+    entirely, so a transient miss never clobbers a value a previous crawl
+    already stored.
+    """
+    m = re.search(
+        r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>',
+        page,
+        flags=re.I | re.S,
+    )
+    if not m:
+        return None
+    try:
+        link = json.loads(m.group(1))["props"]["pageProps"]["job"]["applicationLink"]
+    except Exception:
+        return None
+    link = str(link or "").strip()
+    if not link.lower().startswith(("http://", "https://")):
+        return None
+    if "cryptojobslist.com" in link.lower():
+        return None
+    return link
+
 def _jobs_from_sitemap(xml):
     try:
         root = ET.fromstring(xml)
@@ -156,6 +185,7 @@ def crawl(ctx):
             employment = ", ".join(str(x) for x in employment if x)
         out = {
             "url": job.get("url") or url,
+            "apply_url": _apply_link(page),
             "title": title,
             "company": _text(company),
             "location": _text(location),
