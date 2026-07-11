@@ -1919,6 +1919,18 @@ crawled from (the registry `name`; a single-company board — registry `company`
 the employer's own careers site, fail-soft dropped for a retired slug), so "how did you hear
 about us?" questions get the true source instead of a generic "job board".
 
+**The apply-link pre-hop.** When the run's target is the row's own posting URL (no per-job
+`apply_url` was captured — `autofill_target` fell back), the opened page is usually an aggregator
+posting that pairs an outbound *offer* link with the real apply CTA. Before round 1 the worker
+runs one mechanical scan (`_APPLY_HOP_JS`): visible anchors whose **entire** folded text equals an
+allowlist entry (`_APPLY_HOP_TEXTS` — "apply", "apply now", "candidatar-se", …; whole-text
+equality so composite marketplace buttons like "AI Auto-Apply" or "Apply to Join" can never
+match), absolute http(s) targets only, same-document `#fragment` links excluded (the form is
+already on the page). Exactly **one** distinct href hops the tab there (`Page.navigate` + the
+ready wait) — recorded in the transcript (`prehop`) and the history so the model knows where it
+is; zero or several distinct hrefs means ambiguity, and the LLM sorts it out from the sweep as
+before. One hop max, best-effort: any CDP hiccup skips the hop rather than failing the run.
+
 **Comboboxes (react-select et al.).** ARIA comboboxes (`input[role=combobox]` — every dropdown
 on Greenhouse job-boards) are swept as selects-with-a-twist: `fill` refuses them, and `select`
 runs a worker-orchestrated open → poll → (type) → pick sequence. Two constraints shape it,

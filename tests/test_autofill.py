@@ -833,3 +833,123 @@ async def test_combo_miss_reports_real_options_and_escapes_the_menu() -> None:
 
 def test_fill_js_refuses_comboboxes_toward_select() -> None:
     assert "combobox — use select" in autofill_mod._FILL_JS
+
+# -- apply-link pre-hop: start from the apply page, not the posting (#124) ------
+
+
+class HopFakeBrowser(FakeBrowser):
+    """Serves the ``/*jc-hop*/`` pre-hop scan and records ``Page.navigate`` calls."""
+
+    def __init__(self, hrefs: list[str]) -> None:
+        super().__init__()
+        self.hop_hrefs = hrefs
+        self.hop_scans = 0
+        self.navigated: list[str] = []
+
+    async def cmd(
+        self, method: str, params: dict | None = None, *, session_id=None, timeout=None
+    ) -> dict:
+        if method == "Page.navigate":
+            self.navigated.append(str((params or {}).get("url")))
+            return {}
+        return await super().cmd(method, params, session_id=session_id, timeout=timeout)
+
+    async def evaluate(
+        self, sid: str, expression: str, *, await_promise: bool = False, timeout=None
+    ):
+        if "/*jc-hop*/" in expression:
+            self.hop_scans += 1
+            return json.dumps({"ok": True, "hrefs": list(self.hop_hrefs)})
+        return await super().evaluate(
+            sid, expression, await_promise=await_promise, timeout=timeout
+        )
+
+
+def _hop_fixture(
+    tmp_path: Path, fake: FakeBrowser
+) -> tuple[StateStore, AutofillWorker, int]:
+    """A run whose target is the POSTING page itself — no apply_url was captured."""
+    store = StateStore(":memory:")
+    store.upsert_position(
+        "board", "https://board.test/job/1", fields=dict(FIELDS), content_hash="h1"
+    )
+    profile = tmp_path / "PROFILE.md"
+    profile.write_text("# Profile\nName: Jane Doe\n")
+    run_id = store.request_autofill(
+        "board", "https://board.test/job/1", "https://board.test/job/1"
+    )
+    worker = AutofillWorker(
+        store,
+        model="openai/test",
+        max_rounds=3,
+        profile_path=str(profile),
+        notes_path=str(tmp_path / "APPLY.md"),
+        resume_path="",
+        sites_path=str(tmp_path / "sites.yaml"),
+        browser=cast(CdpBrowser, fake),
+    )
+    return store, worker, run_id
+
+
+async def test_prehop_opens_the_postings_single_apply_link_before_round_one(
+    tmp_path: Path,
+) -> None:
+    fake = HopFakeBrowser(["https://jobs.acme.test/apply/1"])
+    store, worker, run_id = _hop_fixture(tmp_path, fake)
+    contexts = _capture_context(worker)
+    out = await worker.run_once()
+    assert out is not None and out["status"] == "done"
+    assert fake.hop_scans == 1
+    assert fake.navigated == ["https://jobs.acme.test/apply/1"]
+    # the model plans against the hopped page and is told about the hop
+    assert "Application page: https://jobs.acme.test/apply/1" in contexts[0]
+    assert "apply link was opened first" in contexts[0]
+    # the transcript records the hop ahead of round 1
+    raw = store._conn.execute(
+        "SELECT transcript_json FROM autofill_runs WHERE id = ?", (run_id,)
+    ).fetchone()[0]
+    assert json.loads(raw)[0] == {
+        "prehop": {
+            "from": "https://board.test/job/1",
+            "to": "https://jobs.acme.test/apply/1",
+        }
+    }
+
+
+async def test_prehop_stays_put_on_zero_or_competing_apply_links(
+    tmp_path: Path,
+) -> None:
+    # no match and several DISTINCT matches are both ambiguity — the model
+    # decides from the sweep instead of the worker guessing a link
+    for hrefs in ([], ["https://a.test/1", "https://b.test/2"]):
+        fake = HopFakeBrowser(hrefs)
+        _, worker, _ = _hop_fixture(tmp_path, fake)
+        contexts = _capture_context(worker)
+        out = await worker.run_once()
+        assert out is not None and out["status"] == "done"
+        assert fake.hop_scans == 1
+        assert fake.navigated == []
+        assert "Application page: https://board.test/job/1" in contexts[0]
+
+
+async def test_prehop_never_fires_when_a_real_apply_link_exists(
+    tmp_path: Path,
+) -> None:
+    store, worker, fake, _ = _worker_fixture(tmp_path)
+    _capture_context(worker)
+    out = await worker.run_once()
+    # the base FakeBrowser raises on any /*jc-hop*/ eval, so a hop attempt
+    # would fail this run outright — done + no navigation proves it never ran
+    assert out is not None and out["status"] == "done"
+    assert "Page.navigate" not in fake.cmds
+
+
+def test_prehop_allowlist_is_whole_text_and_skips_marketplace_buttons() -> None:
+    # membership of the folded WHOLE text — not substring/regex — so composite
+    # marketplace buttons can never match the allowlist words they contain
+    assert "WANTED.has(text)" in autofill_mod._APPLY_HOP_JS
+    assert json.dumps(list(autofill_mod._APPLY_HOP_TEXTS)) in autofill_mod._APPLY_HOP_JS
+    assert "apply now" in autofill_mod._APPLY_HOP_TEXTS
+    assert "candidatar-se" in autofill_mod._APPLY_HOP_TEXTS
+    for trap in ("ai auto-apply", "apply to join", "easy apply"):
+        assert trap not in autofill_mod._APPLY_HOP_TEXTS

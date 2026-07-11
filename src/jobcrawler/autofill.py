@@ -81,6 +81,24 @@ _WIZARD_WORDS = (
     "review application",
 )
 
+# The apply-link pre-hop allowlist (#124). When no per-job apply_url was
+# captured, the run opens the posting page itself — often an aggregator page
+# pairing an outbound "offer" link with the real apply CTA. An anchor hops the
+# run ONLY when its entire folded text equals one of these; substring matching
+# would chase marketplace buttons ("AI Auto-Apply", "Apply to Join"), which
+# must stay unmatched.
+_APPLY_HOP_TEXTS = (
+    "apply",
+    "apply now",
+    "apply here",
+    "apply for this job",
+    "apply for this position",
+    "apply for job",
+    "apply to this job",
+    "candidatar-se",
+    "candidate-se",
+)
+
 
 def _words_pattern(words: tuple[str, ...]) -> str:
     """A regex source usable by BOTH Python ``re`` and JS ``new RegExp``."""
@@ -462,6 +480,35 @@ _CLICK_JS = r"""/*jc-act*/ (() => {
   return JSON.stringify({ ok: true, clicked: text.slice(0, 80) });
 })()"""
 
+# The apply-link pre-hop scan (#124): visible anchors whose ENTIRE folded text
+# is in _APPLY_HOP_TEXTS, reported as absolute http(s) targets. Same-document
+# links (href differs only by #fragment) are excluded — those reveal a form
+# already on this page, so there is nothing to hop to. Read-only: the worker
+# decides whether to navigate.
+_APPLY_HOP_JS = r"""/*jc-hop*/ (() => {
+  const fold = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ').trim().toLowerCase()
+    .replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '');
+  const WANTED = new Set(__TEXTS__);
+  const visible = (el) => {
+    try {
+      const r = el.getBoundingClientRect();
+      const st = el.ownerDocument.defaultView.getComputedStyle(el);
+      return r.width > 0 && r.height > 0 && st.visibility !== 'hidden' && st.display !== 'none';
+    } catch (e) { return true; }
+  };
+  const here = location.href.split('#')[0];
+  const hits = [];
+  for (const a of document.querySelectorAll('a[href]')) {
+    const text = fold(a.textContent) || fold(a.getAttribute('aria-label'));
+    if (!WANTED.has(text) || !visible(a)) continue;
+    const href = a.href;
+    if (!/^https?:\/\//i.test(href) || href.split('#')[0] === here) continue;
+    hits.push(href);
+  }
+  return JSON.stringify({ ok: true, hrefs: [...new Set(hits)] });
+})()""".replace("__TEXTS__", json.dumps(list(_APPLY_HOP_TEXTS)))
+
 _REF_LOOKUP_JS = "/*jc-ref*/ (window.__jcAF || {})[__REF__]"
 
 
@@ -748,6 +795,17 @@ class AutofillWorker:
         await self._wait_ready(sid, target_id)
 
         history: list[str] = []
+        if target == str(req["url"]):
+            # No per-job apply link was captured, so the tab is on the posting
+            # page itself — start from its own apply CTA when it has one (#124).
+            hopped = await self._apply_hop(sid, target_id)
+            if hopped:
+                transcript.append({"prehop": {"from": target, "to": hopped}})
+                history.append(
+                    f"  - (the posting page's own apply link was opened first:"
+                    f" {hopped})"
+                )
+                target = hopped
         summary = "round budget exhausted before the model finished"
         mine = {target_id}  # tabs this run drives; grows when the page opens one
         for rnd in range(1, self._max_rounds + 1):
@@ -946,6 +1004,34 @@ class AutofillWorker:
             if isinstance(count, (int, float)) and count > 0:
                 return
             await asyncio.sleep(0.5)
+
+    async def _apply_hop(self, sid: str, target_id: str) -> str | None:
+        """One mechanical hop from a posting page to its own apply link (#124).
+
+        Runs once, before round 1, and only when the run opened the row's
+        posting URL (no per-job apply_url was captured) — usually an aggregator
+        page pairing an outbound offer link with the real apply CTA. Hopping
+        mechanically spends zero LLM rounds on a page with no form. Strict by
+        design: whole-text allowlist match (``_APPLY_HOP_TEXTS``), anchors
+        only, and exactly ONE distinct target — zero or several distinct hrefs
+        means ambiguity, and the model sorts that out from the sweep instead.
+        Best-effort: a CDP hiccup skips the hop rather than failing the run.
+        """
+        try:
+            res = await self._eval_action(sid, _APPLY_HOP_JS)
+            hrefs = res.get("hrefs")
+            if not isinstance(hrefs, list) or len(hrefs) != 1:
+                return None
+            href = str(hrefs[0])
+            await self._browser.cmd(
+                "Page.navigate", {"url": href}, session_id=sid
+            )
+            await self._wait_ready(sid, target_id)
+            return href
+        except CdpError:
+            if not await self._tab_alive(target_id):
+                raise TabClosed("apply tab closed in Chrome") from None
+            return None
 
     async def _tab_alive(self, target_id: str) -> bool:
         """Does the tab still exist? Closing it is the operator's interrupt.
