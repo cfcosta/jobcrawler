@@ -1,4 +1,3 @@
-
 import html
 import json
 import re
@@ -8,7 +7,10 @@ SITE = "https://jobicy.com/api/v2/remote-jobs?count=100&industry=dev"
 EXTRA_HOSTS = []
 
 _TAG_RE = re.compile(r"<[^>]+>")
-_BLOCK_RE = re.compile(r"</?(?:p|div|br|li|ul|ol|h[1-6]|section|article|tr|td|th)[^>]*>", re.I)
+_BLOCK_RE = re.compile(
+    r"</?(?:p|div|br|li|ul|ol|h[1-6]|section|article|tr|td|th)[^>]*>", re.I
+)
+
 
 def _clean_html(value):
     if not value:
@@ -23,6 +25,7 @@ def _clean_html(value):
     text = text.strip()
     return text or None
 
+
 def _first_text(value):
     if value is None:
         return None
@@ -31,6 +34,7 @@ def _first_text(value):
         return ", ".join(parts) if parts else None
     text = str(value).strip()
     return text or None
+
 
 def _salary(job):
     min_v = job.get("salaryMin")
@@ -52,6 +56,7 @@ def _salary(job):
         pieces.append(period)
     return " ".join(pieces) or None
 
+
 def _positive_amount(value):
     if isinstance(value, bool):
         return None
@@ -65,6 +70,7 @@ def _positive_amount(value):
     else:
         return None
     return number if number > 0 else None
+
 
 def _salary_fields(job):
     """Jobicy serves salaryMin/salaryMax/salaryCurrency/salaryPeriod; keep the
@@ -89,6 +95,7 @@ def _salary_fields(job):
     if period:
         fields["salary_period"] = period
     return fields
+
 
 def crawl(ctx):
     raw = ctx.fetch(SITE)
@@ -116,15 +123,22 @@ def crawl(ctx):
         optional = {
             "employment_type": _first_text(job.get("jobType")),
             "department": _first_text(job.get("jobIndustry") or job.get("department")),
-            "posted_at": _first_text(job.get("pubDate") or job.get("publishedAt") or job.get("datePosted")),
+            "posted_at": _first_text(
+                job.get("pubDate") or job.get("publishedAt") or job.get("datePosted")
+            ),
             "external_id": _first_text(job.get("id") or job.get("jobSlug")),
             "apply_url": _first_text(job.get("url")),
         }
         for key, value in _salary_fields(job).items():
             optional[key] = value
-        # Jobicy's filtered remote feed represents remote roles; keep the source wording when present.
-        if location and "remote" in location.lower():
-            optional["workplace_type"] = "Remote"
+        # Jobicy's /api/v2/remote-jobs feed is remote-only, so every listing is
+        # remote by construction. Marking it so turns each jobGeo region into a
+        # remote fence downstream ("USA" -> Remote (US), "Europe" -> Remote
+        # (Europe)) instead of a physical place, and keeps the Anywhere bucket
+        # worldwide. The old gate only set it when the literal word "remote"
+        # appeared in jobGeo — which it never does — and used the capitalized
+        # "Remote" that the §4.6 promotion (workplace == "remote") never matched.
+        optional["workplace_type"] = "remote"
         for key, value in optional.items():
             if value:
                 item[key] = value

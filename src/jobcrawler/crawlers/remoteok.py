@@ -15,6 +15,23 @@ def _strip_html(s):
     return s
 
 
+def _demojibake(s):
+    """Reverse double-encoded UTF-8 in RemoteOK's text fields.
+
+    Some rows arrive with UTF-8 bytes that were decoded as latin-1 and stored,
+    so "Perú" reads as "PerÃº" and "São Paulo" as "SÃ£o Paulo". Re-encoding to
+    the latin-1 bytes and decoding them as UTF-8 reverses it; clean ASCII and
+    already-correct UTF-8 both fail that round trip (a lone high byte is not
+    valid standalone UTF-8) and pass through unchanged.
+    """
+    if not s:
+        return s
+    try:
+        return s.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return s
+
+
 def _epoch_to_iso(epoch):
     if not epoch:
         return None
@@ -31,15 +48,15 @@ def crawl(ctx):
     for job in data[1:]:
         if not isinstance(job, dict):
             continue
-        title = (job.get("position") or "").strip()
+        title = _demojibake((job.get("position") or "").strip())
         if not title:
             continue
-        company = (job.get("company") or "").strip()
+        company = _demojibake((job.get("company") or "").strip())
         desc_html = job.get("description") or ""
-        description = _strip_html(desc_html)
+        description = _demojibake(_strip_html(desc_html))
         if not description:
             description = title
-        location = (job.get("location") or "").strip()
+        location = _demojibake((job.get("location") or "").strip())
         if not location:
             location = "Remote"
         job_url = (job.get("url") or "").strip()
