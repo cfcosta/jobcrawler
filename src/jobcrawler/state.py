@@ -4014,6 +4014,15 @@ def _compose_projection(
         ]
         places = []
 
+    # §4.12 same-URL demotion (audit #143): an explicit remote fence and a
+    # global 'anywhere' marker contradict on one posting — typically one
+    # location string named the fence ('Remote (US)') while another carried a
+    # bare global token ('Worldwide'). The fence is the specific, trustworthy
+    # signal; drop the worldwide claim rather than show both. (The single-string
+    # case is already collapsed upstream in geo.parse_location.)
+    if worldwide and fences:
+        worldwide = False
+
     rows: list[dict[str, Any]] = []
     for place in places:
         rows.append(

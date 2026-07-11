@@ -194,6 +194,30 @@ def test_tz_fence_residue() -> None:
     assert parse.quality == "macro"
 
 
+def test_global_token_glued_to_concrete_geography_is_not_worldwide() -> None:
+    # audit #143: a world token sharing its string with real geography is an
+    # aggregator's flourish on a fenced role, not a worldwide reach. The
+    # concrete place wins so the projection never over-claims 'anywhere'.
+    for raw in [
+        "Anywhere, United States",
+        "Global, SP, BR",
+        "United States; Worldwide",
+        "Anywhere; Europe",
+    ]:
+        parse = geo.parse_location(raw)
+        assert not parse.worldwide, raw
+        assert parse.places or parse.fence, raw
+
+
+def test_bare_global_token_still_reads_worldwide() -> None:
+    # No competing geography: the worldwide claim stands (the eu_remote_jobs
+    # 'Remote - Worldwide' output and the WWR canon must survive the v4 change).
+    for raw in ["Worldwide", "Anywhere", "Remote - Worldwide", "Home based - Worldwide"]:
+        parse = geo.parse_location(raw)
+        assert parse.worldwide, raw
+        assert parse.places == () and parse.fence == (), raw
+
+
 # --- named disambiguation regressions ---------------------------------------
 
 
@@ -452,5 +476,6 @@ def test_parser_version_pinned() -> None:
     # Bumping GEO_PARSER_VERSION triggers a whole-corpus deterministic resweep at
     # store open — any behavior change in this module must come with a bump.
     # v2: the Brazilian state-code context rule; v3: title fences demote false
-    # worldwide projections.
-    assert geo.GEO_PARSER_VERSION == 3
+    # worldwide projections; v4: a global token co-occurring with concrete
+    # geography no longer reads as worldwide.
+    assert geo.GEO_PARSER_VERSION == 4

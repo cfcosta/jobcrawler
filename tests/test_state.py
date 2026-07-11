@@ -2090,6 +2090,51 @@ def test_migration_repairs_title_fenced_anywhere_rows(tmp_path: object) -> None:
         s.close()
 
 
+def test_refresh_cross_string_fence_demotes_worldwide(store: StateStore) -> None:
+    # audit #143 / sailonchain: one location string fences the role
+    # ('Remote - US'), another carries a bare global token ('Worldwide').
+    # The explicit fence is the specific signal — the projection keeps the
+    # fence and drops the contradicting remote_anywhere row.
+    store.upsert_position(
+        "sailonchain", "u", fields={**FIELDS, "location": "Remote - US"}, content_hash="h"
+    )
+    store.refresh_position_locations(
+        "sailonchain",
+        "u",
+        location="Remote - US",
+        locations_json='["Remote - US", "Worldwide"]',
+        workplace="remote",
+        force=True,
+    )
+    rows = _projection(store, "sailonchain", "u")
+    assert [(r[1], r[4]) for r in rows] == [("remote_fence", "US")]
+    assert _display(store, "sailonchain", "u") == "Remote (United States)"
+
+
+def test_refresh_single_string_global_plus_country_fences_not_worldwide(
+    store: StateStore,
+) -> None:
+    # web3career stamps its aggregator address onto a remote role:
+    # 'Anywhere, United States'. The country wins (geo v4 suppresses the world
+    # token), and the remote row promotes it to a US fence — never worldwide.
+    store.upsert_position(
+        "web3career",
+        "u",
+        fields={**FIELDS, "location": "Anywhere, United States"},
+        content_hash="h",
+    )
+    store.refresh_position_locations(
+        "web3career",
+        "u",
+        location="Anywhere, United States",
+        workplace="remote",
+        force=True,
+    )
+    rows = _projection(store, "web3career", "u")
+    assert [(r[1], r[4]) for r in rows] == [("remote_fence", "US")]
+    assert _display(store, "web3career", "u") == "Remote (United States)"
+
+
 def test_refresh_worldwide_and_marker_only(store: StateStore) -> None:
     store.upsert_position(
         "acme", "w", fields={**FIELDS, "location": "Anywhere in the World"}, content_hash="w"

@@ -30,7 +30,9 @@ from dataclasses import dataclass, field
 # v2: Brazilian state codes resolve under Brazilian context (v1 read
 # 'Campo Grande, MS, Brasil' as Mississippi and briefly reached a live ledger).
 # v3: title fences ('[EUROPE ONLY] …') demote false-worldwide projections.
-GEO_PARSER_VERSION = 3
+# v4: a global token sharing its string with concrete geography no longer
+# reads as worldwide ('Anywhere, United States' = US-only, not worldwide).
+GEO_PARSER_VERSION = 4
 
 # Bump when GEO_REGION_MEMBERS changes so the store reseeds geo_region_members.
 GEO_REGION_SEED_VERSION = 1
@@ -1094,6 +1096,15 @@ def parse_location(raw: str) -> LocationParse:
 
     places_t = dedup(places)
     fence_t = dedup(fence)
+
+    # §4.12 / audit #143: a global token ('Worldwide', 'Anywhere', 'Global',
+    # 'International') sharing its string with concrete geography is not a
+    # worldwide reach — it's an aggregator's flourish on a fenced role
+    # ('Anywhere, United States' = US-only; 'Global, SP, BR' = Brazil;
+    # 'Anywhere; Europe' = Europe). The concrete place wins; keep worldwide
+    # only when the string names no country/subdivision/city/macro of its own.
+    if worldwide and (places_t or fence_t):
+        worldwide = False
 
     clean = not unknown
     has_country_geo = any(p.country for p in places_t) or any(f.country for f in fence_t)
