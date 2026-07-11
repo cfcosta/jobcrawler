@@ -277,6 +277,7 @@ class Scheduler:
         regen_budget: float | None = None,
         assess_timeout: float | None = None,
         recheck_timeout: float | None = None,
+        recheck_budget: float | None = None,
         reload_sites: Callable[[], Iterable[Site] | None] | None = None,
     ) -> None:
         self._sites = list(sites)
@@ -453,6 +454,16 @@ class Scheduler:
             if recheck_timeout is not None
             else max(300.0, 15.0 * config.fetch_timeout())
         )
+        # §4.9 recheck-sweep pacing: the recheck_cap above bounds URLs PER windowed site
+        # and the watchdog bounds each fetch, but neither bounds the aggregate — a fleet of
+        # windowed sources runs cap×sites sequential fetches in one tick. This wall-clock
+        # budget stops the pass early (mirrors _regen_budget); ``_recheck_incomplete`` keeps
+        # a budget-deferred sweep due next tick instead of a full interval later (#9). 0
+        # disables the budget (unbounded sweep), matching the watchdog's 0-disables rule.
+        self._recheck_budget = (
+            recheck_budget if recheck_budget is not None else config.recheck_budget()
+        )
+        self._recheck_incomplete = False
         self._regen_incomplete = False
         # §4.1 hot-reload: an optional probe that returns the freshly-parsed registry when
         # sites.yaml changed on disk (else None), so an operator can add/remove boards
@@ -999,10 +1010,15 @@ class Scheduler:
             return False
         return self._next_recheck is None or now >= self._next_recheck
 
-    def mark_recheck(self, now: datetime) -> None:
-        """Record that a recheck sweep ran at ``now``; the next is one interval later."""
+    def mark_recheck(self, now: datetime, *, completed: bool = True) -> None:
+        """Record that a recheck sweep ran at ``now``.
+
+        A completed sweep waits a full ``JOBCRAWLER_RECHECK_CHECK`` interval; an incomplete
+        one — deferred mid-pass by the §4.9 recheck budget (#9) — stays due next tick so
+        the still-stalest remainder clears a bounded slice at a time. Mirrors ``mark_regen``.
+        """
         if self._recheck_interval is not None:
-            self._next_recheck = now + self._recheck_interval
+            self._next_recheck = now + self._recheck_interval if completed else now
 
     async def recheck_tick(self) -> int:
         """Close positions that have quietly gone away (§4.9); return how many closed.
@@ -1027,9 +1043,13 @@ class Scheduler:
         fetch = self._recheck_fetch
         if fetch is None:  # pragma: no cover - gated by recheck_due
             return 0
+        self._recheck_incomplete = False
         closed = self._store.expire_due()
         if closed:
             _log.info("recheck expired closed=%d", closed)
+        # #9: the windowed pass fetches sequentially and in-band; this stamps the sweep's
+        # start so each attempted URL can check the aggregate wall-clock budget below.
+        pass_started = self._clock()
         for site in self._sites:
             if not site.enabled or site.enumerates_all:
                 continue
@@ -1059,7 +1079,6 @@ class Scheduler:
                     # A wedged fetch is never closed, so without this the same poison URL
                     # stays stalest-first and re-burns the watchdog every sweep (§4.9, #39).
                     self._store.note_rechecked(site.slug, url)
-                    continue
                 except Exception as exc:
                     # A transient fetch failure is not evidence the posting closed — skip
                     # it (closure is one-way; a blip must never end a live job). Routine
@@ -1080,16 +1099,27 @@ class Scheduler:
                     # Attempted but unconfirmed: rotate it off the head too, so a URL that
                     # only ever errors can't pin the sweep and starve fresher rows (#39).
                     self._store.note_rechecked(site.slug, url)
-                    continue
-                checked += 1
-                reason = self._closure_reason(status, text)
-                if reason is not None:
-                    self._store.mark_closed(site.slug, url, reason=reason)
-                    site_closed += 1
                 else:
-                    # Still open — advance its recheck order so the sweep moves on to the
-                    # next stalest rows next pass instead of re-verifying this one (#39).
-                    self._store.note_rechecked(site.slug, url)
+                    checked += 1
+                    reason = self._closure_reason(status, text)
+                    if reason is not None:
+                        self._store.mark_closed(site.slug, url, reason=reason)
+                        site_closed += 1
+                    else:
+                        # Still open — advance its recheck order so the sweep moves on to
+                        # the next stalest rows next pass, not re-verifying this one (#39).
+                        self._store.note_rechecked(site.slug, url)
+                # #9: bound the aggregate sweep. Every branch above attempted a fetch and
+                # rotated the URL off the head (#39), so once the pass exceeds its budget we
+                # defer the rest — the next tick resumes at the still-stalest remainder
+                # rather than re-checking this head. 0 disables the budget (unbounded).
+                if (
+                    self._recheck_budget
+                    and (self._clock() - pass_started).total_seconds()
+                    > self._recheck_budget
+                ):
+                    self._recheck_incomplete = True
+                    break
             _log.info(
                 "recheck slug=%s checked=%d closed=%d cap=%d",
                 site.slug,
@@ -1098,6 +1128,10 @@ class Scheduler:
                 self._recheck_cap,
             )
             closed += site_closed
+            if self._recheck_incomplete:
+                # Budget tripped mid-site: defer the remaining windowed sources too, so no
+                # one tick runs cap×sites fetches. Resumes next tick (mark_recheck below).
+                break
         return closed
 
     def match_drain_due(self, now: datetime) -> bool:
@@ -1322,7 +1356,8 @@ class Scheduler:
                         self.mark_reopt(now)
                     if self.recheck_due(now):
                         await self.recheck_tick()
-                        self.mark_recheck(now)
+                        # A budget-deferred sweep (#9) stays due next tick, mirroring regen.
+                        self.mark_recheck(now, completed=not self._recheck_incomplete)
                     if self.fx_due(now):
                         await self.fx_tick()
                         self.mark_fx(now)

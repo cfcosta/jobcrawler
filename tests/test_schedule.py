@@ -1643,12 +1643,14 @@ def _recheck_sched(
     autonomy: bool = True,
     cap: int = 150,
     recheck_timeout: float | None = None,
+    recheck_budget: float | None = None,
+    clock: Callable[[], datetime] = lambda: T0,
 ) -> Scheduler:
     return Scheduler(
         sites,
         store=store,
         crawl=_ok_crawl,
-        clock=lambda: T0,
+        clock=clock,
         recheck_check="12h",
         recheck_cap=cap,
         recheck_fetch=fetch,
@@ -1657,6 +1659,7 @@ def _recheck_sched(
         regen_check="off",
         reopt_check="off",
         recheck_timeout=recheck_timeout,
+        recheck_budget=recheck_budget,
     )
 
 
@@ -1835,6 +1838,69 @@ async def test_recheck_rotates_a_watchdog_wedged_url_off_the_head() -> None:
     assert store.rechecked == [
         ("windowed", "u_hang")
     ]  # wedged URL rotated; gone one closed
+
+
+async def test_recheck_defers_the_rest_once_it_exhausts_its_pass_budget() -> None:
+    # #9: the sweep re-fetches up to recheck_cap open URLs PER windowed site with no
+    # aggregate ceiling, so a fleet of windowed sources runs cap×sites sequential fetches
+    # in one tick, holding the single-process loop and starving crawl/regen/match — the
+    # same freeze the §4.8 regen budget already prevents. A per-sweep wall-clock budget
+    # stops the pass early; because each attempted URL was rotated off the head (#39), the
+    # next tick resumes at the still-stalest remainder rather than re-checking this head.
+    fetched: list[str] = []
+
+    async def fetch(url: str) -> tuple[int, str]:
+        fetched.append(url)
+        return (200, "<h1>Still hiring</h1>")  # all live: nothing closes, all rotate
+
+    store = _RecheckStore({"windowed": ["u1", "u2", "u3", "u4", "u5"]})
+    ticking = {"t": T0}
+
+    def clock() -> datetime:
+        cur = ticking["t"]
+        ticking["t"] = cur + timedelta(seconds=1)  # each read advances 1s
+        return cur
+
+    sched = _recheck_sched(
+        store,
+        sites=[Site(slug="windowed", url="https://x.com", enumerates_all=False)],
+        fetch=fetch,
+        recheck_budget=2.5,  # pass_started=T0, trips once elapsed exceeds 2.5s (after u3)
+        clock=clock,
+    )
+
+    closed = await sched.recheck_tick()
+
+    assert closed == 0
+    assert fetched == ["u1", "u2", "u3"]  # u4, u5 deferred to the next tick
+    assert sched._recheck_incomplete is True
+    # The loop marks an incomplete sweep still-due (completed=False keeps _next_recheck==now).
+    sched.mark_recheck(T0, completed=not sched._recheck_incomplete)
+    assert sched.recheck_due(T0 + timedelta(seconds=1)) is True
+
+
+async def test_recheck_within_budget_completes_and_waits_a_full_interval() -> None:
+    # The complementary path: a sweep that finishes under budget is NOT incomplete, so the
+    # next recheck waits a full JOBCRAWLER_RECHECK_INTERVAL rather than re-running next tick.
+    store = _RecheckStore({"windowed": ["u1", "u2", "u3"]})
+
+    async def fetch(url: str) -> tuple[int, str]:
+        return (200, "<h1>Still hiring</h1>")
+
+    sched = (
+        _recheck_sched(  # constant T0 clock: elapsed is always 0, budget never trips
+            store,
+            sites=[Site(slug="windowed", url="https://x.com", enumerates_all=False)],
+            fetch=fetch,
+        )
+    )
+
+    await sched.recheck_tick()
+
+    assert sched._recheck_incomplete is False
+    sched.mark_recheck(T0, completed=not sched._recheck_incomplete)
+    assert sched.recheck_due(T0 + timedelta(hours=11, minutes=59)) is False
+    assert sched.recheck_due(T0 + timedelta(hours=12)) is True
 
 
 async def test_recheck_expiry_closes_fleet_wide_and_is_counted() -> None:

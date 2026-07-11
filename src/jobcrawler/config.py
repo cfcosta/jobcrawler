@@ -1036,6 +1036,24 @@ def regen_budget() -> float:
     return _duration_secs("JOBCRAWLER_REGEN_BUDGET", "3m")
 
 
+def recheck_budget() -> float:
+    """Per-sweep time budget (seconds) for the §4.9 windowed-source recheck pass.
+
+    ``recheck_tick`` re-fetches up to ``JOBCRAWLER_RECHECK_CAP`` still-open URLs *per*
+    windowed site; the per-fetch watchdog bounds each request but nothing bounds the
+    aggregate. A fleet of windowed sources therefore runs ``cap × sites`` sequential
+    fetches in a single tick, holding the single-process §4.9 loop and starving crawl,
+    regen, and matching — the same freeze the §4.8 regen budget already prevents. Once a
+    sweep exceeds this budget the remaining URLs defer; because every attempted URL was
+    rotated off the head (its ``last_seen`` restamped, #39), the next tick resumes at the
+    still-stalest remainder rather than re-checking the same head, and — like regen — an
+    incomplete sweep resumes on the *next* tick rather than a full ``JOBCRAWLER_RECHECK_CHECK``
+    interval later. ``0`` disables the budget (an unbounded sweep, matching the pre-#9
+    behaviour and the watchdog's own ``0``-disables convention). Default: three tick
+    intervals."""
+    return _duration_secs("JOBCRAWLER_RECHECK_BUDGET", "3m")
+
+
 def assess_timeout() -> float:
     """Liveness watchdog (seconds) for ONE §4.2/§4.8 generation assess (§4.9).
 
