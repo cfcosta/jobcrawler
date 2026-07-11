@@ -278,18 +278,27 @@
 
 - slug: chainlink_labs
   name: "Chainlink Labs"
-  url: https://api.ashbyhq.com/posting-api/job-board/chainlink-labs?includeCompensation=true
+  url: https://jobs.ashbyhq.com/chainlink-labs
   render: static
   company: "Chainlink Labs"
   hints: >-
-    Ashby job board API, token `chainlink-labs`. Parse the standard Ashby fields. Strong
-    match for decentralized oracle infrastructure, blockchain protocols, on-chain finance,
+    Ashby HOSTED board — the org has the public posting API disabled
+    (api.ashbyhq.com/posting-api/job-board/chainlink-labs is HTTP 404 under every token;
+    do NOT use it), but the hosted pages embed everything server-side, so plain static
+    GETs work. LISTING: GET https://jobs.ashbyhq.com/chainlink-labs — the HTML carries an
+    inline `window.__appData = {...}` JSON literal; parse it (json.JSONDecoder().raw_decode
+    on the text after `window.__appData = `) and read `jobBoard.jobPostings[]` (~24 roles,
+    all teams). Each posting has `id`, `jobId`, `title`, `teamName`, `locationName`,
+    `secondaryLocations`, `workplaceType` (Remote/Hybrid), `employmentType`,
+    `publishedDate`, `compensationTierSummary`. DETAIL/description: GET
+    https://jobs.ashbyhq.com/chainlink-labs/<id> using the posting `id` (NOT `jobId` —
+    that shape returns an empty shell); its `__appData.posting` object carries
+    `descriptionPlainText`/`descriptionHtml` (~7k chars), `isRemote`,
+    `secondaryLocationNames`, and `scrapeableCompensationSalarySummary`. Apply url:
+    https://jobs.ashbyhq.com/chainlink-labs/<id>/application. Strong match for
+    decentralized oracle infrastructure, blockchain protocols, on-chain finance,
     cryptography-adjacent backend, distributed systems and remote protocol engineering
-    roles. Emit a single-request crawler: this one GET returns every open role with its full
-    description in `descriptionPlain`/`descriptionHtml` (fall back to `descriptionHtml` when
-    the plain text is empty) plus compensation — parse them straight from the JSON and keep
-    EXTRA_HOSTS empty. Never fetch jobs.ashbyhq.com or a per-job page, and never authorize a
-    host merely linked inside a description.
+    roles. Keep EXTRA_HOSTS empty — listing and details live on the registry host.
 
 - slug: supabase
   name: "Supabase"
@@ -2921,6 +2930,8 @@
   url: https://us.api.csod.com/rec-job-search/external/jobs
   render: static
   company: "Banco Bradesco"
+  extra_hosts:
+    - bradesco.csod.com
   hints: >-
     Cornerstone OnDemand (CSOD) "Player" career site — NOT one of the standard ATSs
     (ats_family=other). Tenant `bradesco`, careerSiteId=1. Two plain GETs + one POST, NO
