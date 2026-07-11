@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
@@ -361,11 +362,11 @@ async def test_regen_tick_defers_over_budget_and_stays_due() -> None:
         latest = store.start_run(slug)
         store.finish_run(latest, items_found=0, new_items=0, errors=1, pages_fetched=1)
 
-    ticking = {"t": T0}
+    mono = {"t": 0.0}
 
-    def clock() -> datetime:
-        cur = ticking["t"]
-        ticking["t"] = cur + timedelta(seconds=1)  # each read advances 1s
+    def monotonic() -> float:
+        cur = mono["t"]
+        mono["t"] = cur + 1.0  # each read advances 1s of real pass time (#A6)
         return cur
 
     sched = Scheduler(
@@ -373,7 +374,8 @@ async def test_regen_tick_defers_over_budget_and_stays_due() -> None:
         store=store,
         crawl=_ok_crawl,
         healer=_healer(store, reprobe_items=0, regen_passes=False),
-        clock=clock,
+        clock=lambda: T0,  # frozen: the budget rides monotonic, not the wall clock
+        monotonic=monotonic,
         regen_check="24h",
         regen_budget=0.0,
     )
@@ -383,7 +385,7 @@ async def test_regen_tick_defers_over_budget_and_stays_due() -> None:
     assert sched._regen_incomplete is True
 
     # The loop marks an incomplete sweep as still-due (completed=False keeps _next_regen==now).
-    now = clock()
+    now = T0
     sched.mark_regen(now, completed=not sched._regen_incomplete)
     assert sched.regen_due(now) is True
 
@@ -1466,6 +1468,9 @@ async def test_bootstrap_over_budget_defers_and_the_next_tick_crawls_the_promote
         regen_check="off",
         heal_cooldown="off",
         clock=clock,
+        monotonic=lambda: (
+            clock.now.timestamp()
+        ),  # elapsed rides the same advanced clock
         bootstrap_budget=60.0,
         bootstrap_concurrency=1,  # per-site budget granularity (see the wave test below)
     )
@@ -1557,6 +1562,9 @@ async def test_bootstrap_retries_least_recently_attempted_first() -> None:
         regen_check="off",
         heal_cooldown="off",
         clock=clock,
+        monotonic=lambda: (
+            clock.now.timestamp()
+        ),  # elapsed rides the same advanced clock
         bootstrap_budget=60.0,
         bootstrap_concurrency=1,
     )
@@ -1606,6 +1614,9 @@ async def test_manual_crawl_now_on_a_crawlerless_site_jumps_the_bootstrap_queue(
         regen_check="off",
         heal_cooldown="off",
         clock=clock,
+        monotonic=lambda: (
+            clock.now.timestamp()
+        ),  # elapsed rides the same advanced clock
         bootstrap_budget=60.0,
         bootstrap_concurrency=1,  # per-site budget granularity (see the wave test below)
     )
@@ -1747,12 +1758,14 @@ def _recheck_sched(
     recheck_timeout: float | None = None,
     recheck_budget: float | None = None,
     clock: Callable[[], datetime] = lambda: T0,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> Scheduler:
     return Scheduler(
         sites,
         store=store,
         crawl=_ok_crawl,
         clock=clock,
+        monotonic=monotonic,
         recheck_check="12h",
         recheck_cap=cap,
         recheck_fetch=fetch,
@@ -1956,19 +1969,19 @@ async def test_recheck_defers_the_rest_once_it_exhausts_its_pass_budget() -> Non
         return (200, "<h1>Still hiring</h1>")  # all live: nothing closes, all rotate
 
     store = _RecheckStore({"windowed": ["u1", "u2", "u3", "u4", "u5"]})
-    ticking = {"t": T0}
+    mono = {"t": 0.0}
 
-    def clock() -> datetime:
-        cur = ticking["t"]
-        ticking["t"] = cur + timedelta(seconds=1)  # each read advances 1s
+    def monotonic() -> float:
+        cur = mono["t"]
+        mono["t"] = cur + 1.0  # each read advances 1s of real pass time (#A6)
         return cur
 
     sched = _recheck_sched(
         store,
         sites=[Site(slug="windowed", url="https://x.com", enumerates_all=False)],
         fetch=fetch,
-        recheck_budget=2.5,  # pass_started=T0, trips once elapsed exceeds 2.5s (after u3)
-        clock=clock,
+        recheck_budget=2.5,  # pass_started=0, trips once monotonic elapsed exceeds 2.5s
+        monotonic=monotonic,
     )
 
     closed = await sched.recheck_tick()
@@ -1989,12 +2002,11 @@ async def test_recheck_within_budget_completes_and_waits_a_full_interval() -> No
     async def fetch(url: str) -> tuple[int, str]:
         return (200, "<h1>Still hiring</h1>")
 
-    sched = (
-        _recheck_sched(  # constant T0 clock: elapsed is always 0, budget never trips
-            store,
-            sites=[Site(slug="windowed", url="https://x.com", enumerates_all=False)],
-            fetch=fetch,
-        )
+    sched = _recheck_sched(  # constant monotonic: elapsed stays 0, so the budget never trips
+        store,
+        sites=[Site(slug="windowed", url="https://x.com", enumerates_all=False)],
+        fetch=fetch,
+        monotonic=lambda: 0.0,
     )
 
     await sched.recheck_tick()
@@ -2002,6 +2014,57 @@ async def test_recheck_within_budget_completes_and_waits_a_full_interval() -> No
     assert sched._recheck_incomplete is False
     sched.mark_recheck(T0, completed=not sched._recheck_incomplete)
     assert sched.recheck_due(T0 + timedelta(hours=11, minutes=59)) is False
+
+
+async def test_recheck_budget_trips_on_monotonic_time_not_a_backward_wall_clock() -> (
+    None
+):
+    # #A6: the pass budget must measure elapsed on a MONOTONIC clock, never the wall clock.
+    # If it read the wall clock, an NTP step (or DST / VM-suspend skew) BACKWARD mid-sweep
+    # makes (now - pass_started) negative, so the budget never trips and the sweep runs the
+    # whole cap×windowed-sites fan-out it was meant to bound — the #9 starvation, resurrected
+    # by a clock jump. Here the wall clock marches backward while the monotonic seam advances;
+    # the budget must still defer on real elapsed time.
+    fetched: list[str] = []
+
+    async def fetch(url: str) -> tuple[int, str]:
+        fetched.append(url)
+        return (200, "<h1>Still hiring</h1>")  # all live: nothing closes, all rotate
+
+    store = _RecheckStore({"windowed": ["u1", "u2", "u3", "u4", "u5"]})
+
+    wall = {"t": T0}
+
+    def clock() -> datetime:
+        cur = wall["t"]
+        wall["t"] = cur - timedelta(seconds=60)  # jumps BACKWARD on every read
+        return cur
+
+    mono = {"t": 0.0}
+
+    def monotonic() -> float:
+        cur = mono["t"]
+        mono["t"] = cur + 1.0  # real elapsed: +1s per read, immune to the wall jump
+        return cur
+
+    sched = _recheck_sched(
+        store,
+        sites=[Site(slug="windowed", url="https://x.com", enumerates_all=False)],
+        fetch=fetch,
+        recheck_budget=2.5,  # trips once monotonic elapsed exceeds 2.5s (after u3)
+        clock=clock,
+        monotonic=monotonic,
+    )
+
+    closed = await sched.recheck_tick()
+
+    assert closed == 0
+    assert fetched == [
+        "u1",
+        "u2",
+        "u3",
+    ]  # u4, u5 deferred despite the backward wall clock
+    assert sched._recheck_incomplete is True
     assert sched.recheck_due(T0 + timedelta(hours=12)) is True
 
 

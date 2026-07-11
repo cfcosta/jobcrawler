@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime, timedelta, timezone
@@ -243,6 +244,7 @@ class Scheduler:
         concurrency: int | None = None,
         default_schedule: str | None = None,
         clock: Callable[[], datetime] = _utcnow,
+        monotonic: Callable[[], float] = time.monotonic,
         sleep: Sleep = asyncio.sleep,
         max_retries: int = 2,
         backoff_base: float = 1.0,
@@ -287,6 +289,11 @@ class Scheduler:
         self._sem = asyncio.Semaphore(concurrency or config.concurrency())
         self._default = default_schedule or config.default_schedule()
         self._clock = clock
+        # Elapsed budgets (bootstrap/regen/recheck) measure their pass duration on this
+        # MONOTONIC seam, never on _clock: a wall-clock (NTP/DST/VM-suspend) step backward
+        # mid-sweep would make (now - pass_started) negative so the budget never trips, and a
+        # step forward would trip it prematurely. _clock still owns every scheduling instant.
+        self._monotonic = monotonic
         self._sleep = sleep
         self._max_retries = max_retries
         self._backoff_base = backoff_base
@@ -734,7 +741,7 @@ class Scheduler:
             return {}
         healer = self._healer
         states: dict[str, HealthState] = {}
-        pass_started = self._clock()
+        pass_started = self._monotonic()
 
         async def _assess(slug: str) -> None:
             # Isolated like the heal path: one generation raising can't abort the wave.
@@ -778,7 +785,7 @@ class Scheduler:
             wave = backlog[i : i + k]
             await asyncio.gather(*(_assess(s.slug) for s in wave))
             done += len(wave)
-            elapsed = (self._clock() - pass_started).total_seconds()
+            elapsed = self._monotonic() - pass_started
             if elapsed > self._bootstrap_budget and done < len(backlog):
                 _log.info(
                     "bootstrap pass over budget (%.0fs > %.0fs); deferring %d site(s)"
@@ -935,7 +942,7 @@ class Scheduler:
         last_attempt = self._store.health_updated_by_site()
         assessable.sort(key=lambda s: last_attempt.get(s.slug, ""))
         states: dict[str, HealthState] = {}
-        pass_started = self._clock()
+        pass_started = self._monotonic()
         for done, site in enumerate(assessable, start=1):
             try:
                 state = await self._assess_bounded(self._healer, site.slug)
@@ -945,7 +952,7 @@ class Scheduler:
                 # One site's regenerate (LM / Deno / network) raising must not abort
                 # the sweep or the daemon — isolate it, log, and assess the rest (§4.8).
                 _log.exception("regen sweep failed for %s; skipping", site.slug)
-            elapsed = (self._clock() - pass_started).total_seconds()
+            elapsed = self._monotonic() - pass_started
             if elapsed > self._regen_budget and done < len(assessable):
                 self._regen_incomplete = True
                 _log.info(
@@ -1057,8 +1064,9 @@ class Scheduler:
         if closed:
             _log.info("recheck expired closed=%d", closed)
         # #9: the windowed pass fetches sequentially and in-band; this stamps the sweep's
-        # start so each attempted URL can check the aggregate wall-clock budget below.
-        pass_started = self._clock()
+        # start (on the monotonic seam — #A6) so each attempted URL can check the aggregate
+        # elapsed budget below without a wall-clock jump un-bounding it.
+        pass_started = self._monotonic()
         for site in self._sites:
             if not site.enabled or site.enumerates_all:
                 continue
@@ -1124,8 +1132,7 @@ class Scheduler:
                 # rather than re-checking this head. 0 disables the budget (unbounded).
                 if (
                     self._recheck_budget
-                    and (self._clock() - pass_started).total_seconds()
-                    > self._recheck_budget
+                    and self._monotonic() - pass_started > self._recheck_budget
                 ):
                     self._recheck_incomplete = True
                     break
