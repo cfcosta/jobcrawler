@@ -1,83 +1,252 @@
-
 import json
 import re
-from html import unescape
+import html
 
 SITE = "https://ntrs.wd1.myworkdayjobs.com/wday/cxs/ntrs/northerntrust/jobs"
 EXTRA_HOSTS = []
 
 COMPANY = "Northern Trust"
+BASE = "https://ntrs.wd1.myworkdayjobs.com"
+PUBLIC_BASE = "https://ntrs.wd1.myworkdayjobs.com/northerntrust"
 CXS_BASE = "https://ntrs.wd1.myworkdayjobs.com/wday/cxs/ntrs/northerntrust"
-PATHS = [('https://ntrs.wd1.myworkdayjobs.com/northerntrust/job/London-United-Kingdom/Accounting-Product-Lead_R156065-1', '/job/London-United-Kingdom/Accounting-Product-Lead_R156065-1'), ('https://ntrs.wd1.myworkdayjobs.com/northerntrust/job/Chicago-IL/Sr-Relationship-Manager--Insti_R151463', '/job/Chicago-IL/Sr-Relationship-Manager--Insti_R151463'), ('https://ntrs.wd1.myworkdayjobs.com/northerntrust/job/Tempe-AZ/Senior-Consultant--Non-Traditional-Third-Parties---Third-Party-Risk-Management_R157492', '/job/Tempe-AZ/Senior-Consultant--Non-Traditional-Third-Parties---Third-Party-Risk-Management_R157492'), ('https://ntrs.wd1.myworkdayjobs.com/northerntrust/job/Chicago-IL/Issue-Management-and-Risk-Event-Specialist--BU-Control_R154006', '/job/Chicago-IL/Issue-Management-and-Risk-Event-Specialist--BU-Control_R154006'), ('https://ntrs.wd1.myworkdayjobs.com/northerntrust/job/Chicago-IL/Principal--AI-Engineer_R157016', '/job/Chicago-IL/Principal--AI-Engineer_R157016'), ('https://ntrs.wd1.myworkdayjobs.com/northerntrust/job/Chicago-IL/Consultant--Treasury-COO---Strategy---Execution_R156168', '/job/Chicago-IL/Consultant--Treasury-COO---Strategy---Execution_R156168'), ('https://ntrs.wd1.myworkdayjobs.com/northerntrust/job/Chicago-IL/Sr-Accountant---Financial-Close-and-Consolidation_R157897', '/job/Chicago-IL/Sr-Accountant---Financial-Close-and-Consolidation_R157897'), ('https://ntrs.wd1.myworkdayjobs.com/northerntrust/job/Tempe-AZ/Procurement-and-Sustainability-Compliance-Consultant_R153007', '/job/Tempe-AZ/Procurement-and-Sustainability-Compliance-Consultant_R153007'), ('https://ntrs.wd1.myworkdayjobs.com/northerntrust/job/Tempe-AZ/Senior-Consultant--Concentration-Risk---Third-Party-Risk-Management_R152172', '/job/Tempe-AZ/Senior-Consultant--Concentration-Risk---Third-Party-Risk-Management_R152172'), ('https://ntrs.wd1.myworkdayjobs.com/northerntrust/job/Chicago-IL/Sr-Product-Manager---Enrollments---Entitlements_R157478', '/job/Chicago-IL/Sr-Product-Manager---Enrollments---Entitlements_R157478'), ('https://ntrs.wd1.myworkdayjobs.com/northerntrust/job/Limerick-Ireland/Senior-Analyst-Transfer-Agency_R156616', '/job/Limerick-Ireland/Senior-Analyst-Transfer-Agency_R156616'), ('https://ntrs.wd1.myworkdayjobs.com/northerntrust/job/London-United-Kingdom/Global-KYC-Enhanced-Due-Diligence-Specialist_R157126', '/job/London-United-Kingdom/Global-KYC-Enhanced-Due-Diligence-Specialist_R157126'), ('https://ntrs.wd1.myworkdayjobs.com/northerntrust/job/Tempe-AZ/Principal--GRC-Cyber-Risk-Management_R154785-1', '/job/Tempe-AZ/Principal--GRC-Cyber-Risk-Management_R154785-1'), ('https://ntrs.wd1.myworkdayjobs.com/northerntrust/job/Luxembourg/Client-Servicing-Consultant_R142982', '/job/Luxembourg/Client-Servicing-Consultant_R142982'), ('https://ntrs.wd1.myworkdayjobs.com/northerntrust/job/Chicago-IL/Manager--Digital-Workforce---IAM-Product-Management--IAM-_R157945', '/job/Chicago-IL/Manager--Digital-Workforce---IAM-Product-Management--IAM-_R157945'), ('https://ntrs.wd1.myworkdayjobs.com/northerntrust/job/Pune-India/Infrastructure-Vulnerability-Management---Lead_R155142-2', '/job/Pune-India/Infrastructure-Vulnerability-Management---Lead_R155142-2'), ('https://ntrs.wd1.myworkdayjobs.com/northerntrust/job/Limerick-Ireland/Consultant--Private-Equity---Transfer-Agency_R152485', '/job/Limerick-Ireland/Consultant--Private-Equity---Transfer-Agency_R152485'), ('https://ntrs.wd1.myworkdayjobs.com/northerntrust/job/Limerick-Ireland/Manager---Private-Equity---Limerick-Hybrid_R153247', '/job/Limerick-Ireland/Manager---Private-Equity---Limerick-Hybrid_R153247'), ('https://ntrs.wd1.myworkdayjobs.com/northerntrust/job/Limerick-Ireland/Payments-Consultant_R156930', '/job/Limerick-Ireland/Payments-Consultant_R156930'), ('https://ntrs.wd1.myworkdayjobs.com/northerntrust/job/Limerick-Ireland/Accounting-Opportunities--Expression-of-Interest--Limerick---Hybrid_R158045-1', '/job/Limerick-Ireland/Accounting-Opportunities--Expression-of-Interest--Limerick---Hybrid_R158045-1')]
+IT_JOB_FAMILY_GROUP = "333f5ad2433c1000f79c4f8be7390000"
+MAX_JOBS = 8
 
 
-def _html_to_text(html):
-    if not html:
+def _strip_html(value):
+    if not value:
         return None
-    text = html
-    text = re.sub(r"(?i)<\s*br\s*/?\s*>", "\n", text)
-    text = re.sub(r"(?i)</\s*(p|div|li|tr|section|h[1-6])\s*>", "\n", text)
-    text = re.sub(r"(?i)<\s*li[^>]*>", "\n- ", text)
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = unescape(text)
+    text = html.unescape(value)
+    text = re.sub(r"(?is)<script\b.*?</script>|<style\b.*?</style>", " ", text)
+    text = re.sub(r"(?is)<\s*(br|p|div|li|tr|h[1-6])\b[^>]*>", "\n", text)
+    text = re.sub(r"(?is)<\s*/\s*(p|div|li|tr|h[1-6])\s*>", "\n", text)
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    text = html.unescape(text)
     text = re.sub(r"[ \t\r\f\v]+", " ", text)
-    text = re.sub(r" *\n *", "\n", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip() or None
+    text = re.sub(r"\n\s*\n+", "\n\n", text)
+    text = "\n".join(part.strip() for part in text.splitlines())
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text or None
 
 
-def _locations_from_info(info):
-    values = []
-    locs = info.get("jobRequisitionLocation")
-    if isinstance(locs, list):
-        for loc in locs:
-            if isinstance(loc, dict) and loc.get("descriptor"):
-                values.append(loc["descriptor"])
-            elif isinstance(loc, str):
-                values.append(loc)
-    elif isinstance(locs, dict) and locs.get("descriptor"):
-        values.append(locs["descriptor"])
-    primary = info.get("location")
-    if primary and primary not in values:
-        values.insert(0, primary)
-    return values
+def _clean(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = html.unescape(value).strip()
+        return value or None
+    return value
+
+
+def _post_json(ctx, url, body):
+    return json.loads(ctx.fetch(url, method="POST", json=body))
+
+
+def _get_json(ctx, url):
+    return json.loads(ctx.fetch(url))
+
+
+def _absolute_url(path_or_url):
+    if not path_or_url:
+        return None
+    if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
+        return path_or_url
+    if path_or_url.startswith("/"):
+        return BASE + path_or_url
+    return BASE + "/" + path_or_url
+
+
+def _public_url(external_path):
+    if not external_path:
+        return None
+    if external_path.startswith("http://") or external_path.startswith("https://"):
+        return external_path
+    if external_path.startswith("/"):
+        return PUBLIC_BASE + external_path
+    return PUBLIC_BASE + "/" + external_path
+
+
+def _detail_url(external_path):
+    if not external_path:
+        return None
+    if external_path.startswith("http://") or external_path.startswith("https://"):
+        return external_path
+    if external_path.startswith("/wday/cxs/"):
+        return BASE + external_path
+    if external_path.startswith("/"):
+        return CXS_BASE + external_path
+    return CXS_BASE + "/" + external_path
+
+
+def _location_name(item):
+    if isinstance(item, str):
+        return _clean(item)
+    if not isinstance(item, dict):
+        return None
+    for key in ("location", "descriptor", "name", "displayName", "formattedLocation"):
+        value = item.get(key)
+        if isinstance(value, dict):
+            value = _location_name(value)
+        value = _clean(value)
+        if value:
+            return value
+    return None
+
+
+def _locations_from_detail(info):
+    locations = []
+    for key in ("jobRequisitionLocation", "locations", "additionalLocations"):
+        value = info.get(key)
+        if isinstance(value, list):
+            for item in value:
+                name = _location_name(item)
+                if name and name not in locations:
+                    locations.append(name)
+        else:
+            name = _location_name(value)
+            if name and name not in locations:
+                locations.append(name)
+    primary = _location_name(info.get("location"))
+    if primary and primary not in locations:
+        locations.insert(0, primary)
+    return locations
+
+
+def _first(*values):
+    for value in values:
+        value = _clean(value)
+        if value:
+            return value
+    return None
+
+
+def _department(info, row):
+    for obj in (info, row):
+        for key in ("jobFamily", "jobFamilyGroup", "supervisoryOrganization", "managementLevel"):
+            value = obj.get(key)
+            if isinstance(value, dict):
+                value = _location_name(value)
+            value = _clean(value)
+            if value:
+                return value
+    return None
+
+
+def _workplace_type(info, row):
+    value = _first(info.get("remoteType"), row.get("remoteType"))
+    if not value:
+        return None
+    lowered = value.lower()
+    if "remote" in lowered:
+        return "Remote"
+    if "hybrid" in lowered:
+        return "Hybrid"
+    if "onsite" in lowered or "on-site" in lowered or "office" in lowered:
+        return "On-site"
+    return value
+
+
+def _external_id(info, row):
+    value = _first(info.get("jobReqId"), info.get("jobRequisitionId"))
+    if value:
+        return value
+    fields = row.get("bulletFields")
+    if isinstance(fields, list):
+        for field in fields:
+            field = _clean(field)
+            if field:
+                return field
+    return None
+
+
+def _job_from_row(ctx, row):
+    external_path = row.get("externalPath")
+    detail_url = _detail_url(external_path)
+    if not detail_url:
+        return None
+
+    detail = _get_json(ctx, detail_url)
+    info = detail.get("jobPostingInfo") or detail.get("jobPosting") or detail
+
+    title = _first(info.get("title"), row.get("title"))
+    description = _strip_html(info.get("jobDescription") or info.get("description"))
+    if not title or not description:
+        return None
+
+    locations = _locations_from_detail(info)
+    location = _first(_location_name(info.get("location")), row.get("locationsText"))
+    if not location and locations:
+        location = locations[0]
+    if not location:
+        return None
+
+    apply_url = _first(info.get("externalUrl"), info.get("applyUrl"), info.get("url"))
+    job = {
+        "url": _public_url(external_path) or detail_url,
+        "title": title,
+        "company": COMPANY,
+        "location": location,
+        "description": description,
+        "source": SITE,
+    }
+
+    if locations:
+        job["locations"] = locations
+
+    optional = {
+        "external_id": _external_id(info, row),
+        "apply_url": _absolute_url(apply_url),
+        "employment_type": _first(info.get("timeType"), info.get("workerType"), row.get("timeType")),
+        "workplace_type": _workplace_type(info, row),
+        "department": _department(info, row),
+    }
+    start_date = _clean(info.get("startDate"))
+    if start_date:
+        optional["posted_at"] = start_date
+
+    for key, value in optional.items():
+        if value:
+            job[key] = value
+
+    return job
 
 
 def crawl(ctx):
-    for public_url, external_path in PATHS:
-        detail = json.loads(ctx.fetch(CXS_BASE + external_path))
-        info = detail.get("jobPostingInfo") or {}
+    limit = 20
+    offset = 0
+    total = None
+    seen = set()
+    yielded = 0
 
-        description = _html_to_text(info.get("jobDescription"))
-        title = info.get("title")
-        location = info.get("location")
-        url = info.get("externalUrl") or public_url
-
-        if not (title and location and description and url):
-            continue
-
-        job = {
-            "url": url,
-            "title": title,
-            "company": COMPANY,
-            "location": location,
-            "description": description,
-            "source": SITE,
+    while total is None or offset < total:
+        body = {
+            "appliedFacets": {
+                "jobFamilyGroup": [IT_JOB_FAMILY_GROUP],
+            },
+            "limit": limit,
+            "offset": offset,
         }
+        data = _post_json(ctx, SITE, body)
+        total = data.get("total")
+        rows = data.get("jobPostings") or data.get("jobs") or data.get("postings") or []
 
-        locations = _locations_from_info(info)
-        if len(locations) > 1:
-            job["locations"] = locations
+        if not rows:
+            break
 
-        if info.get("jobReqId"):
-            job["external_id"] = info["jobReqId"]
-        if info.get("externalUrl"):
-            job["apply_url"] = info["externalUrl"]
-        if info.get("startDate"):
-            job["posted_at"] = info["startDate"]
-        if info.get("timeType"):
-            job["employment_type"] = info["timeType"]
-        if info.get("remoteType"):
-            job["workplace_type"] = info["remoteType"]
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            key = row.get("externalPath") or row.get("title")
+            if key in seen:
+                continue
+            seen.add(key)
+            job = _job_from_row(ctx, row)
+            if job:
+                yield job
+                yielded += 1
+                if yielded >= MAX_JOBS:
+                    return
 
-        yield job
+        offset += limit
+        if total is None and len(rows) < limit:
+            break

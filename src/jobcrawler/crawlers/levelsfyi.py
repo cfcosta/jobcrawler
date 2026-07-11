@@ -1,172 +1,140 @@
-import html
+
 import json
 import re
+import html
+from urllib.parse import urlencode
 
 SITE = "https://www.levels.fyi/jobs"
 EXTRA_HOSTS = []
 
-MAX_JOBS = 6
-
-# The Next.js origin returns 403 to clients that omit a User-Agent.
-_HEADERS = {
-    "user-agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "accept-language": "en-US,en;q=0.9",
-}
-
-_NEXT_DATA = re.compile(
-    r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>', re.I | re.S
-)
+BOARD_URL = "https://www.levels.fyi/en-us/jobs"
+MAX_JOBS = 8
 
 
-def _clean(value):
-    if value is None:
-        return None
-    if isinstance(value, str):
-        value = html.unescape(value).strip()
-        return value or None
-    return value
+def _next_data(text):
+    m = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', text, re.S)
+    if not m:
+        return {}
+    try:
+        return json.loads(html.unescape(m.group(1)))
+    except Exception:
+        return {}
 
 
-def _strip_html(value):
+def _page_props(text):
+    return _next_data(text).get("props", {}).get("pageProps", {}) or {}
+
+
+def _clean_html(value):
     if not value:
         return None
-    text = str(value)
-    text = re.sub(r"(?is)<\s*(script|style)\b.*?</\s*\1\s*>", " ", text)
+    text = html.unescape(str(value))
     text = re.sub(r"(?i)<\s*br\s*/?\s*>", "\n", text)
-    text = re.sub(r"(?i)</\s*(p|div|li|tr|h[1-6]|ul|ol)\s*>", "\n", text)
-    text = re.sub(r"(?i)<\s*li\b[^>]*>", "\n- ", text)
+    text = re.sub(r"(?i)</\s*(p|div|li|h[1-6]|ul|ol|section|article)\s*>", "\n", text)
     text = re.sub(r"(?s)<[^>]+>", " ", text)
     text = html.unescape(text)
     text = re.sub(r"[ \t\r\f\v]+", " ", text)
-    text = re.sub(r" *\n *", "\n", text)
+    text = re.sub(r"\n\s+", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip() or None
 
 
-def _page_props(page):
-    match = _NEXT_DATA.search(page)
-    if not match:
-        return {}
-    raw = match.group(1)
-    try:
-        data = json.loads(raw)
-    except Exception:
-        try:
-            data = json.loads(html.unescape(raw))
-        except Exception:
-            return {}
-    props = data.get("props") if isinstance(data, dict) else None
-    page_props = props.get("pageProps") if isinstance(props, dict) else None
-    return page_props if isinstance(page_props, dict) else {}
-
-
-def _job_ids(page_props):
-    jobs_data = page_props.get("initialJobsData")
-    results = jobs_data.get("results") if isinstance(jobs_data, dict) else None
-    ids = []
-    seen = set()
-    if not isinstance(results, list):
-        return ids
-    for group in results:
-        jobs = group.get("jobs") if isinstance(group, dict) else None
-        if not isinstance(jobs, list):
-            continue
-        for job in jobs:
-            if not isinstance(job, dict):
-                continue
-            jid = job.get("id")
-            if jid is None:
-                continue
-            jid = str(jid)
-            if jid not in seen:
-                seen.add(jid)
-                ids.append(jid)
-    return ids
-
-
-def _location(det):
-    parts = []
-    locations = det.get("locations")
+def _primary_location(locations):
     if isinstance(locations, list):
         for loc in locations:
-            text = _clean(loc)
-            if text:
-                parts.append(text)
-    if parts:
-        return "; ".join(dict.fromkeys(parts))
-    arrangement = _clean(det.get("workArrangement"))
-    if arrangement:
-        return arrangement.replace("_", " ").title()
+            if loc:
+                return str(loc)
+    elif locations:
+        return str(locations)
     return None
 
 
-def _employment_type(det):
-    names = []
-    types = det.get("employmentTypes")
-    if isinstance(types, list):
-        for entry in types:
-            text = _clean(entry)
-            if text:
-                names.append(text)
-    return ", ".join(dict.fromkeys(names)) or None
-
-
-def _amount(value):
-    if isinstance(value, bool):
+def _salary_text(min_salary, max_salary, currency):
+    if min_salary is None and max_salary is None:
         return None
-    if isinstance(value, (int, float)) and value > 0:
-        return float(value)
-    return None
+    cur = currency or ""
+    if min_salary is not None and max_salary is not None:
+        return f"{cur} {min_salary} - {max_salary} base salary".strip()
+    if min_salary is not None:
+        return f"{cur} {min_salary}+ base salary".strip()
+    return f"Up to {cur} {max_salary} base salary".strip()
 
 
-def _clean_dict(data):
-    return {k: v for k, v in data.items() if v is not None and v != ""}
+def _job_from_detail(detail, fallback_company=None):
+    company_info = detail.get("companyInfo") or {}
+    locations = detail.get("locations") if isinstance(detail.get("locations"), list) else None
+
+    job = {
+        "source": SITE,
+        "url": "https://www.levels.fyi/en-us/jobs?" + urlencode({"jobId": detail.get("id")}),
+        "title": detail.get("title"),
+        "company": company_info.get("name") or fallback_company,
+        "location": _primary_location(locations),
+        "description": _clean_html(detail.get("description")),
+    }
+
+    if locations:
+        job["locations"] = [str(x) for x in locations if x]
+    if detail.get("id") is not None:
+        job["external_id"] = str(detail.get("id"))
+    if detail.get("applicationUrl"):
+        job["apply_url"] = detail.get("applicationUrl")
+    if detail.get("postingDate"):
+        job["posted_at"] = detail.get("postingDate")
+    if detail.get("expiryDate"):
+        job["expires_at"] = detail.get("expiryDate")
+    if detail.get("workArrangement"):
+        job["workplace_type"] = detail.get("workArrangement")
+
+    employment = detail.get("employmentTypes")
+    if isinstance(employment, list) and employment:
+        job["employment_type"] = ", ".join(str(x) for x in employment if x)
+    elif employment:
+        job["employment_type"] = str(employment)
+
+    if detail.get("jobFamilySlug"):
+        job["department"] = detail.get("jobFamilySlug")
+
+    min_base = detail.get("minBaseSalary")
+    max_base = detail.get("maxBaseSalary")
+    currency = detail.get("baseSalaryCurrency")
+    if min_base is not None:
+        job["salary_min"] = min_base
+    if max_base is not None:
+        job["salary_max"] = max_base
+    if currency:
+        job["salary_currency"] = currency
+    if min_base is not None or max_base is not None:
+        job["salary_period"] = "year"
+        salary = _salary_text(min_base, max_base, currency)
+        if salary:
+            job["salary"] = salary
+
+    return {k: v for k, v in job.items() if v is not None and v != ""}
 
 
 def crawl(ctx):
-    listing = ctx.fetch(SITE, headers=_HEADERS)
-    for jid in _job_ids(_page_props(listing))[:MAX_JOBS]:
-        try:
-            page = ctx.fetch(f"{SITE}?jobId={jid}", headers=_HEADERS)
-        except Exception:
-            continue
-        det = _page_props(page).get("initialJobDetails")
-        if not isinstance(det, dict):
-            continue
+    props = _page_props(ctx.fetch(BOARD_URL))
+    groups = props.get("initialJobsData", {}).get("results", []) or []
 
-        title = _clean(det.get("title"))
-        company_info = det.get("companyInfo")
-        company = (
-            _clean(company_info.get("name")) if isinstance(company_info, dict) else None
-        )
-        location = _location(det)
-        description = _strip_html(det.get("description"))
-        if not (title and company and location and description):
-            continue
+    seen = set()
+    yielded = 0
+    for group in groups:
+        fallback_company = group.get("companyName")
+        for summary in group.get("jobs", []) or []:
+            if yielded >= MAX_JOBS:
+                return
+            job_id = summary.get("id")
+            if not job_id or job_id in seen:
+                continue
+            seen.add(job_id)
 
-        external_id = _clean(det.get("id")) or jid
-        salary_min = _amount(det.get("minBaseSalary"))
-        salary_max = _amount(det.get("maxBaseSalary"))
-        currency = _clean(det.get("baseSalaryCurrency"))
+            detail_url = "https://www.levels.fyi/en-us/jobs?" + urlencode({"jobId": job_id})
+            detail = _page_props(ctx.fetch(detail_url)).get("initialJobDetails") or {}
+            if not isinstance(detail, dict) or not detail.get("description"):
+                continue
 
-        out = {
-            "url": f"{SITE}?jobId={external_id}",
-            "title": title,
-            "company": company,
-            "location": location,
-            "description": description,
-            "source": "levelsfyi",
-            "external_id": str(external_id),
-            "workplace_type": _clean(det.get("workArrangement")),
-            "employment_type": _employment_type(det),
-            "posted_at": _clean(det.get("postingDate")),
-            "expires_at": _clean(det.get("expiryDate")),
-            "apply_url": _clean(det.get("applicationUrl")),
-            "salary_min": salary_min,
-            "salary_max": salary_max,
-            "salary_currency": currency if (salary_min or salary_max) else None,
-        }
-        yield _clean_dict(out)
+            item = _job_from_detail(detail, fallback_company=fallback_company)
+            if item.get("title") and item.get("company") and item.get("location") and item.get("description"):
+                yielded += 1
+                yield item
