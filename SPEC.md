@@ -791,7 +791,7 @@ operates the whole loop itself rather than relying on an external cron.
   once; per-host limits come from §4.5. A board never overlaps its own prior run.
 - **Cold-start bootstrap is budgeted per tick.** A due site with no committed crawler is never
   crawled (it would only `FileNotFoundError`); the tick routes it to the §4.2 bootstrap **after** the
-  crawl wave. That pass carries a time budget (`JOBCRAWLER_BOOTSTRAP_BUDGET`, default two tick
+  crawl wave. That pass carries a time budget (`JOBCRAWLER_BOOTSTRAP_BUDGET`, default three tick
   intervals): one generation blocks the single-process loop for many minutes, and an unbudgeted pass
   over a cold roster runs every generation back-to-back inside a single tick — while each freshly
   promoted crawler sits idle, due but never dispatched, until the whole wave ends. Over budget, the
@@ -800,7 +800,7 @@ operates the whole loop itself rather than relying on an external cron.
   don't consume the budget in any meaningful way, so a no-op sweep still covers the roster in one
   tick; deferral loses nothing because crawler-less sites are re-detected from disk every tick.
   Within a pass, generations run in bounded-concurrency waves (`JOBCRAWLER_BOOTSTRAP_CONCURRENCY`,
-  default 6) so a fresh roster comes up in parallel instead of one multi-minute generation at a time,
+  default 8) so a fresh roster comes up in parallel instead of one multi-minute generation at a time,
   while still capping simultaneous LM spend/rate; the time budget is checked at each wave boundary and
   forced "crawl now" slugs run first, exempt from it.
 - **Retry & backoff (one owner per failure class).** A crawl that fails *before yielding any position*
@@ -1465,7 +1465,7 @@ an `openrouter/…` slug billed per token. Selected knobs:
 | `JOBCRAWLER_DEFAULT_SCHEDULE` | `2h` | fixed cadence for a board with no `schedule` and adaptive off |
 | `JOBCRAWLER_ADAPTIVE_DEFAULT` | `on` | a board with no explicit cadence is adaptive (§4.9) |
 | `JOBCRAWLER_MIN_SCHEDULE` / `MAX_SCHEDULE` | `30m` / `3d` | adaptive-interval politeness floor / staleness ceiling |
-| `JOBCRAWLER_CONCURRENCY` | `8` | max boards crawled concurrently |
+| `JOBCRAWLER_CONCURRENCY` | `12` | max boards crawled concurrently |
 | `JOBCRAWLER_AUTONOMY` | `on` | master brake over all self-modification (heal/regen/promote/reopt/adopt/rollback) |
 | `JOBCRAWLER_REVIEW_GATE` | `auto` | tri-state delivery: `auto` (promote+backup) / `on` (stage for `promote`) / `off` (write live) |
 | `JOBCRAWLER_REGEN_CHECK` | `24h` | staleness-evaluation cadence (§4.8) |
@@ -1478,8 +1478,8 @@ an `openrouter/…` slug billed per token. Selected knobs:
 | `JOBCRAWLER_MAX_ITERATIONS` / `MAX_LLM_CALLS` / `MAX_SUBCALLS` | `20` / `40` / `60` | RLM caps + the unconditional host sub-call kill (§4.2) |
 | `JOBCRAWLER_FANOUT_N` / `FANOUT_TOKEN_CAP` | `4` / `2M/site` | §6 best-of-N width + the aggregate fan-out token ceiling (dspy records tokens for every provider; USD isn't priced for many slugs) |
 | `JOBCRAWLER_FANOUT_RETRIES` | `= FANOUT_N` | §6 redraws for LM/adapter-dead attempts (a failure never eats a comparison slot; attempts ≤ 2N) |
-| `JOBCRAWLER_BOOTSTRAP_BUDGET` | `2m` | §4.9 per-tick time budget for the cold-start bootstrap pass (over budget → roster defers to next tick) |
-| `JOBCRAWLER_BOOTSTRAP_CONCURRENCY` | `6` | §4.9 max cold-start generations run in parallel per wave (1 = sequential; caps concurrent LM spend/rate) |
+| `JOBCRAWLER_BOOTSTRAP_BUDGET` | `3m` | §4.9 per-tick time budget for the cold-start bootstrap pass (over budget → roster defers to next tick) |
+| `JOBCRAWLER_BOOTSTRAP_CONCURRENCY` | `8` | §4.9 max cold-start generations run in parallel per wave (1 = sequential; caps concurrent LM spend/rate) |
 | `JOBCRAWLER_ASSESS_TIMEOUT` | `30m` | §4.9 liveness watchdog: max wall-clock ONE generation assess may hold the loop; on expiry the assess is abandoned (worker detached, its store writes still land) and the tick resumes — a wedged generation can't freeze crawling/recheck/matching. `0s` disables |
 | `JOBCRAWLER_SOLVER` / `FLARESOLVERR_URL` / `JOBCRAWLER_CLEARANCE_TTL` / `JOBCRAWLER_EGRESS_PROXY` | `none` / — / `30m` / — | §4.10 challenge backend + clearance + IP/UA-pinned egress |
 | `JOBCRAWLER_NOTIFY_WEBHOOK` / `NOTIFY_TIMEOUT` | — / `10s` | optional operator webhook for autonomous actions + match alerts (§4.7/§4.9) |

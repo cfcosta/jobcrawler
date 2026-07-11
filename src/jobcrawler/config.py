@@ -924,7 +924,7 @@ def default_schedule() -> str:
 
 
 def concurrency() -> int:
-    return _int("JOBCRAWLER_CONCURRENCY", 8)
+    return _int("JOBCRAWLER_CONCURRENCY", 12)
 
 
 # --- adaptive cadence (§4.9, the hit-rate controller) ----------------------
@@ -978,12 +978,12 @@ def bootstrap_budget() -> float:
     behind it) starved until the wave ends. Cheap assesses (a site in backoff)
     sweep through freely; once the pass exceeds this budget it defers the rest of
     the roster to the next tick — a crawler-less site is re-detected from disk
-    every tick, so deferral loses nothing. Default: two tick intervals."""
-    return _duration_secs("JOBCRAWLER_BOOTSTRAP_BUDGET", "2m")
+    every tick, so deferral loses nothing. Default: three tick intervals."""
+    return _duration_secs("JOBCRAWLER_BOOTSTRAP_BUDGET", "3m")
 
 
 def bootstrap_concurrency() -> int:
-    """How many §4.2 cold-start generations may run at once (default 6).
+    """How many §4.2 cold-start generations may run at once (default 8).
 
     A fresh roster of N crawler-less boards otherwise generates one crawler at a time —
     N back-to-back multi-minute LM generations before the fleet is online. Bounded
@@ -991,7 +991,7 @@ def bootstrap_concurrency() -> int:
     is LM-heavy, so a large fan-out would multiply the instantaneous token load and risk
     provider rate limits. ``1`` restores the fully sequential pass. The per-tick time
     budget and the forced-slug exemption apply across waves exactly as before."""
-    return max(1, _int("JOBCRAWLER_BOOTSTRAP_CONCURRENCY", 6))
+    return max(1, _int("JOBCRAWLER_BOOTSTRAP_CONCURRENCY", 8))
 
 
 def regen_budget() -> float:
@@ -1005,8 +1005,8 @@ def regen_budget() -> float:
     once the sweep exceeds this budget the rest defers — but unlike the periodic cadence
     the deferral resumes on the *next* tick, not a full ``JOBCRAWLER_REGEN_CHECK`` interval
     later, so a bounded slice of the backlog clears each tick until it drains. Default:
-    two tick intervals."""
-    return _duration_secs("JOBCRAWLER_REGEN_BUDGET", "2m")
+    three tick intervals."""
+    return _duration_secs("JOBCRAWLER_REGEN_BUDGET", "3m")
 
 
 def assess_timeout() -> float:
