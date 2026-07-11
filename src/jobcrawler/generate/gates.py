@@ -28,8 +28,11 @@ About-us blurb, the benefits list, the EEO statement), so a mechanical news→jo
 port of this gate would reject every *correct* crawler. Instead we STRIP the
 shared blocks and judge what remains: a posting whose unique residual — after
 removing every block (≥ 80 chars) shared by ≥ 2 samples — is too thin is
-boilerplate masquerading as a description, and two byte-identical descriptions
-are a crawler grabbing one page-level blurb for every role. Shared boilerplate
+boilerplate masquerading as a description, and descriptions that collapse toward
+one shared blurb — a strict majority byte-identical across different titles — are
+a crawler grabbing one page-level blob for every role (a *minority* of cross-title
+clones is tolerated: real boards post one req per location with the city in the
+title). Shared boilerplate
 *plus* a substantial unique residual PASSES: that is the normal, healthy shape of
 a careers board, and this is exactly the spot a naive port would get wrong.
 """
@@ -395,9 +398,11 @@ def check_completeness(
 
     The boilerplate check is INVERTED from the news port (see the module
     docstring): blocks shared across samples are STRIPPED, not rejected, and a
-    sample fails only when its unique residual falls below ``min_unique_chars`` or
-    two samples' descriptions are byte-identical — so the About-us / benefits /
-    EEO slabs a real careers board repeats never sink a correct crawler.
+    sample fails only when its unique residual falls below ``min_unique_chars``,
+    with the whole set failing only when its descriptions collapse toward one
+    shared blurb (a strict majority byte-identical across different titles) — so
+    the About-us / benefits / EEO slabs a real careers board repeats, and the
+    per-location role clones it posts, never sink a correct crawler.
 
     Schema errors are tolerated up to ``max_schema_error_ratio`` of the total
     yield, mirroring the production runner: ``runner._collect`` drops an invalid
@@ -552,16 +557,21 @@ def _strip_blocks(description: str, shared: Collection[str]) -> str:
     return " ".join(kept)
 
 
-def _identity_scan(samples: list[dict]) -> tuple[list[tuple[int, int]], list[int]]:
-    """The §6 identity facts: cross-title identical pairs + the collapsed set.
+def _identity_scan(
+    samples: list[dict],
+) -> tuple[list[tuple[int, int]], list[int], list[int], int]:
+    """The §6 identity facts: cross-title identical pairs, the collapsed set, the
+    counted indices, and the count of DISTINCT description bodies.
 
-    Returns ``(pairs, collapsed)``: each pair is two sample indices whose
-    descriptions are byte-identical under *different* titles, and ``collapsed``
-    is every counted index when the whole set reduces to a single
-    (title, description) posting — else empty. Samples with empty descriptions
-    are ignored (the length/quality checks own that case). One scan feeds both
-    the gate's failure messages and the description axis's defect set, so the
-    identity rules cannot drift between enforcement and reward.
+    Returns ``(pairs, collapsed, counted, distinct)``: each pair is two sample
+    indices whose descriptions are byte-identical under *different* titles;
+    ``collapsed`` is every counted index when the whole set reduces to a single
+    (title, description) posting (else empty); ``counted`` is the indices with a
+    non-empty description; and ``distinct`` is how many distinct description
+    strings those span. Samples with empty descriptions are ignored (the
+    length/quality checks own that case). One scan feeds both the gate's failure
+    messages and the description axis's defect set, so the identity rules cannot
+    drift between enforcement and reward.
     """
     seen: dict[str, tuple[int, str]] = {}
     pairs: list[tuple[int, int]] = []
@@ -581,29 +591,49 @@ def _identity_scan(samples: list[dict]) -> tuple[list[tuple[int, int]], list[int
         else:
             seen[description] = (i, title)
     collapsed = counted if len(counted) >= 2 and len(postings) == 1 else []
-    return pairs, collapsed
+    return pairs, collapsed, counted, len(seen)
+
+
+def _descriptions_collapse(counted: list[int], distinct: int) -> bool:
+    """True when the sampled descriptions collapse toward one shared blurb (§6).
+
+    The blurb-grab bug stamps one board-level blob on *each* row, so its
+    signature is a **strict majority** of postings reusing another's body: fewer
+    distinct bodies than half the sampled postings, or (at any size) a single
+    distinct body across them all. A **minority** of cross-title identical bodies
+    is NOT this bug — real boards post one req per location with the city in the
+    title (``Account Manager - DC`` / ``- New York``), so pagerduty samples 15
+    roles with 14 distinct bodies and one clone pair. Rejecting that minority
+    makes correct boards ungeneratable, so we fire only past the halfway mark.
+    Gate and §4.11 reward axis both consult this predicate, so tolerance and
+    penalty stay aligned.
+    """
+    n = len(counted)
+    return n >= 2 and (distinct == 1 or 2 * distinct < n)
 
 
 def _identical_description_failures(samples: list[dict]) -> list[str]:
-    """Cross-title pairs of samples whose descriptions are byte-identical (§6).
+    """Gate message when the sampled descriptions collapse toward one blurb (§6).
 
-    A crawler that yields the *same* description for postings with *different*
-    titles grabbed one page-level generic blurb instead of the per-role text —
-    broken even though each row clears the length floor. Same-title duplicates
-    are tolerated: a real ATS board posts one req per region as separate
-    postings with identical bodies (GitLab's per-region clones), and rejecting
-    those makes the board ungeneratable. A sample set that collapses to a
-    single (title, description) posting still fails as a whole: that is one job
-    echoed n times, not a crawl.
+    A crawler that yields the *same* description for postings under *many*
+    different titles grabbed one page-level generic blurb instead of the per-role
+    text — broken even though each row clears the length floor. But a real ATS
+    board legitimately posts one req per location as separate postings with
+    identical bodies (``Account Manager - DC`` / ``- New York``, or GitLab's
+    per-region clones), so a MINORITY of cross-title clones is tolerated: only a
+    strict-majority collapse (:func:`_descriptions_collapse`) fails. A sample set
+    that collapses to a single (title, description) posting always fails — that is
+    one job echoed n times, not a crawl.
     """
-    pairs, collapsed = _identity_scan(samples)
-    failures = [
-        f"samples {a} and {b} have identical descriptions under different titles"
-        for a, b in pairs
-    ]
+    pairs, collapsed, counted, distinct = _identity_scan(samples)
     if collapsed:
-        failures.append(f"all {len(collapsed)} samples are the same posting")
-    return failures
+        return [f"all {len(collapsed)} samples are the same posting"]
+    if pairs and _descriptions_collapse(counted, distinct):
+        return [
+            f"descriptions collapse to {distinct} distinct across "
+            f"{len(counted)} sampled postings (one blurb stamped on most roles)"
+        ]
+    return []
 
 
 def defective_description_indices(
@@ -611,19 +641,21 @@ def defective_description_indices(
 ) -> set[int]:
     """Sample indices whose descriptions flunk the §6 uniqueness rules.
 
-    The union of: members of a cross-title identical-description pair, every
-    sample when the set collapses to a single (title, description) posting, and
-    samples whose unique residual after stripping the board's shared blocks
-    falls below ``min_unique_chars``. This is the "§6 unique-residual measure"
-    the §4.11 description axis grades by (§8 adversarial admission): the reward
-    steers by exactly the defects this gate enforces — a candidate that stamps
-    one page-level blurb on every posting scores low *before* it ever reaches
-    the gate, instead of sailing to the gate on length alone. Thresholds stay
-    hidden from the generator either way (§8).
+    The union of: every posting sharing a body in a strict-majority collapse
+    (:func:`_descriptions_collapse` — a MINORITY of cross-title clones is
+    tolerated, matching the gate), every sample when the set collapses to a
+    single (title, description) posting, and samples whose unique residual after
+    stripping the board's shared blocks falls below ``min_unique_chars``. This is
+    the "§6 unique-residual measure" the §4.11 description axis grades by (§8
+    adversarial admission): the reward steers by exactly the defects this gate
+    enforces — a candidate that stamps one page-level blurb on every posting
+    scores low *before* it ever reaches the gate, instead of sailing to the gate
+    on length alone. Thresholds stay hidden from the generator either way (§8).
     """
-    pairs, collapsed = _identity_scan(samples)
-    defective = {i for pair in pairs for i in pair}
-    defective.update(collapsed)
+    pairs, collapsed, counted, distinct = _identity_scan(samples)
+    defective: set[int] = set(collapsed)
+    if _descriptions_collapse(counted, distinct):
+        defective.update(i for pair in pairs for i in pair)
     shared = _shared_blocks(samples)
     for i, sample in enumerate(samples):
         description = str(sample.get("description") or "").strip()

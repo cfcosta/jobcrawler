@@ -745,23 +745,67 @@ def test_all_boilerplate_fails() -> None:
     assert any("boilerplate" in f for f in gate.failures)
 
 
-def test_identical_descriptions_under_different_titles_fail() -> None:
-    # A crawler yielding the SAME description for postings with DIFFERENT titles (a
-    # page-level generic blurb, not the per-role text) — REJECT. Built from
-    # sub-80-char lines so no block registers as shared boilerplate; this isolates
-    # the identical-descriptions rule from the residual check.
+def test_systematic_identical_descriptions_fail() -> None:
+    # A crawler yielding the SAME description for MANY postings under DIFFERENT
+    # titles (a page-level generic blurb, not the per-role text) collapses the
+    # sample to one distinct body — REJECT. Built from sub-80-char lines so no
+    # block registers as shared boilerplate; this isolates the collapse rule from
+    # the residual check.
     line = "We build reliable backend services in Python and Go."
     desc = "\n\n".join(f"{line} Detail {j}." for j in range(6))
-    a = _job("https://example.com/a", desc, title="Backend Engineer")
-    b = _job("https://example.com/b", desc, title="Frontend Engineer")
+    samples = [
+        _job(f"https://example.com/{i}", desc, title=f"Engineer {i}") for i in range(6)
+    ]
     gate = check_completeness(
-        _result(item_count=9, samples=[a, b]),
+        _result(item_count=9, samples=samples),
         min_items=5,
         min_description_chars=100,
         allowed_hosts=_HOSTS,
     )
     assert not gate.passed
-    assert any("identical descriptions" in f for f in gate.failures)
+    assert any("collapse to" in f for f in gate.failures)
+
+
+def test_minority_cross_title_clones_pass() -> None:
+    # The pagerduty shape: several distinct full descriptions plus ONE legitimate
+    # per-location clone pair (the city is in the TITLE, so titles differ but the
+    # body is byte-identical). A single cross-title clone amid variety must NOT
+    # sink the crawler — real boards post one req per location this way, and the
+    # any-pair rule wrongly rejected them. Only a strict-majority collapse fails.
+    body = (
+        "Own our incident-response platform end to end: design, build, and operate "
+        "the on-call and alerting services in Python and Go, partnering with SRE and "
+        "product from first commit through production rollout across the fleet."
+    )
+    clone = (
+        "Grow strategic accounts across the region: partner with customers on "
+        "renewals and expansion, run quarterly business reviews, and carry a named "
+        "quota with the field team from prospecting through close and post-sale."
+    )
+    samples = [
+        _job("https://example.com/eng", body, title="Staff Backend Engineer"),
+        _job(
+            "https://example.com/sre",
+            body.replace("incident-response", "reliability"),
+            title="Site Reliability Engineer",
+        ),
+        _job(
+            "https://example.com/pm",
+            body.replace("incident-response platform", "product roadmap"),
+            title="Product Manager",
+        ),
+        _job(
+            "https://example.com/am-dc", clone, title="Account Manager - Washington DC"
+        ),
+        _job("https://example.com/am-ny", clone, title="Account Manager - New York"),
+    ]
+    gate = check_completeness(
+        _result(item_count=9, samples=samples),
+        min_items=5,
+        min_description_chars=100,
+        allowed_hosts=_HOSTS,
+    )
+    assert gate.passed, gate.reason
 
 
 def test_same_title_region_clones_pass() -> None:
@@ -842,26 +886,47 @@ def test_all_samples_one_posting_fails() -> None:
 
 def test_defective_indices_track_the_gate_rules() -> None:
     # The §4.11 description axis grades by the same defect set the gate enforces
-    # (one _identity_scan feeds both): cross-title identical pairs, the collapsed
-    # set, and thin residual are defective; a same-title clone pair is not.
+    # (one _identity_scan feeds both): a strict-MAJORITY collapse to one body and
+    # the fully-collapsed echo are defective; a MINORITY of cross-title clones and
+    # a same-title clone pair are tolerated; thin residual is always defective.
     blurb = "One page-level blurb the crawler stamped on every posting. " * 4
-    cross = [
-        _job("https://example.com/a", blurb, title="Backend Engineer"),
-        _job("https://example.com/b", blurb, title="Frontend Engineer"),
-        _job("https://example.com/c", "A genuinely distinct role text. " * 8),
+    distinct = [
+        "A genuinely distinct role text number {}. ".format(i) * 8 for i in range(3)
     ]
-    assert defective_description_indices(cross, min_unique_chars=150) == {0, 1}
 
+    # Zero variety: one blurb across many different titles — all defective.
+    systematic = [
+        _job(f"https://example.com/{i}", blurb, title=f"Role {i}") for i in range(4)
+    ]
+    assert defective_description_indices(systematic, min_unique_chars=150) == {
+        0,
+        1,
+        2,
+        3,
+    }
+
+    # Minority clone pair amid distinct bodies (per-location reqs) — tolerated.
+    minority = [
+        _job("https://example.com/a", blurb, title="Backend Engineer - DC"),
+        _job("https://example.com/b", blurb, title="Backend Engineer - NY"),
+        _job("https://example.com/c", distinct[0]),
+        _job("https://example.com/d", distinct[1]),
+        _job("https://example.com/e", distinct[2]),
+    ]
+    assert defective_description_indices(minority, min_unique_chars=150) == set()
+
+    # Every sample is the SAME (title, description) — one job echoed n times.
     collapsed = [
         _job(f"https://example.com/{i}", blurb, title="Backend Engineer")
         for i in range(3)
     ]
     assert defective_description_indices(collapsed, min_unique_chars=150) == {0, 1, 2}
 
+    # Same-title clone pair (one distinct sibling keeps it a minority) — tolerated.
     clones = [
         _job("https://example.com/be-1", blurb, title="Backend Engineer"),
         _job("https://example.com/be-2", blurb, title="Backend Engineer"),
-        _job("https://example.com/fe", "A genuinely distinct role text. " * 8),
+        _job("https://example.com/fe", distinct[0]),
     ]
     assert defective_description_indices(clones, min_unique_chars=150) == set()
 

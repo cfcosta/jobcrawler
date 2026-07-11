@@ -1192,13 +1192,19 @@ company boilerplate on *every* posting. So the gate is inverted into three parts
   role-specific responsibilities/requirements) — this is what `min_unique_description_chars` (§11)
   operationalizes. A crawler that yields only the shared boilerplate (title + benefits, no role body)
   fails here even though its raw length clears `min_description_chars`.
-- **Identical-description reject, title-aware** — byte-identical descriptions under **different**
-  titles mean the crawler grabbed a board-level blob and stamped it on each row → reject. An identical
-  body under the **same** title is a legitimate per-region clone (one req posted per location, the
-  GitLab/Greenhouse shape) → tolerated; the shared-block set is accordingly computed over **distinct
-  description strings**, so a clone can't promote its own body to "boilerplate" and residual-strip
-  itself to zero. A sample set that collapses to a *single* (title, description) posting still
-  rejects — that is one job echoed n times, not a crawl.
+- **Identical-description reject, majority-gated** — a crawler that grabbed a board-level blob and
+  stamped it on *each* row shows up as byte-identical descriptions across many different titles →
+  reject. But the trigger is a **strict majority** (fewer distinct bodies than half the sampled
+  postings, or a single body across them all), **not a single pair**: real boards post one req per
+  **location** with the city in the *title* (`Account Manager - DC` / `- New York`), so a **minority**
+  of cross-title identical bodies is a legitimate per-location clone and is tolerated (pagerduty
+  samples 15 roles / 14 distinct / one clone pair — a *correct* crawler the any-pair rule wrongly
+  rejected). An identical body under the **same** title is likewise a legitimate per-region clone (the
+  GitLab/Greenhouse shape); the shared-block set is computed over **distinct description strings**, so a
+  clone can't promote its own body to "boilerplate" and residual-strip itself to zero. A sample set
+  that collapses to a *single* (title, description) posting still rejects — that is one job echoed n
+  times, not a crawl. The gate and the §4.11 description axis consult one predicate, so tolerance and
+  penalty never drift.
 
 Gates 1–2 are computed by **one pure scoring core** returning a `CandidateResult`, a `gate_failures`
 reason string, and a **graded, continuous, multi-axis** score — *not* a 0/1 verdict. Compute the hard
