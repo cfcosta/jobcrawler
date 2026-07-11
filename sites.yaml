@@ -4058,3 +4058,336 @@
     must cluster with these rows. Fit: Solana R&D lab (Agave validator client); Rust
     systems, distributed consensus/protocol engineering.
 
+
+# --- A.Team client-company import (2026-07-10): boards discovered and verified by the
+# per-company probe fleet from A.Team's client roster; A.Team itself is a talent
+# marketplace (denylisted in urls.py) so its own Ashby board is deliberately NOT here.
+# No public board exists for Buzzback (email-only), Centime, or Dicer.ai. ---
+
+- slug: inflection_ai
+  name: "Inflection AI"
+  url: https://boards-api.greenhouse.io/v1/boards/inflectionai/jobs?content=true
+  render: static
+  company: "Inflection AI"
+  hints: >-
+    Greenhouse board API, token `inflectionai` (NOT `inflection`, which 404s; do not confuse
+    with inflection.io martech — board meta .name = "Inflection AI" and inflection.ai/careers
+    embeds this board). Whole board in one GET (6 postings now, no pagination). Per job:
+    stable integer `id`, `title`, flattened `location.name`, `absolute_url`
+    (boards.greenhouse.io/inflectionai/jobs/<id> — apply_url), `updated_at`,
+    `first_published`, `company_name`, and `content` = HTML-ENTITY-ESCAPED description
+    (html.unescape then strip tags). No salary or employment_type fields. Fit: staff/principal
+    agentic-AI, model-training and realtime-voice engineering — strong skills match but 5 of 6
+    roles are Palo Alto onsite (one Dublin), so weak on remote/São Paulo.
+
+- slug: hca_healthcare
+  name: "HCA Healthcare"
+  url: https://careers.hcahealthcare.com/search/information-technology/jobs
+  render: browser
+  company: "HCA Healthcare"
+  enumerates_all: false
+  hints: >-
+    Talemetry/Radancy career site on the company's own careers.hcahealthcare.com (apply CTA
+    hands off to apply.talemetry.com) — server-rendered HTML, no JSON API. The whole domain
+    sits behind a Cloudflare managed challenge: every path (even robots.txt) returns the
+    "Just a moment..." interstitial to plain HTTP, so render: browser is required (verified
+    working via a real Chrome). Mega-employer whose full board is overwhelmingly clinical —
+    url is the Information Technology category listing (~65 roles, header shows "65 results",
+    ~25 cards/page, paginate ?page=2, ?page=3). Cards live in #job-list-inner as
+    .jobs-section__item blocks: title in h2.neu-text--h6 > a.neu-link, href
+    /jobs/<numericId>-<slug> (numeric id = stable key), employer line and location ("Nashville,
+    TN, United States") in sibling .neu-text--caption divs. Detail pages carry a clean
+    schema.org JobPosting JSON-LD (title, hiringOrganization, jobLocation, datePosted) plus a
+    .job-details__description HTML body; baseSalary exists in the schema but arrives empty.
+    Fit: US health-IT (MLOps, data architecture, clinical informatics), Nashville-centric,
+    mostly onsite/hybrid — modest for São Paulo remote.
+
+- slug: northern_trust
+  name: "Northern Trust"
+  url: https://ntrs.wd1.myworkdayjobs.com/wday/cxs/ntrs/northerntrust/jobs
+  render: static
+  company: "Northern Trust"
+  enumerates_all: false
+  hints: >-
+    Workday CXS board, tenant `ntrs` (matches the NTRS ticker), site `northerntrust`, wd1 pod
+    (northerntrust.com/careers links straight to it). MEGA-BOARD: unfiltered total=606, so
+    LIST via POST to the url with Content-Type: application/json and body
+    `{"appliedFacets":{"jobFamilyGroup":["333f5ad2433c1000f79c4f8be7390000"]},"limit":20,"offset":0}`
+    — that facet is the "Information Technology" Job Category (111 jobs: software eng, cyber,
+    infra/network, data analytics, Charles River support). Workday hard-caps limit at 20; page
+    offset += 20 until offset>=total. Rows: `title`, `externalPath`, `locationsText` (often
+    the literal "2 Locations" — trust the detail), `postedOn` (relative), optional
+    `remoteType`, `bulletFields`=[reqId]. BODY: GET same host + /wday/cxs/ntrs/northerntrust +
+    externalPath -> jobPostingInfo: `jobDescription` (raw HTML, NOT entity-escaped — strip
+    tags), `location`, `startDate` (real ISO date), `jobReqId` (R-number, stable external_id),
+    `timeType`, `externalUrl` (public apply page), `jobRequisitionLocation` for multi-site.
+    No salary/employment_type. Facet ids are opaque hashes that can drift — re-read from an
+    unfiltered call's facets[] rather than trusting the hardcoded id. wd1 host 406s plain GETs;
+    the CXS POST needs a browser UA + JSON Accept. Fit: US-custodian bank IT (Chicago/Tempe/
+    Pune/Bangalore) with a handful of remoteType=Remote rows — decent backend/SRE/data match,
+    Brazil unlikely.
+
+- slug: lululemon
+  name: "Lululemon"
+  url: https://careers.lululemon.com/en_US/careers/SearchCareer/?search=engineer&jobOffset=0
+  render: static
+  company: "Lululemon"
+  enumerates_all: false
+  hints: >-
+    Avature portal on careers.lululemon.com (locale path /en_US/careers), fully
+    server-rendered — no JS wall. Full board is a global retail mega-board (thousands of
+    store roles; technology facet over-matches at 676), so url is the free-text
+    `search=engineer` results page (~90 genuine software/platform/data/AI-ML/security roles).
+    ~10 jobs/page; total printed as "N results"; paginate jobOffset += 10. Each posting is an
+    <article class="article article--result">: title + stable numeric jobId in
+    h3.article__header__text__title > a (href .../JobDetail/<slug>/<jobId>), location in
+    div.article__header__text__subtitle > span as "Country · State · City" (heavy padding
+    whitespace — collapse), apply CTA <a class="apply" href=".../ApplicationMethods?jobId=…">,
+    full description in div.article__content (strip the leading "Who we are" boilerplate
+    block). No salary/employment_type fields; employment type sometimes rides the title after
+    " | " ("| Contract Until April 2027"); the same role can appear as duplicate rows across
+    locations, each with its own jobId. RSS exists at SearchCareer/feed/?search=engineer but
+    is hard-capped at 20 items with no pagination and empty descriptions — use the HTML. Fit:
+    Principal/Senior software, platform (GitLab/IaC), data and AI/ML engineering — mostly
+    Vancouver-based, limited remote.
+
+- slug: d_id
+  name: "D-ID"
+  url: https://apply.workable.com/api/v1/widget/accounts/d-id
+  render: static
+  company: "D-ID"
+  hints: >-
+    Workable widget API, account token `d-id` (widget returns name "D-ID" + the generative-AI
+    avatar company description; d-id.workable.com redirects to apply.workable.com/d-id/).
+    Whole board in one GET -> {name, description, jobs:[...]}. BOARD IS EMPTY at import time
+    (total=0, and d-id.com/careers itself says "no open positions") — treat an empty jobs
+    array as a valid live response, not an error; registered so future R&D/backend/ML reqs
+    are captured. Per job when present: `id`, `shortcode`, `title`, `employment_type`,
+    `telecommuting` (remote bool), `department`, `url`, `application_url`, flattened
+    location{country, region, city}, `created_at`. Store account-scoped public URLs
+    (https://apply.workable.com/d-id/j/<SHORTCODE>/), the §17 Workable identity-key shape.
+    Descriptions are NOT in the list payload — fetch per-job detail
+    (widget/accounts/d-id/jobs/<shortcode>). Alt: POST api/v3/accounts/d-id/jobs with
+    {"query":"","location":[],"department":[],"worktype":[],"remote":[]}. No salary fields.
+    Fit: small Tel Aviv generative-AI startup; expect a handful of Israel-based R&D roles
+    with occasional remote.
+
+- slug: allstate
+  name: "Allstate"
+  url: https://allstate.wd5.myworkdayjobs.com/wday/cxs/allstate/Allstate_Careers/jobs
+  render: static
+  company: "Allstate"
+  enumerates_all: false
+  hints: >-
+    Workday CXS board, tenant `allstate`, site `Allstate_Careers`, wd5 pod (wd1/wd3 422 for
+    this tenant). MEGA-BOARD: unfiltered total=467 (adjusters/sales-heavy), so LIST via POST
+    to the url with Content-Type: application/json and body
+    `{"appliedFacets":{"jobFamilyGroup":["bf1cc5a85e0b1002ffcbc04a1f4d0002"]},"limit":20,"offset":0}`
+    — the "Technology Group" facet (58 eng/software roles; sibling "Data & Analytics Group"
+    bf1cc5a85e0b1002ffcbc217c2580002 adds 9). Workday hard-caps limit at 20 — limit=100
+    returns ZERO rows — page offset += 20 until offset>=total. Rows: `title`, `externalPath`,
+    `locationsText` (multi-site reqs collapse to "4 Locations" — real list lives in detail
+    `jobRequisitionLocation`), `postedOn` (relative), `bulletFields`=[reqId "R32514"]. BODY:
+    GET /wday/cxs/allstate/Allstate_Careers/job/<externalPath> -> jobPostingInfo:
+    `jobDescription` raw HTML (strip tags), `jobReqId`, `location`, `country.descriptor`,
+    `remoteType`, `timeType`, `startDate`, `externalUrl` (apply_url). No salary fields. Some
+    tech reqs are branded "National General" (Allstate subsidiary). Facet ids can drift —
+    re-read from facets[] on an unfiltered call. Fit: strong — Technology Group includes
+    US-Remote and Mexico (Remote) software/platform/cloud/DBA roles suiting remote-friendly
+    São Paulo.
+
+- slug: grindr
+  name: "Grindr"
+  url: https://api.ashbyhq.com/posting-api/job-board/Grindr%20LLC?includeCompensation=true
+  render: static
+  company: "Grindr"
+  hints: >-
+    Ashby posting API, token `Grindr LLC` — the token contains a SPACE, keep it URL-encoded
+    as %20 (blind grindr/grindrapp 404; the exact endpoint is hardcoded in grindr.com's own
+    careers.js). Single GET returns the whole board {jobs:[...], apiVersion} (~23 roles, no
+    pagination). Per job: UUID `id`, `title`, `department`, `team`, `employmentType`,
+    flattened `location` + `secondaryLocations` + structured address.postalAddress, booleans
+    `isRemote`/`isListed`, `workplaceType`, `publishedAt` ISO, `jobUrl`/`applyUrl` (both
+    jobs.ashbyhq.com/Grindr%20LLC/<id> — keep the encoded token). Descriptions inline:
+    `descriptionHtml` is real HTML (NOT entity-escaped). Compensation present:
+    `compensationTierSummary`/`scrapeableCompensationSalarySummary` gives a "$186K – $248K"
+    string; compensationTiers[].components[] has structured per-location pay. Fit: solid —
+    Engineering/ML/MLOps/data-science/infosec skew, every role isRemote=true but US-hybrid
+    (Chicago/SF/NY/LA); no LATAM office.
+
+- slug: santander
+  name: "Santander"
+  url: https://santander.wd3.myworkdayjobs.com/wday/cxs/santander/SantanderCareers/jobs
+  render: static
+  company: "Santander"
+  enumerates_all: false
+  hints: >-
+    Workday CXS board, tenant `santander`, site `SantanderCareers`, wd3 pod — the single
+    GLOBAL board for all Santander entities including "008 Banco Santander (Brasil) S.A."
+    (176 reqs; santander.gupy.io variants all 404, www.santander.com.br/carreiras is
+    edge-blocked, so this is the Brasil source too). MEGA-BOARD: unfiltered total=924, so
+    LIST via POST to the url with Content-Type: application/json and body
+    `{"appliedFacets":{"jobFamilyGroup":["6cefe723149d01df0493a3f619014d4b","ab9adf92110e011571e710ab1a01034a","047662461dfb01bf0a10a10a1a01d241","135a3ebce3810166e65b0db919012550","135a3ebce38101c45b3e18b919012750"]},"limit":20,"offset":0}`
+    — the five core tech families: Software Engineering (28), Data Analytics & Models (21),
+    Technology Risk & Cybersecurity (17), Systems Infrastructure & Communication Platforms
+    (10), Solution/Infrastructure & Data Architecture (6) = 82 roles incl. SÃO PAULO
+    cybersecurity/data. Workday caps limit at 20; page offset += 20. Rows: `title`,
+    `externalPath`, `locationsText` (can be "N Locations" or null — use detail), `postedOn`,
+    `bulletFields`. BODY: GET /wday/cxs/santander/SantanderCareers + externalPath ->
+    jobPostingInfo: `jobDescription` HTML (not entity-escaped — strip tags), `location`,
+    `country.descriptor`, `startDate`, `timeType`, `jobReqId`, `externalUrl` (apply_url). No
+    salary fields. Facet ids can drift — re-read from facets[] on an unfiltered call. Fit:
+    strong — São Paulo cyber/data roles plus global Python/Android/AI engineering.
+
+- slug: idc
+  name: "IDC"
+  url: https://idccareers-idg.icims.com/jobs/search?ss=1
+  render: browser
+  company: "IDC"
+  hints: >-
+    iCIMS portal (IDG tenant, IDC-branded subdomain idccareers-idg.icims.com; idc.com/about/
+    careers links to it; detail JSON-LD hiringOrganization = "IDC Research Inc."). The whole
+    *.icims.com IDG estate sits behind an AWS WAF human-verification challenge that 405s
+    plain HTTP — needs the real-browser fetch (render: browser); if the challenge still walls
+    the render, expect the board to bench. Small board (~24 jobs, 2 pages): GET
+    /jobs/search?ss=1, paginate &pr=<n> (0-indexed); "Page 1 of 2" gives the page count. Cards:
+    div.col-xs-12.title > a.iCIMS_Anchor, href /jobs/<id>/<slug>/job (numeric id = stable
+    key), title attribute "<id> - <Title>", snippet in sibling div.col-xs-12.description
+    (entity-escaped). Detail pages carry a JobPosting JSON-LD: title, full HTML description
+    (entity-escaped — html.unescape then strip tags), employmentType, datePosted/validThrough
+    ISO; JSON-LD jobLocation fields are all "UNAVAILABLE" (iCIMS quirk) — read location from
+    the page <title> ("… | Careers at United States - Remote"). No salary. Regional filtered
+    entries exist (idccareers-latam-idg.icims.com). Fit: weak — market-research firm, mostly
+    analyst/sales roles, ~3 technical/product/data openings (some US-remote).
+
+- slug: morgan_and_morgan
+  name: "Morgan & Morgan"
+  url: https://boards-api.greenhouse.io/v1/boards/morganmorganjobsapplynow/departments/4071963004
+  render: static
+  company: "Morgan & Morgan"
+  enumerates_all: false
+  hints: >-
+    Greenhouse board API, token `morganmorganjobsapplynow` (not guessable — recovered from
+    forthepeople.com/employment/open-roles/, whose JS fetches this board; board meta .name =
+    "Morgan & Morgan, P.A."). Full board is a 363-job legal mega-board (attorneys/paralegals),
+    so url is the department endpoint for `Product` (id 4071963004) — the Brooklyn in-house
+    software/data team (~7 jobs: Software Engineers, Tech Lead Manager, PMs, UX). The
+    department listing does NOT include descriptions — fetch per job via GET
+    /v1/boards/morganmorganjobsapplynow/jobs/{id}: `content` is HTML-ENTITY-ESCAPED
+    (html.unescape then strip tags). Rows carry stable `id`, `title`, `location.name`,
+    `absolute_url` (apply_url), `updated_at`, `requisition_id`. No salary
+    (pay_input_ranges null), no employment_type. Optional extra departments: Information
+    Technology 4015759004 (security/GRC), Business Operations 4015755004 (Analytics Engineer).
+    DECOYS: the firm's Workable account `forthepeople` is live but EMPTY, and SmartRecruiters
+    tokens return 200 with totalFound:0 — Greenhouse is the only real board. Fit: weak geo —
+    all US on-site (mostly Brooklyn), no remote flags.
+
+- slug: blackstone
+  name: "Blackstone"
+  url: https://blackstone.wd1.myworkdayjobs.com/wday/cxs/blackstone/Blackstone_Careers/jobs
+  render: static
+  company: "Blackstone"
+  hints: >-
+    Workday CXS board, tenant `blackstone`, site `Blackstone_Careers`, wd1 pod (linked from
+    blackstone.com/careers). Board is 182 jobs total (<300), so LIST the WHOLE board: POST to
+    the url with Content-Type: application/json and body
+    `{"appliedFacets":{},"limit":20,"offset":0}` -> {total, jobPostings:[...]}; Workday caps
+    limit at 20 — page offset += 20 until offset>=total. Rows: `title`, `externalPath`,
+    `locationsText`, `bulletFields` ([0]=numeric jobReqId, sometimes [1]=Business Unit).
+    BODY: GET /wday/cxs/blackstone/Blackstone_Careers/job/<externalPath> -> jobPostingInfo:
+    `jobDescription` real HTML (NOT entity-escaped — strip tags), `location`, `startDate`
+    (ISO), `jobReqId`, `country`, `externalUrl` (apply_url). No salary/employment_type;
+    everything is Full time/Permanent. To pre-filter tech instead, facet
+    REC_ESI_Skill_is_Business_Unit_Extended=["7674c604ae970153f60625117b110aa4"] = the 27
+    "Information Technology" roles. Fit: modest — real software/security/data engineering,
+    but NY/Miami/NJ onsite, no remote/Brazil.
+
+- slug: accrue
+  name: "Accrue"
+  url: https://boards-api.greenhouse.io/v1/boards/accrue/jobs?content=true
+  render: static
+  company: "Accrue"
+  hints: >-
+    Greenhouse board API, token `accrue` (the payments/loyalty company at byaccrue.com —
+    formerly Accrue Savings, accruesavings.com 301s there; its careers page embeds
+    boards.greenhouse.io/accrue). Whole board in one GET (5 postings, meta.total, no
+    pagination). Per job: stable numeric `id`, `title`, `location.name` ("NYC/Remote"),
+    `absolute_url` (apply_url), `updated_at`, `company_name`, departments[]/offices[];
+    `content` is HTML-ENTITY-ESCAPED (html.unescape then strip tags). No salary or
+    employment_type fields. Fit: currently zero engineering — all NYC/Remote sales and
+    partnerships roles; cheap to track for when this payments startup posts eng reqs.
+
+- slug: apprentice
+  name: "Apprentice"
+  url: https://boards-api.greenhouse.io/v1/boards/apprentice/jobs?content=true
+  render: static
+  company: "Apprentice"
+  hints: >-
+    Greenhouse board API, token `apprentice` (apprentice.io — pharma-manufacturing AI SaaS;
+    its /about/careers page links boards.greenhouse.io/apprentice; board meta .name =
+    "Apprentice"). BOARD IS EMPTY at import time (meta.total=0, "There are no current
+    openings") — treat an empty jobs array as a valid live response, not an error; the board
+    taxonomy already has an Engineering department, so tech hiring resumes here. Whole board
+    in one GET when populated: stable integer `id`, `title`, `location.name`, `absolute_url`
+    (apply_url), `updated_at`, `content` = HTML-ENTITY-ESCAPED description (html.unescape
+    then strip tags). No salary/employment_type. GOTCHA: www.apprentice.io/careers (wrong
+    path) serves a decoy 404 titled "Not Found - Centime"; the real path is /about/careers.
+    Fit: US-HQ software/platform roles when populated; watch location.name for remote.
+
+- slug: blank_street
+  name: "Blank Street"
+  url: https://boards-api.greenhouse.io/v1/boards/blankstreet/jobs?content=true
+  render: static
+  company: "Blank Street"
+  hints: >-
+    Greenhouse board API, token `blankstreet` (board meta .name = "Blank Street";
+    blankstreet.com/en-US/careers embeds it). Whole board in one GET (73 postings, no
+    pagination). Per job: stable numeric `id`, `title`, flattened `location.name` ("New York
+    City"), `absolute_url` (apply_url), `updated_at`, `first_published`, departments[] +
+    offices[] (offices carry a richer location string); `content` is HTML-ENTITY-ESCAPED once
+    (html.unescape then strip tags). Only metadata is a "Featured" yes_no flag; no salary or
+    employment_type. Retail-heavy coffee-chain board: most rows are Barista/Cafe Manager
+    duplicated per city — filter to the corporate/tech slice by department or title. Fit:
+    weak — no software reqs now (closest: Head of Corporate IT & Security, product
+    designers), NYC/London, tracked for future eng postings.
+
+- slug: chief
+  name: "Chief"
+  url: https://api.ashbyhq.com/posting-api/job-board/chief?includeCompensation=true
+  render: static
+  company: "Chief"
+  hints: >-
+    Ashby posting API, token `chief` (chief.com/careers links jobs.ashbyhq.com/Chief; the NYC
+    private network for women executives). Single GET returns the whole board (4 postings, no
+    pagination). Per job: UUID `id`, `title`, `department`, `team`, `employmentType`,
+    flattened `location` + secondaryLocations + address.postalAddress, `publishedAt` ISO,
+    `isListed`/`isRemote` (can be null), `workplaceType`, `jobUrl`/`applyUrl`
+    (jobs.ashbyhq.com/chief/<id>), `descriptionHtml` full HTML. Despite
+    includeCompensation=true this org sets shouldDisplayCompensationOnJobPostings=false — no
+    salary data. GOTCHA: one posting is the evergreen "Don't see a role that fits?" pipeline
+    req (employmentType Contractor, isRemote/workplaceType null) — filter it out. Fit: weak —
+    currently all-NYC/US non-tech (finance, community, ops); tiny board, cheap to poll.
+
+- slug: ey
+  name: "EY"
+  url: https://careers.ey.com/ey/search/?q=&locationsearch=Brazil&locale=en_US
+  render: static
+  company: "EY"
+  enumerates_all: false
+  hints: >-
+    SAP SuccessFactors career site, tenant `ey`, custom domain careers.ey.com (linked from
+    ey.com's own careers pages). Full global board ~6,616 jobs (mega-board), so url is the
+    Brazil location facet: locationsearch=Brazil (~183 jobs, ~47% technology) — a clean AND
+    filter; avoid plain q= keyword search (loose OR-ranked, returns thousands). Plain GET
+    returns fully-rendered HTML. Pagination: classic SuccessFactors `startrow` param, 25
+    jobs/page (startrow=0,25,50,…); total + page count in the aria-label "Results X to Y of
+    Z / Page N of M". GOTCHA: each job tile renders TWICE (phone span + desktop table cell =
+    two a.jobTitle-link anchors per job) — dedupe by jobid = trailing digits of the href
+    /ey/job/<slug>/<jobid>/. Title = anchor text; state in span.jobState; free-form location
+    in span.jobLocation ("Sao Paulo JK, SP, BR, 04543-011", with "+N more..." for multi-site).
+    No date/salary/employment_type in tiles. Detail: GET the /ey/job/<slug>/<jobid>/ URL —
+    description HTML in div.jobdescription (Portuguese for BR roles), posting date in a meta
+    tag ("Fri Jun 26 00:00:00 …"), no JSON-LD, no salary. Service-line facet
+    optionsFacetsDD_customfield1 exists but has no "Technology" value — the location filter is
+    the cleanest tech-rich subset. Fit: strong — São Paulo AI/data/DevOps/backend-Java/DBA
+    roles on page one.

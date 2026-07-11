@@ -65,6 +65,11 @@ DEFAULT_MARKETPLACE_APPLY_HOSTS: frozenset[str] = frozenset(
         # per-employer link worth keeping. (Reverses an earlier read of arc.dev as a real
         # per-job board — the signup wall makes it a pool.)
         "arc.dev",
+        # a.team — fractional-talent marketplace the operator retired; its client
+        # companies' boards are tracked directly instead, and aggregators (WWR,
+        # remotive) re-list its pool postings, so any apply target landing here is a
+        # signup, not a per-employer application.
+        "a.team",
         # Deliberately NOT here, though it surfaced in the same sweep: innovecs.com mints a
         # distinct Greenhouse per-job link (jobs.innovecs.com/vacancies?gh_jid=…) — a real
         # per-job board, not a pool.
@@ -87,6 +92,9 @@ DEFAULT_MARKETPLACE_COMPANIES: frozenset[str] = frozenset(
     {
         # Confirmed in the corpus — 11 lemon.io rows arrived past the host filter.
         "lemonio",
+        # Confirmed in the corpus — 4 A.Team rows arrived via WWR/remotive with the
+        # marketplace as the printed company ("A.Team" → "ateam").
+        "ateam",
         # Preventive: the canonical company forms of the pools host-listed above.
         "proxify",
         "toptal",

@@ -133,6 +133,7 @@ def test_marketplace_denylist_defaults_to_curated(
     hosts = config.marketplace_apply_host_denylist()
     assert hosts is DEFAULT_MARKETPLACE_APPLY_HOSTS
     assert "proxify.io" in hosts  # a confirmed pool ships in the default
+    assert "a.team" in hosts  # aggregators re-list this pool's postings
 
 
 def test_marketplace_denylist_parses_csv(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -159,6 +160,7 @@ def test_marketplace_company_denylist_defaults_to_curated(
     companies = config.marketplace_company_denylist()
     assert companies is DEFAULT_MARKETPLACE_COMPANIES
     assert "lemonio" in companies  # the confirmed corpus offender ships by default
+    assert "ateam" in companies  # 4 A.Team rows arrived via WWR/remotive
 
 
 def test_marketplace_company_denylist_parses_csv(
