@@ -1468,18 +1468,6 @@
     source; enumerates_all:false. Strong match for Go backend, API platform, cloud and
     infrastructure roles.
 
-- slug: kube_careers
-  name: "Kube Careers"
-  url: https://kube.careers/
-  render: static
-  enumerates_all: false
-  hints: >-
-    Kubernetes/cloud-native job board. Crawl newest listings and fetch job detail pages;
-    parse company, title, full description, location/remote, salary when explicit,
-    employment_type, posted_at and apply_url. Windowed source; enumerates_all:false. Strong
-    match for Kubernetes, observability, platform engineering, SRE and backend
-    infrastructure roles.
-
 - slug: gitjobs_dev
   name: "GitJobs.dev"
   # Apex only: the www. host does not resolve (NXDOMAIN as of 2026-07).
@@ -1502,17 +1490,6 @@
     CV includes substantial earlier Ruby/Rails backend work. Crawl newest listings and
     detail pages for company, title, full description, location/remote, posted_at and
     apply_url. Windowed source; enumerates_all:false.
-
-- slug: ruby_on_remote
-  name: "RubyOnRemote"
-  url: https://rubyonremote.com/
-  render: static
-  enumerates_all: false
-  hints: >-
-    Remote Ruby/Rails job board. Supplemental source for backend/platform roles that can
-    leverage the candidate's earlier Rails and scaling experience. Crawl newest
-    postings/detail pages for company, title, description, location constraints, salary,
-    posted_at and apply_url. Windowed source; enumerates_all:false.
 
 - slug: a16z_portfolio_jobs
   name: "a16z Portfolio Jobs"
@@ -1795,21 +1772,6 @@
     location, department, employment type, remote/hybrid flags when present, published
     timestamp and the full description/body fields. Company is fixed. Strong match for
     peer-to-peer networking, distributed systems, cryptography and low-level backend roles.
-
-- slug: arbeitnow_remote
-  name: "Arbeitnow — Remote Tech Jobs"
-  url: https://www.arbeitnow.com/api/job-board-api?remote=true
-  render: static
-  enumerates_all: false
-  hints: >-
-    Arbeitnow public job board API. The API rate-limits aggressively: fetch a handful of
-    paced pages per crawl and STOP on the first 429 with whatever was already collected —
-    never retry a 429 in-run. Windowed/paginated remote feed; page through pagination
-    or next links if present, but treat as enumerates_all:false unless a full run proves
-    complete active-board coverage. Each job exposes slug, company_name, title, location,
-    remote boolean, tags, job_types, created_at, url and full description. Filter downstream
-    for backend, Rust, Go, distributed systems, platform, fintech, crypto and
-    search/retrieval terms.
 
 - slug: hnhiring
   name: "HNHiring"
@@ -2604,23 +2566,6 @@
     jobsboard.zeroknowledge.fm. Small but curated; high signal for ZK, cryptography, Rust,
     protocol, blockchain, and crypto-infrastructure roles.
 
-- slug: readytotouch_rust
-  name: "ReadyToTouch — Rust"
-  url: https://readytotouch.com/api/v1/unsafe/rust/vacancies.json
-  render: static
-  hints: >-
-    ReadyToTouch Rust vacancy aggregator — one public JSON GET returns the whole board as
-    `{companies:[...], vacancies:[...]}` (no auth; the 401 branch is only for logged-in
-    personalization/favorites). Each `vacancies[]` item: `id`, `title`, `short_description`,
-    `location.raw` (+ `location.country.code`), `remote` (bool), `date` (ISO posted_at),
-    `source` (int origin-ATS enum), `monthly_views`, `pinned_until`, and `company.id` — JOIN
-    that id against `companies[]` for the hiring company (`name`, `type`, `industries`,
-    `linkedin_profile.alias`). This board aggregates many companies, so there is no single
-    site company. apply_url / canonical link = https://readytotouch.com/v/<vacancy id> (302s
-    through a /welcome consent gate to the original posting — record it, don't fetch it). No
-    salary is exposed anywhere — leave the salary quartet None. Direct, high-density fit: Rust
-    backend, systems, blockchain/crypto, embedded and infrastructure roles, remote and onsite.
-
 - slug: devjobsscanner_rust
   name: "DevJobsScanner — Rust"
   url: https://www.devjobsscanner.com/api/searchFull/?search=rust&limit=200
@@ -2767,29 +2712,6 @@
     apply_url = the primary button `a.btn.btn-primary` ("Candidatar-se →"), an external ATS link
     (gem/greenhouse/lever/gupy/etc.); fall back to the rustlang detail URL if absent. Fit: Rust
     (and Rust-adjacent systems/backend) engineering roles, many remote / LATAM / international.
-
-- slug: devjobs_de_rust
-  name: "DEVjobs.de — Rust (Germany)"
-  url: https://en.devjobs.de/jobs/rust
-  render: browser
-  hints: >-
-    Server-rendered HTML behind a Cloudflare managed challenge, so a plain GET returns 403 — a
-    real browser (JS + Sec-CH-UA client hints) is required to obtain the page; no CAPTCHA is
-    solved, the challenge clears automatically. Enumerate at https://en.devjobs.de/jobs/rust:
-    every open Rust role is an `<a href="/job/<32-hex-id>">` card (~15 roles, ALL on one page —
-    no pagination, no load-more, no infinite scroll). The card carries title (`<h2>`), company
-    name, city, a Hybrid/Home-Office badge, employment type, seniority and skill tags. For clean
-    structured fields, follow each /job/<id> detail page, which embeds a JSON-LD
-    `<script type="application/ld+json">` JobPosting: title=`title`,
-    company=`hiringOrganization.name`, location=`jobLocation[].address`
-    (addressLocality/addressRegion, addressCountry "DE"), posted=`datePosted` (ISO),
-    remote=the card "Hybrid" badge or `jobBenefits` "Home Office", employmentType=`employmentType`,
-    skills=`skills`. external_id=the 32-char hex (`identifier.value`, same as the /job/<id>
-    slug). apply_url=the detail URL https://en.devjobs.de/job/<external_id> (an on-site "Apply
-    now"/"Easy Apply" button; no external employer link is exposed). salary is usually absent
-    (no `baseSalary`); when present it is EUR/year. Multi-company aggregator (Quantum-systems,
-    Delivery Hero, Axel Springer, SQUER, IABG, ...), so each posting names its own company. Fit:
-    Rust-tagged developer/engineer roles based in Germany.
 
 - slug: clickhouse
   name: "ClickHouse"
@@ -4625,41 +4547,6 @@
     role slices and dedupe by `id`. Strong match for early-stage YC-startup engineering,
     ML/AI, and founding roles, remote-friendly.
 
-- slug: otta
-  name: "Otta / Welcome to the Jungle"
-  url: https://api.exp.welcometothejungle.com/graphql
-  render: static
-  enumerates_all: false
-  hints: >-
-    Otta (acquired by and rebranded to Welcome to the Jungle) — curated startup/scaleup
-    tech-jobs aggregator. The live product is the React SPA at app.welcometothejungle.com,
-    backed by a PUBLIC unauthenticated GraphQL API at
-    https://api.exp.welcometothejungle.com/graphql (HTTP POST, header `Content-Type:
-    application/json`, no cookies/auth, CORS-open). Two-step crawl: (1) POST
-    `{"query":"query{companies(workflowStatuses:[COMPLETED,CHANGED]){id name urlSafeName
-    numberLiveJobs}}"}` to enumerate all ~12.2k companies, keep numberLiveJobs>0 (~2990
-    companies, ~32.7k live jobs); (2) per company POST
-    `{"query":"query{company(urlSafeName:\"<slug>\"){name numberLiveJobs liveJobs{externalId
-    title subtitle hideSalary salaryRange{minAmount maxAmount currency}
-    oteSalaryRange{minAmount maxAmount currency} otherCompensationInformation originalUrl
-    insertedAt validUntil function{value} subFunction{value}
-    formattedLocationPreferences{name} remoteOnly minDaysInOffice maxDaysInOffice
-    involvesBullets{value} requirements{value desirable}
-    applicationProcessBullets{value}}}}"}` which returns EVERY live job for that company
-    with full detail in one call. Field notes: `salaryRange`/`oteSalaryRange` are MoneyRange
-    objects with string `minAmount`/`maxAmount` + `currency` (structured salary — rare and
-    reliable); `originalUrl` is the real apply link on the underlying ATS
-    (Greenhouse/Lever/Workday, carries `?utm_source=Otta`); the description is NOT one HTML
-    blob but structured plain-text arrays — join `involvesBullets[].value` (what you'll do)
-    + `requirements[].value` (each with a `desirable` bool); category is `function.value` /
-    `subFunction.value`; dates are ISO `insertedAt`/`validUntil`; no HTML-entity escaping.
-    Canonical per-job page is https://app.welcometothejungle.com/jobs/<externalId> (public
-    query field `publicJob(externalId:...)`); the same payloads also SSR into
-    `window.__APOLLO_STATE__=__b64dec("<base64>")` (base64-decode then json.loads, resolve
-    Apollo `__ref` pointers) if you prefer HTML over the API. Strong for software
-    engineering, data, product and design roles at UK/EU startups and scaleups, mostly
-    London and remote-UK.
-
 - slug: turing_jobs
   name: "Turing Remote SWE Jobs"
   url: https://www.turing.com/jobs/remote-software-engineer-jobs
@@ -4844,33 +4731,6 @@
     (MonetaryAmount → currency + value.unitText HOUR/YEAR + minValue/maxValue) when present.
     Strong for remote software, backend and full-stack engineering roles, though the wider
     board also carries admin, design and sales postings.
-
-- slug: builtin_remote_engineering
-  name: "Built In Remote Engineering Jobs"
-  url: https://builtin.com/jobs/remote/dev-engineering
-  render: static
-  enumerates_all: false
-  hints: >-
-    Built In job aggregator (Drupal), remote engineering filter. Windowed crawl over
-    `?page=N` (page 1 = base URL, last page ~103, 25 jobs/page, ~2575 total). Job links live
-    ONLY in an ld+json block whose script type is HTML-entity-escaped as
-    `application/ld&#x2B;json` (the `+` is `&#x2B;`) — match on that, not plain `ld+json`.
-    The block is `{"@context",...,"@graph":[CollectionPage, ItemList]}`; take the ItemList
-    node's `itemListElement`, each ListItem has `position`, `name` (title), `url` =
-    `https://builtin.com/job/<slug>/<id>`, and a plain-text `description` summary. The
-    visible cards are React-hydrated (no static `/job/` hrefs), so the ld+json ItemList is
-    the only static source of page URLs. Fetch each detail page for the rich JobPosting
-    ld+json (same entity-escaped script type): `title`, `datePosted`, `validThrough`,
-    `employmentType`, `hiringOrganization.name`/`sameAs`/`logo`, structured
-    `jobLocation.address`, `jobLocationType` (TELECOMMUTE), `applicantLocationRequirements`,
-    `baseSalary` (MonetaryAmount currency/value.minValue/maxValue/unitText),
-    `identifier.value` (job id), and `description` as full RAW HTML (not entity-escaped —
-    strip tags directly). The outbound apply link is NOT in the JobPosting (`url`:null,
-    `directApply`:false) — parse the `<script type="module">` that calls
-    `Builtin.jobPostInit({...})` and read `job.howToApply` (the external ATS URL, e.g. a
-    Greenhouse-backed jobs.dropbox.com link) plus `job.companyName`, `job.isEasyApply`.
-    Broad source for remote US software/backend/platform/infra engineering roles at
-    established tech companies and startups.
 
 - slug: virtual_vocations_swdev
   name: "Virtual Vocations SW Dev Jobs"
@@ -5430,32 +5290,6 @@
     Filter to `isListed:true`. This is the ZK/crypto infrastructure company behind Prividium
     and ZKsync — good for remote security, infrastructure, protocol/cryptography, and
     product roles.
-
-- slug: plnetwork_jobs
-  name: "Protocol Labs"
-  url: https://directory.plnetwork.io/api/jobs/list?page=1
-  render: static
-  hints: >-
-    Protocol Labs rebranded into an "innovation network": protocol.ai/careers/ now 404s and
-    the live careers page protocol.ai/join/ links out to the network-wide board at
-    directory.plnetwork.io (a Next.js App-Router "Protocol Labs Directory"). Aggregator, not
-    a single firm — jobs come from ~36 network companies (QuickNode, Fleek, Bluesky, Prime
-    Intellect, Merge Labs, ...). Public JSON via the app's own route handler: GET
-    /api/jobs/list?page=1, no auth, no special headers. Response = {page, limit:50, total
-    (=totalGroups=36), totalGroups, totalRoles (241),
-    groups:[{team:{uid,name,logoUrl,focusAreas[],subFocusAreas[]}, totalRoles,
-    roles:[...]}]}; pagination is BY COMPANY (50 groups/page), so page=1 returns every group
-    and role in one shot (page 2 is empty). Flatten each group.roles and attach team.name as
-    the hiring company. Each role carries uid, roleTitle, roleCategory (Engineering / GTM-
-    Marketing / Leadership-Exec / ...), seniority (e.g. "Senior (L4)"), location (string
-    array like ["US","Portugal"]), workMode (often null), applyUrl (the real underlying ATS
-    link — mostly jobs.ashbyhq.com / jobs.lever.co / apply.workable.com / jobs.gem.com, some
-    Greenhouse/Personio/custom), plus lastUpdated / postedDate / detectionDate ISO
-    timestamps. No description or salary in this feed — follow applyUrl to the underlying
-    ATS for those. Sibling GET /api/jobs/filters returns facet counts; query params are q,
-    roleCategory, seniority, focus, location, workplaceType, sort
-    (company_az|company_za|newest). Strong coverage of crypto/web3, AI, and deep-tech
-    engineering plus GTM roles across the PL portfolio.
 
 - slug: phantom
   name: "Phantom"
