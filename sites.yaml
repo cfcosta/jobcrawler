@@ -7595,3 +7595,823 @@
     `shouldDisplayCompensationOnJobPostings=false` so those come back empty/null. Small
     DeFi/DAO board (1 live listing at probe time) — good for remote legal/governance,
     finance/regulatory, and protocol/crypto-engineering roles across the Sky Ecosystem.
+
+- slug: akamai
+  name: "Akamai"
+  url: https://fa-extu-saasfaprod1.fa.ocs.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitions?onlyData=true&finder=findReqs;siteNumber=CX_1,limit=200,offset=0,sortBy=POSTING_DATES_DESC&expand=requisitionList.secondaryLocations,requisitionList.workLocation
+  render: static
+  company: "Akamai"
+  hints: >-
+    Oracle Recruiting Cloud (Fusion HCM Candidate Experience) on tenant `fa-extu-
+    saasfaprod1.fa.ocs.oraclecloud.com`, siteNumber `CX_1`; the human board is
+    jobs.akamai.com/en/sites/CX_1. LIST is GET
+    recruitingCEJobRequisitions?finder=findReqs;siteNumber=CX_1,limit=200,offset=N ->
+    items[0].requisitionList[] with the grand total at items[0].TotalJobsCount; the server
+    hard-caps each page at 200 so walk `offset` until you have collected TotalJobsCount.
+    BODY is a batched GET recruitingCEJobRequisitionDetails?finder=ById;Id=%22<comma-
+    ids>%22,siteNumber=CX_1 -> items[]; concat HTML ExternalDescriptionStr +
+    ExternalQualificationsStr + ExternalResponsibilitiesStr (most reqs pack everything into
+    ExternalDescriptionStr). Akamai is a core CDN/edge-cloud and cloud-security
+    infrastructure vendor and the board skews heavily to SRE, software, network-infra and
+    security-architect roles.
+
+- slug: anysphere
+  name: "Anysphere"
+  url: https://api.ashbyhq.com/posting-api/job-board/cursor?includeCompensation=true
+  render: static
+  company: "Anysphere"
+  hints: >-
+    Anysphere builds Cursor, the AI-native code editor, so this board is a strong AI-
+    infra/devtools fit. Its Ashby posting-api returns a flat jobs[] array; take
+    descriptionPlain, jobUrl and location per posting and skip isListed:false entries. The
+    public vanity token 'anysphere' 404s on the API; the live board token is 'cursor'.
+
+- slug: aqua_security
+  name: "Aqua Security"
+  url: https://www.comeet.co/careers-api/2.0/company/91.001/positions?token=191644966966644E194B3191644644&details=true
+  render: static
+  company: "Aqua Security"
+  hints: >-
+    Comeet ATS (not Greenhouse/Ashby/etc). The aquasec.com/about-us/careers/ page embeds a
+    Comeet careers-api call with COMPANY_UID `91.001` and a public read TOKEN; the whole
+    board plus descriptions come back in one GET from `https://www.comeet.co/careers-
+    api/2.0/company/91.001/positions?token=<TOKEN>&details=true`. Response is a bare JSON
+    array (no envelope/pagination) of position objects, each with `uid`, `name`,
+    `department`, `workplace_type` (On-site/Hybrid/Remote), `employment_type` (may be null),
+    nested `location` (`name`/`city`/`state`/`country`/`is_remote`), `time_updated`
+    (ISO-8601 Z), `company_name`, and `url_active_page` = the on-site apply/detail page.
+    With `details=true` each job carries a `details` array of ordered `{name, value}`
+    sections (Description / Requirements) where `value` is raw HTML with real tags and
+    literal Unicode chars, so just strip tags. Good fit for cloud-native / container
+    security R&D: platform and runtime backend (Go), security research, plus product and GTM
+    sales roles.
+
+- slug: ashby
+  name: "Ashby"
+  url: https://api.ashbyhq.com/posting-api/job-board/Ashby?includeCompensation=true
+  render: static
+  company: "Ashby"
+  hints: >-
+    Ashby is the ATS vendor hiring for itself; its own board is served by the Ashby posting-
+    api, returning a flat {"jobs": [...]} array of postings with title, descriptionPlain,
+    jobUrl, location, department/team, and includeCompensation salary summaries. As an all-
+    in-one recruiting and hiring-analytics platform it is a devtools/data-infra company
+    building the software this project crawls. Parse is a single JSON GET, skip
+    isListed=false, and lift secondaryLocations plus the compensation summaryComponents for
+    salary ranges.
+
+- slug: atlassian
+  name: "Atlassian"
+  url: https://www.atlassian.com/endpoint/careers/listings
+  render: static
+  company: "Atlassian"
+  hints: >-
+    Atlassian's public careers board is served as a first-party JSON array at
+    /endpoint/careers/listings (no auth, plain curl works), each element carrying title,
+    category, a locations list, and overview/responsibilities/qualifications HTML blocks
+    that concatenate into the description; canonical role pages live at
+    /company/careers/details/<id> and the iCIMS apply URL is stored from
+    applyUrl/portalJobPost.portalUrl. The feed aggregates Atlassian's iCIMS recruiting
+    portals into one clean listing and returns the whole board in a single call, so de-dupe
+    exact repeated ids. Atlassian is a core devtools and team-collaboration company (Jira,
+    Confluence, Bitbucket, Compass), squarely in scope.
+
+- slug: automattic
+  name: "Automattic"
+  url: https://automattic.com/work-with-us/jobs/
+  render: static
+  company: "Automattic"
+  hints: >-
+    Automattic builds the open-source web platform behind WordPress.com, WooCommerce,
+    Jetpack, Tumblr and Beeper, making it a core web-infrastructure and developer-tools
+    employer. Its careers page is Greenhouse-backed, but the public Greenhouse board token
+    does not resolve, so open roles are parsed from an inline `const ghJobsData = [...]`
+    JSON array embedded in the jobs page by the WordPress wwu-positions block. Each entry
+    carries id, title, HTML content, category and team that map cleanly to a Job dict, and
+    since the company is fully distributed every role is treated as remote.
+
+- slug: bamboohr
+  name: "BambooHR"
+  url: https://boards-api.greenhouse.io/v1/boards/bamboohr17/jobs?content=true
+  render: static
+  company: "BambooHR"
+  hints: >-
+    BambooHR is an HR SaaS platform vendor (HRIS, payroll, benefits, and its own applicant
+    tracking). The public careers page hydrates from Greenhouse under the token bamboohr17,
+    so the crawler reads the standard boards-api.greenhouse.io jobs feed: a flat jobs[]
+    array where content is HTML-entity-escaped body text, absolute_url is the apply link,
+    location.name carries the office string (';'-joined for multi-state remote roles), and
+    departments[] gives the team. Fits as a devtools-adjacent people-ops/payroll
+    infrastructure company hiring platform and engineering staff.
+
+- slug: box
+  name: "Box"
+  url: https://boards-api.greenhouse.io/v1/boards/boxinc/jobs?content=true
+  render: static
+  company: "Box"
+  hints: >-
+    Box runs the enterprise Content Cloud - secure file storage, sharing, and AI-driven
+    content management infrastructure for large organizations. Parse the Greenhouse boards-
+    api JSON at /v1/boards/boxinc/jobs with content=true for the HTML job body and
+    pay_transparency=true for per-region pay_input_ranges; each job yields absolute_url,
+    title, location.name, and departments. USD bands are single-currency so they collapse
+    cleanly into salary_min/max.
+
+- slug: buffer
+  name: "Buffer"
+  url: https://api.ashbyhq.com/posting-api/job-board/buffer?includeCompensation=true
+  render: static
+  company: "Buffer"
+  hints: >-
+    Ashby posting-api job board for Buffer, the fully-remote social-media management SaaS.
+    Parse shape is a flat JSON {"jobs":[...]} where each posting carries descriptionPlain,
+    jobUrl, location/secondaryLocations, workplaceType and a compensation block with
+    scrapeableCompensationSalarySummary plus summaryComponents. Buffer is an engineering-led
+    remote product company that publishes salary bands on every listing.
+
+- slug: civo
+  name: "Civo"
+  url: https://careers.civo.com/jobs.rss
+  render: static
+  company: "Civo"
+  hints: >-
+    Teamtailor career site, read via its `jobs.rss` feed (RSS 2.0 with the `tt:` Teamtailor
+    namespace) in one GET. Each `<item>` yields `title`, `link`, an HTML-escaped
+    `description` (unescape + strip tags), `pubDate`, `remoteStatus`, and `tt:department`;
+    location comes from `tt:locations` or, when that container is empty, from `remoteStatus`
+    (`fully` -> Remote), which also maps to workplace_type. The companion `jobs.json` (JSON
+    Feed 1.1) lists the same postings but carries no location field. Strong match for
+    Kubernetes, cloud-native platform, Go backend and AI/ML infrastructure roles.
+
+- slug: coder
+  name: "Coder"
+  url: https://api.ashbyhq.com/posting-api/job-board/coder?includeCompensation=true
+  render: static
+  company: "Coder"
+  hints: >-
+    Ashby posting-api job board returning a flat {"jobs":[...]} array; each entry carries
+    descriptionPlain, jobUrl, location, team/department and an Ashby compensation block with
+    scrapeableCompensationSalarySummary and summaryComponents. Coder builds self-hosted
+    cloud development environments (remote/CDE devtools infrastructure), a clean single-
+    employer infra fit. Parse mirrors the Ashby template: skip isListed=false, require
+    title+description+jobUrl+location.
+
+- slug: cognition
+  name: "Cognition"
+  url: https://api.ashbyhq.com/posting-api/job-board/cognition?includeCompensation=true
+  render: static
+  company: "Cognition"
+  hints: >-
+    Ashby posting-api JSON board (jobs array with descriptionPlain, jobUrl, location,
+    department/team, and includeCompensation salary summaries). Cognition is the AI-infra
+    lab behind the Devin autonomous software engineer, so its roles fit the AI/devtools
+    focus.
+
+- slug: continue_dev
+  name: "Continue"
+  url: https://api.ashbyhq.com/posting-api/job-board/continue?includeCompensation=true
+  render: static
+  company: "Continue"
+  hints: >-
+    Single-company Ashby board for Continue, the maker of the open-source AI code assistant
+    and IDE extensions (hub.continue.dev) — an AI-infra / devtools employer. The posting-api
+    job-board endpoint returns a flat jobs[] array; each entry carries title,
+    descriptionPlain, jobUrl, location, department/team, and optional compensation. Parse is
+    a plain JSON walk over jobs[], skipping any entry with isListed=false.
+
+- slug: cribl
+  name: "Cribl"
+  url: https://boards-api.greenhouse.io/v1/boards/cribl/jobs?content=true
+  render: static
+  company: "Cribl"
+  hints: >-
+    Cribl builds telemetry-pipeline / observability infrastructure (Stream, Edge, Search,
+    Lake) that routes and reshapes logs, metrics, and traces for IT and Security teams. Its
+    Greenhouse board serves a single JSON list at boards-
+    api.greenhouse.io/v1/boards/cribl/jobs with ?content=true for embedded HTML descriptions
+    and ?pay_transparency=true for USD pay_input_ranges; each job carries absolute_url,
+    location, offices, and departments. A clean single-employer observability board well
+    under the mega-board size.
+
+- slug: crowdstrike
+  name: "CrowdStrike"
+  url: https://crowdstrike.wd5.myworkdayjobs.com/wday/cxs/crowdstrike/crowdstrikecareers/jobs
+  render: static
+  company: "CrowdStrike"
+  enumerates_all: false
+  hints: >-
+    CrowdStrike's own Workday tenant (crowdstrike.wd5, crowdstrikecareers site). The CXS
+    list endpoint takes a POST with {appliedFacets, limit, offset} and returns paginated
+    jobPostings each carrying an externalPath; the crawler fetches CXS_BASE + externalPath
+    for the full jobPostingInfo (title, location, HTML jobDescription, jobReqId, timeType,
+    remoteType). CrowdStrike is a cloud-native cybersecurity and endpoint-protection company
+    (the Falcon platform), so the board is heavy on sensor, cloud-security, detection-and-
+    response and AI-security engineering roles. Mega-board, so the crawler yields a bounded
+    rolling sample rather than the full listing.
+
+- slug: culture_amp
+  name: "Culture Amp"
+  url: https://boards-api.greenhouse.io/v1/boards/cultureamp/jobs?content=true
+  render: static
+  company: "Culture Amp"
+  hints: >-
+    Greenhouse boards API for Culture Amp, the employee-experience and people-analytics SaaS
+    platform. The `content=true` endpoint returns the full jobs array in one static JSON
+    call, each entry carrying absolute_url, title, location.name, departments and the
+    escaped-HTML posting body. Fits the fleet's data/AI-infra profile via its applied-AI and
+    data-science engineering roles building the analytics platform.
+
+- slug: digitalocean
+  name: "DigitalOcean"
+  url: https://boards-api.greenhouse.io/v1/boards/digitalocean98/jobs?content=true
+  render: static
+  company: "DigitalOcean"
+  hints: >-
+    DigitalOcean is a cloud infrastructure provider (compute, managed databases, Kubernetes)
+    hiring across engineering, data-center operations and support. Standard Greenhouse
+    boards API: GET the board's /jobs?content=true endpoint and iterate data['jobs'],
+    reading title, absolute_url, location.name, and the HTML content field (unescape
+    entities then strip tags). Board token digitalocean98 was recovered from the careers
+    open-roles Next.js bundle and identity-confirmed via the board name field
+    'DigitalOcean'.
+
+- slug: docusign
+  name: "Docusign"
+  url: https://careers.docusign.com/api/jobs
+  render: static
+  company: "Docusign"
+  enumerates_all: false
+  hints: >-
+    Docusign runs a Jibe (iCIMS-owned) careers front-end over its iCIMS ATS, exposing a
+    clean single-company JSON board at /api/jobs. Each entry nests a data object with slug,
+    title, plain-text description, full_location, categories, tags2 workplace type and an
+    icims apply_url. The crawler paginates page/limit and dedupes by slug. Docusign is an
+    agreement/e-signature SaaS with substantial software, AI and platform engineering
+    hiring.
+
+- slug: dropbox
+  name: "Dropbox"
+  url: https://boards-api.greenhouse.io/v1/boards/dropbox/jobs?content=true
+  render: static
+  company: "Dropbox"
+  hints: >-
+    Greenhouse board API, token `dropbox` (board name field confirms `Dropbox`). Whole board
+    in one GET; each job carries stable `id`, `title`, flattened `location.name`,
+    `absolute_url` (a jobs.dropbox.com apply link), `first_published`, `departments`,
+    `metadata` (Time Type -> employment_type), `pay_input_ranges`, and HTML-entity-escaped
+    full `content` (html.unescape then strip tags). Pay ranges are single-currency per role
+    (USD/CAD/PLN) so they collapse into one honest band. Strong match for distributed
+    storage, file sync/collaboration infrastructure, search-platform, SRE/production-
+    engineering and infra-security roles.
+
+- slug: dynatrace
+  name: "Dynatrace"
+  url: https://www.dynatrace.com/api/coveo/search/
+  render: static
+  company: "Dynatrace"
+  hints: >-
+    Dynatrace is an observability, APM, and application-security platform, so its board is a
+    rich seam of infra, devtools, and security engineering roles. The careers UI is backed
+    by a Coveo search proxy: a single POST to /api/coveo/search/ with an empty query and a
+    large page size returns every open role in one JSON payload. Each result carries the
+    full HTML job description inline alongside structured office_locations, country, team,
+    employment_type, and flex_option facets, so no per-job detail fetch is needed.
+
+- slug: gitbook
+  name: "GitBook"
+  url: https://api.ashbyhq.com/posting-api/job-board/GitBook?includeCompensation=true
+  render: static
+  company: "GitBook"
+  hints: >-
+    GitBook makes a documentation and knowledge-management platform for developer teams
+    (docs-as-code, API references, published from Git). This is their own single-company
+    Ashby board, parsed from the posting-api job-board JSON: iterate data['jobs'], skip
+    isListed==false, and read title/descriptionPlain/jobUrl/location with compensation from
+    the compensation object. A devtools/documentation-infra employer.
+
+- slug: gitguardian
+  name: "GitGuardian"
+  url: https://careers.gitguardian.com/jobs.rss
+  render: static
+  company: "GitGuardian"
+  hints: >-
+    Teamtailor career site on the custom domain `careers.gitguardian.com` (the default
+    `gitguardian.teamtailor.com` 301-redirects here); crawl its RSS 2.0 feed at `/jobs.rss`
+    (the Teamtailor `api.teamtailor.com` JSON API needs an API key, so the RSS is the best
+    public structured endpoint). One GET returns the whole board, no pagination. Each
+    `<item>` carries `title`, `description` = full job body as HTML-ENTITY-ESCAPED HTML
+    (html.unescape then strip tags), `pubDate`, `link` = the job URL
+    `https://careers.gitguardian.com/jobs/<id>-<slug>`, `remoteStatus` (hybrid/fully/none ->
+    workplace_type), `guid` (UUID), plus Teamtailor `tt:` namespace fields: `tt:department`,
+    `tt:role`, and `tt:locations` holding one or more `tt:location` each with
+    `tt:name`/`tt:address`/`tt:zip`/`tt:city`/`tt:country`. No salary or employment_type
+    fields. Strong match for this Paris cybersecurity scale-up: secrets detection, NHI
+    governance, endpoint/security engineering, backend (Python/Django) and AI/ML roles
+    across Paris, New York, Boston and remote US/EU.
+
+- slug: github
+  name: "GitHub"
+  url: https://www.github.careers/api/jobs?limit=100
+  render: static
+  company: "GitHub"
+  hints: >-
+    GitHub runs a Jibe/iCIMS career site (client_code githubinc) whose search backend
+    exposes a plain JSON jobs API. A single GET with limit=100 returns the whole board under
+    jobs[].data, each carrying title, description (full HTML posting), location_name,
+    categories, req_id and an iCIMS apply_url. GitHub is the world's leading developer
+    platform, so this is a core devtools/AI-infra employer worth tracking.
+
+- slug: grammarly
+  name: "Grammarly (Superhuman)"
+  url: https://api.ashbyhq.com/posting-api/job-board/Superhuman%20Platform%20Inc?includeCompensation=true
+  render: static
+  company: "Superhuman"
+  hints: >-
+    Ashby posting-API board for Superhuman Platform Inc, the merged parent of Grammarly,
+    Coda, and Superhuman; grammarly.com/jobs now redirects to superhuman.com/company/careers
+    and embeds this board. A single GET returns a jobs array with descriptionPlain, jobUrl,
+    applyUrl, team, workplaceType, and structured compensation summaries. Strong AI-devtools
+    fit: the company builds Grammarly's AI writing assistant, the Coda docs platform, and
+    the Superhuman email client, hiring across Engineering, SRE, and Data Science.
+
+- slug: greenhouse
+  name: "Greenhouse"
+  url: https://boards-api.greenhouse.io/v1/boards/greenhouse/jobs?content=true
+  render: static
+  company: "Greenhouse"
+  hints: >-
+    Standard Greenhouse boards-API shape: GET
+    /v1/boards/greenhouse/jobs?content=true&pay_transparency=true returns a jobs[] array,
+    each entry carrying HTML content (stripped to plaintext), a location.name,
+    departments[], first_published, and optional pay_input_ranges bands. This is Greenhouse
+    the ATS vendor hiring for itself, a recruiting/HR-tech SaaS whose engineering, data-
+    science and GTM-engineering openings fit the devtools/software bucket. Single-employer
+    board; every open role is enumerated in a single request, so no pagination is needed.
+
+- slug: hetzner
+  name: "Hetzner"
+  url: https://career.hetzner.com/en/jobs/
+  render: static
+  company: "Hetzner"
+  hints: >-
+    Hetzner is one of Europe's largest bare-metal, cloud, and colocation hosting providers,
+    so its openings skew toward data-center operations, systems and network, security, and
+    backend software. The board is Hetzner's own self-hosted careers site
+    (career.hetzner.com, no third-party ATS): crawl() parses the server-rendered listing
+    table for each role's title, location, category, and employment type, then fetches each
+    detail page and extracts the description from its scheme-content sections. Roles are on-
+    site at the German data-center towns (Gunzenhausen, Falkenstein, Nuremberg) and salaries
+    are not posted.
+
+- slug: incident_io
+  name: "incident.io"
+  url: https://api.ashbyhq.com/posting-api/job-board/incident?includeCompensation=true
+  render: static
+  company: "incident.io"
+  hints: >-
+    incident.io builds incident management, on-call, and status-page tooling for reliability
+    and SRE teams, squarely in the observability/devtools space. Its own hiring runs on
+    Ashby: the posting-api job-board endpoint returns a jobs[] array where each entry
+    carries descriptionPlain, jobUrl on jobs.ashbyhq.com/incident, department/team,
+    publishedAt, and a compensation block. Parse is plain JSON with no pagination; skip
+    entries where isListed is false.
+
+- slug: inference_net
+  name: "Inference.net"
+  url: https://api.ashbyhq.com/posting-api/job-board/inference?includeCompensation=true
+  render: static
+  company: "Inference.net"
+  hints: >-
+    Ashby posting-api JSON board: read data['jobs'], drop isListed=false, and take
+    title/descriptionPlain/jobUrl/location with employmentType, workplaceType,
+    department/team and compensation summary when present. Inference.net runs a globally
+    distributed GPU cluster serving low-latency LLM inference, so its openings (model-
+    performance/CUDA, applied ML, ML research, full-stack) are core AI-infra hiring. Note
+    the board token is 'inference', not the 'inference-net' careers-page slug that 404s on
+    the API.
+
+- slug: kentik
+  name: "Kentik"
+  url: https://boards-api.greenhouse.io/v1/boards/kentik/jobs?content=true
+  render: static
+  company: "Kentik"
+  hints: >-
+    Kentik is a network observability platform for cloud, WAN, and data-center traffic
+    analytics. The Greenhouse boards API returns a jobs array; each entry carries
+    absolute_url, title, a location object, HTML content, departments, and first_published,
+    which map straight onto the standard Greenhouse Job shape. Single-company board (token
+    'kentik'), so every listing is a Kentik infra/observability role.
+
+- slug: lattice
+  name: "Lattice"
+  url: https://boards-api.greenhouse.io/v1/boards/lattice/jobs?content=true
+  render: static
+  company: "Lattice"
+  hints: >-
+    Lattice is an HR / people-management SaaS platform (performance, engagement, and HRIS
+    tooling) now leaning into AI for HR workflows. Its careers page embeds the Greenhouse
+    board token 'lattice', so we hit boards-
+    api.greenhouse.io/v1/boards/lattice/jobs?content=true&pay_transparency=true and parse
+    the jobs[] array: each entry gives title, absolute_url, location.name, HTML content,
+    departments[], and any pay_input_ranges. HTML content is entity-escaped and stripped to
+    plain text.
+
+- slug: lm_studio
+  name: "LM Studio"
+  url: https://api.ashbyhq.com/posting-api/job-board/lm-studio?includeCompensation=true
+  render: static
+  company: "LM Studio"
+  hints: >-
+    Ashby posting-api board; parse data['jobs'], keep isListed entries, and read
+    descriptionPlain/jobUrl/location plus the compensation summary exactly like the convex-
+    dev crawler. LM Studio builds the popular local-LLM desktop runtime (C++ native engine,
+    llama.cpp/MLX integrations), so it is squarely an AI-infra employer worth indexing. The
+    board token is the hyphenated lm-studio, not the lmstudio slug in the careers URL.
+
+- slug: logicmonitor
+  name: "LogicMonitor"
+  url: https://boards-api.greenhouse.io/v1/boards/logicmonitor/jobs?content=true
+  render: static
+  company: "LogicMonitor"
+  hints: >-
+    LogicMonitor is an SaaS-based hybrid observability and IT infrastructure monitoring
+    platform, now extending into agentic AIOps with its Edwin AI product. Standard
+    Greenhouse boards API: GET the board's jobs?content=true and iterate data['jobs'],
+    reading absolute_url, title, location.name, entity-escaped HTML content, and
+    departments. Strong observability/infra fit for the monitoring thesis.
+
+- slug: logzio
+  name: "Logz.io"
+  url: https://api.lever.co/v0/postings/logz?mode=json
+  render: static
+  company: "Logz.io"
+  hints: >-
+    Logz.io is a Tel Aviv-based observability and security platform (its Open 360 stack
+    unifies logs, metrics, and traces on open source with agentic AI), squarely in the
+    devtools/observability lane. Its careers page links to jobs.lever.co/logz, so the
+    crawler reads the Lever v0 postings JSON API and yields one job per posting. Body text
+    is assembled from descriptionPlain plus each lists[].text/content section and
+    additionalPlain, then tag-stripped and entity-unescaped; location, team/department,
+    commitment, workplaceType, and the createdAt millisecond timestamp come from each
+    posting's categories block.
+
+- slug: minio
+  name: "MinIO"
+  url: https://boards-api.greenhouse.io/v1/boards/minio/jobs?content=true
+  render: static
+  company: "MinIO"
+  hints: >-
+    MinIO builds the high-performance, S3-compatible object storage that underpins AI/ML and
+    modern data-analytics infrastructure, so its roles map cleanly onto the project's
+    infra/data-storage focus. Parse shape is the standard Greenhouse boards API: GET the
+    board's jobs?content=true endpoint and iterate data['jobs'], taking title,
+    location.name, entity-escaped HTML content (unescape then strip tags), absolute_url, and
+    department/office names. Board identity confirmed via /v1/boards/minio name field
+    'MinIO'; pay_transparency currently returns no ranges.
+
+- slug: miro
+  name: "Miro"
+  url: https://api.ashbyhq.com/posting-api/job-board/miro?includeCompensation=true
+  render: static
+  company: "Miro"
+  hints: >-
+    Ashby posting-api board returning a flat jobs[] array; each entry carries title,
+    descriptionPlain, jobUrl, location, team/department and an Ashby-hosted applyUrl, parsed
+    exactly like other single-company Ashby boards. Miro is a visual-collaboration SaaS
+    platform whose engineering org hires across AI/ML, application security, threat
+    detection and design/platform engineering. Compensation objects are present but hidden
+    on most postings, so salary is emitted only when Ashby exposes a summary. Static JSON,
+    no browser rendering required.
+
+- slug: new_relic
+  name: "New Relic"
+  url: https://boards-api.greenhouse.io/v1/boards/newrelic/jobs?content=true&pay_transparency=true
+  render: static
+  company: "New Relic"
+  hints: >-
+    Greenhouse board API, token `newrelic`. Whole board in one GET; parse the standard
+    Greenhouse fields (id, title, absolute_url, location.name, content HTML, departments).
+    pay_transparency=true adds pay_input_ranges, collapsed into a single-currency salary
+    band when present. Strong match for observability, telemetry data platforms, APM,
+    distributed tracing and instrumentation infrastructure roles.
+
+- slug: openrouter
+  name: "OpenRouter"
+  url: https://api.ashbyhq.com/posting-api/job-board/openrouter?includeCompensation=true
+  render: static
+  company: "OpenRouter"
+  hints: >-
+    OpenRouter runs a unified inference API and marketplace that routes requests across
+    dozens of LLM providers behind one endpoint, squarely in the AI-infra / devtools bucket.
+    The Ashby posting API returns a flat jobs array; each entry carries title,
+    descriptionPlain, jobUrl, location, department/team, and a compensation block, so
+    parsing is a direct field map with no HTML cleanup needed. Roles like Provider
+    Operations & Support and Forward Deployed Engineer confirm this is the model-routing
+    infra company.
+
+- slug: orca_security
+  name: "Orca Security"
+  url: https://boards-api.greenhouse.io/v1/boards/orcasecurity/jobs?content=true
+  render: static
+  company: "Orca Security"
+  hints: >-
+    Greenhouse boards API (board token orcasecurity); parse data.jobs[], one posting each
+    with absolute_url, title, location.name, and entity-escaped HTML in content that is
+    unescaped and tag-stripped. Orca Security is an agentless cloud security (CNAPP)
+    platform covering AWS/Azure/GCP workloads, so its engineering, research, and sales-
+    engineering roles fit the security/infra scope.
+
+- slug: ovhcloud
+  name: "OVHcloud Careers"
+  url: https://careers.ovhcloud.com/search/?q=&locale=en_US
+  render: static
+  company: "OVHcloud"
+  hints: >-
+    SAP SuccessFactors Career Site Builder hosted on OVHcloud's own careers domain: the
+    /search/ endpoint renders job tiles server-side (100 per page, paginated by startrow),
+    and each tile links to a detail page carrying schema.org/JobPosting microdata plus data-
+    careersite-propertyid spans for description, location, department, contract type and
+    workplace mode. OVHcloud is a European cloud-infrastructure provider (bare-metal, hosted
+    private cloud, public cloud and its own datacenters), so roles cluster around SRE,
+    network and hardware infrastructure, and datacenter operations. Single-employer board;
+    identity confirmed via itemprop=hiringOrganization = OVHcloud.
+
+- slug: oyster
+  name: "Oyster"
+  url: https://api.ashbyhq.com/posting-api/job-board/oyster?includeCompensation=true
+  render: static
+  company: "Oyster"
+  hints: >-
+    Ashby posting-api job board (jobs.ashbyhq.com/oyster) returning a flat jobs[] array;
+    each entry carries title, descriptionPlain, location, secondaryLocations,
+    department/team and a compensation block with scrapeableCompensationSalarySummary.
+    Oyster is a global-employment / HR-infrastructure platform (payroll, contracts, benefits
+    across borders), fitting the devtools/infra employer profile. Filter on isListed and
+    skip entries missing url/title/description.
+
+- slug: palo_alto_networks
+  name: "Palo Alto Networks"
+  url: https://paloaltonetworks.wd5.myworkdayjobs.com/wday/cxs/paloaltonetworks/panwexternalcareers/jobs
+  render: static
+  company: "Palo Alto Networks"
+  enumerates_all: false
+  hints: >-
+    Workday CXS board (tenant paloaltonetworks, site panwexternalcareers): POST /jobs with
+    an appliedFacets jobFamilyGroup filter pins the listing to the Engineering Function,
+    then each externalPath is resolved through the /job/<path> detail endpoint for the full
+    jobPostingInfo (title, HTML jobDescription, location, jobReqId, remoteType, startDate).
+    Palo Alto Networks is a core enterprise-security and AI-infra vendor, so the filtered
+    roles are software, cloud-security, and security-research positions (including post-
+    acquisition CyberArk engineering). Paginated over limit/offset and capped, so it samples
+    the engineering slice rather than mirroring the full ~1400-role board.
+
+- slug: poolside
+  name: "Poolside"
+  url: https://api.ashbyhq.com/posting-api/job-board/poolside?includeCompensation=true
+  render: static
+  company: "Poolside"
+  hints: >-
+    Poolside is an AI-infra company building frontier foundation models for software
+    development, hiring across pre-training, reinforcement learning, post-training,
+    synthetic data, and evaluations. The Ashby posting API returns a flat jobs array; each
+    entry carries descriptionPlain, jobUrl, location, secondaryLocations and
+    department/team, filtered on isListed. Strong fit as an AI-infra employer.
+
+- slug: prime_intellect
+  name: "Prime Intellect"
+  url: https://api.ashbyhq.com/posting-api/job-board/primeintellect?includeCompensation=true
+  render: static
+  company: "Prime Intellect"
+  hints: >-
+    Prime Intellect is an AI-infrastructure company building decentralized/distributed
+    training, reinforcement-learning, and GPU compute platforms. The Ashby posting-api
+    returns a flat jobs[] array with descriptionPlain, jobUrl, location, and
+    secondaryLocations, so a single static JSON fetch enumerates every open role. Roles skew
+    heavily toward research engineering, training/inference platforms, and GPU
+    infrastructure.
+
+- slug: rootly
+  name: "Rootly"
+  url: https://jobs.gem.com/api/public/graphql
+  render: static
+  company: "Rootly"
+  hints: >-
+    Gem-hosted single-company board (jobs.gem.com/rootly) served via GraphQL: a JobBoardList
+    query returns oatsExternalJobPostings, then a batched oatsExternalJobPosting query
+    hydrates descriptionHtml, locations, department, employmentType and firstPublishedTsSec
+    per extId. Rootly is an AI-powered incident-management, on-call and SRE reliability
+    platform, squarely in the infra/observability/devtools lane. Location names default to a
+    generic 'Office' label, so the crawler falls back to the city field for a usable
+    location.
+
+- slug: safetywing
+  name: "SafetyWing"
+  url: https://safetywing.pinpointhq.com/postings.json
+  render: static
+  company: "SafetyWing"
+  hints: >-
+    Pinpoint ATS board, subdomain token `safetywing`. Public `postings.json` returns the
+    whole board as `{"data": [...]}` in one GET; each posting carries `id`, `title`,
+    absolute `url`/`path`, a `location` object, `job.department.name`,
+    `employment_type`/`workplace_type`, plus several HTML content fields (`description`,
+    `key_responsibilities`, `skills_knowledge_expertise`, `benefits`) whose tags pack with
+    no inter-tag whitespace, so replace tags with a space before collapsing. Compensation is
+    gated behind `compensation_visible` (currently hidden). SafetyWing (YC W18) is a remote-
+    first insurtech/fintech building global health, insurance and retirement products for
+    distributed teams, so its board skews fully-remote product, operations, partnerships and
+    backend-adjacent roles.
+
+- slug: salt_security
+  name: "Salt Security"
+  url: https://boards-api.greenhouse.io/v1/boards/saltsecurity/jobs?content=true
+  render: static
+  company: "Salt Security"
+  hints: >-
+    Salt Security is the original API security vendor, protecting APIs across the full
+    lifecycle from discovery to runtime threat detection. Its Greenhouse board (token
+    saltsecurity) returns a jobs array; each entry carries title, absolute_url, a location
+    object with a name, HTML-escaped content, and a departments list. Parse follows the
+    standard Greenhouse shape: unescape entities, strip tags, and fetch with
+    pay_transparency=true for pay bands when present.
+
+- slug: scaleway
+  name: "Scaleway"
+  url: https://api.lever.co/v0/postings/scaleway?mode=json
+  render: static
+  company: "Scaleway"
+  hints: >-
+    Scaleway is a European sovereign-cloud and infrastructure provider (compute, object
+    storage, managed databases, Kubernetes, GPU/AI clusters), so its roles fit the
+    infra/devtools/AI-infra remit. The board is a single-company Lever instance: fetch the
+    postings JSON array and read each posting's descriptionPlain plus additionalPlain for
+    the body, categories.location/department/commitment for metadata, and hostedUrl/applyUrl
+    for links.
+
+- slug: solarwinds
+  name: "SolarWinds"
+  url: https://boards-api.greenhouse.io/v1/boards/solarwinds/jobs?content=true
+  render: static
+  company: "SolarWinds"
+  hints: >-
+    Standard Greenhouse boards API: GET /v1/boards/solarwinds/jobs?content=true returns the
+    full jobs[] array with per-role HTML content (double-escaped), a {name} location object,
+    departments[], and first_published. The public jobs.solarwinds.com careers site is a
+    WordPress shell that just links each role through /job-detail/?gh_jid=<id>, so the board
+    API is the clean source. SolarWinds is an IT infrastructure management vendor building
+    network/systems monitoring, database performance, and full-stack observability tooling,
+    so its openings include SRE, DevOps, database reliability, security operations, and
+    observability engineering roles.
+
+- slug: sumo_logic
+  name: "Sumo Logic"
+  url: https://boards-api.greenhouse.io/v1/boards/sumologic/jobs?content=true
+  render: static
+  company: "Sumo Logic"
+  hints: >-
+    Greenhouse boards API (token sumologic); crawl reads data['jobs'], entity-unescaping
+    each job's content HTML into a clean description and taking location.name, departments,
+    offices, and pay_input_ranges when present. Sumo Logic is a cloud-native log analytics,
+    observability, and SIEM security platform, squarely in the infra/observability/security
+    wheelhouse.
+
+- slug: suse
+  name: "SUSE"
+  url: https://suse.wd3.myworkdayjobs.com/wday/cxs/suse/Jobsatsuse/jobs
+  render: static
+  company: "SUSE"
+  hints: >-
+    SUSE is an enterprise open-source infrastructure vendor - Linux (SLES), Kubernetes
+    (Rancher), edge and AI-platform software - squarely in the infra/devtools/security
+    wheelhouse. The board is Workday: POST /wday/cxs/suse/Jobsatsuse/jobs paginates the
+    postings list, then each externalPath is re-fetched at the same CXS base for
+    jobPostingInfo carrying title, location, jobReqId, externalUrl and an HTML
+    jobDescription that is unescaped and stripped. Static JSON, no browser required; the
+    total field reads 0 on later pages, so pagination stops on a short or empty page.
+
+- slug: sysdig
+  name: "Sysdig"
+  url: https://api.lever.co/v0/postings/sysdig?mode=json
+  render: static
+  company: "Sysdig"
+  hints: >-
+    Sysdig is a cloud and container security company built on Falco, providing runtime
+    insights, CNAPP, and cloud detection and response. Its careers page embeds a Lever board
+    (token sysdig); the postings API returns a flat JSON array of open roles, each with
+    categories.location/department/commitment, workplaceType, and a lists[] body assembled
+    into the description. Strong fit for the infra/security segment.
+
+- slug: testgorilla
+  name: "TestGorilla"
+  url: https://api.ashbyhq.com/posting-api/job-board/testgorilla?includeCompensation=true
+  render: static
+  company: "TestGorilla"
+  hints: >-
+    TestGorilla is a skills-based hiring platform whose pre-employment assessment library
+    (coding, cognitive, and role-specific tests) powers screening for engineering and other
+    teams. Parses the Ashby posting-api job-board JSON: iterate data['jobs'], skip
+    isListed==False, and read title, descriptionPlain, jobUrl, location, plus
+    compensation.summaryComponents for structured salary. Fully remote-first roles across
+    Customer Success, Sales, and Product.
+
+- slug: tigera
+  name: "Tigera"
+  url: https://boards-api.greenhouse.io/v1/boards/tigera/jobs?content=true
+  render: static
+  company: "Tigera"
+  hints: >-
+    Greenhouse boards API returns a jobs[] array; each posting carries double entity-escaped
+    content HTML, a location.name, departments[], offices[], and first_published. Tigera
+    builds Calico, a Kubernetes-native network security and observability platform, fitting
+    the infra/security/observability cohort. Static JSON, no pay ranges currently exposed.
+
+- slug: unstructured
+  name: "Unstructured"
+  url: https://api.ashbyhq.com/posting-api/job-board/unstructured?includeCompensation=true
+  render: static
+  company: "Unstructured"
+  hints: >-
+    Ashby posting API for Unstructured, the ETL/preprocessing platform that turns raw
+    documents (PDFs, HTML, images) into clean, LLM-ready data for RAG and model training. A
+    single JSON call returns jobs[] with descriptionPlain, structured department/location
+    and an optional compensation block; skip entries where isListed is false. A core AI-
+    infra and devtools employer building document-ingestion pipelines.
+
+- slug: voltage_park
+  name: "Voltage Park"
+  url: https://careers.kula.ai/api/internal/ats_job_posts?accountName=voltagepark&type=ats_job_post.index&items=99&page=1
+  render: static
+  company: "Voltage Park"
+  hints: >-
+    Single-company careers board served by Kula's public JSON API
+    (careers.kula.ai/api/internal/ats_job_posts) keyed by accountName=voltagepark; a single
+    static GET returns data[] where each role's ats_job block carries inline HTML
+    job_description, offices[], workplace/employment enums, and base_salary min/max. Voltage
+    Park is an AI-infrastructure company renting bare-metal NVIDIA GPU compute (merged with
+    Lightning AI, the makers of PyTorch Lightning), so roles skew to infrastructure
+    operations, observability, data-center, and AI-optimization engineering. Per-role detail
+    pages resolve at careers.kula.ai/voltagepark/<id>. Roles were imported from Ashby but
+    the live enumerable feed is Kula's, so ats_family is other.
+
+- slug: vultr
+  name: "Vultr"
+  url: https://api.ashbyhq.com/posting-api/job-board/vultr?includeCompensation=true
+  render: static
+  company: "Vultr"
+  hints: >-
+    Vultr's Ashby posting-api board returns a flat jobs[] array; each entry carries
+    descriptionPlain, jobUrl, location, employmentType, workplaceType and department/team so
+    parsing needs no HTML stripping. Vultr is an independent cloud-infrastructure provider
+    running 33 global data centers, and the current roles skew heavily toward AI-infra,
+    cloud networking, RDMA fabric automation and data-center delivery. Filter out
+    isListed=false and require title/description/url/location.
+
+- slug: webflow
+  name: "Webflow"
+  url: https://boards-api.greenhouse.io/v1/boards/webflow/jobs?content=true
+  render: static
+  company: "Webflow"
+  hints: >-
+    Greenhouse boards API for Webflow, the visual web-development and no-code site-building
+    platform. Parse data.jobs[]: absolute_url, title, company_name, location.name, and
+    content (HTML, strip to plain text); departments[].name joins into the department field.
+    Fits the devtools/infra thesis with open Infrastructure Engineer, DevOps, Developer
+    Productivity, and AI/ML roles.
+
+- slug: workable
+  name: "Workable"
+  url: https://apply.workable.com/api/v1/widget/accounts/careers
+  render: static
+  company: "Workable"
+  hints: >-
+    Workable is the ATS/HR-tech SaaS vendor hiring for itself on its own Workable board
+    (account slug 'careers', accountUid 470ec0c3-a5b0-4980-a115-f64f81de9c3c). The widget
+    account endpoint returns a jobs array of shortcodes; the crawler dedupes shortcodes and
+    fetches per-job detail at /api/v1/accounts/careers/jobs/<shortcode> to assemble
+    description+requirements+benefits and the full visible locations list. Public job URLs
+    are rebuilt in the account-scoped /careers/j/<shortcode>/ shape since the widget only
+    exposes account-less shortlinks. Fits as a B2B SaaS platform company with a dedicated
+    R&D/engineering org (Athens/Boston).
+
+- slug: zapier
+  name: "Zapier"
+  url: https://api.ashbyhq.com/posting-api/job-board/zapier?includeCompensation=true
+  render: static
+  company: "Zapier"
+  hints: >-
+    Ashby posting-api board returning a flat {"jobs":[...]} array; each entry carries
+    jobUrl, descriptionPlain, workplaceType, team/department and a compensation block with
+    scrapeableCompensationSalarySummary. Zapier is the automation/iPaaS devtools company now
+    leaning hard into applied AI, and the board spans backend/release engineering, applied
+    AI, security and IT roles.
+
+- slug: zilliz
+  name: "Zilliz"
+  url: https://api.lever.co/v0/postings/zilliz?mode=json
+  render: static
+  company: "Zilliz"
+  hints: >-
+    Zilliz builds the leading managed vector database for enterprise AI, founded by the
+    engineers behind Milvus, the most popular open-source vector database. Single-company
+    Lever board: GET the postings JSON array and map each posting's hostedUrl, text,
+    categories.location/department, and salaryRange into a job. Strong AI-infra / database-
+    systems fit with roles across Vector Database, Cloud Platform, and Solutions teams.
