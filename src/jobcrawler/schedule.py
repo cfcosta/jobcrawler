@@ -505,7 +505,18 @@ class Scheduler:
         if last is None:
             return True
         if last.finished is None:
-            return False  # in-flight or crashed mid-run; don't double-dispatch
+            # An unfinished last run only reaches here for a slug that is NOT in
+            # self._inflight (due_sites filters in-flight slugs before consulting
+            # _is_due), so under the single-process loop (§4.9) it is not genuinely
+            # running: the owning dispatch already exited, having raised between
+            # start_run and finish_run (a SQLite lock/IO error or a tracking/matcher
+            # fault in _process), or a prior daemon died mid-crawl and startup's
+            # reap_orphans has not run since. The run is orphaned. Returning False
+            # here wedged the site until the next restart (reap_orphans is startup-
+            # only) — a silent per-site stall, since tick() swallows the dispatch
+            # error. Recover it in-loop once the cadence elapses since it STARTED,
+            # so a poisoned crawl retries next cycle rather than stalling forever.
+            return self._clock() >= last.started + self._cadence(site)
         return self._clock() >= last.finished + self._cadence(site)
 
     def _cadence(self, site: Site) -> timedelta:

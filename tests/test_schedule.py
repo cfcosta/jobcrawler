@@ -137,8 +137,12 @@ def test_disabled_site_is_never_due() -> None:
     assert sched.due_sites() == []
 
 
-def test_unfinished_last_run_blocks_redispatch() -> None:
-    # a started-but-not-finished run means in-flight or crashed; don't double-dispatch.
+def test_inflight_run_is_never_redispatched() -> None:
+    # The real double-dispatch guard is the in-memory _inflight set (a running crawl
+    # holds its slug there for the whole dispatch), NOT the runs-table finished column:
+    # due_sites skips an in-flight slug before it ever consults _is_due. So a slug that
+    # is genuinely still crawling is not re-dispatched even though its run row is
+    # unfinished — and _is_due only ever sees NON-inflight (i.e. orphaned) unfinished runs.
     store = StateStore(":memory:", clock=lambda: T0)
     store.start_run("s0")
     sched = Scheduler(
@@ -147,7 +151,36 @@ def test_unfinished_last_run_blocks_redispatch() -> None:
         crawl=_ok_crawl,
         clock=lambda: T0 + timedelta(days=1),
     )
+    sched._inflight.add("s0")
     assert sched.due_sites() == []
+
+
+def test_orphaned_unfinished_run_recovers_after_cadence() -> None:
+    # A run started but never finished, with the slug NOT in _inflight, is orphaned: its
+    # dispatch already exited having raised between start_run and finish_run (a SQLite
+    # lock/IO error in tracking/matching, §4.9 single-process), or a prior daemon died
+    # mid-crawl and startup's reap_orphans has not run since. Blocking it forever wedged
+    # the site until the next restart (reap_orphans is startup-only) — a silent per-site
+    # stall, since tick() swallows the dispatch exception. It must instead recover once
+    # the cadence elapses since the run STARTED, so a poisoned crawl retries next cycle.
+    store = StateStore(":memory:", clock=lambda: T0)
+    store.start_run("s0")  # started, never finished, never in _inflight -> orphaned
+    # within the 2h default cadence: still cooling down, do not hot-retry every tick
+    early = Scheduler(
+        [Site(slug="s0", url="https://x.com")],
+        store=store,
+        crawl=_ok_crawl,
+        clock=lambda: T0 + timedelta(hours=1),
+    )
+    assert early.due_sites() == []
+    # past the cadence: the orphan is recovered and the site is due again
+    late = Scheduler(
+        [Site(slug="s0", url="https://x.com")],
+        store=store,
+        crawl=_ok_crawl,
+        clock=lambda: T0 + timedelta(hours=3),
+    )
+    assert [s.slug for s in late.due_sites()] == ["s0"]
 
 
 async def test_tick_dispatches_due_sites() -> None:
