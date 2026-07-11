@@ -1056,6 +1056,9 @@ class Scheduler:
                         url,
                         self._recheck_timeout,
                     )
+                    # A wedged fetch is never closed, so without this the same poison URL
+                    # stays stalest-first and re-burns the watchdog every sweep (§4.9, #39).
+                    self._store.note_rechecked(site.slug, url)
                     continue
                 except Exception as exc:
                     # A transient fetch failure is not evidence the posting closed — skip
@@ -1074,12 +1077,19 @@ class Scheduler:
                         url,
                         exc_info=True,
                     )
+                    # Attempted but unconfirmed: rotate it off the head too, so a URL that
+                    # only ever errors can't pin the sweep and starve fresher rows (#39).
+                    self._store.note_rechecked(site.slug, url)
                     continue
                 checked += 1
                 reason = self._closure_reason(status, text)
                 if reason is not None:
                     self._store.mark_closed(site.slug, url, reason=reason)
                     site_closed += 1
+                else:
+                    # Still open — advance its recheck order so the sweep moves on to the
+                    # next stalest rows next pass instead of re-verifying this one (#39).
+                    self._store.note_rechecked(site.slug, url)
             _log.info(
                 "recheck slug=%s checked=%d closed=%d cap=%d",
                 site.slug,

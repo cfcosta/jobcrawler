@@ -1617,6 +1617,7 @@ class _RecheckStore(StateStore):
         self._open_by_site = open_by_site
         self._expired = expired
         self.closed: list[tuple[str, str, str]] = []
+        self.rechecked: list[tuple[str, str]] = []
 
     def expire_due(self) -> int:
         return self._expired
@@ -1626,6 +1627,9 @@ class _RecheckStore(StateStore):
 
     def mark_closed(self, site: str, url: str, *, reason: str) -> None:
         self.closed.append((site, url, reason))
+
+    def note_rechecked(self, site: str, url: str) -> None:
+        self.rechecked.append((site, url))
 
 
 _MARKERS = ("no longer accepting applications", "position filled")
@@ -1771,6 +1775,66 @@ async def test_recheck_watchdog_unwedges_the_sweep() -> None:
 
     assert closed == 1  # the wedged URL was abandoned; the next one still closed
     assert store.closed == [("windowed", "u_gone", "recheck http 404")]
+
+
+async def test_recheck_rotates_attempted_open_urls_off_the_head() -> None:
+    # #39: the sweep pulls the stalest-``last_seen`` open URLs, but a re-verify that keeps
+    # a posting open never advanced its order — so a live row (windowed sources never
+    # re-see it, freezing its last_seen) and, worse, a *poison* one that only ever errors
+    # stayed permanently head-of-line, re-fetched every sweep while fresher rows starved.
+    # Every URL the sweep ATTEMPTS but does not close must be rotated (note_rechecked);
+    # a *closed* URL has left the open set and is not.
+    store = _RecheckStore({"windowed": ["u_live", "u_err", "u_gone"]})
+
+    async def fetch(url: str) -> tuple[int, str]:
+        if url == "u_err":
+            raise RuntimeError("transient blip")
+        return {
+            "u_live": (200, "<h1>Still hiring</h1>"),  # live → keep + rotate
+            "u_gone": (404, ""),  # removed → close, do NOT rotate
+        }[url]
+
+    sched = _recheck_sched(
+        store,
+        sites=[Site(slug="windowed", url="https://x.com", enumerates_all=False)],
+        fetch=fetch,
+    )
+    closed = await sched.recheck_tick()
+
+    assert closed == 1
+    assert store.closed == [("windowed", "u_gone", "recheck http 404")]
+    # The live re-verify AND the errored (unconfirmed) attempt both rotate off the head;
+    # the closed row does not (it is no longer in the open set).
+    assert store.rechecked == [("windowed", "u_live"), ("windowed", "u_err")]
+
+
+async def test_recheck_rotates_a_watchdog_wedged_url_off_the_head() -> None:
+    # The exact poison case in the bug title: a URL that wedges the fetch beneath the
+    # watchdog is never closed, so absent a rotation it stays stalest-first and is
+    # re-fetched (re-burning the watchdog) on every single sweep. Rotating it advances
+    # the sweep past it; the following URL still closes normally.
+    hung = asyncio.Event()  # never set: the first URL wedges forever
+
+    async def fetch(url: str) -> tuple[int, str]:
+        if url == "u_hang":
+            await hung.wait()
+        return (404, "")
+
+    store = _RecheckStore({"windowed": ["u_hang", "u_gone"]})
+    sched = _recheck_sched(
+        store,
+        sites=[Site(slug="windowed", url="https://x.com", enumerates_all=False)],
+        fetch=fetch,
+        recheck_timeout=0.05,
+    )
+
+    closed = await asyncio.wait_for(sched.recheck_tick(), timeout=5.0)
+
+    assert closed == 1
+    assert store.closed == [("windowed", "u_gone", "recheck http 404")]
+    assert store.rechecked == [
+        ("windowed", "u_hang")
+    ]  # wedged URL rotated; gone one closed
 
 
 async def test_recheck_expiry_closes_fleet_wide_and_is_counted() -> None:
