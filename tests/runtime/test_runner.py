@@ -1107,6 +1107,18 @@ def test_position_fields_carries_the_apply_url() -> None:
     assert fields["apply_url"] == "https://boards.example/acme/42"
 
 
+def test_position_fields_omits_apply_url_when_uncaptured() -> None:
+    # Omit-when-absent like salary, NOT always-keyed like locations_json: capture
+    # can cost extra fetches (tracking-hop boards resolve inside a rotating budget
+    # window), so a crawl that skips it must not NULL the link a prior crawl
+    # stored — upsert refreshes every key it is handed.
+    from jobcrawler.runtime.normalize import enrich
+    from jobcrawler.runtime.runner import _position_fields
+
+    job = _job(apply_url=None)
+    assert "apply_url" not in _position_fields(job, enrich(job))
+
+
 def test_position_fields_always_carries_locations_json() -> None:
     # §4.12: unlike the omit-when-absent salary keys, locations_json is crawler-owned
     # raw data — always present so a crawler that stops serving the array clears it.

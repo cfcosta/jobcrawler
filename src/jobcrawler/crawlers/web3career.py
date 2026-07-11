@@ -1,15 +1,35 @@
 from __future__ import annotations
 
+import base64
 import html
 import json
 import re
-from urllib.parse import urljoin
+from datetime import date
+from urllib.parse import urljoin, urlsplit
 
 SITE = "https://web3.career/"
 EXTRA_HOSTS = []
 
 SOURCE = "web3career"
 LISTINGS = (SITE, urljoin(SITE, "?page=2"))
+
+# Apply capture (#130): each row's Apply CTA is an on-site tracking chain, and
+# resolving it to the real ATS posting costs 2 fetches per job — too much to
+# spend on every one of ~106 rows inside the ~200-page crawl budget. Each crawl
+# resolves a day-rotated window of this many rows; the runner preserves links
+# captured on earlier crawls for rows outside today's window (apply_url is
+# omit-when-absent), so coverage accrues across days.
+_APPLY_BUDGET = 60
+
+# The interstitial hides its destination in
+# ``VAR = "<blob>".slice(a, b).split('').reverse().join('')`` — undoing it is
+# pure string work, no JS execution.
+_APPLY_DEST_RE = re.compile(
+    r'=\s*"((?:[^"\\]|\\.)+)"'
+    r"\.slice\(\s*(\d+)\s*,\s*(\d+)\s*\)"
+    r"\.split\(['\"]{2}\)\.reverse\(\)\.join\(['\"]{2}\)"
+)
+_JS_ESCAPE_RE = re.compile(r"\\(.)")
 
 _ROW_RE = re.compile(r"tableTurboRowClick\(event,\s*'(/([^'/]+)/(\d+))'")
 _LDJSON_RE = re.compile(
@@ -299,8 +319,64 @@ def _build(job, url, ident):
     return record
 
 
+def _interstitial_path(ident):
+    """The on-site tracking hop behind a row's Apply CTA: /i/<b64(ident) reversed>.
+
+    The job page's own "Apply Now" anchor points at ``/i/<token>`` where the
+    token is exactly ``base64(str(ident))`` written backwards (ident 96380 →
+    ``OTYzODA=`` → ``=ADOzYTO``) — derivable from the listing row for free, so
+    the job page itself never needs fetching.
+    """
+    return "/i/" + base64.b64encode(str(ident).encode()).decode()[::-1]
+
+
+def _apply_url(ctx, job_url, ident):
+    """Resolve a row's Apply chain (/i/ → obfuscated /z/ → 302) to the real ATS URL.
+
+    Both tracking hops refuse referer-less requests (bot defense) — each must
+    carry the page that links it. The /z/ hash is salted per request, so the
+    interstitial fetch cannot be skipped. The final URL is the /z/ 302's
+    Location, captured by ``ctx.resolve`` without fetching the foreign ATS
+    page; a same-site or non-http result (the bounce-back defense tripping)
+    is reported as no capture.
+    """
+    i_url = urljoin(SITE, _interstitial_path(ident))
+    page = ctx.fetch(i_url, headers={"Referer": job_url})
+    match = _APPLY_DEST_RE.search(page)
+    if not match:
+        return None
+    blob = _JS_ESCAPE_RE.sub(r"\1", match.group(1))
+    dest = blob[int(match.group(2)) : int(match.group(3))][::-1]
+    if not dest:
+        return None
+    final = ctx.resolve(urljoin(SITE, dest), headers={"Referer": i_url})
+    if not final.startswith(("http://", "https://")):
+        return None
+    host = urlsplit(final).hostname or ""
+    if host == "web3.career" or host.endswith(".web3.career"):
+        return None
+    return final
+
+
+def _apply_window(count, budget, seed):
+    """Which record ordinals (0-based) spend the 2 apply fetches this crawl.
+
+    A circular window of ``budget`` ordinals starting at ``(seed * budget) %
+    count``: consecutive seeds (days) tile the whole list, so every row gets
+    resolved within ``ceil(count / budget)`` crawl-days while no single crawl
+    exceeds its share of the page budget.
+    """
+    if count <= 0:
+        return set()
+    if count <= budget:
+        return set(range(count))
+    start = (seed * budget) % count
+    return {(start + i) % count for i in range(budget)}
+
+
 def crawl(ctx):
     seen_urls = set()
+    records = []
     for listing in LISTINGS:
         try:
             page = ctx.fetch(listing)
@@ -320,4 +396,14 @@ def crawl(ctx):
             if record is None:
                 continue
             seen_urls.add(url)
-            yield record
+            records.append(record)
+    window = _apply_window(len(records), _APPLY_BUDGET, date.today().toordinal())
+    for index, record in enumerate(records):
+        if index in window:
+            try:
+                apply_url = _apply_url(ctx, record["url"], record["external_id"])
+            except Exception:
+                apply_url = None  # fail-open: the record ships without a capture
+            if apply_url:
+                record["apply_url"] = apply_url
+        yield record

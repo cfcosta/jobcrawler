@@ -19,6 +19,9 @@ class _StubCtx:
     def fetch(self, url: str) -> str:
         return ""
 
+    def resolve(self, url: str) -> str:
+        return url
+
     def render(self, url: str) -> str:
         return ""
 
@@ -34,7 +37,7 @@ def test_ctx_protocol_is_satisfied_structurally() -> None:
 
 
 def test_incomplete_ctx_is_not_a_ctx() -> None:
-    incomplete = SimpleNamespace(fetch=lambda url: "")  # missing render/get/log
+    incomplete = SimpleNamespace(fetch=lambda url: "")  # missing resolve/render/log
     assert not isinstance(incomplete, Ctx)
 
 

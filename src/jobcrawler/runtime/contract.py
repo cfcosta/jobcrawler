@@ -104,7 +104,11 @@ class Ctx(Protocol):
     enumeration endpoint only answers POST (a JSON search API) passes
     ``method="POST"`` + ``json=...``, and the request rides exactly the same
     SSRF / politeness / budget enforcement as a GET — the crawler chooses the
-    verb, never the guard.
+    verb, never the guard. ``resolve`` is the tracking-hop primitive: it
+    follows a redirect chain under the same per-hop enforcement and returns
+    the first *off-allowlist* target as data without requesting it — how an
+    aggregator's ``/out/<token>``-style apply CTA becomes an ``apply_url``
+    while host admission stays exactly as narrow as ``fetch``'s.
     """
 
     def fetch(
@@ -114,6 +118,13 @@ class Ctx(Protocol):
         max_redirects: int = 5,
         method: str = "GET",
         json: object | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> str: ...
+    def resolve(
+        self,
+        url: str,
+        *,
+        max_redirects: int = 5,
         headers: Mapping[str, str] | None = None,
     ) -> str: ...
     def render(self, url: str) -> str: ...

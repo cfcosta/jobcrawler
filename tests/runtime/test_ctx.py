@@ -582,3 +582,126 @@ def test_facade_only_reaches_ctx_through_a_gate_banned_dunder() -> None:
     cells = facade.fetch.__func__.__closure__
     assert cells is not None
     assert any(cell.cell_contents is ctx for cell in cells)
+
+
+# -- resolve: the tracking-hop primitive (§8, #130) ---------------------------
+
+
+def test_resolve_returns_off_allowlist_target_without_requesting_it() -> None:
+    # The whole point: the /z/ 302's Location is captured as DATA. The foreign
+    # ATS host is never admitted, never dialed.
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        return httpx.Response(
+            302, headers={"location": "https://boards.greenhouse.io/acme/jobs/1"}
+        )
+
+    target = _ctx(handler).resolve("https://example.com/z/abc")
+
+    assert target == "https://boards.greenhouse.io/acme/jobs/1"
+    assert requested == ["https://example.com/z/abc"]
+
+
+def test_resolve_follows_on_allowlist_hops_to_the_edge() -> None:
+    # A tracker that chains through the site's own paths stays followed (each
+    # hop re-checked + paced); the first hop that leaves the allowlist ends it.
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/out":
+            return httpx.Response(302, headers={"location": "/track/42"})
+        if request.url.path == "/track/42":
+            return httpx.Response(
+                302, headers={"location": "https://jobs.lever.co/acme/1"}
+            )
+        raise AssertionError(f"unexpected request: {request.url}")
+
+    assert (
+        _ctx(handler).resolve("https://example.com/out")
+        == "https://jobs.lever.co/acme/1"
+    )
+
+
+def test_resolve_of_a_non_redirect_returns_the_url_itself() -> None:
+    # A chain that ends on-site (the bounce-back bot defense tripping) resolves
+    # to the terminal on-site URL; the caller decides that is not a capture.
+    ctx = _ctx(lambda r: httpx.Response(200, text="a page"))
+    assert ctx.resolve("https://example.com/final") == "https://example.com/final"
+
+
+def test_resolve_sends_caller_headers() -> None:
+    # Referer is the whole trick for tracking hops: refuse-less-referer defenses
+    # only reveal the destination when the linking page rides along.
+    seen: dict[str, str | None] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["referer"] = request.headers.get("referer")
+        return httpx.Response(302, headers={"location": "https://ats.example.org/x"})
+
+    _ctx(handler).resolve(
+        "https://example.com/z/1", headers={"Referer": "https://example.com/i/t"}
+    )
+    assert seen["referer"] == "https://example.com/i/t"
+
+
+def test_resolve_refuses_internal_redirect_targets() -> None:
+    # An off-allowlist target is data, but an internal one is an attack: a
+    # tracker pointing at loopback/metadata must not launder into stored URLs.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            302, headers={"location": "http://169.254.169.254/latest/meta-data"}
+        )
+
+    with pytest.raises(SsrfError):
+        _ctx(handler).resolve("https://example.com/z/1")
+
+
+def test_resolve_rejects_off_allowlist_start_before_any_request() -> None:
+    requested = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        return httpx.Response(200)
+
+    with pytest.raises(SsrfError):
+        _ctx(handler).resolve("https://evil.test/x")
+    assert requested == []
+
+
+def test_resolve_charges_one_page_like_fetch() -> None:
+    ctx = _ctx(
+        lambda r: httpx.Response(
+            302, headers={"location": "https://ats.example.org/x"}
+        )
+    )
+    ctx.resolve("https://example.com/z/1")
+    assert ctx.pages_fetched == 1
+    with pytest.raises(PageLimitError):
+        Ctx({"example.com"}, client=ctx._client, max_pages=0).resolve(
+            "https://example.com/z/2"
+        )
+
+
+def test_resolve_raises_on_an_endless_on_allowlist_loop() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"location": "https://example.com/loop"})
+
+    with pytest.raises(SsrfError):
+        _ctx(handler).resolve("https://example.com/loop", max_redirects=3)
+
+
+def test_resolve_raises_for_terminal_error_statuses() -> None:
+    ctx = _ctx(lambda r: httpx.Response(404))
+    with pytest.raises(httpx.HTTPStatusError):
+        ctx.resolve("https://example.com/z/gone")
+
+
+def test_facade_forwards_resolve() -> None:
+    ctx = _ctx(
+        lambda r: httpx.Response(
+            302, headers={"location": "https://ats.example.org/x"}
+        )
+    )
+    facade = crawler_facade(ctx)
+    assert facade.resolve("https://example.com/z") == "https://ats.example.org/x"
+    assert ctx.pages_fetched == 1

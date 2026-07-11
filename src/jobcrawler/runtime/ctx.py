@@ -38,7 +38,7 @@ from jobcrawler.runtime.solver import (
     ClearanceCache,
     is_challenge,
 )
-from jobcrawler.runtime.ssrf import SsrfError, check_url
+from jobcrawler.runtime.ssrf import SsrfError, check_url, is_on_domain
 from jobcrawler.urls import normalize_host
 
 _REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
@@ -152,6 +152,57 @@ class Ctx:
                 continue
             resp.raise_for_status()
             return self._decode(resp)
+        raise SsrfError(f"too many redirects from {url!r}")
+
+    def resolve(
+        self,
+        url: str,
+        *,
+        max_redirects: int = 5,
+        headers: Mapping[str, str] | None = None,
+    ) -> str:
+        """Follow ``url``'s redirect chain and return where it lands — as data.
+
+        The tracking-hop primitive (§8): aggregator boards route their apply
+        CTAs through on-site trackers (``/i/<token>`` → ``/z/<salted-hash>`` →
+        302 to the real ATS posting) whose *value is the final Location, not
+        any body*. ``fetch`` cannot serve that — it follows hops internally,
+        would demand the foreign ATS host be on the crawler's allowlist, and
+        would download a page nobody wants.
+
+        Every hop actually *requested* rides the full fetch discipline — the
+        per-hop SSRF check, politeness pacing, challenge escalation, and one
+        page charged for the whole chain, exactly like ``fetch``. The moment a
+        hop points OFF the crawler's allowlist, that target is returned
+        verbatim WITHOUT being requested: it is captured as data (an
+        ``apply_url``), so host admission stays exactly as narrow as
+        ``fetch``'s. The off-allowlist target must still clear the
+        internal-address screen — a tracker pointing at loopback or a metadata
+        endpoint is an attack, not an apply link, and must not launder into
+        stored data the UI or autofill daemon would later open. A chain that
+        ends on-site with a non-redirect returns the last URL after raising
+        for an error status; exhausting ``max_redirects`` raises like
+        ``fetch``.
+        """
+        self._charge_page()
+        current = url
+        for _ in range(max_redirects + 1):
+            check_url(current, self._allowed)
+            self._pace(current)
+            resp = self._challenge_aware_request("GET", current, headers=headers)
+            if resp.status_code in _REDIRECT_CODES and "location" in resp.headers:
+                target = urljoin(current, resp.headers["location"])
+                if is_on_domain(normalize_host(target), self._allowed):
+                    current = target  # on-allowlist hop: keep following
+                    continue
+                # Off-allowlist: this is the answer. Screen the name exactly as
+                # a fetch would — the single-member allowlist makes the
+                # on-domain rule vacuous so only the blocked-internal checks
+                # bite — then hand it back unrequested.
+                check_url(target, {normalize_host(target)})
+                return target
+            resp.raise_for_status()
+            return current
         raise SsrfError(f"too many redirects from {url!r}")
 
     @staticmethod
@@ -342,6 +393,15 @@ def crawler_facade(ctx: Ctx) -> _CtxProtocol:
                 json=json,
                 headers=headers,
             )
+
+        def resolve(
+            self,
+            url: str,
+            *,
+            max_redirects: int = 5,
+            headers: Mapping[str, str] | None = None,
+        ) -> str:
+            return ctx.resolve(url, max_redirects=max_redirects, headers=headers)
 
         def render(self, url: str) -> str:
             return ctx.render(url)

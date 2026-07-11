@@ -703,7 +703,6 @@ def _position_fields(
     """
     fields: dict[str, object] = {
         "external_id": job.external_id,
-        "apply_url": job.apply_url,
         "title": job.title,
         "company": job.company,
         # Derived §16 dedup key, refreshed on every crawl. Kept OUT of ``content_hash``
@@ -737,6 +736,15 @@ def _position_fields(
         # so a parser upgrade can re-read stored rows offline; never hashed.
         "salary_raw": job.salary,
     }
+    if job.apply_url is not None:
+        # Omit-when-absent like the salary block, NOT always-keyed: capturing an
+        # apply link can cost extra fetches (tracking-hop boards resolve it via
+        # ctx.resolve inside a per-crawl budget window), so any one crawl may
+        # legitimately skip it for a job it still serves. Keying None here would
+        # NULL the link a prior crawl resolved — the crawlers' own convention
+        # (sailonchain/cryptojobslist omit on a transient CTA miss precisely so
+        # stored values survive) already assumes this preserve semantics.
+        fields["apply_url"] = job.apply_url
     salary = enriched.salary
     if salary is not None:
         fields["salary_min"] = salary.min
