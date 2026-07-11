@@ -998,6 +998,7 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
                 "msg": request.query_params.get("msg"),
                 "rows": rows,
                 "filters": raw,
+                "home_country": config.home_country(),
                 "sites": site_list,
                 "page": page,
                 "has_next": has_next,

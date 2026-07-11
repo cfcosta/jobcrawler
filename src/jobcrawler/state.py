@@ -3000,9 +3000,13 @@ class StateStore:
           ``'remote_anywhere'`` / ``'relocation_offered'`` / ``'relocation_no_us'``. Any
           satisfied arm keeps the row — checking several widens the result set ("any way
           I could take this job") instead of demanding a posting that is all of them at
-          once. Each arm alone is exactly its standalone filter (``relocation_no_us`` =
-          relocation offered AND no §4.12-resolved US office/fence); unknown arm names
-          raise ``ValueError``.
+          once. ``relocation_no_us`` = relocation offered AND no §4.12-resolved US
+          office/fence. ``remote_anywhere`` is home-relative: a worldwide remote
+          (``remote_scope = 'anywhere'``) OR a §4.12 remote fence that covers
+          ``config.home_country()`` (default ``BR``) directly or through a macro region —
+          a role remotely workable from home counts as "anywhere I can take it", so this
+          arm is broader than the exact ``remote_scope = 'anywhere'`` param. Unknown arm
+          names raise ``ValueError``.
         - ``country``  ISO2 (case-folded): rows with ANY §4.12 resolved row in that country —
           an office there or remote fenced to it ("show me everything touching DE").
         - ``remote_in``  ISO2: rows REMOTELY WORKABLE from that country — kind-scoped to
@@ -3129,8 +3133,28 @@ class StateStore:
             # filter; sorted for deterministic query text. relocation_no_us keeps
             # the §4.12 exclusion discipline — only a *resolved* US office/fence
             # drops the row, unresolved geography stays in.
+            #
+            # remote_anywhere is home-relative: a worldwide remote (the column's
+            # 'anywhere') OR a remote fence that covers config.home_country() —
+            # directly or via a macro region — because a role remotely workable
+            # from home is exactly as reachable as a global one. The country code
+            # is a validated ISO2 config constant (never user/crawler input), so
+            # it is inlined rather than parameterized to keep this arm dict
+            # param-free like the others.
+            from jobcrawler import config
+
+            home = config.home_country()
             arm_sql = {
-                "remote_anywhere": "lower(COALESCE(remote_scope, '')) = 'anywhere'",
+                "remote_anywhere": (
+                    "(lower(COALESCE(remote_scope, '')) = 'anywhere' "
+                    "OR EXISTS (SELECT 1 FROM position_locations pl "
+                    "WHERE pl.site = positions.site AND pl.url = positions.url "
+                    "AND (pl.kind = 'remote_anywhere' "
+                    "OR (pl.kind = 'remote_fence' AND (pl.country = '" + home + "' "
+                    "OR EXISTS (SELECT 1 FROM geo_region_members gm "
+                    "WHERE gm.region = pl.macro_region "
+                    "AND gm.country = '" + home + "'))))))"
+                ),
                 "relocation_offered": "lower(COALESCE(relocation, '')) = 'offered'",
                 "relocation_no_us": (
                     "(lower(COALESCE(relocation, '')) = 'offered' "

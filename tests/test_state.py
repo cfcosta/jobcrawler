@@ -2669,6 +2669,54 @@ def test_search_mobility_arms_or_together(store: StateStore) -> None:
         store.search_positions(mobility=["jetpack"])
 
 
+def test_search_mobility_remote_anywhere_is_home_relative(
+    store: StateStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #144: "Remote anywhere" is home-relative — a role remotely workable *from
+    # home* is as reachable as a worldwide one. The arm keeps a worldwide anywhere
+    # plus any remote fence that covers config.home_country() directly (a BR fence)
+    # or through a macro region (LATAM ⊇ BR). A fence for a *different* country
+    # (US) does not, and a home-country *office* (a 'place', not a fence) does not —
+    # being physically in Brazil is not the same as being remotely hireable from it.
+    rows = [
+        # url, location, workplace, remote_scope
+        ("worldwide", "Anywhere in the World", "remote", "anywhere"),
+        ("br-fence", "Remote - Brazil", "remote", "restricted"),
+        ("latam-fence", "Remote - LATAM", "remote", "restricted"),
+        ("us-fence", "Remote - US", "remote", "restricted"),
+        ("br-office", "São Paulo, Brazil", "onsite", None),
+    ]
+    for url, loc, wp, scope in rows:
+        store.upsert_position(
+            "acme",
+            url,
+            fields={**FIELDS, "location": loc, "workplace": wp, "remote_scope": scope},
+            content_hash=url,
+        )
+        store.refresh_position_locations(
+            "acme", url, location=loc, workplace=wp, force=True
+        )
+
+    def anywhere() -> list[str]:
+        return sorted(
+            r.url for r in store.search_positions(mobility=["remote_anywhere"])
+        )
+
+    # Home = Brazil (the default): worldwide + BR fence + LATAM macro fence.
+    monkeypatch.setenv("JOBCRAWLER_HOME_COUNTRY", "BR")
+    assert anywhere() == ["br-fence", "latam-fence", "worldwide"]
+
+    # The lever is real, not a hardcoded BR: from the US the US fence joins and the
+    # Brazil-only ones drop, while a worldwide anywhere still matches from anywhere.
+    monkeypatch.setenv("JOBCRAWLER_HOME_COUNTRY", "US")
+    assert anywhere() == ["us-fence", "worldwide"]
+
+    # A malformed override can never reach the inlined SQL literal — it falls back
+    # to BR rather than injecting or emptying the result.
+    monkeypatch.setenv("JOBCRAWLER_HOME_COUNTRY", "not-a-country")
+    assert anywhere() == ["br-fence", "latam-fence", "worldwide"]
+
+
 def test_search_exclude_email_apply(store: StateStore) -> None:
     # #133: "Hide e-mail apply" drops rows whose apply target is a mailto: link.
     # No apply_url at all is NOT e-mail apply (the posting page itself is the

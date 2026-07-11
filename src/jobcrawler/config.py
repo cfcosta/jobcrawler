@@ -927,6 +927,20 @@ def concurrency() -> int:
     return _int("JOBCRAWLER_CONCURRENCY", 12)
 
 
+def home_country() -> str:
+    """The operator's home country as an ISO 3166-1 alpha-2 code (default ``BR``).
+
+    Personalizes the "remote anywhere" mobility filter (§16): a role that is
+    remotely workable *from here* is as reachable as a worldwide-remote one, so
+    that filter's ``remote_anywhere`` arm treats a remote fence covering this
+    country — directly or through a macro region (``LATAM``, ``AMERICAS`` …) — the
+    same as an unrestricted worldwide remote. Upper-cased; a malformed value
+    (not exactly two ASCII letters) falls back to ``BR`` so a typo can never reach
+    the arm's inlined SQL literal."""
+    raw = (os.getenv("JOBCRAWLER_HOME_COUNTRY") or "BR").strip().upper()
+    return raw if len(raw) == 2 and raw.isascii() and raw.isalpha() else "BR"
+
+
 # --- adaptive cadence (§4.9, the hit-rate controller) ----------------------
 # A source flagged ``schedule: adaptive`` learns its own interval from recent
 # hit/miss outcomes (see :mod:`jobcrawler.adaptive`). These bound and
