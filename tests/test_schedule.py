@@ -1306,6 +1306,30 @@ async def test_a_raising_bootstrap_does_not_abort_the_tick() -> None:
     assert healer.assessed == ["new"]  # attempted, raised, tick survived
 
 
+async def test_bootstrap_concurrency_of_zero_is_clamped_not_a_crash() -> None:
+    # The Scheduler kwarg is trusted verbatim — unlike config.bootstrap_concurrency(),
+    # which clamps to max(1, …). A literal 0 made the wave loop's range(0, N, 0) raise
+    # ValueError("range() arg 3 must not be zero") on every bootstrap pass; run()'s
+    # last-resort guard swallows it, so the cold-start roster silently never generates.
+    # A 0 (or negative) concurrency must degrade to a single-site wave, not abort.
+    healer = _RecordingHealer()
+    sched = Scheduler(
+        [Site(slug="new", url="https://new.com")],
+        store=StateStore(":memory:"),
+        crawl=_ok_crawl,
+        healer=healer,
+        has_crawler=lambda slug: False,
+        autonomy=True,
+        regen_check="off",
+        heal_cooldown="off",
+        bootstrap_concurrency=0,
+    )
+
+    await sched.tick()  # before the fix: ValueError bubbles out of _bootstrap_missing
+
+    assert healer.assessed == ["new"]  # the crawler-less site was still generated
+
+
 async def test_bootstrap_over_budget_defers_and_the_next_tick_crawls_the_promoted() -> (
     None
 ):

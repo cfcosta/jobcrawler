@@ -743,7 +743,11 @@ class Scheduler:
         # attempted site structurally moves to the back and fairness needs no cursor.
         last_attempt = self._store.health_updated_by_site()
         backlog.sort(key=lambda s: last_attempt.get(s.slug, ""))
-        k = self._bootstrap_concurrency
+        # Clamp to a single-site wave for a non-positive concurrency: it is the range()
+        # step below, and a literal 0 (the constructor trusts the kwarg verbatim, bypassing
+        # config.bootstrap_concurrency()'s max(1, …)) would raise "range() arg 3 must not be
+        # zero" on every pass — swallowed by run()'s guard, silently freezing cold-start.
+        k = max(1, self._bootstrap_concurrency)
 
         for i in range(0, len(forced_sites), k):
             wave = forced_sites[i : i + k]
