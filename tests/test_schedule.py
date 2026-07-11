@@ -474,6 +474,108 @@ async def test_run_logs_startup(caplog: pytest.LogCaptureFixture) -> None:
     )
 
 
+async def test_heartbeat_is_due_at_boot_then_waits_a_full_interval() -> None:
+    # #65: the run loop logs only when it does work, so a quiet daemon (nothing due, an
+    # idle roster) prints nothing for hours and an operator can't tell "idle-healthy" from
+    # "wedged mid-tick". A periodic heartbeat breaks the ambiguity — due immediately at
+    # boot (the first line proves the first tick returned), then silent until a full
+    # JOBCRAWLER_HEARTBEAT_INTERVAL elapses. Timer semantics mirror the sweep cadences.
+    sched = Scheduler(
+        [Site(slug="s0", url="https://x.com")],
+        store=StateStore(":memory:", clock=lambda: T0),
+        crawl=_ok_crawl,
+        clock=lambda: T0,
+        heartbeat_check="5m",
+    )
+    assert sched.heartbeat_due(T0) is True
+    sched.mark_heartbeat(T0)
+    assert sched.heartbeat_due(T0 + timedelta(minutes=4, seconds=59)) is False
+    assert sched.heartbeat_due(T0 + timedelta(minutes=5)) is True
+
+
+async def test_heartbeat_off_is_never_due() -> None:
+    # ``off`` disables the heartbeat entirely (an operator who monitors liveness elsewhere
+    # can opt out), the same 0/off-disables convention the other cadences use.
+    sched = Scheduler(
+        [Site(slug="s0", url="https://x.com")],
+        store=StateStore(":memory:", clock=lambda: T0),
+        crawl=_ok_crawl,
+        clock=lambda: T0,
+        heartbeat_check="off",
+    )
+    assert sched.heartbeat_due(T0) is False
+    assert sched.heartbeat_due(T0 + timedelta(days=1)) is False
+
+
+async def test_run_emits_a_liveness_heartbeat_when_idle(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The loop emits the heartbeat even on an iteration that dispatched nothing, so a
+    # deployed daemon's log proves it's alive; with no drain seams wired both queues read
+    # ``off`` and no crawl is in flight.
+    sched = Scheduler(
+        [Site(slug="s0", url="https://x.com")],
+        store=StateStore(":memory:", clock=lambda: T0),
+        crawl=_ok_crawl,
+        clock=lambda: T0,
+        heartbeat_check="5m",
+    )
+    stop = asyncio.Event()
+
+    async def stopper() -> None:
+        await asyncio.sleep(0.02)
+        stop.set()
+
+    with caplog.at_level(logging.INFO, logger="jobcrawler.schedule"):
+        await asyncio.gather(sched.run(stop=stop, interval=0.005), stopper())
+
+    line = next(
+        (
+            r.getMessage()
+            for r in caplog.records
+            if "scheduler heartbeat"
+            in r.getMessage()  # not the "heartbeat=5m" startup line
+        ),
+        None,
+    )
+    assert line is not None
+    assert "match_drain=off" in line and "autofill=off" in line
+    assert "inflight=0" in line
+
+
+async def test_heartbeat_reports_a_dead_drain_as_not_advancing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The nuance the finding calls out: the line must distinguish "event loop alive" from
+    # "queues advancing". The match-drain and autofill drains ride their OWN asyncio tasks
+    # (so a generation-heavy tick can't starve scoring); a drain task that has EXITED while
+    # the daemon is up — a crash, or a shutdown-grace cancel of a wedged pass — reads
+    # ``dead``, a running one ``alive``. So a stalled scoring/autofill queue shows up in the
+    # heartbeat even while the main loop keeps ticking.
+    sched = Scheduler(
+        [Site(slug="s0", url="https://x.com")],
+        store=StateStore(":memory:", clock=lambda: T0),
+        crawl=_ok_crawl,
+        clock=lambda: T0,
+        heartbeat_check="5m",
+    )
+    dead = asyncio.create_task(asyncio.sleep(0))
+    await dead  # runs to completion → task.done() is True
+    alive = asyncio.create_task(asyncio.Event().wait())  # never set → stays pending
+    try:
+        with caplog.at_level(logging.INFO, logger="jobcrawler.schedule"):
+            sched._log_heartbeat(T0, match_drain_task=dead, autofill_task=alive)
+        line = next(
+            r.getMessage()
+            for r in caplog.records
+            if "scheduler heartbeat" in r.getMessage()
+        )
+        assert "match_drain=dead" in line
+        assert "autofill=alive" in line
+    finally:
+        alive.cancel()
+
+
 async def test_regen_tick_skips_disabled_sites() -> None:
     store = _stale_store("s0")
 

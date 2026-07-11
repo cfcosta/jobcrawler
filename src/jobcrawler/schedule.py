@@ -265,6 +265,7 @@ class Scheduler:
         dedup_check: str | None = None,
         autofill_drain: AutofillDrain | None = None,
         autofill_poll: float | None = None,
+        heartbeat_check: str | None = None,
         expired_markers: tuple[str, ...] | None = None,
         heal_cooldown: str | None = None,
         description_quality_floor: float | None = None,
@@ -381,6 +382,14 @@ class Scheduler:
         self._autofill_poll = (
             autofill_poll if autofill_poll is not None else config.autofill_poll()
         )
+        # §4.9 liveness heartbeat (#65): the run loop logs only when it does work, so a
+        # quiet daemon is silent and an operator can't tell idle-healthy from wedged. This
+        # periodic line proves the loop is turning; ``off`` disables it. Autonomy-exempt —
+        # a paused daemon still needs to show it's alive — and never gates any work.
+        self._heartbeat_interval = _optional_interval(
+            config.heartbeat_interval() if heartbeat_check is None else heartbeat_check
+        )
+        self._next_heartbeat: datetime | None = None
         # §4.8 event-driven healing: a drifted crawl assesses immediately (not waiting
         # for the periodic sweep), rate-limited per-site by this cooldown (None = off).
         self._heal_cooldown = _optional_interval(
@@ -1286,6 +1295,53 @@ class Scheduler:
 
         adopt_watch.check_adoption(self._store, now)
 
+    def heartbeat_due(self, now: datetime) -> bool:
+        """True if a §4.9 liveness heartbeat is due (``JOBCRAWLER_HEARTBEAT_INTERVAL``).
+
+        Unlike the sweeps this gates only a log line, never work, and is deliberately NOT
+        gated by the master autonomy switch — a paused daemon still has to prove it's alive.
+        The first call is due immediately (no prior heartbeat), then one interval apart.
+        ``off`` (no interval) disables it (#65).
+        """
+        if self._heartbeat_interval is None:
+            return False
+        return self._next_heartbeat is None or now >= self._next_heartbeat
+
+    def mark_heartbeat(self, now: datetime) -> None:
+        """Record that a heartbeat fired at ``now``; the next is one interval later."""
+        if self._heartbeat_interval is not None:
+            self._next_heartbeat = now + self._heartbeat_interval
+
+    def _log_heartbeat(
+        self,
+        now: datetime,
+        *,
+        match_drain_task: "asyncio.Task[None] | None",
+        autofill_task: "asyncio.Task[None] | None",
+    ) -> None:
+        """Emit the §4.9 liveness heartbeat (#65).
+
+        Distinguishes "event loop alive" from "queues advancing": the line's arrival proves
+        the tick loop is turning, and ``match_drain``/``autofill`` report each drain task's
+        state — ``alive`` (running), ``dead`` (exited while the daemon is up: a crash, or a
+        shutdown-grace cancel of a wedged pass), or ``off`` (not wired). A ``dead`` drain
+        means that queue stopped advancing even though the loop still ticks. ``inflight`` is
+        the count of crawls currently dispatched, a cheap "is it doing anything" gauge.
+        """
+
+        def _drain_state(task: "asyncio.Task[None] | None") -> str:
+            if task is None:
+                return "off"
+            return "dead" if task.done() else "alive"
+
+        _log.info(
+            "scheduler heartbeat autonomy=%s inflight=%d match_drain=%s autofill=%s",
+            "on" if self._autonomy else "OFF",
+            len(self._inflight),
+            _drain_state(match_drain_task),
+            _drain_state(autofill_task),
+        )
+
     async def run(
         self,
         *,
@@ -1307,7 +1363,8 @@ class Scheduler:
         """
         _log.info(
             "scheduler starting sites=%d interval=%ss autonomy=%s "
-            "regen=%s reopt=%s recheck=%s match_drain=%s fx=%s dedup=%s autofill=%s",
+            "regen=%s reopt=%s recheck=%s match_drain=%s fx=%s dedup=%s autofill=%s "
+            "heartbeat=%s",
             len(self._sites),
             interval,
             "on" if self._autonomy else "OFF",
@@ -1320,6 +1377,7 @@ class Scheduler:
             if self._dedup_interval is None or self._dedup_sweep is None
             else self._dedup_interval,
             "off" if self._autofill_drain is None else f"{self._autofill_poll}s",
+            "off" if self._heartbeat_interval is None else self._heartbeat_interval,
         )
         # The §4.7 match drain rides its OWN task, not the tick loop: a bootstrap/
         # generation pass can hold tick() for an hour-plus (LM generation × wave), and
@@ -1369,6 +1427,18 @@ class Scheduler:
                     # Last-resort guard: an unexpected error in a tick or sweep must not
                     # terminate the daemon — log it and carry on to the next interval.
                     _log.exception("scheduler loop iteration failed; continuing")
+                # §4.9 liveness heartbeat (#65): emit on its own cadence, AFTER the guard so
+                # even an iteration whose tick raised above still proves the loop is turning
+                # (and reports the drain tasks' state). Re-read the clock — ``now`` may be
+                # unbound if ``tick()`` raised before it was assigned.
+                hb_now = self._clock()
+                if self.heartbeat_due(hb_now):
+                    self._log_heartbeat(
+                        hb_now,
+                        match_drain_task=drain_task,
+                        autofill_task=autofill_task,
+                    )
+                    self.mark_heartbeat(hb_now)
                 try:
                     await asyncio.wait_for(stop.wait(), timeout=interval)
                 except asyncio.TimeoutError:

@@ -748,6 +748,21 @@ def match_drain_interval() -> str:
     return _str("JOBCRAWLER_MATCH_DRAIN_INTERVAL", "10m")
 
 
+def heartbeat_interval() -> str:
+    """How often the §4.9 run loop emits a liveness heartbeat when it would otherwise be
+    silent. The loop logs only when it does work — a dispatched crawl, a sweep with
+    counters — so a quiet daemon (nothing due, an idle roster) prints nothing for hours,
+    and an operator watching the log can't tell "idle and healthy" from "wedged mid-tick".
+    A periodic heartbeat line breaks that ambiguity: while it keeps arriving the loop is
+    turning; when it stops, the loop is stuck. It also reports whether the §4.7 match-drain
+    and §18 autofill drains — which ride their OWN tasks — are still alive, so a dead
+    scoring/autofill queue surfaces even while the main loop spins. Default 5m — frequent
+    enough to notice a wedge within minutes, sparse enough that a busy daemon's log gains
+    only one line per interval; ``off`` disables it (for operators who monitor liveness by
+    other means)."""
+    return _str("JOBCRAWLER_HEARTBEAT_INTERVAL", "5m")
+
+
 def match_drain_cap() -> int:
     """Max parked rows one match-drain tick re-presents to the matcher. Bounds a single
     tick's LLM exposure after a profile edit requeues thousands of rows; successive
