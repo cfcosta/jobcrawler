@@ -2381,12 +2381,17 @@ class StateStore:
         The store-side drain rebuilds candidates from parked rows; one the prefilter now
         definitely rejects must leave the FIFO (or it would clog every future drain
         window) but has earned no LLM verdict — it returns to plain "tracked, unscored",
-        the same state the runner gives a fresh prefilter miss. A later profile widening
+        the same state the runner gives a fresh prefilter miss. That includes wiping any
+        verdict already on the row: a REQUEUED row lands here precisely because its old
+        score predates the rule that now rejects it, and leaving the number visible
+        advertises a fit the pipeline no longer believes. A later profile widening
         re-presents it via :meth:`requeue_open_matches`.
         """
         with self._lock:
             self._conn.execute(
-                "UPDATE positions SET match_pending = 0 WHERE site = ? AND url = ?",
+                "UPDATE positions SET match_pending = 0, match_score = NULL, "
+                "match_verdict = NULL, match_reasons = NULL, match_concerns = NULL, "
+                "matched_at = NULL, match_origin = NULL WHERE site = ? AND url = ?",
                 (site, url),
             )
             self._conn.commit()

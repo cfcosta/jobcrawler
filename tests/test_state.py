@@ -2818,6 +2818,32 @@ def test_clear_match_pending_unparks_without_a_verdict() -> None:
     s.close()
 
 
+def test_clear_match_pending_wipes_a_stale_verdict() -> None:
+    # A REQUEUED row lands on this path precisely because its old score predates the
+    # prefilter rule that now rejects it (#93: Netflix/HubSpot US-locked rows scored
+    # 76-88 under the pre-geo-rule prompt) — "tracked, unscored" must mean the stale
+    # number stops being advertised, not just that the flag drops.
+    s = StateStore(":memory:")
+    s.upsert_position(
+        "acme",
+        "u",
+        fields={"title": "T", "company": "C", "location": "Remote, US"},
+        content_hash="h",
+    )
+    s.set_match(
+        "acme", "u", score=86, verdict="strong", reasons='["r"]', origin="llm"
+    )
+    s.set_match_pending("acme", "u")
+    s.clear_match_pending("acme", "u")
+    assert s.pending_matches(limit=10) == []
+    rec = s.open_positions("acme")[0]
+    assert rec.match_score is None
+    assert rec.match_verdict is None
+    assert rec.match_reasons is None
+    assert rec.matched_at is None
+    s.close()
+
+
 def test_concurrent_reads_and_writes_survive_a_shared_connection(tmp_path):
     """Regression: the web UI (§16) serves reads from an anyio threadpool while the
     §4.9 scheduler writes off-thread, both over one ``check_same_thread=False``
