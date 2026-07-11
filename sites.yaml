@@ -4391,3 +4391,18 @@
     optionsFacetsDD_customfield1 exists but has no "Technology" value — the location filter is
     the cleanest tech-rich subset. Fit: strong — São Paulo AI/data/DevOps/backend-Java/DBA
     roles on page one.
+
+- slug: wikimedia
+  name: "Wikimedia Foundation"
+  url: https://boards-api.greenhouse.io/v1/boards/wikimedia/jobs?content=true
+  render: static
+  company: "Wikimedia Foundation"
+  hints: >-
+    Greenhouse board API, token `wikimedia`. Whole board (~17 jobs) in one GET; standard
+    Greenhouse fields, content double-escaped HTML. Every posting's location is bare
+    "Remote" — the real policy (remote-first, hires in 40+ countries incl. Brazil: US
+    states + country list) lives in the description body, so the §4.7 marker-arm mines
+    it. Titles carry trailing whitespace — strip. metadata null; departments present.
+    ORIGIN board for the working_nomads_development Wikimedia copies (their apply_url
+    points at job-boards.greenhouse.io/wikimedia) — dedup pairs them. Fit: strong —
+    MediaWiki/PHP, Core Experiences, SRE; remote-first with Brazil eligibility.
