@@ -1019,6 +1019,30 @@ def test_open_urls_returns_open_only(store: StateStore) -> None:
     assert store.open_urls("acme", limit=10) == ["a"]
 
 
+def test_note_rechecked_rotates_a_url_off_the_recheck_head() -> None:
+    # open_urls serves the stalest last_seen first (§4.9 recheck order). A recheck that
+    # does not close the URL must record the attempt so the row rotates to the BACK —
+    # otherwise a windowed source's frozen-last_seen URL (esp. a poison one that times
+    # out and is never closed) stays permanently head-of-line, re-fetched every sweep.
+    clock = _MutableClock(datetime(2026, 1, 1, tzinfo=timezone.utc))
+    s = StateStore(":memory:", clock=clock)
+    s.upsert_position("acme", "old", fields=FIELDS, content_hash="h")
+    clock.now += timedelta(hours=1)
+    s.upsert_position("acme", "fresh", fields=FIELDS, content_hash="h")
+    assert s.open_urls("acme", limit=10) == ["old", "fresh"]  # stalest leads
+
+    clock.now += timedelta(hours=1)
+    s.note_rechecked("acme", "old")  # the sweep attempted "old"; rotate it back
+    assert s.open_urls("acme", limit=10) == ["fresh", "old"]
+
+    # Scoped to open rows: a closed URL has left the recheck set, so noting it is a no-op.
+    s.mark_closed("acme", "fresh", reason="x")
+    clock.now += timedelta(hours=1)
+    s.note_rechecked("acme", "fresh")
+    assert s.open_urls("acme", limit=10) == ["old"]
+    s.close()
+
+
 # -- match verdicts, pending backlog, counts (§6) ----------------------------
 
 
@@ -1086,9 +1110,7 @@ def test_matches_attainable_only_wants_anywhere_or_relocation(
         ("fenced", {"remote_scope": "restricted", "relocation": "unspecified"}, 95),
         ("silent", {}, 90),
     ]:
-        store.upsert_position(
-            "acme", url, fields={**FIELDS, **extra}, content_hash=url
-        )
+        store.upsert_position("acme", url, fields={**FIELDS, **extra}, content_hash=url)
         store.set_match("acme", url, score=score, verdict="x", reasons="")
 
     assert [r.url for r in store.matches(0)] == [
@@ -1897,7 +1919,9 @@ def test_migration_adds_structured_location_surfaces(tmp_path: object) -> None:
         assert {"locations_json", "location_display", "loc_llm_at"} <= cols
         tables = {
             row["name"]
-            for row in s._conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            for row in s._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
         }
         assert {"location_values", "position_locations", "geo_region_members"} <= tables
         assert s._conn.execute(
@@ -1905,8 +1929,12 @@ def test_migration_adds_structured_location_surfaces(tmp_path: object) -> None:
         ).fetchone()
         assert s.get_meta("geo_region_seed_version") is not None
         # Reseed on version change: a poisoned table heals at the next open.
-        s._conn.execute("DELETE FROM geo_region_members WHERE region = 'eu' AND country = 'DE'")
-        s._conn.execute("INSERT INTO geo_region_members (region, country) VALUES ('eu', 'ZZ')")
+        s._conn.execute(
+            "DELETE FROM geo_region_members WHERE region = 'eu' AND country = 'DE'"
+        )
+        s._conn.execute(
+            "INSERT INTO geo_region_members (region, country) VALUES ('eu', 'ZZ')"
+        )
         s.set_meta("geo_region_seed_version", "0")
         s._conn.commit()
     finally:
@@ -1951,8 +1979,16 @@ def test_upsert_accepts_locations_json_and_the_record_reads_it_back(
 
 def _projection(store: StateStore, site: str, url: str) -> list[tuple]:
     return [
-        (r["seq"], r["kind"], r["city"], r["subdivision"], r["country"],
-         r["macro_region"], r["display"], r["source"])
+        (
+            r["seq"],
+            r["kind"],
+            r["city"],
+            r["subdivision"],
+            r["country"],
+            r["macro_region"],
+            r["display"],
+            r["source"],
+        )
         for r in store._conn.execute(
             "SELECT * FROM position_locations WHERE site = ? AND url = ? ORDER BY seq",
             (site, url),
@@ -2048,11 +2084,18 @@ def test_refresh_title_fence_demotes_a_false_worldwide(store: StateStore) -> Non
     assert _display(store, "wwr", "u") == "Remote (Europe)"
     # Without a fenced title the worldwide claim stands (pinned elsewhere too).
     store.upsert_position(
-        "wwr", "w", fields={**FIELDS, "location": "Anywhere in the World"}, content_hash="w"
+        "wwr",
+        "w",
+        fields={**FIELDS, "location": "Anywhere in the World"},
+        content_hash="w",
     )
     store.refresh_position_locations(
-        "wwr", "w", location="Anywhere in the World", workplace="remote",
-        title="GTM MarTech Engineer", force=True,
+        "wwr",
+        "w",
+        location="Anywhere in the World",
+        workplace="remote",
+        title="GTM MarTech Engineer",
+        force=True,
     )
     assert [(r[1],) for r in _projection(store, "wwr", "w")] == [("remote_anywhere",)]
 
@@ -2096,7 +2139,10 @@ def test_refresh_cross_string_fence_demotes_worldwide(store: StateStore) -> None
     # The explicit fence is the specific signal — the projection keeps the
     # fence and drops the contradicting remote_anywhere row.
     store.upsert_position(
-        "sailonchain", "u", fields={**FIELDS, "location": "Remote - US"}, content_hash="h"
+        "sailonchain",
+        "u",
+        fields={**FIELDS, "location": "Remote - US"},
+        content_hash="h",
     )
     store.refresh_position_locations(
         "sailonchain",
@@ -2137,7 +2183,10 @@ def test_refresh_single_string_global_plus_country_fences_not_worldwide(
 
 def test_refresh_worldwide_and_marker_only(store: StateStore) -> None:
     store.upsert_position(
-        "acme", "w", fields={**FIELDS, "location": "Anywhere in the World"}, content_hash="w"
+        "acme",
+        "w",
+        fields={**FIELDS, "location": "Anywhere in the World"},
+        content_hash="w",
     )
     store.refresh_position_locations(
         "acme", "w", location="Anywhere in the World", workplace="remote", force=True
@@ -2236,9 +2285,12 @@ def test_llm_ledger_fill_and_precedence(store: StateStore, monkeypatch) -> None:
     # First writer wins: a second fill is a no-op.
     assert (
         store.set_location_value_llm(
-            "acme", "Zorgville",
+            "acme",
+            "Zorgville",
             places=[{"city": "Elsewhere", "subdivision": None, "country": "CA"}],
-            fence=[], remote="none", model="m2",
+            fence=[],
+            remote="none",
+            model="m2",
         )
         is False
     )
@@ -2264,8 +2316,8 @@ def test_clean_rules_parse_beats_a_stale_llm_row(store: StateStore) -> None:
         "INSERT INTO location_values (site, value, places_json, fence_json, parse_quality, "
         "parse_source, parser_version, llm_model, parsed_at) "
         "VALUES ('acme', 'Berlin, Germany', "
-        "'[{\"city\": \"Wrongtown\", \"subdivision\": null, \"country\": \"US\", "
-        "\"macro\": null, \"confidence\": \"medium\", \"raw\": \"\"}]', '[]', "
+        '\'[{"city": "Wrongtown", "subdivision": null, "country": "US", '
+        '"macro": null, "confidence": "medium", "raw": ""}]\', \'[]\', '
         "'full', 'llm', 0, 'm1', ?)",
         (now,),
     )
@@ -2401,15 +2453,15 @@ def test_requeue_salaryless_matches_marks_only_the_extraction_pool(
         fields = dict(FIELDS)
         if salary is not None:
             fields.update(
-                salary_min=salary, salary_max=salary, salary_currency="USD",
+                salary_min=salary,
+                salary_max=salary,
+                salary_currency="USD",
                 salary_period="year",
             )
         store.upsert_position("acme", url, fields=fields, content_hash=url)
         if score is not None:
             store.set_match("acme", url, score=score, verdict="x", reasons="")
-    store._conn.execute(
-        "UPDATE positions SET status = 'closed' WHERE url = 'gone'"
-    )
+    store._conn.execute("UPDATE positions SET status = 'closed' WHERE url = 'gone'")
     store._conn.commit()
 
     assert store.requeue_salaryless_matches(min_score=60) == 1
@@ -2481,10 +2533,28 @@ def test_salary_repair_sweep_heals_the_measured_corruption_classes(
     put("tinyyear", 78.0, 87.0, "USD", "year", 78.0, 87.0)
     put("absurd", 220000000.0, 220000000.0, "USD", "year", 2.2e8, 2.2e8)
     put("llmrow", 78.0, 87.0, "USD", "year", 78.0, 87.0, source="llm")
-    put("rawgood", 1.0, 1.0, "USD", "year", 1.0, 1.0,
-        sraw="CA$120,000 - CA$150,000", source="text")
-    put("rawbad", 500.0, 500.0, "EUR", "year", 540.0, 540.0,
-        sraw="€500 per day", source="text")
+    put(
+        "rawgood",
+        1.0,
+        1.0,
+        "USD",
+        "year",
+        1.0,
+        1.0,
+        sraw="CA$120,000 - CA$150,000",
+        source="text",
+    )
+    put(
+        "rawbad",
+        500.0,
+        500.0,
+        "EUR",
+        "year",
+        540.0,
+        540.0,
+        sraw="€500 per day",
+        source="text",
+    )
     raw.commit()
     raw.close()
 
@@ -2611,18 +2681,18 @@ def test_search_positions_country_and_remote_in_filters(store: StateStore) -> No
             "acme", url, location=loc, workplace=wp, force=True
         )
 
-    def urls(
-        *, country: str | None = None, remote_in: str | None = None
-    ) -> list[str]:
+    def urls(*, country: str | None = None, remote_in: str | None = None) -> list[str]:
         return sorted(
-            r.url
-            for r in store.search_positions(country=country, remote_in=remote_in)
+            r.url for r in store.search_positions(country=country, remote_in=remote_in)
         )
 
     assert urls(country="DE") == ["berlin"]
     assert urls(country="de") == ["berlin"]  # case-folded
     assert urls(country="US") == ["fenced-us"]
-    assert urls(remote_in="DE") == ["anywhere", "emea"]  # EMEA expands; office DE doesn't
+    assert urls(remote_in="DE") == [
+        "anywhere",
+        "emea",
+    ]  # EMEA expands; office DE doesn't
     assert urls(remote_in="US") == ["anywhere", "fenced-us"]
     assert urls(remote_in="BR") == ["anywhere"]
     assert urls(country="ES") == []
@@ -2787,7 +2857,10 @@ def test_search_query_bridges_synonyms_through_location_display(
     # Raw says 'Brasil'; the projection's display carries the English country name,
     # so q='brazil' now finds the row even with location_normalized unset.
     store.upsert_position(
-        "acme", "sp", fields={**FIELDS, "location": "São Paulo, Brasil"}, content_hash="h"
+        "acme",
+        "sp",
+        fields={**FIELDS, "location": "São Paulo, Brasil"},
+        content_hash="h",
     )
     store.refresh_position_locations(
         "acme", "sp", location="São Paulo, Brasil", workplace="hybrid", force=True
@@ -2989,9 +3062,7 @@ def test_clear_match_pending_wipes_a_stale_verdict() -> None:
         fields={"title": "T", "company": "C", "location": "Remote, US"},
         content_hash="h",
     )
-    s.set_match(
-        "acme", "u", score=86, verdict="strong", reasons='["r"]', origin="llm"
-    )
+    s.set_match("acme", "u", score=86, verdict="strong", reasons='["r"]', origin="llm")
     s.set_match_pending("acme", "u")
     s.clear_match_pending("acme", "u")
     assert s.pending_matches(limit=10) == []

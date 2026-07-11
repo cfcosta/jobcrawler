@@ -890,8 +890,13 @@ class StateStore:
             parsed = parse_salary(row["salary_raw"])
             if parsed is not None:
                 _write(
-                    row["site"], row["url"], parsed.min, parsed.max,
-                    parsed.currency, parsed.period, "text",
+                    row["site"],
+                    row["url"],
+                    parsed.min,
+                    parsed.max,
+                    parsed.currency,
+                    parsed.period,
+                    "text",
                 )
             elif row["salary_source"] == "text":
                 refused.append((row["site"], row["url"]))
@@ -912,8 +917,11 @@ class StateStore:
             implausible: list[tuple[str, str]] = []
             for row in candidates:
                 usd_lo, usd_hi = usd_annual_band(
-                    row["salary_min"], row["salary_max"], row["salary_currency"],
-                    "year", fx_rates=fx,
+                    row["salary_min"],
+                    row["salary_max"],
+                    row["salary_currency"],
+                    "year",
+                    fx_rates=fx,
                 )
                 if (
                     usd_lo is not None
@@ -922,8 +930,13 @@ class StateStore:
                     and usd_hi <= 2_000_000
                 ):
                     _write(
-                        row["site"], row["url"], row["salary_min"],
-                        row["salary_max"], row["salary_currency"], "year", "text",
+                        row["site"],
+                        row["url"],
+                        row["salary_min"],
+                        row["salary_max"],
+                        row["salary_currency"],
+                        "year",
+                        "text",
                     )
                 else:
                     implausible.append((row["site"], row["url"]))
@@ -939,8 +952,12 @@ class StateStore:
         ).fetchall()
         for row in halfk:
             _write(
-                row["site"], row["url"], row["salary_min"] * 1000,
-                row["salary_max"], row["salary_currency"], row["salary_period"],
+                row["site"],
+                row["url"],
+                row["salary_min"] * 1000,
+                row["salary_max"],
+                row["salary_currency"],
+                row["salary_period"],
                 "text",
             )
 
@@ -1040,7 +1057,9 @@ class StateStore:
             [
                 (
                     classify_remote_scope(
-                        row["workplace"] or "", row["location"] or "", row["title"] or ""
+                        row["workplace"] or "",
+                        row["location"] or "",
+                        row["title"] or "",
                     ),
                     row["site"],
                     row["url"],
@@ -1331,17 +1350,38 @@ class StateStore:
         seq = 0
         for row in rows:
             params.append(
-                (site, url, seq, row["kind"], row.get("city"), row.get("subdivision"),
-                 row.get("country"), row.get("macro_region"), row["display"],
-                 row.get("source", "rules"), row.get("confidence", "high"),
-                 row.get("raw_fragment"))
+                (
+                    site,
+                    url,
+                    seq,
+                    row["kind"],
+                    row.get("city"),
+                    row.get("subdivision"),
+                    row.get("country"),
+                    row.get("macro_region"),
+                    row["display"],
+                    row.get("source", "rules"),
+                    row.get("confidence", "high"),
+                    row.get("raw_fragment"),
+                )
             )
             seq += 1
         for row in kept:
             params.append(
-                (site, url, seq, row["kind"], row["city"], row["subdivision"],
-                 row["country"], row["macro_region"], row["display"], "llm_posting",
-                 row["confidence"], row["raw_fragment"])
+                (
+                    site,
+                    url,
+                    seq,
+                    row["kind"],
+                    row["city"],
+                    row["subdivision"],
+                    row["country"],
+                    row["macro_region"],
+                    row["display"],
+                    "llm_posting",
+                    row["confidence"],
+                    row["raw_fragment"],
+                )
             )
             seq += 1
         if params:
@@ -1364,7 +1404,8 @@ class StateStore:
         ).fetchall()
         place_items = [r["display"] for r in rows if r["kind"] == "place"]
         fence_names = [
-            geo.country_name(r["country"]) or geo.macro_label(r["macro_region"])
+            geo.country_name(r["country"])
+            or geo.macro_label(r["macro_region"])
             or r["display"]
             for r in rows
             if r["kind"] == "remote_fence"
@@ -1546,9 +1587,18 @@ class StateStore:
                 "subdivision, country, macro_region, display, source, confidence, "
                 "raw_fragment) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'llm_posting', ?, NULL)",
                 [
-                    (site, url, base + 1 + i, r["kind"], r.get("city"),
-                     r.get("subdivision"), r.get("country"), r.get("macro_region"),
-                     r["display"], r["confidence"])
+                    (
+                        site,
+                        url,
+                        base + 1 + i,
+                        r["kind"],
+                        r.get("city"),
+                        r.get("subdivision"),
+                        r.get("country"),
+                        r.get("macro_region"),
+                        r["display"],
+                        r["confidence"],
+                    )
                     for i, r in enumerate(rows)
                 ],
             )
@@ -2008,6 +2058,34 @@ class StateStore:
             )
             self._conn.commit()
 
+    def note_rechecked(self, site: str, url: str) -> None:
+        """Advance an open position's recheck ordering after the §4.9 sweep attempted it.
+
+        The recheck loop pulls the stalest-``last_seen`` open URLs (:meth:`open_urls`) and
+        re-verifies them. A windowed source (``enumerates_all=False``) never re-sees a URL
+        that scrolled out of its recent view, so that URL's ``last_seen`` is frozen — and a
+        *poison* one (a connect that times out under the fetch watchdog and is therefore
+        never closed) stays permanently head-of-line, re-fetched (and burning the watchdog)
+        every single sweep while fresher rows are never reached once a pass-level budget
+        caps the sweep. Stamping ``last_seen = now`` on each attempt rotates the row to the
+        back, so the sweep advances through the whole open set across successive passes.
+
+        Scoped to OPEN rows (a closed one has left the recheck set). Deliberately reuses
+        ``last_seen``: the pinned §4.7 schema carries no separate recheck-order column, and
+        ``last_seen``'s only *behavioural* reader is exactly this recheck order — elsewhere
+        it is a display timestamp and the one-time notify-ledger seed. A live re-verify is a
+        genuine sighting; on a timeout/error the row wasn't confirmed, but rotating it off
+        the head is the whole point and its ``last_seen`` display is only cosmetically off.
+        """
+        now = self._clock().isoformat()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE positions SET last_seen = ? "
+                "WHERE site = ? AND url = ? AND status = 'open'",
+                (now, site, url),
+            )
+            self._conn.commit()
+
     def expire_due(self) -> int:
         """Close every open position whose ``expires_at`` is now past; return the count.
 
@@ -2078,7 +2156,9 @@ class StateStore:
         ).fetchall()
         return [row["url"] for row in rows]
 
-    def _effective_score_sql(self, *, column: str = "match_score", prefix: str = "") -> str:
+    def _effective_score_sql(
+        self, *, column: str = "match_score", prefix: str = ""
+    ) -> str:
         """SQL for the §4.7 freshness-decayed effective score: the base ``match_score`` fit
         scaled by a recency multiplier in ``[floor, 1]`` that decays with the posting's age
         (from ``posted_at``, else ``first_seen``). So a newer posting outranks an equally-good
@@ -2098,9 +2178,7 @@ class StateStore:
         half_life = max(1e-6, config.score_half_life_days())
         floor = min(1.0, max(0.0, config.score_freshness_floor()))
         now_jd = 2440587.5 + self._clock().timestamp() / 86400.0
-        age_days = (
-            f"max(0.0, {now_jd!r} - julianday(COALESCE({prefix}posted_at, {prefix}first_seen)))"
-        )
+        age_days = f"max(0.0, {now_jd!r} - julianday(COALESCE({prefix}posted_at, {prefix}first_seen)))"
         freshness = (
             f"({floor!r} + {(1.0 - floor)!r} * pow(2.0, -({age_days}) / {half_life!r}))"
         )
@@ -2543,7 +2621,10 @@ class StateStore:
                 "INSERT OR REPLACE INTO position_clusters "
                 "(site, url, cluster_id, is_canonical, tier, computed_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                [(s, u, cid, canon, tier, now) for s, u, cid, canon, tier in cluster_rows],
+                [
+                    (s, u, cid, canon, tier, now)
+                    for s, u, cid, canon, tier in cluster_rows
+                ],
             )
             self._conn.executemany(
                 "INSERT OR REPLACE INTO position_role_groups "
@@ -3980,9 +4061,7 @@ def _compose_projection(
     seen_fences: set[tuple[Any, ...]] = set()
     worldwide = any(e["worldwide"] for e in entries)
     ww_source = "rules"
-    if worldwide and all(
-        e["source"] != "rules" for e in entries if e["worldwide"]
-    ):
+    if worldwide and all(e["source"] != "rules" for e in entries if e["worldwide"]):
         ww_source = "llm_value"
     for entry in entries:
         # Projection provenance: 'rules' for parser-derived rows, 'llm_value' for
@@ -3990,8 +4069,12 @@ def _compose_projection(
         # from positions × location_values), unlike posting-local 'llm_posting'.
         row_source = "rules" if entry["source"] == "rules" else "llm_value"
         for place in entry["places"]:
-            key = ((place.get("city") or "").lower(), place.get("subdivision"),
-                   place.get("country"), place.get("macro"))
+            key = (
+                (place.get("city") or "").lower(),
+                place.get("subdivision"),
+                place.get("country"),
+                place.get("macro"),
+            )
             if key not in seen_places:
                 seen_places.add(key)
                 places.append({**place, "source": row_source})
@@ -4131,9 +4214,7 @@ def _to_position(row: sqlite3.Row) -> PositionRecord:
         salary_usd_min=row["salary_usd_min"],
         salary_usd_max=row["salary_usd_max"],
         salary_raw=(row["salary_raw"] if "salary_raw" in row.keys() else None),
-        salary_source=(
-            row["salary_source"] if "salary_source" in row.keys() else None
-        ),
+        salary_source=(row["salary_source"] if "salary_source" in row.keys() else None),
         employment_type=row["employment_type"],
         department=row["department"],
         posted_at=_dt("posted_at"),
