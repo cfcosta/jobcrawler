@@ -5,12 +5,12 @@
 
   <header class="detail-head">
     <h1>{{ p.title }}</h1>
-    <p class="sub">{% if p.company_canonical %}<a href="/positions?company_canonical={{ p.company_canonical | urlencode }}">{{ p.hiring_company or p.company }}</a>{% else %}{{ p.hiring_company or p.company }}{% endif %} · {{ p.location_display or p.location_normalized or p.location }}{% if p.workplace %} · {{ p.workplace }}{% if p.remote_scope == 'anywhere' %} <span class="scope scope-anywhere" title="Open to candidates anywhere">anywhere</span>{% elif p.remote_scope == 'restricted' %} <span class="scope scope-restricted" title="Remote but geographically restricted — see location">restricted</span>{% endif %}{% endif %}{% if p.relocation == 'offered' %} <span class="scope scope-relo" title="Relocation or visa support mentioned in the posting">relocation</span>{% endif %}</p>
+    <p class="sub">{% if p.company_canonical %}<a href="/positions?company_canonical={{ p.company_canonical | urlencode }}">{{ p.hiring_company or p.company }}</a>{% else %}{{ p.hiring_company or p.company }}{% endif %} · {{ p.location_display or p.location_normalized or p.location }}{% if p.workplace %}{% if p.workplace != 'unspecified' %} · {{ p.workplace | label }}{% endif %}{% if p.remote_scope == 'anywhere' %} <span class="scope scope-anywhere" title="Open to candidates anywhere">anywhere</span>{% elif p.remote_scope == 'restricted' %} <span class="scope scope-restricted" title="Remote but geographically restricted — see location">restricted</span>{% endif %}{% endif %}{% if p.relocation == 'offered' %} <span class="scope scope-relo" title="Relocation or visa support mentioned in the posting">relocation</span>{% endif %}</p>
     <p class="meta">
       <span class="lifecycle lc-{{ p.status }}">{{ p.status }}</span>
       {% if p.match_score is not none %}<span class="score-chip band-{{ score_band(p) }}" title="freshness-adjusted; base fit {{ p.match_score }}">{{ score_of(p) }}{% if p.match_verdict %} · {{ p.match_verdict }}{% endif %}</span>{% endif %}
-      {% if p.discipline %}<span class="tag">{{ p.discipline }}</span>{% endif %}
-      {% if p.level %}<span class="tag">{{ p.level }}</span>{% endif %}
+      {% if p.discipline %}<span class="tag">{{ p.discipline | label }}</span>{% endif %}
+      {% if p.level and p.level != 'unspecified' %}<span class="tag">{{ p.level | label }}</span>{% endif %}
       {% if p | salary %}<span class="tag">{{ p | salary }}</span>{% endif %}
       {% if p.employment_type %}<span class="tag">{{ p.employment_type }}</span>{% endif %}
       {% if p.department %}<span class="tag">{{ p.department }}</span>{% endif %}
@@ -167,11 +167,11 @@
     <section class="panel">
       <h2>Classification</h2>
       <dl class="kv">
-        <dt>Discipline</dt><dd>{{ p.discipline or '—' }}</dd>
-        <dt>Level</dt><dd>{{ p.level or '—' }}</dd>
-        <dt>Workplace</dt><dd>{{ p.workplace or '—' }}</dd>
-        <dt>Remote scope</dt><dd>{{ p.remote_scope or '—' }}</dd>
-        <dt>Relocation</dt><dd>{{ p.relocation or '—' }}</dd>
+        <dt>Discipline</dt><dd>{{ p.discipline | label or '—' }}</dd>
+        <dt>Level</dt><dd>{{ p.level | label or '—' }}</dd>
+        <dt>Workplace</dt><dd>{{ p.workplace | label or '—' }}</dd>
+        <dt>Remote scope</dt><dd>{{ p.remote_scope | label or '—' }}</dd>
+        <dt>Relocation</dt><dd>{{ p.relocation | label or '—' }}</dd>
         <dt>Employment</dt><dd>{{ p.employment_type or '—' }}</dd>
         <dt>Department</dt><dd>{{ p.department or '—' }}</dd>
       </dl>

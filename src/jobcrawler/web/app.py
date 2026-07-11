@@ -170,6 +170,59 @@ def format_date(dt: datetime | None) -> str:
     return dt.date().isoformat() if dt is not None else "—"
 
 
+# Display words for the classification enums (§4.6 taxonomies plus relocation).
+# The DB stores the raw machine tokens — matching, filtering, and the profile
+# loader all key on them — so the mapping lives here, presentation-only.
+_ENUM_LABELS: dict[str, str] = {
+    # discipline
+    "backend": "Backend",
+    "frontend": "Frontend",
+    "fullstack": "Full-stack",
+    "mobile": "Mobile",
+    "devops_sre": "DevOps/SRE",
+    "data": "Data",
+    "ml_ai": "ML/AI",
+    "security": "Security",
+    "qa": "QA",
+    "embedded": "Embedded",
+    "eng_other": "Other engineering",
+    "non_eng": "Non-engineering",
+    # level
+    "intern": "Intern",
+    "junior": "Junior",
+    "mid": "Mid-level",
+    "senior": "Senior",
+    "staff_plus": "Staff+",
+    "tech_lead": "Tech Lead",
+    "manager": "Manager",
+    "director_plus": "Director+",
+    # workplace
+    "remote": "Remote",
+    "hybrid": "Hybrid",
+    "onsite": "On-site",
+    # remote scope
+    "anywhere": "Anywhere",
+    "restricted": "Restricted",
+    # relocation ("none" is an explicit refusal cue in the posting, not absence)
+    "offered": "Offered",
+    "none": "Not offered",
+    # shared by level / workplace / remote scope / relocation
+    "unspecified": "Unspecified",
+}
+
+
+def human_label(value: str | None) -> str:
+    """The display word for a classification enum token (``staff_plus`` → ``Staff+``).
+
+    Empty/None stays ``""`` (falsy) so templates can keep the ``| label or '—'``
+    idiom; an unknown token degrades to underscore-free text rather than leaking
+    a machine name into the UI.
+    """
+    if not value:
+        return ""
+    return _ENUM_LABELS.get(value, value.replace("_", " "))
+
+
 def _compact_usd(value: float) -> str:
     """A short USD figure: ``$1.2M`` / ``$260k`` / ``$95`` (for hourly-derived lows)."""
     if value >= 1_000_000:
@@ -573,6 +626,7 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
     jinja_filters["age"] = humanize_age
     jinja_filters["salary"] = format_salary
     jinja_filters["date"] = format_date
+    jinja_filters["label"] = human_label  # enum tokens → display words
 
     if _STATIC_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")

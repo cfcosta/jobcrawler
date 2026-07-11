@@ -146,8 +146,9 @@ async def test_detail_surfaces_full_record() -> None:
             assert "180,000" in body and "220,000" in body
             # provenance shows the source board slug + the content-hash label
             assert "(acme)" in body and "Content hash" in body
-            # classification surfaces the crawl-normalized discipline
-            assert "backend" in body
+            # classification surfaces the crawl-normalized discipline, as its
+            # display word (#127) — the raw token stays in the DB only
+            assert "Backend" in body
     finally:
         store.close()
 
@@ -352,6 +353,63 @@ def test_format_salary_appends_usd_hint_for_non_usd() -> None:
         salary_usd_max=140000.0,
     )
     assert format_salary(cast(PositionRecord, usd)) == "USD 120,000–140,000/year"
+
+
+def test_human_label_covers_every_taxonomy_token() -> None:
+    from jobcrawler.runtime.normalize import (
+        DISCIPLINES,
+        LEVELS,
+        REMOTE_SCOPES,
+        WORKPLACES,
+    )
+    from jobcrawler.web.app import _ENUM_LABELS, human_label
+
+    assert human_label("eng_other") == "Other engineering"
+    assert human_label("staff_plus") == "Staff+"
+    assert human_label("devops_sre") == "DevOps/SRE"
+    # every taxonomy token has an explicit display word — a new enum member must
+    # land in the map too, not leak through the underscore-strip fallback
+    for token in DISCIPLINES | LEVELS | WORKPLACES | REMOTE_SCOPES:
+        assert token in _ENUM_LABELS, token
+    # falsy stays falsy so the `| label or '—'` template idiom keeps working
+    assert human_label(None) == ""
+    assert human_label("") == ""
+    assert human_label("weird_token") == "weird token"
+
+
+async def test_enum_labels_render_humanized() -> None:
+    store = StateStore(":memory:")
+    store.upsert_position(
+        "acme",
+        "https://acme.test/enum",
+        fields={
+            **FIELDS,
+            "title": "Platform Engineer",
+            "discipline": "eng_other",
+            "level": "staff_plus",
+            "workplace": "onsite",
+            "remote_scope": "restricted",
+            "relocation": "none",
+        },
+        content_hash="he",
+    )
+    pid = encode_pid("acme", "https://acme.test/enum")
+    try:
+        async with _client(create_app(store)) as c:
+            # the DB keeps the machine tokens; the detail page shows display words
+            r = await c.get(f"/positions/{pid}")
+            for token in ("eng_other", "staff_plus", "onsite"):
+                assert token not in r.text, token
+            assert "Other engineering" in r.text
+            assert "Staff+" in r.text
+            assert "On-site" in r.text
+            assert "Not offered" in r.text  # relocation "none" = explicit refusal
+            # the list row's workplace suffix is humanized too
+            r = await c.get("/positions")
+            assert "· On-site" in r.text
+            assert "onsite" not in r.text
+    finally:
+        store.close()
 
 
 async def test_relocation_filter_and_badge() -> None:

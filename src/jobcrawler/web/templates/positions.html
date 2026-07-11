@@ -97,7 +97,7 @@
         <span class="pos-sub">
           {% if p.company_canonical %}<a href="/positions?company_canonical={{ p.company_canonical | urlencode }}">{{ p.hiring_company or p.company }}</a>{% else %}<span>{{ p.hiring_company or p.company }}</span>{% endif %}
           <span class="sep">·</span>
-          <span class="loc">{{ p.location_display or p.location_normalized or p.location }}{% if p.workplace and p.workplace != 'unspecified' %} · {{ p.workplace }}{% endif %}</span>
+          <span class="loc">{{ p.location_display or p.location_normalized or p.location }}{% if p.workplace and p.workplace != 'unspecified' %} · {{ p.workplace | label }}{% endif %}</span>
           {% if p.remote_scope == 'anywhere' %}<span class="scope scope-anywhere" title="Open to candidates anywhere">anywhere</span>{% elif p.remote_scope == 'restricted' %}<span class="scope scope-restricted" title="Remote but geographically restricted — see location">restricted</span>{% endif %}
           {% if p.relocation == 'offered' %}<span class="scope scope-relo" title="Relocation or visa support mentioned in the posting">relocation</span>{% endif %}
           {% set csize = cluster_sizes.get(encode_pid(p.site, p.url)) if cluster_sizes is defined else none %}
