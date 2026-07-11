@@ -1315,6 +1315,91 @@ async def test_country_and_remote_in_filters_flow_through_the_form() -> None:
         store.close()
 
 
+async def test_location_links_filter_to_that_location() -> None:
+    store = _loc_store()
+    try:
+        async with _client(create_app(store)) as c:
+            # each row's location line links to the location-filtered view (#128)
+            html = (await c.get("/positions")).text
+            assert 'href="/positions?location=S%C3%A3o%20Paulo%2C%20Brazil"' in html
+            # the filter keeps only rows reading that location
+            rows = (
+                await c.get(
+                    "/api/positions", params={"location": "São Paulo, Brazil"}
+                )
+            ).json()
+            assert [r["title"] for r in rows] == ["SP Engineer"]
+            # reflexivity: every displayed location line round-trips to a result
+            # set containing its own row — projected (ledger display), fenced,
+            # and unresolved (raw-string fallback) alike
+            rows = (await c.get("/api/positions")).json()
+            for r in rows:
+                shown = (
+                    r["location_display"]
+                    or r["location_normalized"]
+                    or r["location"]
+                )
+                got = (
+                    await c.get("/api/positions", params={"location": shown})
+                ).json()
+                assert r["url"] in {g["url"] for g in got}, shown
+            # landing on the filtered view shows a clearable context chip
+            html = (
+                await c.get(
+                    "/positions", params={"location": "São Paulo, Brazil"}
+                )
+            ).text
+            assert "Location · São Paulo, Brazil" in html
+            assert "SP Engineer" in html and "Fenced Engineer" not in html
+            # the detail page's §4.12 location chips link the same way
+            pid = encode_pid("acme", "https://acme.test/fenced")
+            html = (await c.get(f"/positions/{pid}")).text
+            assert (
+                'href="/positions?location=Remote%20%28United%20States%29"' in html
+            )
+    finally:
+        store.close()
+
+
+async def test_location_filter_matches_the_ledger_not_just_the_display_line() -> None:
+    # A multi-location posting's display line is a composite ("A · Remote (B)") —
+    # clicking a single place elsewhere must still catch it via its §4.12 ledger.
+    store = _loc_store()
+    store.upsert_position(
+        "acme",
+        "https://acme.test/multi",
+        fields={
+            **FIELDS,
+            "title": "Multi Engineer",
+            "location": "São Paulo, Brasil",
+            "workplace": "hybrid",
+        },
+        content_hash="hm",
+    )
+    store.refresh_position_locations(
+        "acme",
+        "https://acme.test/multi",
+        location="São Paulo, Brasil",
+        locations_json=json.dumps(["São Paulo, Brasil", "Remote - US"]),
+        workplace="hybrid",
+        force=True,
+    )
+    try:
+        multi = store.get_position("acme", "https://acme.test/multi")
+        assert multi is not None
+        # the premise: its display line is a composite, not the bare place
+        assert multi.location_display != "São Paulo, Brazil"
+        async with _client(create_app(store)) as c:
+            rows = (
+                await c.get(
+                    "/api/positions", params={"location": "São Paulo, Brazil"}
+                )
+            ).json()
+            assert {r["title"] for r in rows} == {"SP Engineer", "Multi Engineer"}
+    finally:
+        store.close()
+
+
 async def test_api_carries_structured_location_keys() -> None:
     store = _loc_store()
     try:

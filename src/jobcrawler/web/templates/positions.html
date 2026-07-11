@@ -12,13 +12,16 @@
   {% endfor %}
 </div>
 
-{% if filters.company_canonical or filters.site %}
+{% if filters.company_canonical or filters.site or filters.location %}
 <div class="context">
   {% if filters.company_canonical %}
   <span class="chip context-chip">Company · {{ (rows[0].hiring_company or rows[0].company) if rows else filters.company_canonical }}<a class="chip-x" href="/positions" title="Clear filter" aria-label="Clear filter">✕</a></span>
   {% endif %}
   {% if filters.site %}
   <span class="chip context-chip">Site · {{ site_names.get(filters.site, filters.site) }}<a class="chip-x" href="/positions" title="Clear filter" aria-label="Clear filter">✕</a></span>
+  {% endif %}
+  {% if filters.location %}
+  <span class="chip context-chip">Location · {{ filters.location }}<a class="chip-x" href="/positions" title="Clear filter" aria-label="Clear filter">✕</a></span>
   {% endif %}
 </div>
 {% endif %}
@@ -97,7 +100,8 @@
         <span class="pos-sub">
           {% if p.company_canonical %}<a href="/positions?company_canonical={{ p.company_canonical | urlencode }}">{{ p.hiring_company or p.company }}</a>{% else %}<span>{{ p.hiring_company or p.company }}</span>{% endif %}
           <span class="sep">·</span>
-          <span class="loc">{{ p.location_display or p.location_normalized or p.location }}{% if p.workplace and p.workplace != 'unspecified' %} · {{ p.workplace | label }}{% endif %}</span>
+          {% set locstr = p.location_display or p.location_normalized or p.location %}
+          <span class="loc">{% if locstr %}<a href="/positions?location={{ locstr | urlencode }}" title="Only positions in this location">{{ locstr }}</a>{% endif %}{% if p.workplace and p.workplace != 'unspecified' %} · {{ p.workplace | label }}{% endif %}</span>
           {% if p.remote_scope == 'anywhere' %}<span class="scope scope-anywhere" title="Open to candidates anywhere">anywhere</span>{% elif p.remote_scope == 'restricted' %}<span class="scope scope-restricted" title="Remote but geographically restricted — see location">restricted</span>{% endif %}
           {% if p.relocation == 'offered' %}<span class="scope scope-relo" title="Relocation or visa support mentioned in the posting">relocation</span>{% endif %}
           {% set csize = cluster_sizes.get(encode_pid(p.site, p.url)) if cluster_sizes is defined else none %}

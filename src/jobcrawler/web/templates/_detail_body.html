@@ -5,7 +5,7 @@
 
   <header class="detail-head">
     <h1>{{ p.title }}</h1>
-    <p class="sub">{% if p.company_canonical %}<a href="/positions?company_canonical={{ p.company_canonical | urlencode }}">{{ p.hiring_company or p.company }}</a>{% else %}{{ p.hiring_company or p.company }}{% endif %} · {{ p.location_display or p.location_normalized or p.location }}{% if p.workplace %}{% if p.workplace != 'unspecified' %} · {{ p.workplace | label }}{% endif %}{% if p.remote_scope == 'anywhere' %} <span class="scope scope-anywhere" title="Open to candidates anywhere">anywhere</span>{% elif p.remote_scope == 'restricted' %} <span class="scope scope-restricted" title="Remote but geographically restricted — see location">restricted</span>{% endif %}{% endif %}{% if p.relocation == 'offered' %} <span class="scope scope-relo" title="Relocation or visa support mentioned in the posting">relocation</span>{% endif %}</p>
+    <p class="sub">{% if p.company_canonical %}<a href="/positions?company_canonical={{ p.company_canonical | urlencode }}">{{ p.hiring_company or p.company }}</a>{% else %}{{ p.hiring_company or p.company }}{% endif %}{% set locstr = p.location_display or p.location_normalized or p.location %}{% if locstr %} · <a href="/positions?location={{ locstr | urlencode }}" title="Only positions in this location">{{ locstr }}</a>{% endif %}{% if p.workplace %}{% if p.workplace != 'unspecified' %} · {{ p.workplace | label }}{% endif %}{% if p.remote_scope == 'anywhere' %} <span class="scope scope-anywhere" title="Open to candidates anywhere">anywhere</span>{% elif p.remote_scope == 'restricted' %} <span class="scope scope-restricted" title="Remote but geographically restricted — see location">restricted</span>{% endif %}{% endif %}{% if p.relocation == 'offered' %} <span class="scope scope-relo" title="Relocation or visa support mentioned in the posting">relocation</span>{% endif %}</p>
     <p class="meta">
       <span class="lifecycle lc-{{ p.status }}">{{ p.status }}</span>
       {% if p.match_score is not none %}<span class="score-chip band-{{ score_band(p) }}" title="freshness-adjusted; base fit {{ p.match_score }}">{{ score_of(p) }}{% if p.match_verdict %} · {{ p.match_verdict }}{% endif %}</span>{% endif %}
@@ -151,9 +151,9 @@
     <ul class="siblings">
       {% for l in locations %}
       <li>
-        {% if l.kind == 'place' %}<span class="tag">{{ l.display }}</span>
-        {% elif l.kind == 'remote_anywhere' %}<span class="scope scope-anywhere" title="The posting states work-from-anywhere">{{ l.display }}</span>
-        {% else %}<span class="scope scope-restricted" title="Remote work limited to this geography">{{ l.display }}</span>{% endif %}
+        {% if l.kind == 'place' %}<a class="tag" href="/positions?location={{ l.display | urlencode }}" title="Only positions in this location">{{ l.display }}</a>
+        {% elif l.kind == 'remote_anywhere' %}<a class="scope scope-anywhere" href="/positions?location={{ l.display | urlencode }}" title="The posting states work-from-anywhere — click for every position with this eligibility">{{ l.display }}</a>
+        {% else %}<a class="scope scope-restricted" href="/positions?location={{ l.display | urlencode }}" title="Remote work limited to this geography — click for every position with this eligibility">{{ l.display }}</a>{% endif %}
         {% if l.kind != 'place' %}<span class="tag">remote eligibility</span>{% endif %}
         {% if l.source != 'rules' %}<span class="tag" title="Read by the §4.7 extract pass, not the rules parser">LLM</span>{% endif %}
       </li>

@@ -2945,6 +2945,7 @@ class StateStore:
         site: str | None = None,
         company: str | None = None,
         company_canonical: str | None = None,
+        location: str | None = None,
         status: str | None = None,
         track_status: str | None = None,
         workplace: str | None = None,
@@ -2976,6 +2977,11 @@ class StateStore:
           normalized)/description.
         - ``site``    exact slug; ``company`` case-insensitive substring;
           ``company_canonical`` exact dedup key (the "positions at this company" link).
+        - ``location``  exact location-line string (the clickable location link): rows whose
+          §4.12 projection carries a row with that canonical display ("São Paulo, Brazil"
+          catches a three-office posting listing it second), or whose rendered location
+          line (display → normalized → raw, the same coalesce the UI shows) equals it —
+          so the row the link was clicked on always matches, projected or not.
         - ``status``  crawler lifecycle ``'open'``/``'closed'`` (``None``/``'all'`` = both).
         - ``track_status``  exact personal stage (``'applied'`` …).
         - ``workplace``/``level``  exact, case-insensitive (e.g. ``'remote'``).
@@ -3073,6 +3079,19 @@ class StateStore:
             # the matcher set it, aggregator postings onto the real hiring company.
             clauses.append("company_canonical = ?")
             params.append(company_canonical)
+        if location:
+            # The clickable-location link (§16): the ledger branch catches every
+            # position whose §4.12 projection contains this canonical display; the
+            # string branch keeps the link reflexive for rows with no projection
+            # (raw/normalized fallback) and for multi-location composites clicked
+            # whole ("A · B" never equals any single ledger display).
+            clauses.append(
+                "(COALESCE(location_display, location_normalized, location) = ? "
+                "OR EXISTS (SELECT 1 FROM position_locations pl "
+                "WHERE pl.site = positions.site AND pl.url = positions.url "
+                "AND pl.display = ?))"
+            )
+            params += [location, location]
         if status and status != "all":
             clauses.append("status = ?")
             params.append(status)

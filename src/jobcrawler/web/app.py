@@ -440,6 +440,9 @@ def _read_filters(
         "site": _s("site"),
         "company": _s("company"),
         "company_canonical": _s("company_canonical"),
+        # The clickable-location link (#128): exact display-line match, §4.12
+        # ledger-aware store-side. Link-only — no form input carries it.
+        "location": _s("location"),
         "status": status,
         "track_status": track_status,
         "workplace": _s("workplace"),
@@ -468,6 +471,7 @@ def _read_filters(
         "site": params.get("site") or "",
         "company": params.get("company") or "",
         "company_canonical": params.get("company_canonical") or "",
+        "location": params.get("location") or "",
         "status": params.get("status") or "",
         "track_status": track_status or "",
         "workplace": params.get("workplace") or "",
