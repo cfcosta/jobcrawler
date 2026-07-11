@@ -122,6 +122,23 @@ _CONTROL_COUNT_JS = (
     "'input:not([type=hidden]), textarea, select').length"
 )
 
+# Mount-churn probe (#131): client apps often paint a skeleton form first and
+# REPLACE it wholesale once their boot data-fetch resolves (Ashby does, ~1.5s
+# after first paint — later still in a throttled background tab). Sweeping the
+# first mount hands out refs that die in the swap: fills land in detached nodes
+# while their readbacks swear ok. __jcSeen expando marks die with their nodes,
+# so a sample with zero fresh controls and an unchanged count means the CURRENT
+# mount outlived the sampling interval.
+_SETTLE_JS = (
+    "/*jc-settle*/ (() => {"
+    " const els = document.querySelectorAll("
+    "'input:not([type=hidden]), textarea, select');"
+    " let fresh = 0;"
+    " for (const el of els) if (!el.__jcSeen) { fresh++; el.__jcSeen = 1; }"
+    " return JSON.stringify({ count: els.length, fresh });"
+    " })()"
+)
+
 # One sweep: collect every fillable control + clickable affordance (main frame and
 # same-origin iframes), stash live element refs in window.__jcAF keyed by ref id,
 # and return a compact JSON digest the LLM plans against. Refs are only valid for
@@ -283,7 +300,7 @@ _SWEEP_JS = r"""/*jc-sweep*/ (() => {
 
 _FILL_JS = r"""/*jc-act*/ (() => {
   const el = (window.__jcAF || {})[__REF__];
-  if (!el) return JSON.stringify({ ok: false, error: 'stale ref — re-read the page' });
+  if (!el || !el.isConnected) return JSON.stringify({ ok: false, error: 'stale ref — re-read the page' });
   const value = __VALUE__;
   try { el.scrollIntoView({ block: 'center' }); } catch (e) {}
   const tag = el.tagName;
@@ -314,7 +331,7 @@ _FILL_JS = r"""/*jc-act*/ (() => {
 
 _SELECT_JS = r"""/*jc-act*/ /*jc-select*/ (() => {
   const el = (window.__jcAF || {})[__REF__];
-  if (!el) return JSON.stringify({ ok: false, error: 'stale ref — re-read the page' });
+  if (!el || !el.isConnected) return JSON.stringify({ ok: false, error: 'stale ref — re-read the page' });
   const want = String(__VALUE__);
   const fold = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .replace(/\s+/g, ' ').trim().toLowerCase();
@@ -396,7 +413,7 @@ _COMBO_HELPERS_JS = r"""
 _COMBO_OPEN_JS = (
     r"""/*jc-act*/ /*jc-combo-open*/ (() => {
   const el = (window.__jcAF || {})[__REF__];
-  if (!el) return JSON.stringify({ ok: false, error: 'stale ref — re-read the page' });
+  if (!el || !el.isConnected) return JSON.stringify({ ok: false, error: 'stale ref — re-read the page' });
 """
     + _COMBO_HELPERS_JS
     + r"""
@@ -415,7 +432,7 @@ _COMBO_OPEN_JS = (
 _COMBO_COUNT_JS = (
     r"""/*jc-act*/ /*jc-combo-count*/ (() => {
   const el = (window.__jcAF || {})[__REF__];
-  if (!el) return JSON.stringify({ ok: false, error: 'stale ref — re-read the page' });
+  if (!el || !el.isConnected) return JSON.stringify({ ok: false, error: 'stale ref — re-read the page' });
 """
     + _COMBO_HELPERS_JS
     + r"""
@@ -426,7 +443,7 @@ _COMBO_COUNT_JS = (
 _COMBO_PICK_JS = (
     r"""/*jc-act*/ /*jc-combo-pick*/ (() => {
   const el = (window.__jcAF || {})[__REF__];
-  if (!el) return JSON.stringify({ ok: false, error: 'stale ref — re-read the page' });
+  if (!el || !el.isConnected) return JSON.stringify({ ok: false, error: 'stale ref — re-read the page' });
   const want = String(__VALUE__);
 """
     + _COMBO_HELPERS_JS
@@ -458,7 +475,7 @@ _COMBO_PICK_JS = (
 _COMBO_VALUE_JS = (
     r"""/*jc-act*/ /*jc-combo-value*/ (() => {
   const el = (window.__jcAF || {})[__REF__];
-  if (!el) return JSON.stringify({ ok: false, error: 'stale ref — re-read the page' });
+  if (!el || !el.isConnected) return JSON.stringify({ ok: false, error: 'stale ref — re-read the page' });
 """
     + _COMBO_HELPERS_JS
     + r"""
@@ -468,7 +485,7 @@ _COMBO_VALUE_JS = (
 
 _CHECK_JS = r"""/*jc-act*/ (() => {
   const el = (window.__jcAF || {})[__REF__];
-  if (!el) return JSON.stringify({ ok: false, error: 'stale ref — re-read the page' });
+  if (!el || !el.isConnected) return JSON.stringify({ ok: false, error: 'stale ref — re-read the page' });
   const type = String(el.type || '').toLowerCase();
   if (type !== 'checkbox' && type !== 'radio')
     return JSON.stringify({ ok: false, error: 'not a checkbox/radio' });
@@ -484,7 +501,7 @@ _CHECK_JS = r"""/*jc-act*/ (() => {
 # safe side). Anchors never submit and reveal links stay clickable.
 _CLICK_JS = r"""/*jc-act*/ (() => {
   const el = (window.__jcAF || {})[__REF__];
-  if (!el) return JSON.stringify({ ok: false, error: 'stale ref — re-read the page' });
+  if (!el || !el.isConnected) return JSON.stringify({ ok: false, error: 'stale ref — re-read the page' });
   const fold = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .replace(/\s+/g, ' ').trim().toLowerCase();
   const text = fold((el.textContent || '') + ' ' + (el.value || '') + ' ' + (el.getAttribute('aria-label') || ''));
@@ -531,7 +548,54 @@ _APPLY_HOP_JS = r"""/*jc-hop*/ (() => {
   return JSON.stringify({ ok: true, hrefs: [...new Set(hits)] });
 })()""".replace("__TEXTS__", json.dumps(list(_APPLY_HOP_TEXTS)))
 
-_REF_LOOKUP_JS = "/*jc-ref*/ (window.__jcAF || {})[__REF__]"
+_REF_LOOKUP_JS = (
+    "/*jc-ref*/ (() => { const el = (window.__jcAF || {})[__REF__];"
+    " return el && el.isConnected ? el : null; })()"
+)
+
+# Post-act verification (#131): an ok fill readback proves the value was SET,
+# not that it SURVIVED — a post-boot remount resets every control to the app's
+# own (empty) state. A beat after acting, re-check each acted control in the
+# live document. Emptiness, not value equality, is the test: pages legitimately
+# reformat input (phone masks), but only a state-owning re-render EMPTIES a
+# field. Detached nodes fail unconditionally — their state died with them.
+_VERIFY_JS = r"""/*jc-verify*/ (() => {
+  const items = __ITEMS__;
+  const out = [];
+  for (const it of items) {
+    const el = (window.__jcAF || {})[it.ref];
+    if (!el || !el.isConnected) {
+      out.push({ ref: it.ref, held: false, actual: 'detached' });
+      continue;
+    }
+    let held, actual;
+    if (it.op === 'check') {
+      held = !!el.checked === !!it.on;
+      actual = el.checked ? 'checked' : 'unchecked';
+    } else if (it.op === 'upload') {
+      held = !!(el.files && el.files.length);
+      actual = held ? String(el.files[0].name) : 'no file';
+    } else {
+      actual = String(el.value != null ? el.value : '');
+      if (!actual.trim() && el.isContentEditable) actual = String(el.textContent || '');
+      if (!actual.trim()) {
+        // A committed combobox choice renders beside its (empty) input — read
+        // the value container the same way the sweep does.
+        try {
+          const vc = el.closest('[class*="value-container"], [class*="ValueContainer"]');
+          if (vc) {
+            const c = vc.cloneNode(true);
+            for (const kill of c.querySelectorAll('input, [class*="placeholder"], [id$="placeholder"]')) kill.remove();
+            actual = c.textContent.replace(/\s+/g, ' ').trim();
+          }
+        } catch (e) {}
+      }
+      held = actual.trim() !== '';
+    }
+    out.push({ ref: it.ref, held: !!held, actual: String(actual).slice(0, 60) });
+  }
+  return JSON.stringify({ ok: true, checks: out });
+})()"""
 
 
 def _fill_js(ref: str, value: str) -> str:
@@ -576,6 +640,38 @@ def _click_js(ref: str) -> str:
         .replace("__SUBMIT_RE__", json.dumps(_SUBMIT_RE))
         .replace("__WIZARD_RE__", json.dumps(_WIZARD_RE))
     )
+
+
+def _verify_js(items: list[dict[str, Any]]) -> str:
+    return _VERIFY_JS.replace("__ITEMS__", json.dumps(items, ensure_ascii=False))
+
+
+def _match_control(
+    ident: dict[str, Any], controls: list[dict[str, Any]]
+) -> str | None:
+    """Re-locate a control across a re-render: strongest identity wins (#131).
+
+    Refs die with the sweep that assigned them; after a re-sweep the same
+    logical field is found again by id, then name, then (label, tag, type) —
+    the attributes ATS forms keep stable across framework remounts.
+    """
+    for key in ("id", "name"):
+        want = ident.get(key)
+        if not want:
+            continue
+        for c in controls:
+            if c.get(key) == want:
+                return str(c.get("ref") or "") or None
+    want_label = ident.get("label")
+    if want_label:
+        for c in controls:
+            if (
+                c.get("label") == want_label
+                and c.get("tag") == ident.get("tag")
+                and c.get("type") == ident.get("type")
+            ):
+                return str(c.get("ref") or "") or None
+    return None
 
 
 class AutofillStep(dspy.Signature):
@@ -656,6 +752,34 @@ def _parse_actions(raw: str) -> list[dict[str, Any]]:
     if not isinstance(parsed, list):
         return []
     return [a for a in parsed if isinstance(a, dict)][:_MAX_ACTIONS_PER_ROUND]
+
+
+def _stale_results(results: list[dict[str, object]]) -> int:
+    """How many of a round's executed actions died on a stale ref (#131)."""
+    n = 0
+    for r in results:
+        res = r.get("result")
+        if isinstance(res, dict) and "stale ref" in str(res.get("error") or ""):
+            n += 1
+    return n
+
+
+def _all_stale(results: list[dict[str, object]]) -> bool:
+    """Did every EXECUTED action this round die on a stale ref? (#131)
+
+    Deferred-done markers ride ``results`` too but aren't executions — they
+    must not break the "everything died stale" signal.
+    """
+    executed = 0
+    stale = 0
+    for r in results:
+        res = r.get("result")
+        if not isinstance(res, dict) or res.get("deferred"):
+            continue
+        executed += 1
+        if "stale ref" in str(res.get("error") or ""):
+            stale += 1
+    return executed > 0 and stale == executed
 
 
 def _history_line(action: dict[str, Any], result: dict[str, Any]) -> str:
@@ -855,27 +979,28 @@ class AutofillWorker:
             done: str | None = None
             navigated = False
             any_ok = False
+            staged: list[dict[str, Any]] = []  # ok state-ops, verified post-round
             for action in actions:
                 if str(action.get("op", "")).lower() == "done":
-                    if navigated:
+                    if navigated or _stale_results(results):
                         # The model is declaring done for a page it hasn't seen:
-                        # a click just ran this round and may have navigated or
-                        # revealed the form (BambooHR modal, WWR→Breezy hop).
-                        # Defer — next round plans against the fresh sweep.
+                        # either a click just ran (may have navigated or revealed
+                        # the form — BambooHR modal, WWR→Breezy hop) or refs died
+                        # mid-round because the app re-rendered underneath us
+                        # (#131). Defer — next round plans against a fresh sweep.
+                        reason = (
+                            "a click ran this round; plan again from the fresh page"
+                            if navigated
+                            else "refs went stale this round — the page "
+                            "re-rendered; plan again from the fresh sweep"
+                        )
                         results.append(
                             {
                                 "action": action,
-                                "result": {
-                                    "ok": False,
-                                    "deferred": "done after a click in the same "
-                                    "round — the page is re-read first",
-                                },
+                                "result": {"ok": False, "deferred": reason},
                             }
                         )
-                        history.append(
-                            "  - done -> DEFERRED (a click ran this round; "
-                            "plan again from the fresh page)"
-                        )
+                        history.append(f"  - done -> DEFERRED ({reason})")
                         summary = str(action.get("summary") or summary)
                         break
                     done = str(action.get("summary") or "prefill complete")
@@ -889,9 +1014,26 @@ class AutofillWorker:
                     op = str(action.get("op", "")).lower()
                     if op in ("fill", "select", "check", "upload"):
                         counters["fields"] += 1
+                        staged.append(action)
                     if op == "click":
                         navigated = True  # a click may navigate or re-render
                 await asyncio.sleep(0.15)  # let the page's JS react between actions
+            if staged and not navigated:
+                # Did the round's state actually STICK? (#131) A remount can
+                # wipe every "ok" fill after the readback; only a round whose
+                # values held may honor "done".
+                held = await self._verify_round(
+                    sid, target_id, entry, staged, counters
+                )
+                if not held:
+                    history.append(
+                        "  - NOTE: the page re-rendered and WIPED some of the "
+                        "values above after they reported ok; re-apply anything "
+                        "the fresh sweep shows empty"
+                    )
+                    if done is not None:
+                        summary = done
+                        done = None  # the state did not stick — plan again
             if done is not None:
                 summary = done
                 break
@@ -900,6 +1042,16 @@ class AutofillWorker:
                 # calling it a stall.
                 if not await self._tab_alive(target_id):
                     raise TabClosed("apply tab closed in Chrome")
+                if _all_stale(results):
+                    # Every ref died between the sweep and the acts — the app
+                    # re-rendered underneath us (#131). Not a stall: re-sweep
+                    # and let the model re-plan against live nodes.
+                    history.append(
+                        "  - NOTE: every ref went stale before acting (the "
+                        "page re-rendered); plan again from the fresh sweep"
+                    )
+                    await asyncio.sleep(1.0)
+                    continue
                 summary = f"stalled: no action succeeded in round {rnd}"
                 break
             if navigated:
@@ -996,6 +1148,13 @@ class AutofillWorker:
 
     # -- CDP page interaction ----------------------------------------------------
 
+    # Mount-settle sampling (#131): how long the control set must hold still
+    # before the first sweep trusts it, and how many samples to spend before
+    # giving up and proceeding (verification below is the backstop). Worker-side
+    # like every other wait — page timers in a backgrounded tab are throttled.
+    _SETTLE_POLLS = 8
+    _SETTLE_POLL_S = 1.2
+
     async def _wait_ready(self, sid: str, target_id: str) -> None:
         """Navigation + SPA settle: readyState on a real URL, then (bounded) form controls.
 
@@ -1024,8 +1183,152 @@ class AutofillWorker:
                     raise TabClosed("apply tab closed in Chrome") from None
                 count = 0
             if isinstance(count, (int, float)) and count > 0:
-                return
+                break
             await asyncio.sleep(0.5)
+        else:
+            return  # no controls ever appeared — a reveal page; round 1 clicks
+        # Controls exist — now require the mount to SETTLE (#131): Ashby-style
+        # apps replace the whole form when their boot fetch resolves, killing
+        # every ref a too-early sweep handed out. Sample until one interval
+        # passes with zero fresh controls and a stable count; churn that never
+        # stops just times out (post-act verification is the backstop).
+        prev = -1
+        for _ in range(self._SETTLE_POLLS):
+            try:
+                raw = await self._browser.evaluate(sid, _SETTLE_JS)
+            except CdpError:
+                if not await self._tab_alive(target_id):
+                    raise TabClosed("apply tab closed in Chrome") from None
+                raw = None
+            sig: dict[str, Any] | None = None
+            if isinstance(raw, str):
+                try:
+                    parsed = json.loads(raw)
+                    sig = parsed if isinstance(parsed, dict) else None
+                except json.JSONDecodeError:
+                    sig = None
+            if sig is not None:
+                count = int(sig.get("count") or 0)
+                if count == prev and int(sig.get("fresh") or 0) == 0:
+                    return
+                prev = count
+            await asyncio.sleep(self._SETTLE_POLL_S)
+
+    # Post-act verification pacing (#131): how long a "successful" state-op must
+    # survive in the live DOM before it counts, and how many repair passes
+    # (re-sweep → re-locate → re-apply) a wiped round gets before it is declared
+    # unstable and the model plans again.
+    _VERIFY_DELAY_S = 2.5
+    _VERIFY_REPAIRS = 2
+
+    async def _verify_round(
+        self,
+        sid: str,
+        target_id: str,
+        entry: dict[str, object],
+        staged: list[dict[str, Any]],
+        counters: dict[str, int],
+    ) -> bool:
+        """Confirm a round's ok state-ops actually stuck; repair them when not (#131).
+
+        Ashby's SPA swaps in a freshly-mounted form when its boot fetch
+        resolves, wiping earlier fills and detaching swept refs (so later
+        fills land in ghost nodes whose readbacks still echo the value). A
+        beat after acting, re-check each acted control in the live document;
+        anything empty or detached is re-located on a fresh sweep by
+        id/name/label and re-applied — the same action the model already
+        emitted, pointed at the live node. Returns True when everything held
+        (possibly after repairs), False when the round is unstable — the
+        caller then withholds "done" and lets the model re-plan. Fail-open:
+        a page that can't answer (mid-navigation, odd DOM) counts as held;
+        this is a safety net, not a gate on flaky readback.
+        """
+        controls: dict[str, Any] = {}
+        page = entry.get("page")
+        swept = page.get("controls") if isinstance(page, dict) else None
+        if isinstance(swept, list):
+            for c in swept:
+                if isinstance(c, dict) and c.get("ref"):
+                    controls[str(c.get("ref"))] = c
+        # Current ref + the action to re-apply + the identity to re-locate by.
+        items: list[dict[str, Any]] = [
+            {"ref": str(a.get("ref", "")), "action": a, "ident": ident}
+            for a in staged
+            if (ident := controls.get(str(a.get("ref", "")))) is not None
+        ]
+        if not items:
+            return True
+        verify: dict[str, Any] = {"held": True}
+        entry["verify"] = verify
+        wiped: list[dict[str, Any]] = []
+        for attempt in range(self._VERIFY_REPAIRS + 1):
+            await asyncio.sleep(self._VERIFY_DELAY_S)
+            checks = [
+                {
+                    "ref": it["ref"],
+                    "op": str(it["action"].get("op", "")).lower(),
+                    "on": bool(it["action"].get("on", True)),
+                }
+                for it in items
+            ]
+            try:
+                res = await self._eval_action(sid, _verify_js(checks))
+            except CdpError:
+                if not await self._tab_alive(target_id):
+                    raise TabClosed("apply tab closed in Chrome") from None
+                verify["unreadable"] = True
+                return True
+            if not res.get("ok"):
+                if not await self._tab_alive(target_id):
+                    raise TabClosed("apply tab closed in Chrome")
+                verify["unreadable"] = True
+                return True
+            by_ref = {
+                str(c.get("ref")): c
+                for c in res.get("checks") or []
+                if isinstance(c, dict)
+            }
+            verify["checks"] = list(by_ref.values())
+            # Absent from the reply = held (fail-open); explicit held=False = wiped.
+            wiped = [
+                it
+                for it in items
+                if by_ref.get(it["ref"], {}).get("held") is False
+            ]
+            if not wiped:
+                verify["attempts"] = attempt + 1
+                return True
+            if attempt == self._VERIFY_REPAIRS:
+                break
+            # Repair: fresh sweep (live refs), re-locate each wiped control by
+            # identity, re-apply the SAME action through the normal executor —
+            # nothing the model didn't already emit, so no-submit is untouched.
+            try:
+                digest = await self._sweep(sid)
+            except CdpError:
+                if not await self._tab_alive(target_id):
+                    raise TabClosed("apply tab closed in Chrome") from None
+                verify["unreadable"] = True
+                return True
+            fresh = [
+                c
+                for c in digest.get("controls") or []
+                if isinstance(c, dict)
+            ]
+            repaired: list[str] = []
+            for it in wiped:
+                new_ref = _match_control(it["ident"], fresh)
+                if new_ref is None:
+                    continue
+                it["ref"] = new_ref
+                await self._act(sid, {**it["action"], "ref": new_ref})
+                repaired.append(new_ref)
+            verify.setdefault("repairs", []).append(repaired)
+        verify["held"] = False
+        verify["attempts"] = self._VERIFY_REPAIRS + 1
+        # The wiped fields are NOT filled, whatever the act-time counters said.
+        counters["fields"] = max(0, counters["fields"] - len(wiped))
+        return False
 
     async def _apply_hop(self, sid: str, target_id: str) -> str | None:
         """One mechanical hop from a posting page to its own apply link (#124).

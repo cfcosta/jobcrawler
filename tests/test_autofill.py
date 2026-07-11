@@ -226,7 +226,9 @@ class FakeBrowser:
     ``sweeps`` is an optional queue of per-round digests (popped front-first; the
     default ``sweep`` serves once it drains) so tests can model a page that
     changes after a click. ``targets`` is the ``Target.getTargets`` reply used by
-    the popup-adoption path.
+    the popup-adoption path. ``settles`` and ``verify_replies`` queue the #131
+    mount-settle and post-act verification answers; their defaults (stable page,
+    every value held) keep runs that don't model the remount race unaffected.
     """
 
     def __init__(self) -> None:
@@ -238,6 +240,8 @@ class FakeBrowser:
         self.acted: list[str] = []
         self.sids: set[str] = set()
         self.sweeps: list[dict[str, Any]] = []
+        self.settles: list[dict[str, Any]] = []
+        self.verify_replies: list[dict[str, Any]] = []
         self.targets: list[dict[str, Any]] = []
         self.sweep: dict[str, Any] = {
             "url": "https://apply.acme.test/a",
@@ -280,6 +284,16 @@ class FakeBrowser:
             return "complete"
         if "/*jc-count*/" in expression:
             return 3
+        if "/*jc-settle*/" in expression:
+            return json.dumps(
+                self.settles.pop(0) if self.settles else {"count": 3, "fresh": 0}
+            )
+        if "/*jc-verify*/" in expression:
+            return json.dumps(
+                self.verify_replies.pop(0)
+                if self.verify_replies
+                else {"ok": True, "checks": []}
+            )
         if "/*jc-sweep*/" in expression:
             return json.dumps(self.sweeps.pop(0) if self.sweeps else self.sweep)
         if "/*jc-act*/" in expression:
@@ -312,6 +326,9 @@ def _worker_fixture(tmp_path: Path) -> tuple[StateStore, AutofillWorker, FakeBro
         sites_path=str(tmp_path / "sites.yaml"),  # absent — no Found-via line
         browser=cast(CdpBrowser, fake),
     )
+    # zero the #131 pacing so settle/verify sampling doesn't slow the suite
+    worker._SETTLE_POLL_S = 0.0
+    worker._VERIFY_DELAY_S = 0.0
     return store, worker, fake, run_id
 
 
@@ -903,6 +920,8 @@ def _hop_fixture(
         sites_path=str(tmp_path / "sites.yaml"),
         browser=cast(CdpBrowser, fake),
     )
+    worker._SETTLE_POLL_S = 0.0
+    worker._VERIFY_DELAY_S = 0.0
     return store, worker, run_id
 
 
@@ -968,3 +987,196 @@ def test_prehop_allowlist_is_whole_text_and_skips_marketplace_buttons() -> None:
     assert "candidatar-se" in autofill_mod._APPLY_HOP_TEXTS
     for trap in ("ai auto-apply", "apply to join", "easy apply"):
         assert trap not in autofill_mod._APPLY_HOP_TEXTS
+
+
+# -- the boot-remount race: settle, verify, repair (#131) -------------------------
+#
+# Ashby's SPA paints the application form, then REPLACES it wholesale when its
+# boot data-fetch resolves (~1.5s after first paint; later in a throttled
+# background tab). Sweeping the first mount hands out refs that die in the
+# swap: fills land in detached nodes whose readbacks still echo the value, or
+# land on mount #1 and are wiped visibly. Three layers defend against it —
+# executors refuse detached refs, _wait_ready waits for the mount to settle,
+# and _verify_round re-checks/repairs a round's state before "done" counts.
+
+
+def test_executors_refuse_detached_refs() -> None:
+    # A ref that outlived its node must fail loudly: a detached fill echoes a
+    # readback while touching nothing the user can see.
+    for js in (
+        autofill_mod._FILL_JS,
+        autofill_mod._SELECT_JS,
+        autofill_mod._CHECK_JS,
+        autofill_mod._CLICK_JS,
+        autofill_mod._COMBO_OPEN_JS,
+        autofill_mod._COMBO_COUNT_JS,
+        autofill_mod._COMBO_PICK_JS,
+        autofill_mod._COMBO_VALUE_JS,
+    ):
+        assert "!el.isConnected" in js
+    assert "isConnected" in autofill_mod._REF_LOOKUP_JS
+
+
+def test_match_control_relocates_by_id_then_name_then_label() -> None:
+    controls: list[dict[str, Any]] = [
+        {
+            "ref": "c7",
+            "id": "_systemfield_name",
+            "label": "Name",
+            "tag": "input",
+            "type": "text",
+        },
+        {"ref": "c8", "name": "email", "label": "Email", "tag": "input", "type": "email"},
+        {"ref": "c9", "label": "Cover letter", "tag": "textarea", "type": ""},
+    ]
+    match = autofill_mod._match_control
+    assert match({"id": "_systemfield_name"}, controls) == "c7"
+    assert match({"name": "email", "label": "mismatched"}, controls) == "c8"
+    assert match({"label": "Cover letter", "tag": "textarea", "type": ""}, controls) == "c9"
+    # a bare label is not identity — tag/type must agree too
+    assert match({"label": "Cover letter", "tag": "input", "type": ""}, controls) is None
+    assert match({"label": "Ghost", "tag": "input", "type": "text"}, controls) is None
+
+
+async def test_wait_ready_waits_out_a_form_remount(tmp_path: Path) -> None:
+    """The first sweep must not trust a mount the app is about to replace."""
+    store, worker, fake, run_id = _worker_fixture(tmp_path)
+    fake.settles = [
+        {"count": 5, "fresh": 5},  # first paint
+        {"count": 5, "fresh": 5},  # the remount: same count, all-new nodes
+        {"count": 5, "fresh": 0},  # stable — sweep may proceed
+        {"count": 5, "fresh": 0},  # spare: must NOT be consumed
+    ]
+    worker._call_llm = lambda profile, context, page: json.dumps(  # ty: ignore[invalid-assignment]
+        [{"op": "done", "summary": "nothing to fill"}]
+    )
+    out = await worker.run_once()
+    assert out is not None and out["status"] == "done"
+    # settled on the third sample — a fresh-node sample alone is not stability
+    assert len(fake.settles) == 1
+
+
+async def test_wiped_fills_are_repaired_from_a_fresh_sweep(tmp_path: Path) -> None:
+    """Run 37's shape: the fill lands, the boot fetch remounts the form and
+    wipes it. Verification catches the empty control, re-locates it on a fresh
+    sweep (new ref, same label), re-applies the same fill, and only then lets
+    "done" stand — all inside the round, no extra LLM call."""
+    store, worker, fake, run_id = _worker_fixture(tmp_path)
+    remounted = {
+        "url": "https://apply.acme.test/a",
+        "title": "Apply — Acme",
+        "controls": [
+            {"ref": "c7", "tag": "input", "type": "text", "label": "Full name"}
+        ],
+        "buttons": [],
+    }
+    fake.sweeps = [dict(fake.sweep), remounted]  # round 1, then the repair re-sweep
+    fake.verify_replies = [
+        {"ok": True, "checks": [{"ref": "c1", "held": False, "actual": ""}]},
+        {"ok": True, "checks": [{"ref": "c7", "held": True, "actual": "Jane Doe"}]},
+    ]
+    worker._call_llm = lambda profile, context, page: json.dumps(  # ty: ignore[invalid-assignment]
+        [
+            {"op": "fill", "ref": "c1", "value": "Jane Doe"},
+            {"op": "done", "summary": "name filled"},
+        ],
+        ensure_ascii=False,
+    )
+    out = await worker.run_once()
+    assert out is not None and out["status"] == "done"
+    runs = store.autofill_runs_for("acme", "https://acme.test/a")
+    assert runs[0]["summary"] == "name filled"
+    assert runs[0]["rounds"] == 1
+    assert runs[0]["fields_filled"] == 1
+    # the repair re-applied the SAME fill against the remounted node
+    assert len(fake.acted) == 2 and json.dumps("c7") in fake.acted[1]
+    raw = store._conn.execute(
+        "SELECT transcript_json FROM autofill_runs WHERE id = ?", (run_id,)
+    ).fetchone()[0]
+    verify = json.loads(raw)[0]["verify"]
+    assert verify["held"] is True
+    assert verify["repairs"] == [["c7"]]
+    assert verify["attempts"] == 2
+
+
+async def test_a_round_that_never_holds_defers_done_and_keeps_counters_honest(
+    tmp_path: Path,
+) -> None:
+    """When repairs can't make the values stick, done must not be honored: the
+    model re-plans against a fresh sweep and fields_filled excludes the wipes."""
+    store, worker, fake, run_id = _worker_fixture(tmp_path)
+    worker._VERIFY_REPAIRS = 1
+    wiped = {"ok": True, "checks": [{"ref": "c1", "held": False, "actual": ""}]}
+    fake.verify_replies = [dict(wiped), dict(wiped)]  # initial + post-repair
+    contexts: list[str] = []
+
+    def fake_llm(profile: str, context: str, page: str) -> str:
+        contexts.append(context)
+        if len(contexts) == 1:
+            return json.dumps(
+                [
+                    {"op": "fill", "ref": "c1", "value": "Jane Doe"},
+                    {"op": "done", "summary": "name filled"},
+                ],
+                ensure_ascii=False,
+            )
+        return json.dumps([{"op": "done", "summary": "left for the human"}])
+
+    worker._call_llm = fake_llm  # ty: ignore[invalid-assignment]
+    out = await worker.run_once()
+    assert out is not None and out["status"] == "done"
+    runs = store.autofill_runs_for("acme", "https://acme.test/a")
+    assert runs[0]["rounds"] == 2  # the deferred done cost one more round
+    assert runs[0]["summary"] == "left for the human"
+    assert runs[0]["fields_filled"] == 0  # the wipe was subtracted
+    # round 2's context tells the model its values were wiped, not to be trusted
+    assert "WIPED" in contexts[1]
+    raw = store._conn.execute(
+        "SELECT transcript_json FROM autofill_runs WHERE id = ?", (run_id,)
+    ).fetchone()[0]
+    verify = json.loads(raw)[0]["verify"]
+    assert verify["held"] is False
+    assert verify["repairs"] == [["c1"]]  # it tried — the page kept wiping
+
+
+async def test_a_round_of_all_stale_refs_replans_instead_of_stalling(
+    tmp_path: Path,
+) -> None:
+    """Run 33's shape: the app re-renders while the model thinks and every ref
+    dies before acting. That is neither a stall nor a done — the round's done
+    is deferred and the next round plans against live nodes."""
+    store, worker, fake, run_id = _worker_fixture(tmp_path)
+    orig = fake.evaluate
+    state = {"round": 0}
+
+    async def remounting(sid: str, expression: str, **kw: Any) -> Any:
+        if "/*jc-act*/" in expression and state["round"] == 1:
+            return json.dumps(
+                {"ok": False, "error": "stale ref — re-read the page"}
+            )
+        return await orig(sid, expression, **kw)
+
+    fake.evaluate = remounting  # ty: ignore[invalid-assignment]
+    contexts: list[str] = []
+
+    def fake_llm(profile: str, context: str, page: str) -> str:
+        contexts.append(context)
+        state["round"] = len(contexts)
+        summary = "name filled" if len(contexts) == 1 else "name filled on the live form"
+        return json.dumps(
+            [
+                {"op": "fill", "ref": "c1", "value": "Jane Doe"},
+                {"op": "done", "summary": summary},
+            ],
+            ensure_ascii=False,
+        )
+
+    worker._call_llm = fake_llm  # ty: ignore[invalid-assignment]
+    out = await worker.run_once()
+    assert out is not None and out["status"] == "done"
+    runs = store.autofill_runs_for("acme", "https://acme.test/a")
+    assert runs[0]["summary"] == "name filled on the live form"
+    assert runs[0]["rounds"] == 2
+    assert runs[0]["fields_filled"] == 1  # round 1's failure never counted
+    # round 2's context carries the deferral and the re-render note
+    assert "DEFERRED" in contexts[1] and "stale" in contexts[1]
