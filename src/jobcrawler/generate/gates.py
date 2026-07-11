@@ -210,6 +210,52 @@ def _check_extra_hosts_shape(value: ast.expr) -> list[str]:
 
 # -- gate 1(b): host admission (§8) -------------------------------------------
 
+# Well-known public ATS / job-board backends (§8). These are fixed, multi-tenant
+# vendor domains that serve nothing but public job listings: a company careers page
+# hosted on one of them (or backed by its API on a sibling host) legitimately fetches
+# that vendor host even though the registry URL never named it — e.g. a rippling.com
+# careers page whose postings live at boards-api.greenhouse.io. They carry no SSRF
+# value (public, read-only, no path to internal infrastructure), so an on-domain match
+# here authorizes a declared EXTRA_HOST *without* a per-site operator declaration —
+# sparing the operator from hand-authorizing Greenhouse for each of the 130+ boards
+# already running on it. Two properties keep this safe: the list is code-level, so an
+# attacker-influenced page can never extend it (it can only name a host already on it,
+# which is a benign public endpoint); and every entry still clears the fixed SSRF
+# kernel below. Matched with the suffix-safe host_on_domain primitive, so a look-alike
+# like "greenhouse.io.evil.example" is NOT admitted. Entries are registrable domains,
+# which subsume regional/tenant subdomains (boards-api.eu.greenhouse.io, api.lever.co).
+ATS_BACKEND_DOMAINS: frozenset[str] = frozenset(
+    {
+        "greenhouse.io",
+        "ashbyhq.com",
+        "lever.co",
+        "workable.com",
+        "smartrecruiters.com",
+        "recruitee.com",
+        "bamboohr.com",
+        "personio.com",
+        "pinpointhq.com",
+        "gem.com",
+        "comeet.co",
+        "icims.com",
+        "gupy.io",
+        "myworkdayjobs.com",
+        "csod.com",
+    }
+)
+
+
+def is_ats_backend(host: str) -> bool:
+    """True if ``host`` is (a subdomain of) a well-known public ATS backend (§8).
+
+    The autonomy relaxation for :func:`check_host_admission`: such a host is admissible
+    as a declared EXTRA_HOST even without operator ``extra_hosts`` evidence, because it
+    is a fixed public job-board vendor endpoint (:data:`ATS_BACKEND_DOMAINS`) with no
+    SSRF value. The SSRF kernel still vets it; only the operator-authorization policy
+    is waived. Suffix-safe via ``host_on_domain``.
+    """
+    return host_on_domain(host, ATS_BACKEND_DOMAINS)
+
 
 def check_host_admission(
     source: str,
@@ -228,11 +274,13 @@ def check_host_admission(
         fixes a site's allowlist (§4.1), so a winner that drifted to a different
         board is rejected outright.
       * Every ``EXTRA_HOSTS`` entry must be **operator-authorized**: on-domain of
-        a host in ``evidence_hosts``. The generation context is attacker-influenced
-        (a job page can carry injected instructions and name any host it likes), so
-        neither the crawler declaring a host nor that host merely appearing in the
-        fetched page content authorizes egress — only the operator's out-of-band
-        registry declaration does.
+        a host in ``evidence_hosts``, *or* a well-known public ATS backend
+        (:func:`is_ats_backend`) which needs no per-site evidence. The generation
+        context is attacker-influenced (a job page can carry injected instructions and
+        name any host it likes), so neither the crawler declaring a host nor that host
+        merely appearing in the fetched page content authorizes egress — only the
+        operator's out-of-band registry declaration, or membership in the fixed
+        code-level ATS allowlist a page cannot extend, does.
       * The set stays small (``cap``) and every entry must clear the fixed SSRF
         kernel — the hard denials apply to every host regardless of provenance.
 
@@ -268,7 +316,7 @@ def check_host_admission(
                 f"EXTRA_HOSTS entry {entry!r} is denied by the SSRF kernel: {exc}"
             )
             continue
-        if not host_on_domain(host, evidence):
+        if not host_on_domain(host, evidence) and not is_ats_backend(host):
             failures.append(
                 f"EXTRA_HOSTS entry {entry!r} is not operator-authorized — add it "
                 "to the registry entry's extra_hosts if it is a legitimate backend"
@@ -308,7 +356,7 @@ def admissible_hosts(
     admitted: set[str] = set()
     for entry in declared:
         host = normalize_host(f"https://{entry}")
-        if not host or not host_on_domain(host, evidence):
+        if not host or not (host_on_domain(host, evidence) or is_ats_backend(host)):
             continue
         try:
             check_url(f"https://{host}/", {host})

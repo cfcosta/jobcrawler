@@ -269,6 +269,38 @@ def test_admission_rejects_a_declaration_without_evidence() -> None:
     assert any("not operator-authorized" in f for f in res.failures)
 
 
+def test_admission_auto_authorizes_a_well_known_ats_backend() -> None:
+    # A careers page backed by a shared ATS (Greenhouse/Ashby/Lever/…) legitimately
+    # fetches that vendor's public job API on a sibling host the registry never named
+    # (rippling.com/careers backed by boards-api.greenhouse.io). Those backends are
+    # fixed, multi-tenant, public job-board hosts with no SSRF value, and the allowlist
+    # is code-level so an attacker-influenced page can't extend it — admission grants an
+    # on-domain match WITHOUT a per-site extra_hosts declaration, so the operator no
+    # longer has to hand-authorize Greenhouse for every one of the 130 boards on it.
+    res = check_host_admission(
+        _declaring('("boards-api.greenhouse.io",)'),
+        registry_hosts={"example.com"},
+        evidence_hosts=[],  # no operator authorization
+        cap=3,
+    )
+    assert res.passed, res.reason
+
+
+def test_admission_still_rejects_a_suffix_attack_on_an_ats_backend() -> None:
+    # The ATS allowlist rides the same suffix-safe host_on_domain primitive: a hostile
+    # page dressing its own host up as an ATS backend ("greenhouse.io.attacker.io" is
+    # NOT on-domain of greenhouse.io) is still rejected — the relaxation admits the
+    # vendor's real hosts, never a look-alike.
+    res = check_host_admission(
+        _declaring('("greenhouse.io.attacker.io",)'),
+        registry_hosts={"example.com"},
+        evidence_hosts=[],
+        cap=3,
+    )
+    assert not res.passed
+    assert any("not operator-authorized" in f for f in res.failures)
+
+
 def test_admissible_hosts_admits_only_evidence_backed_declarations() -> None:
     # The allowlist generation-time validation and the reward run under: the
     # registry plus declared ∩ evidence. An unevidenced declaration stays out
@@ -292,6 +324,18 @@ def test_admissible_hosts_uses_the_gate_domain_rule() -> None:
         evidence_hosts=["api.example.net"],
     )
     assert "eu.api.example.net" in hosts
+
+
+def test_admissible_hosts_includes_a_well_known_ats_backend() -> None:
+    # The allowlist validation/reward run under must match what admission grants, or
+    # validation would reject the ATS fetch admission just approved. A well-known ATS
+    # backend is admitted with no operator evidence — same rule as check_host_admission.
+    hosts = admissible_hosts(
+        _declaring('("api.ashbyhq.com",)'),
+        registry_hosts={"example.com"},
+        evidence_hosts=[],
+    )
+    assert hosts == {"example.com", "api.ashbyhq.com"}
 
 
 def test_admissible_hosts_on_unparseable_source_keeps_registry() -> None:

@@ -40,6 +40,7 @@ from jobcrawler.generate.gates import (
     check_ast,
     check_completeness,
     check_host_admission,
+    is_ats_backend,
     must_observe_failure,
     stability_verdict,
 )
@@ -422,7 +423,9 @@ def _report_unauthorized_named_hosts(
     unauthorized = sorted(
         h
         for h in candidates
-        if not host_on_domain(h, registry_hosts) and not host_on_domain(h, authorized)
+        if not host_on_domain(h, registry_hosts)
+        and not host_on_domain(h, authorized)
+        and not is_ats_backend(h)
     )
     if unauthorized:
         print(
