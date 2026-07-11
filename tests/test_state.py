@@ -2622,6 +2622,72 @@ def test_search_exclude_country_drops_only_resolved_matches(
     ]
 
 
+def test_search_mobility_arms_or_together(store: StateStore) -> None:
+    # #132: the UI's three mobility checkboxes are alternative routes into a job,
+    # so combined they OR (any satisfied arm keeps the row) — the old composition
+    # ANDed them into "remote-anywhere AND relocation AND non-US", a near-empty
+    # set. Each arm alone must stay exactly its standalone filter.
+    rows = [
+        # url, location, workplace, relocation, remote_scope
+        ("anywhere", "Remote", "remote", "unspecified", "anywhere"),
+        ("sf-relo", "San Francisco, CA", "hybrid", "offered", None),
+        ("berlin-relo", "Berlin, Germany", "hybrid", "offered", None),
+        ("neither", "Berlin, Germany", "onsite", "unspecified", None),
+    ]
+    for url, loc, wp, relo, scope in rows:
+        store.upsert_position(
+            "acme",
+            url,
+            fields={
+                **FIELDS,
+                "location": loc,
+                "workplace": wp,
+                "relocation": relo,
+                "remote_scope": scope,
+            },
+            content_hash=url,
+        )
+        store.refresh_position_locations(
+            "acme", url, location=loc, workplace=wp, force=True
+        )
+
+    def urls(*arms: str) -> list[str]:
+        return sorted(r.url for r in store.search_positions(mobility=list(arms)))
+
+    # Single arms == the standalone filters they mirror.
+    assert urls("remote_anywhere") == ["anywhere"]
+    assert urls("relocation_offered") == ["berlin-relo", "sf-relo"]
+    assert urls("relocation_no_us") == ["berlin-relo"]  # resolved-US office drops
+    # Combined arms widen (OR), never narrow to the impossible intersection.
+    assert urls("remote_anywhere", "relocation_no_us") == ["anywhere", "berlin-relo"]
+    assert urls("remote_anywhere", "relocation_offered", "relocation_no_us") == [
+        "anywhere",
+        "berlin-relo",
+        "sf-relo",
+    ]
+    with pytest.raises(ValueError, match="jetpack"):
+        store.search_positions(mobility=["jetpack"])
+
+
+def test_search_exclude_email_apply(store: StateStore) -> None:
+    # #133: "Hide e-mail apply" drops rows whose apply target is a mailto: link.
+    # No apply_url at all is NOT e-mail apply (the posting page itself is the
+    # application route), so those rows stay.
+    for url, apply_url in [
+        ("form", "https://jobs.acme.test/apply/1"),
+        ("email", "MAILTO:jobs@acme.test?subject=Engineer"),  # case-folded match
+        ("bare", None),
+    ]:
+        fields: dict[str, object] = dict(FIELDS)
+        if apply_url is not None:
+            fields["apply_url"] = apply_url
+        store.upsert_position("acme", url, fields=fields, content_hash=url)
+
+    hits = sorted(r.url for r in store.search_positions(exclude_email_apply=True))
+    assert hits == ["bare", "form"]
+    assert len(store.search_positions()) == 3  # off by default
+
+
 def test_search_query_bridges_synonyms_through_location_display(
     store: StateStore,
 ) -> None:

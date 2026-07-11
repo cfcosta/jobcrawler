@@ -2956,12 +2956,14 @@ class StateStore:
         workplace: str | None = None,
         remote_scope: str | None = None,
         relocation_offered: bool = False,
+        mobility: Collection[str] | None = None,
         country: str | None = None,
         remote_in: str | None = None,
         exclude_country: str | None = None,
         level: str | None = None,
         min_score: int | None = None,
         min_salary: float | None = None,
+        exclude_email_apply: bool = False,
         dismissed: bool | None = None,
         applied: bool = False,
         exclude_company_applied: bool = False,
@@ -2994,6 +2996,13 @@ class StateStore:
           "remote anywhere" filter; ``'restricted'``/``'unspecified'`` also selectable).
         - ``relocation_offered``  keep only rows whose posting states relocation/visa support
           (``relocation = 'offered'``, §4.6) — the "offers relocation" filter.
+        - ``mobility``  the UI's three mobility checkboxes as one OR-group: arms
+          ``'remote_anywhere'`` / ``'relocation_offered'`` / ``'relocation_no_us'``. Any
+          satisfied arm keeps the row — checking several widens the result set ("any way
+          I could take this job") instead of demanding a posting that is all of them at
+          once. Each arm alone is exactly its standalone filter (``relocation_no_us`` =
+          relocation offered AND no §4.12-resolved US office/fence); unknown arm names
+          raise ``ValueError``.
         - ``country``  ISO2 (case-folded): rows with ANY §4.12 resolved row in that country —
           an office there or remote fenced to it ("show me everything touching DE").
         - ``remote_in``  ISO2: rows REMOTELY WORKABLE from that country — kind-scoped to
@@ -3009,6 +3018,10 @@ class StateStore:
           old great fit ranks below a fresh comparable one but stays above weaker leads.
         - ``min_salary``  ``COALESCE(salary_usd_max, salary_usd_min) >= min_salary``, i.e. an
           annualized-USD floor (§4.6) — drops rows with no resolvable salary/currency.
+        - ``exclude_email_apply``  drop rows whose apply target is an e-mail address
+          (``apply_url`` is a ``mailto:`` link) — the "hide e-mail apply" filter. Rows
+          with no ``apply_url`` at all stay: absence means "apply on the posting page",
+          not "apply by e-mail".
         - ``dismissed``  ``None`` = both, ``False`` = hide dismissed, ``True`` = only dismissed.
         - ``applied``  keep only rows you have actually applied to (``applied_at IS NOT NULL``,
           §16) — the "Applications" page. Survives a later ``rejected``/``withdrawn`` since the
@@ -3111,6 +3124,26 @@ class StateStore:
             params.append(remote_scope.lower())
         if relocation_offered:
             clauses.append("lower(COALESCE(relocation, '')) = 'offered'")
+        if mobility:
+            # The mobility OR-group: each arm is the exact SQL of its standalone
+            # filter; sorted for deterministic query text. relocation_no_us keeps
+            # the §4.12 exclusion discipline — only a *resolved* US office/fence
+            # drops the row, unresolved geography stays in.
+            arm_sql = {
+                "remote_anywhere": "lower(COALESCE(remote_scope, '')) = 'anywhere'",
+                "relocation_offered": "lower(COALESCE(relocation, '')) = 'offered'",
+                "relocation_no_us": (
+                    "(lower(COALESCE(relocation, '')) = 'offered' "
+                    "AND NOT EXISTS (SELECT 1 FROM position_locations pl "
+                    "WHERE pl.site = positions.site AND pl.url = positions.url "
+                    "AND pl.country = 'US'))"
+                ),
+            }
+            arms = sorted(set(mobility))
+            unknown = [a for a in arms if a not in arm_sql]
+            if unknown:
+                raise ValueError(f"unknown mobility arm(s): {unknown}")
+            clauses.append("(" + " OR ".join(arm_sql[a] for a in arms) + ")")
         if country:
             clauses.append(
                 "EXISTS (SELECT 1 FROM position_locations pl "
@@ -3149,6 +3182,8 @@ class StateStore:
         if min_salary is not None:
             clauses.append("COALESCE(salary_usd_max, salary_usd_min) >= ?")
             params.append(min_salary)
+        if exclude_email_apply:
+            clauses.append("lower(COALESCE(apply_url, '')) NOT LIKE 'mailto:%'")
         if dismissed is not None:
             clauses.append("dismissed = ?")
             params.append(1 if dismissed else 0)

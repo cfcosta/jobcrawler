@@ -432,6 +432,20 @@ def _read_filters(
     # a US destination means the visa entry the operator wants to avoid. Unresolved
     # rows stay (an exclusion never fires on absence of evidence, §4.12).
     relocation_no_us = _flag("relocation_no_us")
+    hide_email_apply = _flag("hide_email_apply")
+    # The three mobility checkboxes are alternative routes into the same job, so
+    # together they OR ("any way I could take this") — a posting that is all three
+    # at once barely exists. One store-side OR-group keeps each lone checkbox
+    # exactly as strict as its old standalone filter.
+    mobility = [
+        arm
+        for arm, on in (
+            ("remote_anywhere", remote_anywhere),
+            ("relocation_offered", relocation_offered),
+            ("relocation_no_us", relocation_no_us),
+        )
+        if on
+    ]
     status = _s("status")  # None/'all' => both open and closed
     track_status = _s("track_status")
     sort = _s("sort") or "score"
@@ -446,18 +460,15 @@ def _read_filters(
         "status": status,
         "track_status": track_status,
         "workplace": _s("workplace"),
-        # "Remote anywhere" is a geographic-scope filter over remote roles; scope
-        # 'anywhere' only ever lands on a workplace='remote' row, so it stands alone.
-        "remote_scope": "anywhere" if remote_anywhere else None,
-        "relocation_offered": relocation_offered or relocation_no_us,
+        "mobility": mobility or None,
         # §4.12 structured geo filters (ISO2, case-folded store-side): country=
         # matches offices AND fences; remote_in= only remote eligibility.
         "country": _s("country"),
         "remote_in": _s("remote_in"),
-        "exclude_country": "US" if relocation_no_us else None,
         "level": _s("level"),
         "min_score": _int_param(params, "min_score"),
         "min_salary": _float_param(params, "min_salary"),
+        "exclude_email_apply": hide_email_apply,
         "dismissed": None if show_dismissed else False,
         "applied": applied,
         "exclude_company_applied": hide_applied_companies,
@@ -487,6 +498,7 @@ def _read_filters(
         "remote_anywhere": remote_anywhere,
         "relocation_offered": relocation_offered,
         "relocation_no_us": relocation_no_us,
+        "hide_email_apply": hide_email_apply,
         "collapse": collapse,
     }
     return kwargs, raw

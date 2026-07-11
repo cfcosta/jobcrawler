@@ -204,6 +204,55 @@ async def test_positions_default_view_is_new_with_applied_companies_hidden() -> 
         store.close()
 
 
+async def test_positions_mobility_boxes_or_and_email_apply_hides() -> None:
+    # #132/#133 wiring: the three mobility checkboxes reach the store as one
+    # OR-group — a two-box query keeps BOTH rows below, where the old AND
+    # composition returned neither — and hide_email_apply drops mailto rows.
+    store = StateStore(":memory:")
+    store.upsert_position(
+        "acme",
+        "https://acme.test/wfa",
+        fields={
+            **FIELDS,
+            "title": "Anywhere Engineer",
+            "workplace": "remote",
+            "remote_scope": "anywhere",
+            "apply_url": "mailto:jobs@acme.test",
+        },
+        content_hash="h1",
+    )
+    store.upsert_position(
+        "beta",
+        "https://beta.test/relo",
+        fields={
+            **FIELDS,
+            "title": "Relocation Engineer",
+            "workplace": "hybrid",
+            "relocation": "offered",
+            "apply_url": "https://beta.test/apply",
+        },
+        content_hash="h2",
+    )
+    try:
+        async with _client(create_app(store)) as c:
+            both = (
+                await c.get("/positions?remote_anywhere=1&relocation_offered=1")
+            ).text
+            assert "Anywhere Engineer" in both and "Relocation Engineer" in both
+            assert 'name="remote_anywhere" value="1" checked' in both
+
+            one = (await c.get("/positions?remote_anywhere=1")).text
+            assert "Anywhere Engineer" in one
+            assert "Relocation Engineer" not in one  # single box stays strict
+
+            no_email = (await c.get("/positions?hide_email_apply=1")).text
+            assert "Relocation Engineer" in no_email
+            assert "Anywhere Engineer" not in no_email  # mailto apply hidden
+            assert 'name="hide_email_apply" value="1" checked' in no_email
+    finally:
+        store.close()
+
+
 async def test_saved_views_and_new_since_last_visit() -> None:
     # Quick-view pills render and mark the active one; the "new since last visit" badge
     # is driven by the jc_seen cookie — absent on a first visit, then counting arrivals.
