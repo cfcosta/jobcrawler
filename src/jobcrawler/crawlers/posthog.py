@@ -108,6 +108,24 @@ def _custom_fields(posting):
     return out
 
 
+# PostHog states the hiring region as "<Region> (GMT band)". A global region word
+# qualified by a bounded timezone band ("Anywhere (GMT +2 to GMT -8)") is not
+# worldwide — the band excludes Asia/Pacific — so demote the leading global token
+# to "Remote", leaving the band for context. Real regions ("Americas (GMT -3 to
+# GMT -8)", "UK (GMT 0)") start with a place word and are left untouched.
+_GLOBAL_TZ_RE = re.compile(
+    r"^\s*(?:anywhere|worldwide|global|international)\b"
+    r"(?=.*(?:gmt|utc)\s*[-+−]?\s*\d)",
+    re.I,
+)
+
+
+def _demote_global_tz_band(value):
+    if not value:
+        return value
+    return _GLOBAL_TZ_RE.sub("Remote", value, count=1)
+
+
 def _location(posting):
     fields = _custom_fields(posting)
     for key in ("Timezone", "Timezone(s)"):
@@ -123,12 +141,16 @@ def _location(posting):
             except Exception:
                 values = None
             if isinstance(values, list):
-                parts = [str(v).strip() for v in values if str(v).strip()]
+                parts = [
+                    _demote_global_tz_band(str(v).strip())
+                    for v in values
+                    if str(v).strip()
+                ]
                 if parts:
                     return "; ".join(parts)
         cleaned = _clean_text(raw)
         if cleaned:
-            return cleaned
+            return _demote_global_tz_band(cleaned)
     return "Remote"
 
 
