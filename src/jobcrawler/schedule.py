@@ -212,6 +212,12 @@ def _utcnow() -> datetime:
 CrawlFn = Callable[[Site], Awaitable[CrawlSummary]]
 Sleep = Callable[[float], Awaitable[None]]
 
+# Seconds added to the crawl subprocess's own wall-clock ceiling (config.crawl_timeout)
+# to derive the scheduler's per-attempt async watchdog (_crawl_once). Generous so the
+# subprocess bound normally returns control first and this only fires when the
+# supervising to_thread itself wedges (a pipe hang after the child is killed).
+_CRAWL_WATCHDOG_GRACE = 60.0
+
 
 def _optional_interval(raw: str) -> timedelta | None:
     """Parse an ``JOBCRAWLER_*`` duration; ``off`` (or unparseable) → None (disabled)."""
@@ -280,6 +286,7 @@ class Scheduler:
         regen_budget: float | None = None,
         assess_timeout: float | None = None,
         recheck_timeout: float | None = None,
+        crawl_watchdog: float | None = None,
         recheck_budget: float | None = None,
         reload_sites: Callable[[], Iterable[Site] | None] | None = None,
     ) -> None:
@@ -297,6 +304,17 @@ class Scheduler:
         self._sleep = sleep
         self._max_retries = max_retries
         self._backoff_base = backoff_base
+        # §4.4 per-attempt async watchdog: a backstop ABOVE the crawl subprocess's own
+        # wall-clock ceiling (config.crawl_timeout), so a wedged supervising to_thread
+        # (pipe hang after the child is killed, executor starvation) can't hang the crawl
+        # task. Defaults comfortably above that ceiling so the subprocess bound normally
+        # returns first; 0 disables (unbounded await, matching the other watchdogs). See
+        # _crawl_once.
+        self._crawl_watchdog = (
+            crawl_watchdog
+            if crawl_watchdog is not None
+            else config.crawl_timeout() + _CRAWL_WATCHDOG_GRACE
+        )
         self._jitter = jitter or (lambda: random.uniform(0, 0.5))
         self._inflight: set[str] = set()
         self._healer = healer
@@ -1323,17 +1341,19 @@ class Scheduler:
         self,
         now: datetime,
         *,
+        crawl_task: "asyncio.Task[None] | None",
         match_drain_task: "asyncio.Task[None] | None",
         autofill_task: "asyncio.Task[None] | None",
     ) -> None:
         """Emit the §4.9 liveness heartbeat (#65).
 
         Distinguishes "event loop alive" from "queues advancing": the line's arrival proves
-        the tick loop is turning, and ``match_drain``/``autofill`` report each drain task's
-        state — ``alive`` (running), ``dead`` (exited while the daemon is up: a crash, or a
-        shutdown-grace cancel of a wedged pass), or ``off`` (not wired). A ``dead`` drain
-        means that queue stopped advancing even though the loop still ticks. ``inflight`` is
-        the count of crawls currently dispatched, a cheap "is it doing anything" gauge.
+        the maintenance loop is turning, and ``crawl``/``match_drain``/``autofill`` report
+        each background task's state — ``alive`` (running), ``dead`` (exited while the daemon
+        is up: a crash, or a shutdown-grace cancel of a wedged pass), or ``off`` (not wired).
+        Since #A1 the crawl tick rides its own task too, so ``crawl=dead`` means crawling
+        stopped even though this loop still ticks. ``inflight`` is the count of crawls
+        currently dispatched, a cheap "is it doing anything" gauge.
         """
 
         def _drain_state(task: "asyncio.Task[None] | None") -> str:
@@ -1342,9 +1362,10 @@ class Scheduler:
             return "dead" if task.done() else "alive"
 
         _log.info(
-            "scheduler heartbeat autonomy=%s inflight=%d match_drain=%s autofill=%s",
+            "scheduler heartbeat autonomy=%s inflight=%d crawl=%s match_drain=%s autofill=%s",
             "on" if self._autonomy else "OFF",
             len(self._inflight),
+            _drain_state(crawl_task),
             _drain_state(match_drain_task),
             _drain_state(autofill_task),
         )
@@ -1356,17 +1377,18 @@ class Scheduler:
         interval: float = 60.0,
         shutdown_grace: float = 30.0,
     ) -> None:
-        """Loop ticks until ``stop`` is set; each tick drains before the next.
+        """Loop runs the maintenance sweeps until ``stop`` is set.
 
-        The slow §4.8 regeneration sweep and the §4.11 re-optimization *dispatch* hang
-        off the same loop on their own cadences — never ``.compile()`` in-band (that
-        offline GEPA work is handed off to a detached single-flight subprocess). The §4.9
-        recheck sweep rides the loop too, closing positions that 404/expire (observation,
-        so it runs even with autonomy off). The §4.7 match drain (profile watch +
-        store-side pending rescoring — judgement, so likewise autonomy-exempt) runs on
-        its OWN task so generation-heavy ticks cannot starve scoring. The §4.11
-        P4c post-adoption regression watcher rides every iteration (marker-gated, so it's
-        a cheap no-op until an adoption is under probation).
+        The crawl tick rides its OWN task (#A1): a generation-heavy or slow wave once ran
+        inline here and starved everything behind it, so it now drains on an unstarvable
+        cadence like the §4.7 match and §18 autofill drains. What remains on THIS loop: the
+        slow §4.8 regeneration sweep and the §4.11 re-optimization *dispatch* on their own
+        cadences — never ``.compile()`` in-band (that offline GEPA work is handed off to a
+        detached single-flight subprocess); the §4.9 recheck sweep, closing positions that
+        404/expire (observation, so it runs even with autonomy off); and the §4.11 P4c
+        post-adoption regression watcher every iteration (marker-gated, a cheap no-op until
+        an adoption is under probation). The §4.7 match drain (profile watch + store-side
+        pending rescoring — judgement, autonomy-exempt) rides its own task alongside crawl.
         """
         _log.info(
             "scheduler starting sites=%d interval=%ss autonomy=%s "
@@ -1408,10 +1430,16 @@ class Scheduler:
             if self._autofill_drain is not None
             else None
         )
+        # The crawl tick likewise rides its own task (#A1). It ran inline below, so a
+        # generation-heavy or slow wave held this loop for as long as it took — the
+        # match-drain fix above rescued *scoring* from that starvation but left the crawl
+        # tick itself (and thus regen/recheck/FX/dedup/heartbeat behind it) exposed. The
+        # per-crawl concurrency bound and per-attempt watchdog live inside tick()/
+        # _crawl_once; this task just owns the cadence, unstarvable like the drains above.
+        crawl_task = asyncio.create_task(self._crawl_loop(stop, poll=interval))
         try:
             while not stop.is_set():
                 try:
-                    await self.tick()
                     now = self._clock()
                     if self.regen_due(now):
                         await self.regen_tick()
@@ -1435,13 +1463,14 @@ class Scheduler:
                     # terminate the daemon — log it and carry on to the next interval.
                     _log.exception("scheduler loop iteration failed; continuing")
                 # §4.9 liveness heartbeat (#65): emit on its own cadence, AFTER the guard so
-                # even an iteration whose tick raised above still proves the loop is turning
-                # (and reports the drain tasks' state). Re-read the clock — ``now`` may be
-                # unbound if ``tick()`` raised before it was assigned.
+                # even an iteration whose sweep raised above still proves the loop is turning
+                # (and reports the crawl/drain tasks' state). Re-read the clock defensively —
+                # a sweep may have raised between the assignment above and here.
                 hb_now = self._clock()
                 if self.heartbeat_due(hb_now):
                     self._log_heartbeat(
                         hb_now,
+                        crawl_task=crawl_task,
                         match_drain_task=drain_task,
                         autofill_task=autofill_task,
                     )
@@ -1451,13 +1480,19 @@ class Scheduler:
                 except asyncio.TimeoutError:
                     pass
         finally:
-            if drain_task is not None or autofill_task is not None:
-                # Unblock the drain polls on every exit path (stop is already set on the
+            if (
+                crawl_task is not None
+                or drain_task is not None
+                or autofill_task is not None
+            ):
+                # Unblock the loops' polls on every exit path (stop is already set on the
                 # normal one). A pass between iterations sees stop and returns cleanly;
                 # a fast in-flight pass finishes within the grace below rather than being
-                # cancelled mid-scoring / mid-form — the spend was reserved up front.
+                # cancelled mid-scoring / mid-form — the spend was reserved up front. A
+                # crawl wedged mid-wave (no watchdog, or above it) is cancelled at the
+                # grace, its detached subprocess reaped by the crawl_timeout ceiling.
                 stop.set()
-            for task in (drain_task, autofill_task):
+            for task in (crawl_task, drain_task, autofill_task):
                 if task is None:
                     continue
                 try:
@@ -1531,6 +1566,28 @@ class Scheduler:
             except asyncio.TimeoutError:
                 pass
 
+    async def _crawl_loop(self, stop: asyncio.Event, *, poll: float) -> None:
+        """Run crawl ticks on their own cadence until ``stop`` is set (its own task, see run()).
+
+        ``tick`` dispatches the due wave and cold-start-bootstraps crawler-less sites; a
+        generation-heavy tick can run for many minutes (LM generation × wave). Riding its
+        own task — exactly like the §4.7 match drain and §18 autofill drains — keeps that
+        cost off the maintenance loop, so regen/recheck/FX/dedup and the liveness heartbeat
+        keep their cadence instead of stalling behind a slow wave. Per-crawl concurrency is
+        still bounded by ``self._sem`` inside ``tick`` and a wedged crawl by the per-attempt
+        watchdog (:meth:`_crawl_once`); this task just owns the cadence. Failures are logged
+        and it keeps going (same fail-open posture as the main loop's guard).
+        """
+        while not stop.is_set():
+            try:
+                await self.tick()
+            except Exception:
+                _log.exception("crawl tick failed; continuing")
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=poll)
+            except asyncio.TimeoutError:
+                pass
+
     async def _dispatch(self, site: Site) -> CrawlSummary:
         self._inflight.add(site.slug)
         try:
@@ -1542,12 +1599,41 @@ class Scheduler:
     async def _run_with_retry(self, site: Site) -> CrawlSummary:
         for attempt in range(self._max_retries + 1):
             try:
-                return await self._crawl(site)
+                return await self._crawl_once(site)
             except Exception:
                 if attempt == self._max_retries:
                     raise
                 await self._sleep(self._backoff_base * (2**attempt) + self._jitter())
         raise RuntimeError("unreachable")  # pragma: no cover
+
+    async def _crawl_once(self, site: Site) -> CrawlSummary:
+        """One crawl attempt under the §4.4 async watchdog (``crawl_watchdog``).
+
+        A committed crawl already runs in a subprocess with its own wall-clock ceiling
+        (``config.crawl_timeout``); this async bound sits ABOVE it as defense-in-depth.
+        The subprocess ceiling should return control first — but if the supervising
+        ``to_thread`` instead wedges (a pipe hang after the child is killed, executor
+        starvation) nothing else bounds it, and while the crawl fan-out was a fleet-wide
+        ``gather`` barrier that stalled the whole loop. On expiry we abandon the await
+        exactly like the §4.9 assess watchdog: the detached worker (and its subprocess,
+        reaped by the subprocess ceiling) lingers uncancellable, but the attempt raises
+        and is retried/dropped by :meth:`_run_with_retry`. ``0`` disables the bound
+        (unbounded await, matching the assess/recheck watchdogs' 0-disables rule).
+        """
+        if not self._crawl_watchdog:
+            return await self._crawl(site)
+        try:
+            return await asyncio.wait_for(
+                self._crawl(site), timeout=self._crawl_watchdog
+            )
+        except asyncio.TimeoutError:
+            _log.warning(
+                "crawl for %s exceeded the %.0fs watchdog; abandoning this attempt "
+                "(the subprocess wall-clock ceiling should have returned first)",
+                site.slug,
+                self._crawl_watchdog,
+            )
+            raise
 
 
 def build_matcher(

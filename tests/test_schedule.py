@@ -513,11 +513,16 @@ async def test_run_emits_a_liveness_heartbeat_when_idle(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     # The loop emits the heartbeat even on an iteration that dispatched nothing, so a
-    # deployed daemon's log proves it's alive; with no drain seams wired both queues read
-    # ``off`` and no crawl is in flight.
+    # deployed daemon's log proves it's alive. The one site was just crawled (finished at
+    # T0, a 2h cadence away from due), so nothing dispatches and inflight stays 0; with no
+    # drain seams wired both queues read ``off``, while the §A1 crawl tick's own task
+    # (always created) reads ``alive``.
+    store = StateStore(":memory:", clock=lambda: T0)
+    run = store.start_run("s0")
+    store.finish_run(run, items_found=3, new_items=0, errors=0, pages_fetched=1)
     sched = Scheduler(
         [Site(slug="s0", url="https://x.com")],
-        store=StateStore(":memory:", clock=lambda: T0),
+        store=store,
         crawl=_ok_crawl,
         clock=lambda: T0,
         heartbeat_check="5m",
@@ -542,6 +547,7 @@ async def test_run_emits_a_liveness_heartbeat_when_idle(
     )
     assert line is not None
     assert "match_drain=off" in line and "autofill=off" in line
+    assert "crawl=alive" in line  # the crawl tick rides its own task now (§A1)
     assert "inflight=0" in line
 
 
@@ -566,16 +572,120 @@ async def test_heartbeat_reports_a_dead_drain_as_not_advancing(
     alive = asyncio.create_task(asyncio.Event().wait())  # never set → stays pending
     try:
         with caplog.at_level(logging.INFO, logger="jobcrawler.schedule"):
-            sched._log_heartbeat(T0, match_drain_task=dead, autofill_task=alive)
+            # The §A1 crawl tick rides its own task too, reported the same way; a running
+            # one reads ``alive``, an exited one ``dead`` — same helper as the drains.
+            sched._log_heartbeat(
+                T0, crawl_task=alive, match_drain_task=dead, autofill_task=alive
+            )
         line = next(
             r.getMessage()
             for r in caplog.records
             if "scheduler heartbeat" in r.getMessage()
         )
+        assert "crawl=alive" in line
         assert "match_drain=dead" in line
         assert "autofill=alive" in line
     finally:
         alive.cancel()
+
+
+# -- §A1 crawl tick on its own task + per-attempt watchdog --------------------
+
+
+async def test_run_lifts_the_crawl_tick_off_the_maintenance_loop(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The #A1 property: the crawl tick rides its own task, so a wedged crawl can't stall the
+    # maintenance loop. Here a crawl never returns AND the watchdog is disabled (0) so it
+    # truly hangs — yet the loop keeps ticking, still emits its liveness heartbeat, and
+    # shutdown completes. A regression that put the crawl fan-out back inline in run() would
+    # hang forever, which the outer timeout converts into a failure instead of a stuck suite.
+    hung = asyncio.Event()
+
+    async def wedged_crawl(site: Site) -> CrawlSummary:
+        await hung.wait()  # never set: this attempt never returns
+        return _summary(site.slug)
+
+    sched = Scheduler(
+        [Site(slug="s0", url="https://x.com")],
+        store=StateStore(":memory:", clock=lambda: T0),  # never run → due at boot
+        crawl=wedged_crawl,
+        clock=lambda: T0,
+        heartbeat_check="5m",
+        crawl_watchdog=0,  # disabled: prove the de-barrier, not the watchdog
+    )
+    stop = asyncio.Event()
+
+    async def stopper() -> None:
+        await asyncio.sleep(0.05)  # let the crawl wedge and a few heartbeats land
+        stop.set()
+
+    with caplog.at_level(logging.INFO, logger="jobcrawler.schedule"):
+        await asyncio.wait_for(
+            asyncio.gather(
+                sched.run(stop=stop, interval=0.005, shutdown_grace=0.05), stopper()
+            ),
+            timeout=5,
+        )
+
+    assert any("scheduler heartbeat" in r.getMessage() for r in caplog.records)
+    hung.set()  # release the (already-cancelled) crawl defensively
+
+
+async def test_crawl_watchdog_bounds_a_hung_crawl() -> None:
+    # Defense-in-depth above the crawl subprocess's own wall-clock ceiling: a per-attempt
+    # async watchdog, so a supervising to_thread that wedges (a pipe hang after the child is
+    # killed) can't hang the crawl task forever. A crawl that never returns is abandoned at
+    # the watchdog and dropped (max_retries=0), so the tick still completes with no summary.
+    async def hung_crawl(site: Site) -> CrawlSummary:
+        await asyncio.Event().wait()  # never returns
+        return _summary(site.slug)
+
+    sched = Scheduler(
+        [Site(slug="s0", url="https://x.com")],
+        store=StateStore(":memory:", clock=lambda: T0),
+        crawl=hung_crawl,
+        clock=lambda: T0,
+        max_retries=0,
+        crawl_watchdog=0.01,
+    )
+    # A regression where the watchdog doesn't fire would hang tick(); the outer timeout
+    # turns that into a failure rather than a stuck suite.
+    results = await asyncio.wait_for(sched.tick(), timeout=5)
+    assert results == []  # abandoned by the watchdog, not hung
+
+
+async def test_run_crawls_due_sites_off_the_crawl_loop() -> None:
+    # The crawl tick moved off the maintenance loop but must still crawl: proves the
+    # §A1 crawl_loop task is actually wired and dispatches a due site, not merely created.
+    crawled: list[str] = []
+
+    async def crawl(site: Site) -> CrawlSummary:
+        crawled.append(site.slug)
+        return _summary(site.slug)
+
+    sched = Scheduler(
+        [Site(slug="s0", url="https://x.com")],
+        store=StateStore(":memory:", clock=lambda: T0),  # never run → due at boot
+        crawl=crawl,
+        clock=lambda: T0,
+    )
+    stop = asyncio.Event()
+
+    async def stopper() -> None:
+        for _ in range(200):  # up to ~1s, poll until the crawl lands
+            if crawled:
+                break
+            await asyncio.sleep(0.005)
+        stop.set()
+
+    await asyncio.wait_for(
+        asyncio.gather(
+            sched.run(stop=stop, interval=0.005, shutdown_grace=0.5), stopper()
+        ),
+        timeout=5,
+    )
+    assert "s0" in crawled
 
 
 async def test_regen_tick_skips_disabled_sites() -> None:

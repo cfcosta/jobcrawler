@@ -26,7 +26,9 @@ The whole path is live (LM, Deno, network); the gating + delivery logic is unit-
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import tempfile
 from collections.abc import Collection, Mapping
 from pathlib import Path
 
@@ -480,6 +482,30 @@ def _committed_hosts(source: str, registry_hosts: set[str]) -> set[str]:
     return registry_hosts | declared
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` atomically: temp file in the same dir + ``os.replace``.
+
+    The live crawler file (``crawlers/<slug>.py``) is read by the crawl task, which since
+    §4.4 runs concurrently with generation — bootstrap/regen deliver here from their own
+    passes while a crawl loads a sibling. A bare ``Path.write_text`` truncates then rewrites
+    in place, so a crawl importing the file mid-write could see a torn (syntactically
+    invalid) module. ``os.replace`` swaps the inode atomically on POSIX, so a concurrent
+    reader always opens either the whole old crawler or the whole new one, never a partial.
+
+    The temp shares ``path``'s directory (not ``/tmp``) so the rename stays within one
+    filesystem and can't fail with ``EXDEV``; its dotted, ``.tmp``-suffixed name keeps it
+    out of any ``*.py`` crawler glob, and it is removed if the write fails before the swap.
+    """
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
 def _deliver(
     slug: str, source: str, *, mode: str, crawlers_dir: Path = _CRAWLERS_DIR
 ) -> RegenOutcome:
@@ -507,7 +533,7 @@ def _deliver(
         return RegenOutcome.STAGED
     if mode == "auto":
         _backup_live(slug, crawlers_dir)  # snapshot the incumbent so rollback can undo
-    (crawlers_dir / f"{slug}.py").write_text(source)
+    _atomic_write_text(crawlers_dir / f"{slug}.py", source)
     return RegenOutcome.PROMOTED
 
 
@@ -542,7 +568,7 @@ def promote_one(slug: str, *, crawlers_dir: Path = _CRAWLERS_DIR) -> tuple[bool,
     pending = crawlers_dir / "_pending" / f"{slug}.py"
     if not pending.exists():
         return False, f"no staged crawler for {slug!r} (nothing in crawlers/_pending/)"
-    (crawlers_dir / f"{slug}.py").write_text(pending.read_text())
+    _atomic_write_text(crawlers_dir / f"{slug}.py", pending.read_text())
     pending.unlink()
     return True, f"promoted {slug}: crawlers/_pending/{slug}.py → crawlers/{slug}.py"
 
@@ -563,7 +589,7 @@ def rollback_one(slug: str, *, crawlers_dir: Path = _CRAWLERS_DIR) -> tuple[bool
             f"(crawlers/_history/{slug}/ is empty)",
         )
     latest = snapshots[-1]
-    (crawlers_dir / f"{slug}.py").write_text(latest.read_text())
+    _atomic_write_text(crawlers_dir / f"{slug}.py", latest.read_text())
     latest.unlink()  # consume so a second rollback goes one version further back
     return (
         True,

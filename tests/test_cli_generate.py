@@ -259,6 +259,34 @@ def test_deliver_writes_live_when_gate_off(tmp_path: Path) -> None:
     assert not (tmp_path / "_history").exists()  # off → no backup
 
 
+def test_live_delivery_leaves_no_temp_residue(tmp_path: Path) -> None:
+    # §4.4: the live crawler is written atomically (temp file + os.replace) because the
+    # crawl task now reads it concurrently with generation. After a live write the dir holds
+    # exactly the crawler — no leftover ``.tmp`` file that would accumulate on every regen
+    # or that a ``*.py`` crawler scan could trip over.
+    _deliver("acme", _SRC, mode="off", crawlers_dir=tmp_path)
+    assert (tmp_path / "acme.py").read_text() == _SRC
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["acme.py"]
+    assert cli_generate._committed_slugs(tmp_path) == {"acme"}  # temp never counts
+
+
+def test_atomic_write_cleans_up_temp_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # If the atomic swap fails (a full disk, a permission fault), the temp must not linger:
+    # it would accumulate on every failed regen and leave a half-written module in the dir.
+    # The call re-raises, but the crawlers dir is left clean and the live crawler untouched.
+    def boom(src: object, dst: object) -> None:
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(cli_generate.os, "replace", boom)
+    with pytest.raises(OSError, match="replace failed"):
+        cli_generate._atomic_write_text(tmp_path / "acme.py", _SRC)
+    assert (
+        list(tmp_path.iterdir()) == []
+    )  # temp removed; nothing half-written committed
+
+
 def test_deliver_creates_crawlers_dir_when_missing(tmp_path: Path) -> None:
     # A relocated JOBCRAWLER_CRAWLERS_DIR (e.g. a fresh /data/crawlers volume) doesn't
     # exist yet on first run; live delivery must create it, not FileNotFoundError (§11).
