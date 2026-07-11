@@ -1242,7 +1242,13 @@ class Scheduler:
 
         adopt_watch.check_adoption(self._store, now)
 
-    async def run(self, *, stop: asyncio.Event, interval: float = 60.0) -> None:
+    async def run(
+        self,
+        *,
+        stop: asyncio.Event,
+        interval: float = 60.0,
+        shutdown_grace: float = 30.0,
+    ) -> None:
         """Loop ticks until ``stop`` is set; each tick drains before the next.
 
         The slow §4.8 regeneration sweep and the §4.11 re-optimization *dispatch* hang
@@ -1325,13 +1331,29 @@ class Scheduler:
         finally:
             if drain_task is not None or autofill_task is not None:
                 # Unblock the drain polls on every exit path (stop is already set on the
-                # normal one) and let an in-flight pass finish rather than cancelling
-                # mid-scoring / mid-form — the spend was reserved up front either way.
+                # normal one). A pass between iterations sees stop and returns cleanly;
+                # a fast in-flight pass finishes within the grace below rather than being
+                # cancelled mid-scoring / mid-form — the spend was reserved up front.
                 stop.set()
-            if drain_task is not None:
-                await drain_task
-            if autofill_task is not None:
-                await autofill_task
+            for task in (drain_task, autofill_task):
+                if task is None:
+                    continue
+                try:
+                    # Bound the join. The loops observe stop only *between* passes, so a
+                    # pass wedged mid-await (e.g. a hung LLM ``to_thread`` — ``build_lm``
+                    # sets no litellm timeout) never sees it; an unbounded await here hung
+                    # shutdown forever. ``wait_for`` cancels the wedged task at the grace,
+                    # freeing the loop like the §4.9 assess watchdog (its detached
+                    # ``to_thread`` lingers, but the daemon is exiting); the drop is safe
+                    # because the drain is boot-recoverable (``reset_stale_autofill`` for
+                    # autofill, still-queued candidates for match). ``0`` disables the
+                    # bound (mirrors the assess/recheck watchdogs).
+                    await asyncio.wait_for(task, timeout=shutdown_grace or None)
+                except asyncio.TimeoutError:
+                    _log.warning(
+                        "drain task did not stop within %ss on shutdown; cancelled",
+                        shutdown_grace,
+                    )
 
     async def _autofill_drain_loop(self, stop: asyncio.Event, *, poll: float) -> None:
         """Drain §18 autofill requests until ``stop`` is set (its own task, see run()).

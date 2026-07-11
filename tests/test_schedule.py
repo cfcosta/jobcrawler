@@ -2037,6 +2037,52 @@ async def test_match_drain_is_not_starved_by_a_wedged_tick(
     assert drained.is_set()
 
 
+async def test_shutdown_is_bounded_when_a_drain_pass_never_returns() -> None:
+    """§18/§4.7: an in-flight drain that never returns must not hang shutdown.
+
+    run()'s finally sets stop then joins the drain tasks, but the loops observe stop
+    only *between* passes — a pass wedged mid-await (a hung LLM to_thread; litellm sets
+    no timeout on build_lm) never sees it. With an unbounded join, shutdown blocked
+    forever. The join is now bounded by ``shutdown_grace``, which cancels the wedged
+    pass — freeing the loop like the §4.9 assess watchdog, the detached thread aside —
+    so run() always returns.
+    """
+    entered = asyncio.Event()
+
+    async def drain() -> dict[str, str] | None:
+        entered.set()
+        await asyncio.Event().wait()  # never set: models a hung LLM to_thread
+        return None
+
+    sched = Scheduler(
+        [Site(slug="s0", url="https://x.com")],
+        store=StateStore(":memory:"),
+        crawl=_ok_crawl,
+        has_crawler=lambda _slug: (
+            False
+        ),  # keep tick() a quiet no-op; only shutdown matters
+        clock=lambda: T0,
+        autofill_drain=drain,
+        autofill_poll=0.005,
+    )
+
+    stop = asyncio.Event()
+
+    async def stopper() -> None:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        stop.set()  # request shutdown while the drain pass is in flight
+
+    # Before the fix, run()'s finally awaited the in-flight drain with no timeout and
+    # this gather never returned; the outer bound turns that hang into a test failure.
+    await asyncio.wait_for(
+        asyncio.gather(
+            sched.run(stop=stop, interval=0.005, shutdown_grace=0.05),
+            stopper(),
+        ),
+        timeout=3.0,
+    )
+
+
 async def test_match_drain_tick_invokes_the_seam_and_marks_the_timer() -> None:
     calls: list[str] = []
 
