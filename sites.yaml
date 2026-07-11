@@ -903,16 +903,22 @@
 - slug: dock
   name: "Dock"
   url: https://dock.inhire.app/vagas
-  render: static
+  render: browser
   company: "Dock"
   enumerates_all: false
+  extra_hosts:
+    - api.inhire.app
   hints: >-
-    Custom careers board. Treat as a windowed crawl unless the generated crawler proves that
-    a same-host API or sitemap enumerates every active posting. Fetch the listing, collect
-    active job detail URLs, then parse each detail page for title, description, location,
-    apply_url, employment_type, posted_at and expires_at when present. Strong match for
-    Brazilian payments, banking-as-a-service, card issuing, processing and backend platform
-    roles.
+    inhire-hosted board — https://dock.inhire.app/vagas is a client-rendered SPA (a plain
+    static GET returns a shell with no postings, so render: browser is required). After
+    render, roles are same-host cards linking to https://dock.inhire.app/vagas/<uuid>/<slug>;
+    collect them and parse each for title, description, location, apply_url. The underlying
+    JSON API observed during render is https://api.inhire.app/job-posts/public/pages with a
+    REQUIRED header `X-Tenant: dock` (tenant metadata at
+    https://api.inhire.app/tenants/public/dock) — if used, call
+    ctx.fetch(..., headers={"X-Tenant": "dock"}); api.inhire.app is authorized via
+    extra_hosts. Strong match for Brazilian payments, banking-as-a-service, card issuing,
+    processing and backend platform roles.
 
 - slug: stone
   name: "Stone"
@@ -996,17 +1002,21 @@
 
 - slug: dydx
   name: "dYdX"
-  url: https://dydx.exchange/careers
+  url: https://api.gem.com/job_board/v0/dydx/job_posts/
   render: static
   company: "dYdX"
-  enumerates_all: false
+  enumerates_all: true
   hints: >-
-    Custom careers board. Treat as a windowed crawl unless the generated crawler proves that
-    a same-host API or sitemap enumerates every active posting. Fetch the listing, collect
-    active job detail URLs, then parse each detail page for title, description, location,
-    apply_url, employment_type, posted_at and expires_at when present. Strong match for
-    exchange infrastructure, protocol/backend engineering, trading systems, wallets and
-    distributed financial systems.
+    Gem-hosted board API (Greenhouse-shaped JSON): a GET returns a top-level JSON array of
+    every active posting in one call — the whole board, no pagination. Each element has
+    `id`, `title`, `absolute_url` (the apply/detail URL on jobs.gem.com), `location.name`,
+    `location_type`, `offices[]`, `departments[]`, `employment_type` (e.g. `full_time`),
+    `updated_at`, `first_published_at`, and `content` = full HTML-ESCAPED description
+    (`content_plain` is the same text pre-stripped); use content_plain or
+    html.unescape+strip on content. No salary field. Keep EXTRA_HOSTS empty — the whole
+    board and its descriptions come from this one host. Strong match for exchange
+    infrastructure, protocol/backend engineering, trading systems, wallets and distributed
+    financial systems.
 
 - slug: polygon_labs
   name: "Polygon Labs"
@@ -1361,15 +1371,18 @@
 
 - slug: fly_io
   name: "Fly.io"
-  url: https://fly.io/jobs/
+  url: https://fly.io/jobs/feed.xml
   render: static
   company: "Fly.io"
-  enumerates_all: false
+  enumerates_all: true
   hints: >-
-    Fly.io jobs page is server-rendered. Crawl open role cards and same-host detail links.
-    Parse title, location/workplace, full description, and apply URL. Treat as windowed.
-    Strong match for Rust/Go/Ruby backend, Linux, global networking, compute orchestration
-    and distributed systems roles.
+    Fly publishes an Atom feed of open roles at https://fly.io/jobs/feed.xml — use it, NOT
+    the human page https://fly.io/jobs/ which is a client-rendered SPA whose shell carries
+    no postings. Parse the Atom `<entry>` elements: `<title>`, `<link href>` (the
+    apply/detail URL on fly.io), `<updated>`/`<published>`, and `<content>`/`<summary>` for
+    the description. One GET returns every active role, so it enumerates the whole board;
+    the feed is empty between hiring waves. Strong match for Rust/Go/Ruby backend, Linux,
+    global networking, compute orchestration and distributed systems roles.
 
 - slug: railway
   name: "Railway"
@@ -2203,14 +2216,19 @@
 
 - slug: retool
   name: "Retool"
-  url: https://boards-api.greenhouse.io/v1/boards/retool/jobs?content=true
-  render: static
+  url: https://retool.com/careers
+  render: browser
   company: "Retool"
+  enumerates_all: false
   hints: >-
-    Greenhouse board API, token `retool`. Whole public board in one GET. Each job has stable
-    `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and `content` =
-    full HTML-ENTITY-ESCAPED description; use html.unescape, then strip tags. Greenhouse has
-    no salary or employment_type fields in this API. Fit: developer tools, database/API
+    Retool left Greenhouse — careers are now first-party at https://retool.com/careers, a
+    JS-rendered Next.js page (a plain static GET returns a shell with zero postings, which
+    is why render: browser is required). After render, roles are same-host anchors of the
+    form https://retool.com/careers/<role-slug> (e.g.
+    /careers/gtm-engineer--business-operations--san-francisco-united-states) under an
+    `#open-positions` section; collect them and fetch each detail page for title, location,
+    full description and the apply URL. If a same-host Next.js JSON data route is observed
+    during render, prefer it. Treat as windowed. Fit: developer tools, database/API
     integrations, internal-app platform and backend/product infrastructure roles.
 
 - slug: workingnomads_golang
