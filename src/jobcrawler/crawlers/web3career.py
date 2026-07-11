@@ -1,11 +1,63 @@
+from __future__ import annotations
 
+import base64
 import html
 import json
 import re
-from urllib.parse import urljoin
+from datetime import date
+from urllib.parse import urljoin, urlsplit
 
 SITE = "https://web3.career/"
 EXTRA_HOSTS = []
+
+SOURCE = "web3career"
+LISTINGS = (SITE, urljoin(SITE, "?page=2"))
+
+# Apply capture (#130): each row's Apply CTA is an on-site tracking chain, and
+# resolving it to the real ATS posting costs 2 fetches per job — too much to
+# spend on every one of ~106 rows inside the ~200-page crawl budget. Each crawl
+# resolves a day-rotated window of this many rows; the runner preserves links
+# captured on earlier crawls for rows outside today's window (apply_url is
+# omit-when-absent), so coverage accrues across days.
+_APPLY_BUDGET = 60
+
+# The interstitial hides its destination in
+# ``VAR = "<blob>".slice(a, b).split('').reverse().join('')`` — undoing it is
+# pure string work, no JS execution.
+_APPLY_DEST_RE = re.compile(
+    r'=\s*"((?:[^"\\]|\\.)+)"'
+    r"\.slice\(\s*(\d+)\s*,\s*(\d+)\s*\)"
+    r"\.split\(['\"]{2}\)\.reverse\(\)\.join\(['\"]{2}\)"
+)
+_JS_ESCAPE_RE = re.compile(r"\\(.)")
+
+_ROW_RE = re.compile(r"tableTurboRowClick\(event,\s*'(/([^'/]+)/(\d+))'")
+_LDJSON_RE = re.compile(
+    r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+    re.I | re.S,
+)
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+_BR_RE = re.compile(r"<\s*br\s*/?\s*>", re.I)
+_BLOCK_RE = re.compile(r"</\s*(?:p|div|li|h[1-6]|tr|ul|ol|section)\s*>", re.I)
+_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"[ \t\r\f\v]+")
+_MULTINL_RE = re.compile(r"\n\s*\n\s*")
+_TRIMNL_RE = re.compile(r"[ \t]*\n[ \t]*")
+
+_DATE_RE = re.compile(
+    r"(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\.\d+)?\s*([+-]\d{2}:?\d{2}|Z)?"
+)
+_DATEONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_PLACEHOLDER_LOC = {"anywhere", "n/a", "worldwide", "global"}
+_PERIOD_MAP = {
+    "YEAR": "year",
+    "YEARLY": "year",
+    "ANNUAL": "year",
+    "MONTH": "month",
+    "MONTHLY": "month",
+    "HOUR": "hour",
+    "HOURLY": "hour",
+}
 
 
 def _text(value):
@@ -14,264 +66,344 @@ def _text(value):
     if not isinstance(value, str):
         value = str(value)
     value = html.unescape(value)
-    value = re.sub(r"<[^>]+>", " ", value)
-    value = value.replace("\xa0", " ")
-    value = re.sub(r"\s+", " ", value).strip()
-    return value or None
+    value = _BR_RE.sub("\n", value)
+    value = _BLOCK_RE.sub("\n", value)
+    value = _TAG_RE.sub(" ", value)
+    value = html.unescape(value)
+    value = _WS_RE.sub(" ", value)
+    value = _MULTINL_RE.sub("\n\n", value)
+    value = _TRIMNL_RE.sub("\n", value)
+    return value.strip() or None
 
 
-def _date(value):
-    value = _text(value)
-    if not value:
+def _slugify(value):
+    return _SLUG_RE.sub("-", html.unescape(str(value or "")).lower()).strip("-")
+
+
+def _iso(value):
+    if not value or not isinstance(value, str):
         return None
-    m = re.match(r"^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})\s+([+-]\d{2})(\d{2})$", value)
-    if m:
-        return "%sT%s%s:%s" % (m.group(1), m.group(2), m.group(3), m.group(4))
-    return value
+    text = value.strip()
+    if _DATEONLY_RE.match(text):
+        return text + "T00:00:00"
+    match = _DATE_RE.search(text)
+    if not match:
+        return None
+    stamp = f"{match.group(1)}T{match.group(2)}"
+    tz = match.group(3)
+    if not tz:
+        return stamp
+    if tz == "Z":
+        return stamp + "+00:00"
+    if ":" not in tz:
+        tz = tz[:3] + ":" + tz[3:]
+    return stamp + tz
 
 
-def _slug_tokens(value):
-    value = _text(value) or ""
-    value = value.lower()
-    value = re.sub(r"[^a-z0-9]+", "-", value).strip("-")
-    return [p for p in value.split("-") if len(p) > 2]
-
-
-def _iter_json_objects(script_text):
-    text = html.unescape(script_text or "").strip()
-    if not text:
-        return
-    try:
-        yield json.loads(text)
-        return
-    except Exception:
-        pass
-
-    decoder = json.JSONDecoder()
-    pos = 0
-    while pos < len(text):
-        start = text.find("{", pos)
-        if start < 0:
-            break
+def _num(value):
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        cleaned = value.replace(",", "").strip()
         try:
-            obj, end = decoder.raw_decode(text[start:])
-        except Exception:
-            pos = start + 1
+            return float(cleaned)
+        except ValueError:
+            return None
+    return None
+
+
+def _find_jobposting(obj):
+    stack = [obj]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            typ = item.get("@type")
+            if typ == "JobPosting" or (isinstance(typ, list) and "JobPosting" in typ):
+                return item
+            graph = item.get("@graph")
+            if isinstance(graph, list):
+                stack.extend(graph)
+            for val in item.values():
+                if isinstance(val, (dict, list)):
+                    stack.append(val)
+        elif isinstance(item, list):
+            stack.extend(item)
+    return None
+
+
+def _jobpostings(page):
+    out = []
+    for raw in _LDJSON_RE.findall(page):
+        try:
+            data = json.loads(html.unescape(raw.strip()))
+        except ValueError:
             continue
-        yield obj
-        pos = start + end
+        job = _find_jobposting(data)
+        if not isinstance(job, dict):
+            continue
+        title_slug = _slugify(job.get("title"))
+        if not title_slug:
+            continue
+        out.append((title_slug, _org_name(job), job))
+    return out
 
 
-def _walk_jobpostings(obj):
-    if isinstance(obj, dict):
-        typ = obj.get("@type")
-        if typ == "JobPosting" or (isinstance(typ, list) and "JobPosting" in typ):
-            yield obj
-        for value in obj.values():
-            yield from _walk_jobpostings(value)
-    elif isinstance(obj, list):
-        for value in obj:
-            yield from _walk_jobpostings(value)
-
-
-def _jobpostings_from_page(page):
-    scripts = re.findall(
-        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
-        page or "",
-        re.I | re.S,
-    )
-    for script in scripts:
-        for obj in _iter_json_objects(script):
-            yield from _walk_jobpostings(obj)
-
-
-def _listing_links(page):
-    links = []
+def _rows(page):
     seen = set()
-    for href in re.findall(r'href=["\']([^"\']+/\d+)(?:[?#][^"\']*)?["\']', page or "", re.I):
-        url = urljoin(SITE, html.unescape(href))
-        if not url.startswith(SITE) or url in seen:
+    out = []
+    for match in _ROW_RE.finditer(page):
+        path, slug, ident = match.group(1), match.group(2), match.group(3)
+        if path in seen:
             continue
-        seen.add(url)
-        links.append(url)
-    return links
+        seen.add(path)
+        out.append((path, slug, ident))
+    return out
 
 
-def _company(job):
+def _company_tokens(company):
+    slug = _slugify(company)
+    tokens = set()
+    if slug:
+        tokens.add(slug)
+        tokens.add(slug.replace("-", ""))
+    return {t for t in tokens if t}
+
+
+def _match_block(row_slug, blocks):
+    candidates = [
+        block
+        for block in blocks
+        if row_slug == block[0] or row_slug.startswith(block[0] + "-")
+    ]
+    if not candidates:
+        return None
+    longest = max(len(block[0]) for block in candidates)
+    best = [block for block in candidates if len(block[0]) == longest]
+    if len(best) == 1:
+        return best[0][2]
+    suffix = row_slug[longest + 1 :]
+    condensed = suffix.replace("-", "")
+    for _slug, company, job in best:
+        for token in _company_tokens(company):
+            if token in suffix or token in condensed or condensed in token:
+                return job
+    return None
+
+
+def _org_name(job):
     org = job.get("hiringOrganization")
     if isinstance(org, dict):
         return _text(org.get("name"))
     return _text(org)
 
 
-def _location_from_schema(job):
-    loc = job.get("jobLocation")
-    if isinstance(loc, list):
-        loc = loc[0] if loc else None
+def _address_parts(addr):
+    if isinstance(addr, str):
+        piece = addr.strip()
+        return [piece] if piece else []
+    if not isinstance(addr, dict):
+        return []
+    bits = [
+        addr.get("addressLocality"),
+        addr.get("addressRegion"),
+        addr.get("addressCountry"),
+    ]
+    cleaned = []
+    for bit in bits:
+        if not bit:
+            continue
+        piece = str(bit).strip()
+        if not piece or piece.lower() in _PLACEHOLDER_LOC:
+            continue
+        if piece not in cleaned:
+            cleaned.append(piece)
+    return cleaned
 
+
+def _location(job):
+    location = job.get("jobLocation")
+    if isinstance(location, list):
+        entries = location
+    elif location:
+        entries = [location]
+    else:
+        entries = []
     parts = []
-    if isinstance(loc, dict):
-        addr = loc.get("address")
-        if isinstance(addr, dict):
-            for key in ("addressLocality", "addressRegion", "addressCountry"):
-                val = _text(addr.get(key))
-                if val and val not in parts:
-                    parts.append(val)
-        elif isinstance(addr, str):
-            val = _text(addr)
-            if val:
-                parts.append(val)
-
-        for key in ("name", "addressLocality"):
-            val = _text(loc.get(key))
-            if val and val not in parts:
-                parts.append(val)
-
-    if parts:
-        return ", ".join(parts)
-    if _text(job.get("jobLocationType")) == "TELECOMMUTE":
-        return "Remote"
-    return None
+    for entry in entries:
+        addr = entry.get("address", entry) if isinstance(entry, dict) else entry
+        joined = ", ".join(_address_parts(addr))
+        if joined and joined not in parts:
+            parts.append(joined)
+    if not parts:
+        req = job.get("applicantLocationRequirements")
+        names = []
+        if isinstance(req, dict):
+            names = [req.get("name")]
+        elif isinstance(req, list):
+            names = [r.get("name") for r in req if isinstance(r, dict)]
+        for name in names:
+            if name and str(name).strip().lower() not in _PLACEHOLDER_LOC:
+                parts.append(str(name).strip())
+    if not parts and str(job.get("jobLocationType") or "").upper() == "TELECOMMUTE":
+        parts.append("Remote")
+    return "; ".join(parts) if parts else None
 
 
-def _locations_from_schema(job):
-    locs = []
-    raw = job.get("jobLocation")
-    items = raw if isinstance(raw, list) else [raw]
-    for loc in items:
-        pseudo = {"jobLocation": loc, "jobLocationType": job.get("jobLocationType")}
-        val = _location_from_schema(pseudo)
-        if val and val not in locs:
-            locs.append(val)
-    return locs
-
-
-def _salary_fields(job):
+def _salary_struct(job):
+    base = job.get("baseSalary")
+    if not isinstance(base, dict):
+        return {}
+    value = base.get("value")
     out = {}
-    salary = job.get("baseSalary")
-    if not isinstance(salary, dict):
-        return out
-
-    currency = _text(salary.get("currency"))
-    value = salary.get("value")
-    if isinstance(value, list):
-        value = value[0] if value else None
     if isinstance(value, dict):
-        min_value = value.get("minValue")
-        max_value = value.get("maxValue")
-        single_value = value.get("value")
-        if min_value is None and single_value is not None:
-            min_value = single_value
-        if max_value is None and single_value is not None:
-            max_value = single_value
-        if min_value is not None:
-            out["salary_min"] = min_value
-        if max_value is not None:
-            out["salary_max"] = max_value
-        period = _text(value.get("unitText"))
+        minv = _num(value.get("minValue"))
+        maxv = _num(value.get("maxValue"))
+        single = _num(value.get("value"))
+        lo = minv if minv is not None else single
+        hi = maxv if maxv is not None else single
+        if lo is not None:
+            out["salary_min"] = lo
+        if hi is not None:
+            out["salary_max"] = hi
+        period = _PERIOD_MAP.get(str(value.get("unitText") or "").strip().upper())
         if period:
             out["salary_period"] = period
-    elif value is not None:
-        out["salary_min"] = value
-        out["salary_max"] = value
-
-    if currency:
-        out["salary_currency"] = currency
+    else:
+        single = _num(value)
+        if single is not None:
+            out["salary_min"] = single
+            out["salary_max"] = single
+    if "salary_min" in out or "salary_max" in out:
+        currency = (
+            str(base.get("currency") or base.get("currencyCode") or "").strip().upper()
+        )
+        if currency:
+            out["salary_currency"] = currency
     return out
 
 
-def _best_url_for_job(job, links, used, index, total_jobs):
-    title_tokens = _slug_tokens(job.get("title"))
-    company_tokens = _slug_tokens(_company(job))
-    wanted = title_tokens[:4] + company_tokens[:3]
-
-    best_url = None
-    best_score = -1
-    for url in links:
-        if url in used:
-            continue
-        slug = url.rstrip("/").rsplit("/", 2)[-2].lower()
-        score = sum(1 for token in wanted if token in slug)
-        if score > best_score:
-            best_score = score
-            best_url = url
-
-    if best_url and best_score >= 2:
-        return best_url
-
-    # Sponsored rows can appear before the JSON-LD sequence.
-    offset = max(0, len(links) - total_jobs)
-    pos = index + offset
-    if pos < len(links) and links[pos] not in used:
-        return links[pos]
-    for url in links:
-        if url not in used:
-            return url
-    return None
-
-
-def _job_from_schema(data, url):
-    title = _text(data.get("title"))
-    description = _text(data.get("description"))
-    company = _company(data)
-    location = _location_from_schema(data)
-    if not (url and title and description and company and location):
+def _build(job, url, ident):
+    title = _text(job.get("title"))
+    company = _org_name(job)
+    description = _text(job.get("description"))
+    location = _location(job)
+    if not (title and company and location and description):
         return None
-
-    job = {
+    record = {
+        "source": SOURCE,
         "url": url,
+        "external_id": ident,
         "title": title,
         "company": company,
         "location": location,
         "description": description,
-        "source": SITE,
     }
+    employment = job.get("employmentType")
+    if isinstance(employment, list):
+        employment = ", ".join(str(x) for x in employment if x)
+    employment = _text(employment)
+    if employment:
+        record["employment_type"] = employment
+    workplace = _text(job.get("jobLocationType"))
+    if workplace:
+        record["workplace_type"] = workplace
+    posted = _iso(job.get("datePosted"))
+    if posted:
+        record["posted_at"] = posted
+    expires = _iso(job.get("validThrough"))
+    if expires:
+        record["expires_at"] = expires
+    record.update(_salary_struct(job))
+    return record
 
-    external_id = url.rstrip("/").rsplit("/", 1)[-1]
-    if external_id.isdigit():
-        job["external_id"] = external_id
 
-    locations = _locations_from_schema(data)
-    if len(locations) > 1:
-        job["locations"] = locations
+def _interstitial_path(ident):
+    """The on-site tracking hop behind a row's Apply CTA: /i/<b64(ident) reversed>.
 
-    employment_type = _text(data.get("employmentType"))
-    if employment_type:
-        job["employment_type"] = employment_type
+    The job page's own "Apply Now" anchor points at ``/i/<token>`` where the
+    token is exactly ``base64(str(ident))`` written backwards (ident 96380 →
+    ``OTYzODA=`` → ``=ADOzYTO``) — derivable from the listing row for free, so
+    the job page itself never needs fetching.
+    """
+    return "/i/" + base64.b64encode(str(ident).encode()).decode()[::-1]
 
-    workplace_type = _text(data.get("jobLocationType"))
-    if workplace_type:
-        job["workplace_type"] = workplace_type
 
-    posted_at = _date(data.get("datePosted"))
-    if posted_at:
-        job["posted_at"] = posted_at
+def _apply_url(ctx, job_url, ident):
+    """Resolve a row's Apply chain (/i/ → obfuscated /z/ → 302) to the real ATS URL.
 
-    expires_at = _date(data.get("validThrough"))
-    if expires_at:
-        job["expires_at"] = expires_at
+    Both tracking hops refuse referer-less requests (bot defense) — each must
+    carry the page that links it. The /z/ hash is salted per request, so the
+    interstitial fetch cannot be skipped. The final URL is the /z/ 302's
+    Location, captured by ``ctx.resolve`` without fetching the foreign ATS
+    page; a same-site or non-http result (the bounce-back defense tripping)
+    is reported as no capture.
+    """
+    i_url = urljoin(SITE, _interstitial_path(ident))
+    page = ctx.fetch(i_url, headers={"Referer": job_url})
+    match = _APPLY_DEST_RE.search(page)
+    if not match:
+        return None
+    blob = _JS_ESCAPE_RE.sub(r"\1", match.group(1))
+    dest = blob[int(match.group(2)) : int(match.group(3))][::-1]
+    if not dest:
+        return None
+    final = ctx.resolve(urljoin(SITE, dest), headers={"Referer": i_url})
+    if not final.startswith(("http://", "https://")):
+        return None
+    host = urlsplit(final).hostname or ""
+    if host == "web3.career" or host.endswith(".web3.career"):
+        return None
+    return final
 
-    job.update(_salary_fields(data))
-    return job
+
+def _apply_window(count, budget, seed):
+    """Which record ordinals (0-based) spend the 2 apply fetches this crawl.
+
+    A circular window of ``budget`` ordinals starting at ``(seed * budget) %
+    count``: consecutive seeds (days) tile the whole list, so every row gets
+    resolved within ``ceil(count / budget)`` crawl-days while no single crawl
+    exceeds its share of the page budget.
+    """
+    if count <= 0:
+        return set()
+    if count <= budget:
+        return set(range(count))
+    start = (seed * budget) % count
+    return {(start + i) % count for i in range(budget)}
 
 
 def crawl(ctx):
-    yielded = set()
-
-    for page_num in (1, 2):
-        listing_url = SITE if page_num == 1 else SITE + "?page=2"
-        page = ctx.fetch(listing_url)
-
-        links = _listing_links(page)
-        postings = list(_jobpostings_from_page(page))
-        used_urls = set()
-
-        for index, data in enumerate(postings):
-            url = _best_url_for_job(data, links, used_urls, index, len(postings))
-            if not url or url in yielded:
+    seen_urls = set()
+    records = []
+    for listing in LISTINGS:
+        try:
+            page = ctx.fetch(listing)
+        except Exception:
+            continue
+        blocks = _jobpostings(page)
+        if not blocks:
+            continue
+        for path, slug, ident in _rows(page):
+            url = urljoin(SITE, path)
+            if url in seen_urls:
                 continue
-            used_urls.add(url)
-            yielded.add(url)
-            job = _job_from_schema(data, url)
-            if job:
-                yield job
+            job = _match_block(slug, blocks)
+            if job is None:
+                continue
+            record = _build(job, url, ident)
+            if record is None:
+                continue
+            seen_urls.add(url)
+            records.append(record)
+    window = _apply_window(len(records), _APPLY_BUDGET, date.today().toordinal())
+    for index, record in enumerate(records):
+        if index in window:
+            try:
+                apply_url = _apply_url(ctx, record["url"], record["external_id"])
+            except Exception:
+                apply_url = None  # fail-open: the record ships without a capture
+            if apply_url:
+                record["apply_url"] = apply_url
+        yield record
