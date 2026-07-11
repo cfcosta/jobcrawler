@@ -76,8 +76,13 @@ class Ctx:
         backoff: float | None = None,
         retry_cap: float | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        render_bridge: RenderProvider | None = None,
     ) -> None:
         self._allowed = set(allowed_hosts)
+        # §4.10 headless render seam (M2 Stage 1). Injected in tests; lazily
+        # built on first render() in production, so importing ctx never pulls in
+        # aiohttp/CDP for the fetch-only paths (the sandbox child, most crawls).
+        self._render_bridge = render_bridge
         self._pages = 0
         self._max_pages = config.max_pages() if max_pages is None else max_pages
         self._solver = solver
@@ -334,10 +339,47 @@ class Ctx:
         if self._pacer is not None:
             self._pacer.wait(normalize_host(url), min_interval=delay)
 
+    @property
+    def render_available(self) -> bool:
+        """Whether a render bridge was *explicitly provisioned* (§4.10).
+
+        The §6 empty-shell escalation keys off this so it only drives a browser
+        when generation deliberately handed this ctx a bridge — never via the
+        lazy fallback in :meth:`render_observed` — so no unrelated fetch path can
+        wander into the operator's live Chrome.
+        """
+        return self._render_bridge is not None
+
     def render(self, url: str) -> str:
-        raise NotImplementedError(
-            "headless rendering is the M2 Playwright tier (§4.10)"
-        )
+        """Return the JS-rendered DOM for ``url`` via the headless render tier (§4.10).
+
+        The crawler-facing shape: just the settled HTML. See :meth:`render_observed`
+        for the richer result the generator reads.
+        """
+        return self.render_observed(url).html
+
+    def render_observed(self, url: str) -> RenderResult:
+        """Render ``url`` and return the settled DOM **plus** the runtime resource
+        URLs the page fetched (§6 API discovery).
+
+        The SSRF guard fires first — exactly like :meth:`fetch` — so a caller can
+        only render a URL on the allowlist; the render then charges one page
+        against the budget. Driving a real browser means its *subsequent*
+        subresource fetches and redirects are not individually ``check_url``-gated
+        the way httpx hops are, so this is a generation-time observation tool over
+        operator-registered hosts (the parent), never the sandbox — CDP egress is
+        blocked inside a committed crawl (§8, Stage 2 deferred). This method is
+        deliberately off the crawler facade; a crawler only gets :meth:`render`.
+        """
+        check_url(url, self._allowed)
+        self._charge_page()
+        bridge = self._render_bridge
+        if bridge is None:
+            # Lazy so the fetch-only paths never import aiohttp/CDP.
+            from jobcrawler.runtime.render import RenderBridge
+
+            bridge = self._render_bridge = RenderBridge()
+        return bridge.render(url)
 
     def log(self, *args: object, **kwargs: object) -> None:
         # stderr, never stdout: the child's stdout is discarded (§8, the result
@@ -350,6 +392,7 @@ class Ctx:
 
 if TYPE_CHECKING:
     from jobcrawler.runtime.contract import Ctx as _CtxProtocol
+    from jobcrawler.runtime.render import RenderProvider, RenderResult
 
 
 def crawler_facade(ctx: Ctx) -> _CtxProtocol:

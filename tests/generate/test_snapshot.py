@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import ast
 import json
-from typing import cast
+from collections.abc import Callable
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -33,6 +34,7 @@ from jobcrawler.generate.snapshot import (
     sitemaps_from_robots,
 )
 from jobcrawler.runtime.ctx import Ctx
+from jobcrawler.runtime.render import RenderResult
 
 
 def test_corpus_has_addressable_shape() -> None:
@@ -399,3 +401,117 @@ def test_prefetch_scrape_samples_exclude_nav_pages() -> None:
     assert {p["url"] for p in postings} == {
         "https://x.com/careers/senior-backend-engineer"
     }
+
+
+# -- §4.10 empty-shell render escalation --------------------------------------
+
+
+class _StubRender:
+    """A provisioned render bridge that returns a canned :class:`RenderResult`
+    and records the URLs it was asked to render (the §4.10 escalation seam)."""
+
+    def __init__(self, result: RenderResult) -> None:
+        self._result = result
+        self.rendered: list[str] = []
+
+    def render(self, url: str) -> RenderResult:
+        self.rendered.append(url)
+        return self._result
+
+
+def _empty_shell_ctx(
+    handler: "Callable[[httpx.Request], httpx.Response]",
+    bridge: object | None,
+) -> Ctx:
+    return Ctx(
+        {"x.com"},
+        client=httpx.Client(
+            transport=httpx.MockTransport(handler), follow_redirects=False
+        ),
+        render_bridge=cast("Any", bridge),
+    )
+
+
+def test_prefetch_escalates_an_empty_shell_to_the_runtime_api() -> None:
+    # The headline case: a JS SPA whose static homepage is an empty shell (no
+    # links, no feed, no ATS embed, no sitemap). Rendering it surfaces the XHR the
+    # page fires — a JSON jobs API a *static* crawler can hit — so escalation
+    # probes that endpoint and the corpus is grounded in real postings.
+    jobs = [
+        {
+            "hostedUrl": "https://x.com/jobs/staff-engineer",
+            "text": "Staff Engineer",
+            "descriptionPlain": "Own the platform.",
+        }
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/jobs":
+            return httpx.Response(200, json=jobs)
+        if request.url.path == "/":
+            return httpx.Response(
+                200, text='<html><body><div id="app"></div></body></html>'
+            )
+        return httpx.Response(200, text="")  # robots/sitemap: empty
+
+    rendered = RenderResult(
+        html="<html><body><ul><li>Staff Engineer</li></ul></body></html>",
+        resource_urls=(
+            "https://x.com/static/app.js",  # noise the filter must drop
+            "https://x.com/api/jobs",  # the XHR that matters
+        ),
+    )
+    bridge = _StubRender(rendered)
+    ctx = _empty_shell_ctx(handler, bridge)
+
+    corpus = prefetch_corpus("https://x.com/", ctx)
+
+    assert bridge.rendered == ["https://x.com/"]  # the shell was rendered
+    assert "https://x.com/api/jobs" in cast("list[str]", corpus["apis"])
+    assert corpus["expected_positions"] == 1  # the API's open-role count
+    postings = cast("list[dict[str, str]]", corpus["postings"])
+    assert postings[0]["url"] == "https://x.com/jobs/staff-engineer"
+    assert "Own the platform." in postings[0]["text"]
+    # the corpus homepage is the *rendered* DOM, not the empty static shell
+    assert "Staff Engineer" in cast("str", corpus["homepage"])
+
+
+def test_prefetch_escalation_scrapes_the_rendered_dom_when_no_api_answers() -> None:
+    # An SPA that injects posting <a> links (no discoverable JSON API): render the
+    # shell, then fall back to scraping posting-slug links from the rendered DOM.
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/jobs/senior-backend-engineer":
+            return httpx.Response(200, text="Job body")
+        if request.url.path == "/":
+            return httpx.Response(200, text="<html><body></body></html>")
+        return httpx.Response(200, text="")
+
+    rendered = RenderResult(
+        html='<a href="/jobs/senior-backend-engineer">Senior Backend Engineer</a>',
+        resource_urls=("https://x.com/static/bundle.js",),  # nothing API-shaped
+    )
+    ctx = _empty_shell_ctx(handler, _StubRender(rendered))
+
+    corpus = prefetch_corpus("https://x.com/", ctx)
+
+    postings = cast("list[dict[str, str]]", corpus["postings"])
+    assert {p["url"] for p in postings} == {
+        "https://x.com/jobs/senior-backend-engineer"
+    }
+    assert {p["text"] for p in postings} == {"Job body"}
+
+
+def test_prefetch_does_not_render_without_a_provisioned_bridge() -> None:
+    # The safety invariant: an empty shell with no bridge must NOT lazily reach
+    # for a browser — it stays an empty corpus, exactly as before the tier existed.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html><body></body></html>")
+
+    ctx = _empty_shell_ctx(handler, None)
+    assert ctx.render_available is False
+
+    corpus = prefetch_corpus("https://x.com/", ctx)
+
+    assert corpus["postings"] == []
+    assert corpus["apis"] == []
+    assert corpus["expected_positions"] == 0

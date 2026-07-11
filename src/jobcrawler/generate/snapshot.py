@@ -33,6 +33,7 @@ from jobcrawler.urls import normalize_host, valid_on_domain_url
 
 if TYPE_CHECKING:
     from jobcrawler.runtime.contract import Ctx
+    from jobcrawler.runtime.render import RenderResult
 
 _JSON_SCALARS = (str, int, float, bool, type(None))
 _LOC_RE = re.compile(r"<loc\b", re.IGNORECASE)
@@ -387,35 +388,118 @@ def prefetch_corpus(
     # URLs so the generator can probe them, and when one answers, take real posting
     # samples + the board's total (the enumeration target the §6 floor keys off).
     apis = ats_api_candidates(site_url, homepage)
-    postings: list[dict[str, str]] = []
-    ats_total = 0
-    for api in apis:
-        samples, total = _ats_posting_samples(ctx, api, max_postings, post_cap)
-        if samples or total:
-            postings, ats_total = samples, total
-            break
+    postings, ats_total = _sample_from_apis(ctx, apis, max_postings, post_cap)
     if not postings and not ats_total:
-        # No ATS answered: sample posting-slug links from the homepage (skipping
-        # nav/marketing pages, which confuse the generator about where the body is).
-        links = [
-            url
-            for url in on_domain_links(homepage, site_url)
-            if _looks_like_posting(url)
-        ][:max_postings]
-        postings = [
-            {"url": url, "title": "", "text": _clip(_try_fetch(ctx, url), post_cap)}
-            for url in links
-        ]
+        postings = _scrape_posting_samples(
+            ctx, homepage, site_url, max_postings, post_cap
+        )
+    feeds = find_feeds_in(homepage, site_url)  # feed discovery (§4.2)
+    sitemap_count = count_sitemap_urls(sitemap)
+    corpus_homepage = homepage
+
+    # §4.10 empty-shell escalation: a static fetch of a JS SPA yields nothing to
+    # ground generation on — no postings, no ATS, no jobs-sitemap count, no feed.
+    # When a render bridge is *provisioned* (generation opts in; never lazily —
+    # see Ctx.render_available), render the shell in a real browser and re-run
+    # discovery on the settled DOM plus the runtime resource URLs the page fetched
+    # — the XHR/JSON API a static crawler can hit directly.
+    if (
+        not postings
+        and not ats_total
+        and not sitemap_count
+        and not feeds
+        and getattr(ctx, "render_available", False)
+    ):
+        rendered = _render_shell(ctx, site_url)
+        if rendered is not None and rendered.html:
+            corpus_homepage = rendered.html
+            apis = _dedup(
+                [
+                    *apis,
+                    *ats_api_candidates(site_url, rendered.html),
+                    *_api_like(rendered.resource_urls),
+                ]
+            )
+            postings, ats_total = _sample_from_apis(ctx, apis, max_postings, post_cap)
+            if not postings and not ats_total:
+                postings = _scrape_posting_samples(
+                    ctx, rendered.html, site_url, max_postings, post_cap
+                )
+            feeds = feeds or find_feeds_in(rendered.html, site_url)
+
     return build_corpus(
-        homepage=_clip(homepage, hp_cap),
+        homepage=_clip(corpus_homepage, hp_cap),
         robots=robots,
         sitemap=sitemap,
         sitemaps=sitemaps or ([sitemap_url] if sitemap else []),
-        expected_positions=ats_total or count_sitemap_urls(sitemap),
+        expected_positions=ats_total or sitemap_count,
         apis=apis,
         postings=postings,
-        feeds=find_feeds_in(homepage, site_url),  # feed discovery (§4.2)
+        feeds=feeds,
     )
+
+
+def _sample_from_apis(
+    ctx: Ctx, apis: list[str], max_postings: int, post_cap: int
+) -> tuple[list[dict[str, str]], int]:
+    """First ATS candidate that answers with samples or a total wins (§4.2)."""
+    for api in apis:
+        samples, total = _ats_posting_samples(ctx, api, max_postings, post_cap)
+        if samples or total:
+            return samples, total
+    return [], 0
+
+
+def _scrape_posting_samples(
+    ctx: Ctx, homepage: str, site_url: str, max_postings: int, post_cap: int
+) -> list[dict[str, str]]:
+    """Sample posting-slug links from a page (skipping nav/marketing pages, which
+    confuse the generator about where the body is) — the no-ATS fallback (§4.2)."""
+    links = [
+        url for url in on_domain_links(homepage, site_url) if _looks_like_posting(url)
+    ][:max_postings]
+    return [
+        {"url": url, "title": "", "text": _clip(_try_fetch(ctx, url), post_cap)}
+        for url in links
+    ]
+
+
+def _render_shell(ctx: Ctx, site_url: str) -> "RenderResult | None":
+    """Render the board's empty shell for §4.10 escalation; ``None`` if it can't.
+
+    Best-effort by construction: Chrome may be down, CDP may error, the URL may
+    be refused — any of which means "couldn't escalate", and generation proceeds
+    on the empty static corpus exactly as it did before the tier existed.
+    ``render_observed`` is a runtime-Ctx method (off the crawler contract), so it
+    is reached via ``getattr`` — a stub ctx without it simply can't escalate.
+    """
+    render_observed = getattr(ctx, "render_observed", None)
+    if render_observed is None:
+        return None
+    try:
+        return render_observed(site_url)
+    except Exception:  # noqa: BLE001 - CdpError / SSRF / unreachable browser
+        return None
+
+
+# Resource URLs worth probing as a jobs API: a rendered SPA's resource list is
+# mostly assets (js/css/fonts/images), so only these data-endpoint shapes are
+# fetched — keeping the page budget off the noise.
+_API_MARKERS = ("/api/", ".json", "graphql")
+
+
+def _api_like(urls: Iterable[str]) -> list[str]:
+    return [u for u in urls if any(marker in u.lower() for marker in _API_MARKERS)]
+
+
+def _dedup(urls: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for url in urls:
+        if url and url not in seen:
+            seen.add(url)
+            out.append(url)
+    return out
 
 
 def _clip(text: str, limit: int) -> str:

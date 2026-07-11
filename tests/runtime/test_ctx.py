@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -17,6 +18,7 @@ from datetime import timedelta
 
 from jobcrawler.runtime.contract import Ctx as CtxProtocol
 from jobcrawler.runtime.ctx import Ctx, PageLimitError, crawler_facade
+from jobcrawler.runtime.render import RenderResult
 from jobcrawler.runtime.politeness import RobotsDisallowedError
 from jobcrawler.runtime.solver import (
     ChallengeError,
@@ -127,9 +129,82 @@ def test_fetch_raises_for_status_errors() -> None:
         ctx.fetch("https://example.com/missing")
 
 
-def test_render_not_implemented_yet() -> None:
-    with pytest.raises(NotImplementedError):
-        _ctx(lambda r: httpx.Response(200)).render("https://example.com/a")
+class _FakeRenderBridge:
+    """A stand-in for the CDP render bridge: returns canned HTML + observed
+    resource URLs and records the URLs it was asked to render, so a test can
+    assert render() reached (or, for the SSRF case, never reached) the browser."""
+
+    def __init__(
+        self,
+        html: str = "<html>rendered</html>",
+        resources: tuple[str, ...] = (),
+    ) -> None:
+        self.html = html
+        self.resources = resources
+        self.rendered: list[str] = []
+
+    def render(self, url: str) -> RenderResult:
+        self.rendered.append(url)
+        return RenderResult(html=self.html, resource_urls=self.resources)
+
+
+def _ctx_with_render(bridge: _FakeRenderBridge, allowed: set[str] | None = None) -> Ctx:
+    ctx = _ctx(lambda r: httpx.Response(200), allowed)
+    ctx._render_bridge = cast(Any, bridge)
+    return ctx
+
+
+def test_render_returns_the_rendered_html() -> None:
+    bridge = _FakeRenderBridge(html="<html><body>Staff Engineer</body></html>")
+    ctx = _ctx_with_render(bridge)
+
+    assert ctx.render("https://example.com/careers") == (
+        "<html><body>Staff Engineer</body></html>"
+    )
+    assert bridge.rendered == ["https://example.com/careers"]
+
+
+def test_render_rejects_off_domain_before_touching_the_browser() -> None:
+    # render is on the crawler contract, so its SSRF gate must fire exactly like
+    # fetch's — before any browser is driven. A denied URL never reaches the bridge.
+    bridge = _FakeRenderBridge()
+    ctx = _ctx_with_render(bridge)
+
+    with pytest.raises(SsrfError):
+        ctx.render("https://evil.com/x")
+    assert bridge.rendered == []
+
+
+def test_render_charges_the_page_budget() -> None:
+    bridge = _FakeRenderBridge()
+    ctx = _ctx_with_render(bridge)
+
+    assert ctx.pages_fetched == 0
+    ctx.render("https://example.com/careers")
+    assert ctx.pages_fetched == 1
+
+
+def test_render_observed_surfaces_the_observed_resource_urls() -> None:
+    # The generator (parent) needs more than the DOM: the runtime XHR/API URLs
+    # the SPA fetched are what a static crawler can hit. render_observed exposes
+    # them; the crawler-facing render() flattens to just the HTML string.
+    bridge = _FakeRenderBridge(
+        html="<html>x</html>",
+        resources=("https://example.com/api/jobs.json",),
+    )
+    ctx = _ctx_with_render(bridge)
+
+    result = ctx.render_observed("https://example.com/careers")
+    assert result.html == "<html>x</html>"
+    assert result.resource_urls == ("https://example.com/api/jobs.json",)
+
+
+def test_render_available_reports_whether_a_bridge_is_provisioned() -> None:
+    # Prefetch escalation keys off this so it only drives a browser when one was
+    # explicitly injected — never lazily, so unrelated code paths can't wander
+    # into the operator's live Chrome.
+    assert _ctx(lambda r: httpx.Response(200)).render_available is False
+    assert _ctx_with_render(_FakeRenderBridge()).render_available is True
 
 
 # -- §4.10 Cloudflare challenge escalation -----------------------------------
@@ -543,7 +618,9 @@ def test_facade_forwards_fetch_and_charges_the_real_budget() -> None:
 def test_facade_forwards_ssrf_and_budget_enforcement() -> None:
     # Enforcement is not bypassed by the wrapper: an off-allowlist host still
     # raises through the facade exactly as it would on the bare ctx.
-    facade = crawler_facade(_ctx(lambda req: httpx.Response(200), allowed={"example.com"}))
+    facade = crawler_facade(
+        _ctx(lambda req: httpx.Response(200), allowed={"example.com"})
+    )
     with pytest.raises(SsrfError):
         facade.fetch("https://evil.test/x")
 
@@ -670,9 +747,7 @@ def test_resolve_rejects_off_allowlist_start_before_any_request() -> None:
 
 def test_resolve_charges_one_page_like_fetch() -> None:
     ctx = _ctx(
-        lambda r: httpx.Response(
-            302, headers={"location": "https://ats.example.org/x"}
-        )
+        lambda r: httpx.Response(302, headers={"location": "https://ats.example.org/x"})
     )
     ctx.resolve("https://example.com/z/1")
     assert ctx.pages_fetched == 1
@@ -698,9 +773,7 @@ def test_resolve_raises_for_terminal_error_statuses() -> None:
 
 def test_facade_forwards_resolve() -> None:
     ctx = _ctx(
-        lambda r: httpx.Response(
-            302, headers={"location": "https://ats.example.org/x"}
-        )
+        lambda r: httpx.Response(302, headers={"location": "https://ats.example.org/x"})
     )
     facade = crawler_facade(ctx)
     assert facade.resolve("https://example.com/z") == "https://ats.example.org/x"
