@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Swipe · Position tracker{% endblock %}
+{% block extra_head %}<link rel="stylesheet" href="{{ asset('swipe.css') }}">{% endblock %}
+{% block main_class %}swipe-main{% endblock %}
+{% block content %}
+<div id="swipe" class="swipe-stage"
+     data-queue-url="/api/swipe/queue"
+     data-decide-url="/api/swipe"
+     data-query="{{ query_string }}">
+  <canvas id="swipe-bg" class="swipe-bg" aria-hidden="true"></canvas>
+
+  <div class="swipe-arena">
+    <div id="swipe-deck" class="swipe-deck" aria-live="polite"></div>
+  </div>
+
+  <noscript>
+    <p class="empty swipe-noscript">
+      The swipe deck needs JavaScript — use the <a href="/positions">positions list</a> instead.
+    </p>
+  </noscript>
+</div>
+{% endblock %}
+{% block extra_scripts %}<script src="{{ asset('swipe.js') }}" defer></script>{% endblock %}

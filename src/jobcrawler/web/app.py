@@ -367,6 +367,32 @@ def _position_dict(p: PositionRecord) -> dict[str, Any]:
     }
 
 
+def _card_dict(p: PositionRecord) -> dict[str, Any]:
+    """A swipe-card view of a position: :func:`_position_dict` plus the presentation
+    extras the deck renders verbatim (formatted salary is already in there; add the
+    display score/band, avatar hue, humanized age, resolved external link, decoded
+    concerns, and the enum display words) — so the client never re-derives policy."""
+    return {
+        **_position_dict(p),
+        "score": _display_score(p),
+        "band": _score_band(p),
+        "hue": _hue_of(p.hiring_company or p.company),
+        "age": humanize_age(p.posted_at or p.first_seen),
+        "ext": _ext_url(p),
+        "detail_url": f"/positions/{encode_pid(p.site, p.url)}",
+        "match_concerns": reasons_list(p.match_concerns),
+        "level_label": human_label(p.level),
+        "discipline_label": human_label(p.discipline),
+        "workplace_label": human_label(p.workplace),
+    }
+
+
+#: Decisions the swipe endpoint accepts: left/right on the deck. ``dismiss`` is the
+#: soft hide flag; ``interested`` is the guarded one-way ``new -> interested``
+#: promotion (same policy as the list's ``i`` key — never resurrects a handled row).
+_SWIPE_DECISIONS = frozenset({"interested", "dismiss"})
+
+
 def _int_param(params: Any, name: str) -> int | None:
     raw = params.get(name)
     if raw is None or raw == "":
@@ -802,7 +828,9 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
         # counts real-world jobs (value) over raw crawled rows (sub) — "312 / 405".
         overlay = store.dedup_overlay_stats() if ui_on else {}
         distinct_open = int(overlay.get("distinct_open") or 0)
-        show_distinct = bool(overlay.get("clusters")) and distinct_open < lifecycle["open"]
+        show_distinct = (
+            bool(overlay.get("clusters")) and distinct_open < lifecycle["open"]
+        )
 
         open_kpi: dict[str, Any] = {
             "label": "Open roles",
@@ -814,9 +842,7 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
             "delta": new_today,
         }
         if show_distinct:
-            open_kpi.update(
-                {"label": "Distinct open roles", "value": distinct_open}
-            )
+            open_kpi.update({"label": "Distinct open roles", "value": distinct_open})
             open_kpi["sub"] = lifecycle["open"]
         kpis = [
             open_kpi,
@@ -1074,6 +1100,29 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
             },
         )
 
+    @app.get("/swipe", response_class=HTMLResponse)
+    def swipe(request: Request) -> Response:
+        """The swipe-triage deck (§16): one card at a time over the browse grammar.
+
+        JS-first by design (the deck, gestures, and keybindings live in swipe.js; a
+        <noscript> points at the list view) — the server just hands the shell its
+        filter echo + site registry so the drawer form mirrors /positions exactly.
+        The queue itself is fetched from ``/api/swipe/queue`` with the SAME query
+        string, so a filtered deep link and the drawer stay one grammar.
+        """
+        _, raw = _read_filters(request.query_params, default_new_view=True)
+        return templates.TemplateResponse(
+            request=request,
+            name="swipe.html",
+            context={
+                "nav": "swipe",
+                "filters": raw,
+                "sites": site_list,
+                "home_country": config.home_country(),
+                "query_string": str(request.url.query or ""),
+            },
+        )
+
     @app.get("/positions/{pid}", response_class=HTMLResponse)
     def position_detail(request: Request, pid: str) -> Response:
         site, url = decode_pid(pid)
@@ -1274,6 +1323,61 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
         payload["locations"] = store.position_locations(site, url)
         return JSONResponse(payload)
 
+    @app.get("/api/swipe/queue")
+    def api_swipe_queue(request: Request) -> JSONResponse:
+        """The deck's card feed: the ``_read_filters`` grammar with the same bare-query
+        default as the positions page (stage ``new``, applied companies hidden, best
+        match first), paged, each row shaped by :func:`_card_dict`."""
+        kwargs, _ = _read_filters(request.query_params, default_new_view=True)
+        page = max(1, _int_param(request.query_params, "page") or 1)
+        rows = store.search_positions(
+            **kwargs, limit=_PAGE_SIZE + 1, offset=(page - 1) * _PAGE_SIZE
+        )
+        has_next = len(rows) > _PAGE_SIZE
+        return JSONResponse(
+            {
+                "positions": [_card_dict(p) for p in rows[:_PAGE_SIZE]],
+                "page": page,
+                "has_next": has_next,
+            }
+        )
+
+    @app.post("/api/swipe/{pid}")
+    def api_swipe_decide(pid: str, body: "SwipeBody") -> JSONResponse:
+        """Commit a swipe: ``dismiss`` (left) or ``interested`` (right), both idempotent.
+
+        ``interested`` reuses the guarded one-way ``new -> interested`` promotion
+        (`tracking.promotable_to_interested`) — a rejected/withdrawn/handled row
+        reports ``changed: false`` rather than being resurrected; the full status
+        dropdown on the detail page stays the unconstrained path. ``dismiss`` is the
+        soft hide flag. The response always carries the row's current stage + flag so
+        the client reconciles its optimistic card fling either way.
+        """
+        if body.decision not in _SWIPE_DECISIONS:
+            raise HTTPException(
+                status_code=400, detail=f"unknown swipe decision {body.decision!r}"
+            )
+        site, url = decode_pid(pid)
+        rec = _require(site, url)
+        changed = False
+        if body.decision == "interested":
+            if tracking.promotable_to_interested(rec.track_status):
+                rec = _apply_track(site, url, tracking.TrackStatus.INTERESTED.value)
+                changed = True
+        else:
+            if not rec.dismissed:
+                store.set_dismissed(site, url, True)
+                rec = _require(site, url)
+                changed = True
+        return JSONResponse(
+            {
+                "decision": body.decision,
+                "changed": changed,
+                "track_status": rec.track_status,
+                "dismissed": rec.dismissed,
+            }
+        )
+
     @app.post("/api/positions/track")
     def api_track(body: "TrackBody") -> JSONResponse:
         _require(body.site, body.url)
@@ -1361,3 +1465,7 @@ class BulkBody(BaseModel):
 
 class CrawlBody(BaseModel):
     slug: str
+
+
+class SwipeBody(BaseModel):
+    decision: str
