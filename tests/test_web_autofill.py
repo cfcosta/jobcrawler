@@ -93,6 +93,50 @@ async def test_detail_page_shows_the_panel_only_for_http_targets() -> None:
         assert "Pre-fill application in Chrome" not in mail_only.text
 
 
+async def test_api_autofill_queues_and_returns_target() -> None:
+    # the JSON twin the swipe deck's `a` key posts to
+    store = _seeded_store()
+    async with _client(create_app(store)) as client:
+        resp = await client.post(
+            "/api/positions/autofill", json={"site": "acme", "url": HTTP_URL}
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "queued": True,
+            "target": "https://apply.acme.test/a",
+        }
+    claimed = store.claim_autofill()
+    assert claimed is not None
+    assert claimed["site"] == "acme" and claimed["url"] == HTTP_URL
+
+
+async def test_api_autofill_reports_email_only_without_queuing() -> None:
+    # email-only apply is a soft "queued: false" (not a 400) so the deck can toast
+    store = _seeded_store()
+    async with _client(create_app(store)) as client:
+        resp = await client.post(
+            "/api/positions/autofill", json={"site": "acme", "url": MAIL_URL}
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["queued"] is False
+        assert "e-mail" in body["reason"]
+    assert store.claim_autofill() is None
+
+
+async def test_swipe_card_carries_autofill_url_for_the_a_key() -> None:
+    # every card exposes autofill_url (null = email-only) so `a` gates without a probe
+    store = _seeded_store()
+    async with _client(create_app(store)) as client:
+        resp = await client.get("/api/swipe/queue?collapse=0")
+        assert resp.status_code == 200
+        cards = resp.json()["positions"]
+        assert cards and all("autofill_url" in c for c in cards)
+        by_url = {c["url"]: c for c in cards}
+        assert by_url[HTTP_URL]["autofill_url"] == "https://apply.acme.test/a"
+        assert by_url[MAIL_URL]["autofill_url"] is None
+
+
 async def test_detail_page_lists_recent_runs() -> None:
     store = _seeded_store()
     rid = store.request_autofill("acme", HTTP_URL, "https://apply.acme.test/a")

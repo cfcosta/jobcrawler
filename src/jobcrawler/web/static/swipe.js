@@ -132,6 +132,12 @@
     return card.location_display || card.location_normalized || card.location || "";
   }
 
+  // the matcher's coarse word ('strong'|'good'|'fair'|'weak'|…) → a caption sitting
+  // under the score dial; CSS uppercases it so one word reads as the verdict
+  function verdictLabel(v) {
+    return v ? String(v).charAt(0).toUpperCase() + String(v).slice(1) : "";
+  }
+
   function buildCard(card) {
     const root = el("article", "swipe-card band-" + (card.band || "none"));
     root.dataset.pid = card.pid;
@@ -152,9 +158,13 @@
     who.appendChild(el("div", "card-company", card.hiring_company || card.company || "Unknown company"));
     who.appendChild(el("div", "card-meta", [card.site, card.age].filter(Boolean).join(" · ")));
     head.appendChild(who);
+    const scoreWrap = el("div", "card-scorewrap");
     const score = el("div", "card-score score-" + (card.band || "none"), card.score === null || card.score === undefined ? "—" : String(card.score));
     score.title = "match score";
-    head.appendChild(score);
+    scoreWrap.appendChild(score);
+    if (card.match_verdict)
+      scoreWrap.appendChild(el("div", "card-verdict verdict-" + (card.band || "none"), verdictLabel(card.match_verdict)));
+    head.appendChild(scoreWrap);
     inner.appendChild(head);
 
     inner.appendChild(el("h2", "card-title", card.title || "Untitled position"));
@@ -163,6 +173,7 @@
     const chips = el("div", "card-chips");
     if (card.level_label) chips.appendChild(chip(card.level_label));
     if (card.discipline_label) chips.appendChild(chip(card.discipline_label));
+    if (card.department) chips.appendChild(chip(card.department, "chip-dept"));
     if (card.workplace_label) chips.appendChild(chip(card.workplace_label, "chip-workplace"));
     if (card.remote_scope === "anywhere") chips.appendChild(chip("Anywhere", "chip-good"));
     if (card.remote_scope === "restricted") chips.appendChild(chip("Geo-restricted", "chip-warn"));
@@ -178,23 +189,24 @@
     if (loc) facts.appendChild(el("div", "card-location", loc));
     if (facts.children.length) inner.appendChild(facts);
 
-    // why the matcher liked / worried
-    const reasons = (card.match_reasons || []).slice(0, 4);
-    const concerns = (card.match_concerns || []).slice(0, 3);
+    // why the matcher liked / worried — split into two groups so a wide card can
+    // set them side by side (see .card-match in swipe.css)
+    const reasons = (card.match_reasons || []).slice(0, 6);
+    const concerns = (card.match_concerns || []).slice(0, 4);
     if (reasons.length || concerns.length) {
       const match = el("div", "card-match");
-      for (const r of reasons) {
-        const line = el("div", "match-line match-pro");
-        line.appendChild(el("span", "match-mark", "✓"));
-        line.appendChild(el("span", "", r));
-        match.appendChild(line);
-      }
-      for (const cn of concerns) {
-        const line = el("div", "match-line match-con");
-        line.appendChild(el("span", "match-mark", "⚠"));
-        line.appendChild(el("span", "", cn));
-        match.appendChild(line);
-      }
+      const group = (lines, cls, mark) => {
+        const box = el("div", "match-group " + cls);
+        for (const text of lines) {
+          const line = el("div", "match-line");
+          line.appendChild(el("span", "match-mark", mark));
+          line.appendChild(el("span", "match-text", text));
+          box.appendChild(line);
+        }
+        return box;
+      };
+      if (reasons.length) match.appendChild(group(reasons, "match-pros", "✓"));
+      if (concerns.length) match.appendChild(group(concerns, "match-cons", "⚠"));
       inner.appendChild(match);
     }
 
@@ -225,6 +237,13 @@
     detail.target = "_blank";
     detail.rel = "noopener";
     links.appendChild(detail);
+    if (card.autofill_url) {
+      const af = el("button", "card-link card-autofill", "⚡ auto-fill");
+      af.type = "button";
+      af.title = "Queue auto-fill in Chrome (press a)";
+      af.addEventListener("click", () => autofill());
+      links.appendChild(af);
+    }
     foot.appendChild(links);
 
     const like = el("button", "card-btn btn-like", "★ Interested");
@@ -474,6 +493,36 @@
     if (card) window.open(card.detail_url, "_blank", "noopener");
   }
 
+  // §18 auto-fill: enqueue the top card's apply form for the daemon's Chrome drain.
+  // Orthogonal to the swipe verbs — it never advances the deck, just fires the job
+  // and toasts. A card with no web form (email-only apply) says so instead.
+  function autofill() {
+    const card = topCard();
+    if (!card) return;
+    if (!card.autofill_url) {
+      toast("No web form to auto-fill — this one applies by e-mail");
+      return;
+    }
+    const node = topEl();
+    if (node) {
+      node.classList.remove("autofilling");
+      void node.offsetWidth; // restart the pulse
+      node.classList.add("autofilling");
+    }
+    toast("⚡ Auto-fill queued — Chrome will open and pre-fill the form");
+    fetch("/api/positions/autofill", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ site: card.site, url: card.url }),
+    })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("http " + r.status))))
+      .then((body) => {
+        if (!body.queued) toast(body.reason || "Couldn't queue auto-fill");
+      })
+      .catch(() => toast("Couldn't reach the server to queue auto-fill"));
+  }
+
   // ---- keyboard ----------------------------------------------------------------
 
   // Capture phase on window so the list-page bindings in app.js (same document)
@@ -495,6 +544,7 @@
         u: undo,
         z: undo,
         o: openExt,
+        a: autofill,
         Enter: openDetail,
         f: () => setDrawer(drawer.hidden),
         "?": () => toggleHelp(),

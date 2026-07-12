@@ -380,6 +380,10 @@ def _card_dict(p: PositionRecord) -> dict[str, Any]:
         "age": humanize_age(p.posted_at or p.first_seen),
         "ext": _ext_url(p),
         "detail_url": f"/positions/{encode_pid(p.site, p.url)}",
+        # §18: the http(s) page the `a`-key auto-fill would drive (posting URL
+        # fallback included), or null for an email-only apply — the deck gates the
+        # affordance on this without re-deriving the policy.
+        "autofill_url": autofill_target(p),
         "match_concerns": reasons_list(p.match_concerns),
         "level_label": human_label(p.level),
         "discipline_label": human_label(p.discipline),
@@ -1399,6 +1403,23 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
         store.set_dismissed(body.site, body.url, body.dismissed)
         return JSONResponse(_position_dict(_require(body.site, body.url)))
 
+    @app.post("/api/positions/autofill")
+    def api_autofill(body: "AutofillBody") -> JSONResponse:
+        """The JSON twin of :func:`post_autofill` for the swipe deck's ``a`` key.
+
+        Enqueue only — the daemon's §18 drain opens Chrome and runs the LLM. Returns
+        ``queued: false`` (not an error) when the row applies by e-mail so the deck
+        can toast a reason instead of surfacing a 400 mid-swipe.
+        """
+        rec = _require(body.site, body.url)
+        target = autofill_target(rec)
+        if target is None:
+            return JSONResponse(
+                {"queued": False, "reason": "applies by e-mail — no web form to fill"}
+            )
+        store.request_autofill(body.site, body.url, target)
+        return JSONResponse({"queued": True, "target": target})
+
     @app.post("/api/positions/bulk")
     def api_bulk(body: "BulkBody") -> JSONResponse:
         if body.action not in _BULK_ACTIONS:
@@ -1454,6 +1475,11 @@ class DismissBody(BaseModel):
     site: str
     url: str
     dismissed: bool = True
+
+
+class AutofillBody(BaseModel):
+    site: str
+    url: str
 
 
 class BulkBody(BaseModel):
