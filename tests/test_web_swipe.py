@@ -148,6 +148,7 @@ async def test_swipe_page_has_deck_scaffolding() -> None:
                 'id="swipe-hud"',
                 'id="swipe-empty"',
                 'id="swipe-undo"',
+                'id="swipe-bg"',  # WebGL backdrop canvas (fails closed to CSS)
                 'data-queue-url="/api/swipe/queue"',
                 'data-decide-url="/api/swipe"',
             ):

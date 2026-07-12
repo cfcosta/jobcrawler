@@ -285,6 +285,7 @@
     if (state.streak >= 3) {
       hud.streak.hidden = false;
       hud.streak.textContent =
+        (state.streak >= 5 ? "🔥 " : "") +
         "×" + state.streak + " " + (state.streakDir === "interested" ? "★" : "✕");
       hud.streak.className = "hud-streak streak-" + (state.streakDir === "interested" ? "like" : "pass");
     } else {
@@ -330,12 +331,14 @@
     node.style.zIndex = "200";
     // inline, because a drag already left an inline transform behind
     node.style.transform =
-      "translate(" +
+      "perspective(1100px) translate(" +
       sign * (window.innerWidth * 0.6 + 240) +
       "px, " +
       (Math.random() * 120 - 80) +
       "px) rotate(" +
       sign * 26 +
+      "deg) rotateY(" +
+      sign * 18 +
       "deg)";
     node.style.opacity = "0";
     window.setTimeout(() => node.remove(), 420);
@@ -345,6 +348,13 @@
     const card = topCard();
     if (!card) return;
     const node = topEl();
+    const zone = (node || deckEl).getBoundingClientRect();
+    bg.burst(
+      decision === "interested" ? 1 : -1,
+      zone.left + zone.width / 2,
+      zone.top + zone.height * 0.45
+    );
+    bg.lean(0);
     flyOff(node, decision);
 
     const index = state.cursor;
@@ -521,11 +531,14 @@
   function setDrag(node, dx, dy, animate) {
     node.classList.toggle("dragging", !animate);
     node.style.transform =
-      "translate(" + dx + "px, " + dy * 0.32 + "px) rotate(" + dx * 0.055 + "deg)";
+      "perspective(1100px) translate(" + dx + "px, " + dy * 0.32 + "px) rotate(" +
+      dx * 0.055 + "deg) rotateY(" + Math.max(-16, Math.min(16, dx * 0.05)) + "deg)";
     const strength = Math.min(1, Math.abs(dx) / (node.offsetWidth * COMMIT_AT));
     node.style.setProperty("--like", dx > 0 ? String(strength) : "0");
     node.style.setProperty("--pass", dx < 0 ? String(strength) : "0");
-    stage.style.setProperty("--lean", String(Math.max(-1, Math.min(1, dx / 320))));
+    const leanTo = Math.max(-1, Math.min(1, dx / 320));
+    stage.style.setProperty("--lean", String(leanTo));
+    bg.lean(leanTo);
   }
 
   function clearDrag(node) {
@@ -534,6 +547,7 @@
     node.style.setProperty("--like", "0");
     node.style.setProperty("--pass", "0");
     stage.style.setProperty("--lean", "0");
+    bg.lean(0);
   }
 
   function releaseDrag(node) {
@@ -653,6 +667,209 @@
     },
     { passive: false }
   );
+
+  // ---- WebGL backdrop --------------------------------------------------------------
+
+  // Hand-rolled full-screen shader (no three.js: a quad + fragment shader is all
+  // this needs, and the app stays dependency-free). A domain-warped aurora drifts
+  // behind the deck, leans green/red as the top card is dragged, and every
+  // committed decision fires an expanding shockwave ring from the deck. Fails
+  // closed: no WebGL, a lost context, or prefers-reduced-motion leaves the plain
+  // CSS background (the canvas is hidden on failure so alpha:false can't blacken
+  // the page).
+  function initBackdrop(canvas) {
+    const none = { lean() {}, burst() {} };
+    if (!canvas || !window.WebGLRenderingContext) return none;
+    const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const darkMq = window.matchMedia("(prefers-color-scheme: dark)");
+    let gl;
+    try {
+      gl = canvas.getContext("webgl", {
+        alpha: false,
+        antialias: false,
+        depth: false,
+        powerPreference: "low-power",
+      });
+    } catch (err) {
+      gl = null;
+    }
+    if (!gl) {
+      canvas.style.display = "none";
+      return none;
+    }
+
+    const MAX_BURSTS = 8;
+    const VERT = "attribute vec2 a; void main() { gl_Position = vec4(a, 0.0, 1.0); }";
+    const FRAG = [
+      "precision highp float;",
+      "uniform vec2 u_res;",
+      "uniform float u_time;",
+      "uniform float u_lean;", // -1 (pass) .. 1 (like)
+      "uniform float u_dark;", // 0 light theme, 1 dark
+      "uniform vec4 u_burst[8];", // x, y (0..1 canvas uv, gl-oriented), start s, dir
+      "float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123); }",
+      "float noise(vec2 p) {",
+      "  vec2 i = floor(p); vec2 f = fract(p);",
+      "  vec2 u = f * f * (3.0 - 2.0 * f);",
+      "  return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x),",
+      "             mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);",
+      "}",
+      "float fbm(vec2 p) {",
+      "  float v = 0.0; float a = 0.55;",
+      "  for (int i = 0; i < 4; i++) { v += a * noise(p); p = p * 2.03 + 17.3; a *= 0.5; }",
+      "  return v;",
+      "}",
+      "void main() {",
+      "  float m = min(u_res.x, u_res.y);",
+      "  vec2 p = (gl_FragCoord.xy - 0.5 * u_res) / m;",
+      "  float t = u_time * 0.045;",
+      // domain warp: one fbm field steers another for the aurora sheets
+      "  vec2 q = vec2(fbm(p * 1.7 + vec2(0.0, t)), fbm(p * 1.7 + vec2(5.2, -t * 0.7)));",
+      "  float n = fbm(p * 2.3 + 2.1 * q + vec2(t * 0.6, -t * 0.35));",
+      "  vec3 likeC = vec3(0.16, 0.82, 0.47);",
+      "  vec3 passC = vec3(0.94, 0.31, 0.36);",
+      "  vec3 dusk = mix(vec3(0.33, 0.42, 0.93), vec3(0.52, 0.33, 0.88), smoothstep(0.25, 0.8, n));",
+      "  vec3 tint = mix(dusk, u_lean > 0.0 ? likeC : passC, min(1.0, abs(u_lean)) * 0.7);",
+      "  vec3 bg = mix(vec3(0.955, 0.965, 0.985), vec3(0.035, 0.045, 0.10), u_dark);",
+      "  float amt = smoothstep(0.32, 0.95, n) * mix(0.16, 0.55, u_dark);",
+      "  vec3 col = mix(bg, tint, amt);",
+      "  for (int i = 0; i < 8; i++) {",
+      "    vec4 b = u_burst[i];",
+      "    float age = u_time - b.z;",
+      "    if (b.z <= 0.0 || age < 0.0 || age > 1.6) continue;",
+      "    vec2 bp = (b.xy * u_res - 0.5 * u_res) / m;",
+      "    float d = distance(p, bp);",
+      "    float r = age * 0.9;",
+      "    float ring = exp(-pow((d - r) * 11.0, 2.0)) * exp(-age * 2.4);",
+      "    col += (b.w > 0.0 ? likeC : passC) * ring * mix(0.45, 0.85, u_dark);",
+      "  }",
+      "  col *= 1.0 - dot(p, p) * mix(0.18, 0.4, u_dark);", // vignette so cards pop
+      "  col += (hash(gl_FragCoord.xy + fract(u_time)) - 0.5) * 0.014;", // de-band grain
+      "  gl_FragColor = vec4(col, 1.0);",
+      "}",
+    ].join("\n");
+
+    let loc = null;
+    const bursts = new Float32Array(MAX_BURSTS * 4);
+    let burstAt = 0;
+    const lean = { v: 0, target: 0 };
+    let raf = 0;
+    const t0 = performance.now();
+    const now = () => (performance.now() - t0) / 1000;
+
+    function compile(type, src) {
+      const shader = gl.createShader(type);
+      gl.shaderSource(shader, src);
+      gl.compileShader(shader);
+      return gl.getShaderParameter(shader, gl.COMPILE_STATUS) ? shader : null;
+    }
+
+    function build() {
+      const vs = compile(gl.VERTEX_SHADER, VERT);
+      const fs = compile(gl.FRAGMENT_SHADER, FRAG);
+      if (!vs || !fs) return false;
+      const prog = gl.createProgram();
+      gl.attachShader(prog, vs);
+      gl.attachShader(prog, fs);
+      gl.linkProgram(prog);
+      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) return false;
+      gl.useProgram(prog);
+      const buf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      // one oversized triangle covers the viewport without a second draw call
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+      const a = gl.getAttribLocation(prog, "a");
+      gl.enableVertexAttribArray(a);
+      gl.vertexAttribPointer(a, 2, gl.FLOAT, false, 0, 0);
+      loc = {
+        res: gl.getUniformLocation(prog, "u_res"),
+        time: gl.getUniformLocation(prog, "u_time"),
+        lean: gl.getUniformLocation(prog, "u_lean"),
+        dark: gl.getUniformLocation(prog, "u_dark"),
+        burst: gl.getUniformLocation(prog, "u_burst"),
+      };
+      return true;
+    }
+
+    function resize() {
+      // the backdrop is soft by design; capping DPR keeps the fill rate cheap
+      const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+      const w = Math.max(1, Math.round(canvas.clientWidth * dpr));
+      const h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
+        gl.viewport(0, 0, w, h);
+      }
+    }
+
+    function draw(t) {
+      resize();
+      gl.uniform2f(loc.res, canvas.width, canvas.height);
+      gl.uniform1f(loc.time, t);
+      gl.uniform1f(loc.lean, lean.v);
+      gl.uniform1f(loc.dark, darkMq.matches ? 1 : 0);
+      gl.uniform4fv(loc.burst, bursts);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+
+    function frame() {
+      lean.v += (lean.target - lean.v) * 0.1;
+      draw(now());
+      raf = window.requestAnimationFrame(frame);
+    }
+
+    function start() {
+      if (!raf && !still && !document.hidden) raf = window.requestAnimationFrame(frame);
+    }
+
+    function stop() {
+      if (raf) window.cancelAnimationFrame(raf);
+      raf = 0;
+    }
+
+    if (!build()) {
+      canvas.style.display = "none";
+      return none;
+    }
+
+    if (still) {
+      // reduced motion: one calm frame, refreshed only on resize/theme flips
+      const single = () => draw(8);
+      single();
+      window.addEventListener("resize", single);
+      darkMq.addEventListener("change", single);
+      return none;
+    }
+
+    document.addEventListener("visibilitychange", () => (document.hidden ? stop() : start()));
+    canvas.addEventListener("webglcontextlost", (event) => {
+      event.preventDefault();
+      stop();
+    });
+    canvas.addEventListener("webglcontextrestored", () => {
+      if (build()) start();
+    });
+    start();
+
+    return {
+      lean(v) {
+        lean.target = Math.max(-1, Math.min(1, v));
+      },
+      burst(dir, cx, cy) {
+        const rect = canvas.getBoundingClientRect();
+        if (!rect.width || !rect.height) return;
+        const i = burstAt * 4;
+        bursts[i] = (cx - rect.left) / rect.width;
+        bursts[i + 1] = 1 - (cy - rect.top) / rect.height; // gl y runs bottom-up
+        bursts[i + 2] = now();
+        bursts[i + 3] = dir;
+        burstAt = (burstAt + 1) % MAX_BURSTS;
+      },
+    };
+  }
+
+  const bg = initBackdrop(document.getElementById("swipe-bg"));
 
   // ---- wiring ----------------------------------------------------------------------
 

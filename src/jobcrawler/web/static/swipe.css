@@ -153,6 +153,7 @@ body:has(.swipe-stage) .site-footer {
   width: min(440px, calc(100vw - 28px));
   height: min(680px, 100%);
   margin: 6px 0;
+  perspective: 1100px; /* the drag adds rotateY; behind-cards stay flat */
 }
 
 .swipe-card {
@@ -176,6 +177,13 @@ body:has(.swipe-stage) .site-footer {
 }
 .swipe-card.is-top {
   cursor: grab;
+  /* directional glow keyed to drag strength (same vars as the stamps) */
+  box-shadow:
+    var(--shadow-2),
+    0 0 46px calc(var(--like, 0) * 30px)
+      color-mix(in srgb, var(--band-strong) 55%, transparent),
+    0 0 46px calc(var(--pass, 0) * 30px)
+      color-mix(in srgb, var(--critical) 50%, transparent);
 }
 .swipe-card.is-top:active {
   cursor: grabbing;
@@ -231,13 +239,13 @@ body:has(.swipe-stage) .site-footer {
 .stamp-like {
   left: 20px;
   color: var(--band-strong);
-  transform: rotate(-16deg);
+  transform: rotate(-16deg) scale(calc(0.75 + var(--like, 0) * 0.35));
   opacity: var(--like, 0);
 }
 .stamp-pass {
   right: 20px;
   color: var(--critical);
-  transform: rotate(16deg);
+  transform: rotate(16deg) scale(calc(0.75 + var(--pass, 0) * 0.35));
   opacity: var(--pass, 0);
 }
 
