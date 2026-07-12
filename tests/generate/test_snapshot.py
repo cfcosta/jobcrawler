@@ -7,9 +7,9 @@ non-JSON type, so the corpus must be an addressable dict of JSON primitives
 ship plain-Python navigation helpers the prompt references.
 
 The job-board specifics are ATS detection: a host/URL pattern that names a known
-ATS (Greenhouse/Lever/Ashby/Gupy) becomes a candidate structured-API URL in the
-corpus, and when one answers during prefetch we sample real postings and the
-board's open-role count.
+ATS (Greenhouse/Lever/Ashby/Gupy/Gem/Rippling/Join) becomes a candidate
+structured-API URL in the corpus, and when one answers during prefetch we sample
+real postings and the board's open-role count.
 """
 
 from __future__ import annotations
@@ -22,8 +22,10 @@ from typing import Any, cast
 import httpx
 import pytest
 
+from jobcrawler.cli_generate import _empty_board_signal
 from jobcrawler.generate.snapshot import (
     REPL_HELPERS,
+    _ats_postings,
     ats_api_candidates,
     build_corpus,
     count_sitemap_urls,
@@ -125,12 +127,89 @@ def test_ats_api_candidates_gupy_board_url() -> None:
     ]
 
 
+def test_ats_api_candidates_gem_api_and_board_urls() -> None:
+    # Gem exposes a bare-array API; the token is the path segment after /v0/ on the
+    # API host or the first segment on the human jobs.gem.com board.
+    gem_api = "https://api.gem.com/job_board/v0/acme/job_posts/"
+    assert ats_api_candidates("https://api.gem.com/job_board/v0/acme/job_posts/") == [
+        gem_api
+    ]
+    assert ats_api_candidates("https://jobs.gem.com/acme") == [gem_api]
+
+
+def test_ats_api_candidates_rippling_board_and_api_urls() -> None:
+    # Rippling's human board is ats.rippling.com/<token>/jobs; the canonical API
+    # form carries the token after /board/. Both resolve to the same paged endpoint.
+    rippling_api = (
+        "https://ats.rippling.com/api/v2/board/acme/jobs?page=0&pageSize=1000"
+    )
+    assert ats_api_candidates("https://ats.rippling.com/acme/jobs") == [rippling_api]
+    assert (
+        ats_api_candidates(
+            "https://ats.rippling.com/api/v2/board/acme/jobs?page=0&pageSize=1000"
+        )
+        == [rippling_api]
+    )
+
+
+def test_ats_api_candidates_join_numeric_company_id_only() -> None:
+    # Join's public API keys off the numeric company id; the human
+    # join.com/companies/<slug> board hides it, so only the id form is resolvable.
+    assert ats_api_candidates(
+        "https://join.com/api/public/companies/117532/jobs?page=1&pageSize=5"
+    ) == ["https://join.com/api/public/companies/117532/jobs?page=1&pageSize=5"]
+    assert ats_api_candidates("https://join.com/companies/acme") == []
+
+
 def test_ats_api_candidates_empty_on_a_plain_careers_page() -> None:
     # A hand-rolled careers page names no ATS — the generator gets no false candidate.
     assert (
         ats_api_candidates("https://example.com/careers", "<html>Join our team</html>")
         == []
     )
+
+
+# -- ATS payload parsing (_ats_postings) -------------------------------------
+# The count returned is the board's OWN authoritative total, so a populated board
+# never reads as empty even when a broken crawler yields nothing (the §6 guard).
+
+
+def test_ats_postings_rippling_items_with_total() -> None:
+    data = {
+        "items": [{"name": "Eng"}, {"name": "PM"}],
+        "totalItems": 20,
+        "page": 0,
+        "pageSize": 1000,
+        "totalPages": 1,
+    }
+    postings, total = _ats_postings(data)
+    assert postings == data["items"]
+    assert total == 20  # totalItems wins over len(items), the enumeration target
+
+
+def test_ats_postings_rippling_empty_board_is_zero() -> None:
+    postings, total = _ats_postings({"items": [], "totalItems": 0, "totalPages": 0})
+    assert postings == []
+    assert total == 0
+
+
+def test_ats_postings_join_items_with_pagination_rowcount() -> None:
+    data = {
+        "aggregations": {},
+        "items": [{"title": "Eng"}],
+        "pagination": {"rowCount": 15, "pageCount": 3, "page": 1, "pageSize": 5},
+    }
+    postings, total = _ats_postings(data)
+    assert postings == data["items"]
+    assert total == 15  # pagination.rowCount is the board's own total
+
+
+def test_ats_postings_join_empty_board_is_zero() -> None:
+    postings, total = _ats_postings(
+        {"items": [], "pagination": {"rowCount": 0, "pageCount": 0, "pageSize": 0}}
+    )
+    assert postings == []
+    assert total == 0
 
 
 # -- sitemaps / robots -------------------------------------------------------
@@ -368,6 +447,97 @@ def test_prefetch_samples_postings_from_the_ats_api() -> None:
     assert postings[0]["url"] == "https://boards.greenhouse.io/acme/jobs/1"
     assert postings[0]["title"] == "Senior Backend Engineer"
     assert "Build the whole thing" in postings[0]["text"]  # full (escaped) body
+
+
+def test_prefetch_samples_a_gem_board_bare_array() -> None:
+    # Gem returns a bare JSON array (like Lever): detection surfaces the API, the
+    # existing array parse grounds the generator in real postings, and the array
+    # length is the enumeration target.
+    board = [
+        {
+            "absolute_url": "https://jobs.gem.com/acme/1",
+            "title": "Backend Engineer",
+            "content": "Build the platform.",
+        },
+        {
+            "absolute_url": "https://jobs.gem.com/acme/2",
+            "title": "Frontend Engineer",
+            "content": "Ship the UI.",
+        },
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api.gem.com":
+            return httpx.Response(200, json=board)
+        return httpx.Response(200, text="")
+
+    ctx = Ctx(
+        {"jobs.gem.com", "api.gem.com"},
+        client=httpx.Client(
+            transport=httpx.MockTransport(handler), follow_redirects=False
+        ),
+    )
+    corpus = prefetch_corpus("https://jobs.gem.com/acme", ctx)
+
+    assert corpus["apis"] == ["https://api.gem.com/job_board/v0/acme/job_posts/"]
+    assert corpus["expected_positions"] == 2  # the bare array's length
+    postings = cast("list[dict[str, str]]", corpus["postings"])
+    assert postings[0]["url"] == "https://jobs.gem.com/acme/1"
+    assert postings[0]["title"] == "Backend Engineer"
+    assert "Build the platform." in postings[0]["text"]
+
+
+def test_prefetch_admits_an_empty_rippling_board() -> None:
+    # A Rippling board that is validly empty right now: the candidate API answers
+    # {items:[], totalItems:0}. The corpus still surfaces the API and reports zero
+    # open roles — the (apis non-empty AND expected_positions==0) shape the §6
+    # empty-board admission keys off, so it is admitted, not failed as under-enumerated.
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v2/board/moov/jobs":
+            return httpx.Response(
+                200, json={"items": [], "totalItems": 0, "totalPages": 0}
+            )
+        return httpx.Response(200, text="")
+
+    ctx = Ctx(
+        {"ats.rippling.com"},
+        client=httpx.Client(
+            transport=httpx.MockTransport(handler), follow_redirects=False
+        ),
+    )
+    corpus = prefetch_corpus("https://ats.rippling.com/moov/jobs", ctx)
+
+    assert corpus["apis"] == [
+        "https://ats.rippling.com/api/v2/board/moov/jobs?page=0&pageSize=1000"
+    ]
+    assert corpus["expected_positions"] == 0
+    assert corpus["postings"] == []
+    assert _empty_board_signal(corpus) == 0  # §6 admits it as a clean empty board
+
+
+def test_prefetch_reads_the_rippling_total_even_when_no_samples_extract() -> None:
+    # Precision guard: a POPULATED Rippling board whose item keys we don't sample
+    # still reports its authoritative totalItems as expected_positions — so a broken
+    # 0-yield crawler is never mistaken for an empty board (mirrors Greenhouse
+    # meta.total; §6).
+    board = {"items": [{"id": "1"}, {"id": "2"}], "totalItems": 12, "totalPages": 1}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v2/board/moov/jobs":
+            return httpx.Response(200, json=board)
+        return httpx.Response(200, text="")
+
+    ctx = Ctx(
+        {"ats.rippling.com"},
+        client=httpx.Client(
+            transport=httpx.MockTransport(handler), follow_redirects=False
+        ),
+    )
+    corpus = prefetch_corpus("https://ats.rippling.com/moov/jobs", ctx)
+
+    assert corpus["expected_positions"] == 12  # totalItems, not the 0 samples
+    assert corpus["postings"] == []  # id-only items yield no url/text samples...
+    assert _empty_board_signal(corpus) is None  # ...but it is NOT admitted as empty
 
 
 def test_prefetch_scrape_samples_exclude_nav_pages() -> None:

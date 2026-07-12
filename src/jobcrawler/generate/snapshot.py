@@ -48,6 +48,11 @@ _LOC_RE = re.compile(r"<loc\b", re.IGNORECASE)
 #   Ashby:      api.ashbyhq.com/posting-api/job-board/<token>?includeCompensation=true
 #   Gupy (BR):  employability-portal.gupy.io/api/v1/jobs?companyId=..&limit=100
 #               (companyId lives in the board's __NEXT_DATA__, not the URL)
+# Empirical endpoints (live probes 2026-07-12):
+#   Gem:      api.gem.com/job_board/v0/<token>/job_posts/ (bare array, like Lever)
+#   Rippling: ats.rippling.com/api/v2/board/<token>/jobs  ({items, totalItems})
+#   Join:     join.com/api/public/companies/<id>/jobs     ({items, pagination.
+#             rowCount}; <id> is the numeric company id, not a slug)
 _ATS_TOKEN = r"([A-Za-z0-9][A-Za-z0-9._-]*)"
 _GH_FOR = re.compile(
     r"greenhouse\.io/embed/job_board\?(?:[^\"'>\s]*&)?for=" + _ATS_TOKEN, re.IGNORECASE
@@ -66,6 +71,23 @@ _ASHBY_REF = re.compile(
     re.IGNORECASE,
 )
 _GUPY_REF = re.compile(r"\bgupy\.io\b", re.IGNORECASE)
+# Gem — bare JSON array (parsed like Lever); the board token is the path segment
+# after ``/v0/`` on the API host or the first segment on the human board hosts.
+_GEM_API_REF = re.compile(
+    r"api\.gem\.com/job_board/v0/" + _ATS_TOKEN + r"/job_posts", re.IGNORECASE
+)
+_GEM_BOARD = re.compile(r"(?:jobs|job-boards)\.gem\.com/" + _ATS_TOKEN, re.IGNORECASE)
+# Rippling — ``{items, totalItems}``; token after ``/board/`` on the API ref, else
+# the first path segment before ``/jobs`` on the human/embed board.
+_RIPPLING_API_REF = re.compile(
+    r"ats\.rippling\.com/api/v2/board/" + _ATS_TOKEN + r"/jobs", re.IGNORECASE
+)
+_RIPPLING_BOARD = re.compile(
+    r"ats\.rippling\.com/(?:embed/)?" + _ATS_TOKEN + r"/jobs", re.IGNORECASE
+)
+# Join — ``{items, pagination.rowCount}``; only the numeric-company-id API form is
+# resolvable (the human ``join.com/companies/<slug>`` board hides the id).
+_JOIN_API_REF = re.compile(r"join\.com/api/public/companies/(\d+)/jobs", re.IGNORECASE)
 
 _GH_API = "https://boards-api.greenhouse.io/v1/boards/{token}/jobs?content=true"
 _LEVER_API = "https://api.lever.co/v0/postings/{token}?mode=json"
@@ -73,6 +95,11 @@ _ASHBY_API = (
     "https://api.ashbyhq.com/posting-api/job-board/{token}?includeCompensation=true"
 )
 _GUPY_API = "https://employability-portal.gupy.io/api/v1/jobs?limit=100"
+_GEM_API = "https://api.gem.com/job_board/v0/{token}/job_posts/"
+_RIPPLING_API = (
+    "https://ats.rippling.com/api/v2/board/{token}/jobs?page=0&pageSize=1000"
+)
+_JOIN_API = "https://join.com/api/public/companies/{token}/jobs?page=1&pageSize=5"
 
 # Posting-shape keys probed tolerantly across the ATS JSON dialects for samples.
 _ATS_URL_KEYS = (
@@ -83,7 +110,7 @@ _ATS_URL_KEYS = (
     "applicationUrl",
     "url",
 )
-_ATS_TITLE_KEYS = ("title", "text")
+_ATS_TITLE_KEYS = ("title", "name", "text")
 _ATS_TEXT_KEYS = ("content", "descriptionPlain", "descriptionHtml", "description")
 
 # Path segments on a plain careers page that are never a posting (nav, marketing,
@@ -115,8 +142,8 @@ def build_corpus(
     ``feeds`` carries the discovered RSS/Atom/JSON feed URLs — the feed-first
     signal the strategy reasons over — so the model needn't rediscover them.
     ``apis`` carries the candidate structured ATS API URLs (Greenhouse/Lever/
-    Ashby/Gupy) that enumerate the *whole* board as JSON — the best source when
-    present. ``sitemaps`` are the sitemap URLs advertised in robots and
+    Ashby/Gupy/Gem/Rippling/Join) that enumerate the *whole* board as JSON — the
+    best source when present. ``sitemaps`` are the sitemap URLs advertised in robots and
     ``expected_positions`` is the host's estimate of how many open roles the board
     has (the ATS total when an API answered, else the jobs-sitemap count) — the
     enumeration target the generator reasons toward so it doesn't settle for a
@@ -164,6 +191,15 @@ def ats_api_candidates(site_url: str, homepage: str = "") -> list[str]:
         add(_ASHBY_API.format(token=match.group(1)))
     if _GUPY_REF.search(haystack):
         add(_GUPY_API)
+    match = _GEM_API_REF.search(haystack) or _GEM_BOARD.search(haystack)
+    if match:
+        add(_GEM_API.format(token=match.group(1)))
+    match = _RIPPLING_API_REF.search(haystack) or _RIPPLING_BOARD.search(haystack)
+    if match:
+        add(_RIPPLING_API.format(token=match.group(1)))
+    match = _JOIN_API_REF.search(haystack)
+    if match:
+        add(_JOIN_API.format(token=match.group(1)))
     return out
 
 
@@ -215,8 +251,13 @@ def _ats_posting_samples(
 
 
 def _ats_postings(data: object) -> tuple[list, int]:
-    """The postings list + total from a parsed ATS payload (Lever is a bare array;
-    Greenhouse/Ashby wrap them under ``jobs`` with a ``meta.total`` for Greenhouse)."""
+    """The postings list + total from a parsed ATS payload.
+
+    Lever/Gem are bare arrays; Greenhouse/Ashby wrap them under ``jobs`` (with a
+    ``meta.total`` for Greenhouse); Rippling/Join wrap them under ``items`` with an
+    authoritative count in ``totalItems`` (Rippling) / ``pagination.rowCount``
+    (Join). The count is the board's OWN total, so a populated board never reads as
+    empty even when a broken crawler yields nothing (the §6 precision guard)."""
     if isinstance(data, list):
         return data, len(data)
     if isinstance(data, Mapping):
@@ -225,6 +266,17 @@ def _ats_postings(data: object) -> tuple[list, int]:
             meta = data.get("meta")
             total = meta.get("total") if isinstance(meta, Mapping) else None
             return jobs, total if isinstance(total, int) and total > 0 else len(jobs)
+        items = data.get("items")
+        if isinstance(items, list):
+            total = data.get("totalItems")
+            if not isinstance(total, int):
+                pagination = data.get("pagination")
+                total = (
+                    pagination.get("rowCount")
+                    if isinstance(pagination, Mapping)
+                    else None
+                )
+            return items, total if isinstance(total, int) and total > 0 else len(items)
     return [], 0
 
 
