@@ -429,31 +429,40 @@
     // wait for the decision's own write to settle, then only revert what we
     // actually changed (changed:false = the server never wrote anything)
     Promise.resolve(entry.commit).then(() => {
-      if (entry.changed) {
-        const revert =
-          entry.decision === "dismiss"
-            ? {
-                url: "/api/positions/dismiss",
-                body: { site: entry.card.site, url: entry.card.url, dismissed: false },
-              }
-            : {
-                url: "/api/positions/track",
-                body: { site: entry.card.site, url: entry.card.url, track_status: "new" },
-              };
-        fetch(revert.url, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          credentials: "same-origin",
-          body: JSON.stringify(revert.body),
-        }).catch(() => toast("Couldn't undo on the server — check " + entry.card.title));
-      }
+      if (!entry.changed) return;
+      const revert =
+        entry.decision === "dismiss"
+          ? {
+              url: "/api/positions/dismiss",
+              body: { site: entry.card.site, url: entry.card.url, dismissed: false },
+            }
+          : {
+              // interested rolls back to new; applied rolls back to whatever
+              // stage the card held before A stamped it
+              url: "/api/positions/track",
+              body: {
+                site: entry.card.site,
+                url: entry.card.url,
+                track_status: entry.decision === "applied" ? entry.prevTrack : "new",
+              },
+            };
+      fetch(revert.url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify(revert.body),
+      }).catch(() => toast("Couldn't undo on the server — check " + entry.card.title));
     });
+
+    // A stamped track_status on the card object in place — restore it so the
+    // rebuilt card doesn't come back wearing the applied badge
+    if (entry.decision === "applied") entry.card.track_status = entry.prevTrack;
 
     const at = Math.min(entry.index, state.cards.length);
     state.cards.splice(at, 0, entry.card);
     state.cursor = at;
     if (entry.decision === "interested") state.liked = Math.max(0, state.liked - 1);
-    else state.passed = Math.max(0, state.passed - 1);
+    else if (entry.decision === "dismiss") state.passed = Math.max(0, state.passed - 1);
     state.streak = 0;
     state.streakDir = null;
     render();
@@ -536,10 +545,11 @@
     node.appendChild(el("div", "card-applied-badge", "✓ Applied"));
   }
 
-  // §16 tracking: stamp the top card's pipeline stage as "applied" (capital A).
-  // Orthogonal to the swipe verbs — like `a` auto-fill it never advances the deck;
-  // the row simply drops out on the next deal (it is no longer stage `new`).
-  // Optimistic: decorate now, roll the stamp back if the write fails.
+  // §16 tracking: capital A stamps the top card's pipeline stage as "applied" and
+  // clears it from the deck — you're done with this one. It advances like a swipe
+  // (green fly-off to the "yes" side) and joins the undo stack, but touches neither
+  // the like/pass tally nor the guarded promotion the `l` verb writes. Optimistic:
+  // the stamp + removal happen now and roll back into place if the write fails.
   function markApplied() {
     const card = topCard();
     if (!card) return;
@@ -548,30 +558,49 @@
       return;
     }
     const node = topEl();
-    const prev = card.track_status;
+    const prev = card.track_status || "new";
     card.track_status = "applied";
-    markAppliedDecor(node);
-    toast("✓ Marked as applied — it leaves the deck on the next deal");
-    fetch("/api/positions/track", {
+    markAppliedDecor(node); // the ✓ badge rides along as the card flies off
+
+    if (node) {
+      const zone = node.getBoundingClientRect();
+      bg.burst(1, zone.left + zone.width / 2, zone.top + zone.height * 0.45);
+    }
+    bg.lean(0);
+    flyOff(node, "interested");
+
+    const index = state.cursor;
+    state.cards.splice(index, 1);
+    state.cursor = Math.min(state.cursor, Math.max(0, state.cards.length - 1));
+    state.streak = 0;
+    state.streakDir = null;
+    toast("✓ Marked as applied");
+
+    const entry = { card, index, decision: "applied", prevTrack: prev, changed: true, commit: null };
+    entry.commit = fetch("/api/positions/track", {
       method: "POST",
       headers: { "content-type": "application/json" },
       credentials: "same-origin",
-      body: JSON.stringify({
-        site: card.site,
-        url: card.url,
-        track_status: "applied",
-      }),
+      body: JSON.stringify({ site: card.site, url: card.url, track_status: "applied" }),
     })
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("http " + r.status))))
+      .then((r) => {
+        if (!r.ok) throw new Error("http " + r.status);
+        return r.json();
+      })
       .catch(() => {
-        card.track_status = prev; // roll back the optimistic stamp
-        if (node) {
-          node.classList.remove("applied");
-          const badge = node.querySelector(".card-applied-badge");
-          if (badge) badge.remove();
-        }
-        toast("Couldn't mark applied — try again");
+        // roll the optimistic move back and put the card where it was
+        card.track_status = prev;
+        const at = Math.min(index, state.cards.length);
+        state.cards.splice(at, 0, card);
+        const i = state.history.indexOf(entry);
+        if (i >= 0) state.history.splice(i, 1);
+        render();
+        toast("Couldn't mark applied — the card is back in the deck");
       });
+    state.history.push(entry);
+
+    render();
+    maybeRefill();
   }
 
   // ---- keyboard ----------------------------------------------------------------
@@ -589,6 +618,7 @@
       }
       const actions = {
         j: next,
+        n: next, // advance without deciding (leaves the card in the deck to revisit)
         k: prev,
         h: () => decide("dismiss"),
         l: () => decide("interested"),
