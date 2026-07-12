@@ -53,6 +53,10 @@ _LOC_RE = re.compile(r"<loc\b", re.IGNORECASE)
 #   Rippling: ats.rippling.com/api/v2/board/<token>/jobs  ({items, totalItems})
 #   Join:     join.com/api/public/companies/<id>/jobs     ({items, pagination.
 #             rowCount}; <id> is the numeric company id, not a slug)
+#   Workable: apply.workable.com/api/v1/widget/accounts/<token>?details=true
+#             ({name, description, jobs:[...]}; ?details=true is REQUIRED for the
+#             job objects to carry descriptions + apply URLs; no count field, so
+#             the §6 total is len(jobs))
 _ATS_TOKEN = r"([A-Za-z0-9][A-Za-z0-9._-]*)"
 _GH_FOR = re.compile(
     r"greenhouse\.io/embed/job_board\?(?:[^\"'>\s]*&)?for=" + _ATS_TOKEN, re.IGNORECASE
@@ -88,6 +92,21 @@ _RIPPLING_BOARD = re.compile(
 # Join — ``{items, pagination.rowCount}``; only the numeric-company-id API form is
 # resolvable (the human ``join.com/companies/<slug>`` board hides the id).
 _JOIN_API_REF = re.compile(r"join\.com/api/public/companies/(\d+)/jobs", re.IGNORECASE)
+# Workable — GET widget ``{name, description, jobs:[...]}``. The account slug comes
+# from the widget API ref (unambiguous), a ``<slug>.workable.com`` subdomain board,
+# or a hosted ``apply.workable.com/<slug>`` board; Workable's own reserved
+# subdomains/paths (``apply``/``api``/``j`` …) are skipped so they're never the slug.
+_WORKABLE_API_REF = re.compile(
+    r"apply\.workable\.com/api/v\d+/(?:widget/)?accounts/" + _ATS_TOKEN, re.IGNORECASE
+)
+_WORKABLE_SUBDOMAIN = re.compile(
+    r"\b([A-Za-z0-9][A-Za-z0-9_-]*)\.workable\.com", re.IGNORECASE
+)
+_WORKABLE_BOARD = re.compile(r"apply\.workable\.com/" + _ATS_TOKEN, re.IGNORECASE)
+_WORKABLE_RESERVED = frozenset(
+    {"www", "apply", "api", "help", "assets", "cdn", "static", "j", "widget",
+     "accounts", "jobs"}
+)
 
 _GH_API = "https://boards-api.greenhouse.io/v1/boards/{token}/jobs?content=true"
 _LEVER_API = "https://api.lever.co/v0/postings/{token}?mode=json"
@@ -100,6 +119,7 @@ _RIPPLING_API = (
     "https://ats.rippling.com/api/v2/board/{token}/jobs?page=0&pageSize=1000"
 )
 _JOIN_API = "https://join.com/api/public/companies/{token}/jobs?page=1&pageSize=5"
+_WORKABLE_API = "https://apply.workable.com/api/v1/widget/accounts/{token}?details=true"
 
 # Posting-shape keys probed tolerantly across the ATS JSON dialects for samples.
 _ATS_URL_KEYS = (
@@ -200,6 +220,9 @@ def ats_api_candidates(site_url: str, homepage: str = "") -> list[str]:
     match = _JOIN_API_REF.search(haystack)
     if match:
         add(_JOIN_API.format(token=match.group(1)))
+    token = _workable_token(haystack)
+    if token:
+        add(_WORKABLE_API.format(token=token))
     return out
 
 
@@ -214,6 +237,22 @@ def _greenhouse_token(haystack: str) -> str | None:
     for match in _GH_BOARD.finditer(haystack):
         if match.group(1).lower() not in ("embed", "job_board"):
             return match.group(1)
+    return None
+
+
+def _workable_token(haystack: str) -> str | None:
+    """The Workable account slug — from the widget API ref (unambiguous), a
+    ``<slug>.workable.com`` subdomain board, or a hosted ``apply.workable.com/<slug>``
+    board — skipping Workable's own reserved subdomains/paths so ``apply``/``api``/
+    ``j`` are never mistaken for the slug."""
+    match = _WORKABLE_API_REF.search(haystack)
+    if match:
+        return match.group(1)
+    for rx in (_WORKABLE_SUBDOMAIN, _WORKABLE_BOARD):
+        for match in rx.finditer(haystack):
+            token = match.group(1)
+            if token.lower() not in _WORKABLE_RESERVED:
+                return token
     return None
 
 

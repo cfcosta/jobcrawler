@@ -7,7 +7,7 @@ non-JSON type, so the corpus must be an addressable dict of JSON primitives
 ship plain-Python navigation helpers the prompt references.
 
 The job-board specifics are ATS detection: a host/URL pattern that names a known
-ATS (Greenhouse/Lever/Ashby/Gupy/Gem/Rippling/Join) becomes a candidate
+ATS (Greenhouse/Lever/Ashby/Gupy/Gem/Rippling/Join/Workable) becomes a candidate
 structured-API URL in the corpus, and when one answers during prefetch we sample
 real postings and the board's open-role count.
 """
@@ -161,6 +161,37 @@ def test_ats_api_candidates_join_numeric_company_id_only() -> None:
     assert ats_api_candidates("https://join.com/companies/acme") == []
 
 
+def test_ats_api_candidates_workable_widget_api_ref_and_board() -> None:
+    # The registry stores Workable sites as the widget API ref itself
+    # (apply.workable.com/api/v1/widget/accounts/<token>), a hosted
+    # apply.workable.com/<token> board, or a <token>.workable.com subdomain — all
+    # resolve to the ?details=true widget endpoint (details carry the job bodies).
+    workable_api = "https://apply.workable.com/api/v1/widget/accounts/acme?details=true"
+    assert ats_api_candidates(
+        "https://apply.workable.com/api/v1/widget/accounts/acme"
+    ) == [workable_api]
+    assert ats_api_candidates("https://apply.workable.com/acme/?lng=en") == [
+        workable_api
+    ]
+    assert ats_api_candidates("https://acme.workable.com/") == [workable_api]
+    # The v3 accounts form and hyphenated real tokens (d-id, risingwave-labs) resolve.
+    assert ats_api_candidates(
+        "https://apply.workable.com/api/v3/accounts/risingwave-labs/jobs"
+    ) == [
+        "https://apply.workable.com/api/v1/widget/accounts/risingwave-labs?details=true"
+    ]
+
+
+def test_ats_api_candidates_workable_skips_reserved_j_path() -> None:
+    # A per-job link apply.workable.com/j/<shortcode> carries no account slug — the
+    # /j/ path must not be taken as one; a hosted-board job link still resolves to
+    # the account slug that precedes /j/.
+    assert ats_api_candidates("https://apply.workable.com/j/97904BAC90") == []
+    assert ats_api_candidates("https://apply.workable.com/acme/j/97904BAC90") == [
+        "https://apply.workable.com/api/v1/widget/accounts/acme?details=true"
+    ]
+
+
 def test_ats_api_candidates_empty_on_a_plain_careers_page() -> None:
     # A hand-rolled careers page names no ATS — the generator gets no false candidate.
     assert (
@@ -208,6 +239,26 @@ def test_ats_postings_join_empty_board_is_zero() -> None:
     postings, total = _ats_postings(
         {"items": [], "pagination": {"rowCount": 0, "pageCount": 0, "pageSize": 0}}
     )
+    assert postings == []
+    assert total == 0
+
+
+def test_ats_postings_workable_jobs_without_meta_uses_len() -> None:
+    # Workable's widget payload is {name, description, jobs:[...]} with no count
+    # field — the existing jobs-branch parse returns the jobs and total falls back to
+    # len(jobs), the enumeration target.
+    data = {
+        "name": "Acme",
+        "description": "We build things.",
+        "jobs": [{"title": "Eng", "url": "u1"}, {"title": "PM", "url": "u2"}],
+    }
+    postings, total = _ats_postings(data)
+    assert postings == data["jobs"]
+    assert total == 2
+
+
+def test_ats_postings_workable_empty_board_is_zero() -> None:
+    postings, total = _ats_postings({"name": "Acme", "description": "", "jobs": []})
     assert postings == []
     assert total == 0
 
@@ -538,6 +589,80 @@ def test_prefetch_reads_the_rippling_total_even_when_no_samples_extract() -> Non
     assert corpus["expected_positions"] == 12  # totalItems, not the 0 samples
     assert corpus["postings"] == []  # id-only items yield no url/text samples...
     assert _empty_board_signal(corpus) is None  # ...but it is NOT admitted as empty
+
+
+def test_prefetch_samples_a_workable_widget_board() -> None:
+    # Workable's widget returns {name, description, jobs:[...]}; detection surfaces the
+    # ?details=true endpoint, the existing jobs-branch parse grounds the generator in
+    # real postings, and len(jobs) is the enumeration target (no count field).
+    board = {
+        "name": "Acme",
+        "description": "We build things.",
+        "jobs": [
+            {
+                "url": "https://apply.workable.com/j/AAA",
+                "title": "Backend Engineer",
+                "description": "Build the platform.",
+            },
+            {
+                "url": "https://apply.workable.com/j/BBB",
+                "title": "Frontend Engineer",
+                "description": "Ship the UI.",
+            },
+        ],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/api/v1/widget/accounts/"):
+            return httpx.Response(200, json=board)
+        return httpx.Response(200, text="")
+
+    ctx = Ctx(
+        {"apply.workable.com"},
+        client=httpx.Client(
+            transport=httpx.MockTransport(handler), follow_redirects=False
+        ),
+    )
+    corpus = prefetch_corpus("https://apply.workable.com/acme", ctx)
+
+    assert corpus["apis"] == [
+        "https://apply.workable.com/api/v1/widget/accounts/acme?details=true"
+    ]
+    assert corpus["expected_positions"] == 2  # len(jobs), no count field
+    postings = cast("list[dict[str, str]]", corpus["postings"])
+    assert postings[0]["url"] == "https://apply.workable.com/j/AAA"
+    assert postings[0]["title"] == "Backend Engineer"
+    assert "Build the platform." in postings[0]["text"]
+
+
+def test_prefetch_admits_an_empty_workable_board() -> None:
+    # d_id/risingwave are validly-empty Workable boards right now: the widget answers
+    # {jobs:[]}. The corpus still surfaces the API and reports zero open roles — the
+    # (apis non-empty AND expected_positions==0) shape §6 empty-board admission keys
+    # off, so it is admitted, not failed as under-enumerated.
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/api/v1/widget/accounts/"):
+            return httpx.Response(
+                200, json={"name": "D-ID", "description": "", "jobs": []}
+            )
+        return httpx.Response(200, text="")
+
+    ctx = Ctx(
+        {"apply.workable.com"},
+        client=httpx.Client(
+            transport=httpx.MockTransport(handler), follow_redirects=False
+        ),
+    )
+    corpus = prefetch_corpus(
+        "https://apply.workable.com/api/v1/widget/accounts/d-id", ctx
+    )
+
+    assert corpus["apis"] == [
+        "https://apply.workable.com/api/v1/widget/accounts/d-id?details=true"
+    ]
+    assert corpus["expected_positions"] == 0
+    assert corpus["postings"] == []
+    assert _empty_board_signal(corpus) == 0  # §6 admits it as a clean empty board
 
 
 def test_prefetch_scrape_samples_exclude_nav_pages() -> None:
