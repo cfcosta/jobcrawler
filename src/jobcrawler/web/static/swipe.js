@@ -147,6 +147,10 @@
     root.appendChild(el("div", "stamp stamp-like", "INTERESTED"));
     root.appendChild(el("div", "stamp stamp-pass", "PASS"));
 
+    // §16: a persistent badge when the row is already in the applied stage — the
+    // `A` key stamps it live, and a re-render or an applied-filter view shows it too
+    if (card.track_status === "applied") markAppliedDecor(root);
+
     const inner = el("div", "card-inner");
     root.appendChild(inner);
 
@@ -523,6 +527,53 @@
       .catch(() => toast("Couldn't reach the server to queue auto-fill"));
   }
 
+  // Add the persistent "applied" decoration to a card node (idempotent). Shared by
+  // buildCard (cards dealt already-applied) and markApplied (the live top card, which
+  // render() won't rebuild since its element is cached).
+  function markAppliedDecor(node) {
+    if (!node || node.classList.contains("applied")) return;
+    node.classList.add("applied");
+    node.appendChild(el("div", "card-applied-badge", "✓ Applied"));
+  }
+
+  // §16 tracking: stamp the top card's pipeline stage as "applied" (capital A).
+  // Orthogonal to the swipe verbs — like `a` auto-fill it never advances the deck;
+  // the row simply drops out on the next deal (it is no longer stage `new`).
+  // Optimistic: decorate now, roll the stamp back if the write fails.
+  function markApplied() {
+    const card = topCard();
+    if (!card) return;
+    if (card.track_status === "applied") {
+      toast("Already marked as applied");
+      return;
+    }
+    const node = topEl();
+    const prev = card.track_status;
+    card.track_status = "applied";
+    markAppliedDecor(node);
+    toast("✓ Marked as applied — it leaves the deck on the next deal");
+    fetch("/api/positions/track", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({
+        site: card.site,
+        url: card.url,
+        track_status: "applied",
+      }),
+    })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("http " + r.status))))
+      .catch(() => {
+        card.track_status = prev; // roll back the optimistic stamp
+        if (node) {
+          node.classList.remove("applied");
+          const badge = node.querySelector(".card-applied-badge");
+          if (badge) badge.remove();
+        }
+        toast("Couldn't mark applied — try again");
+      });
+  }
+
   // ---- keyboard ----------------------------------------------------------------
 
   // Capture phase on window so the list-page bindings in app.js (same document)
@@ -545,6 +596,7 @@
         z: undo,
         o: openExt,
         a: autofill,
+        A: markApplied,
         Enter: openDetail,
         f: () => setDrawer(drawer.hidden),
         "?": () => toggleHelp(),

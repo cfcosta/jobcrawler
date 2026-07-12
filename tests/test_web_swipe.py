@@ -252,6 +252,8 @@ async def test_swipe_queue_card_payload() -> None:
             assert card["discipline_label"] == "Backend"
             assert card["workplace_label"] == "Remote"
             assert card["description"] == "Build distributed systems in Rust."
+            # the deck's `A` key gates its badge + "already applied" guard on this
+            assert card["track_status"] == "new"
     finally:
         store.close()
 
@@ -349,6 +351,29 @@ async def test_swipe_dismiss() -> None:
             # idempotent re-fire
             r = await c.post(f"/api/swipe/{_BETA_PID}", json={"decision": "dismiss"})
             assert r.json()["changed"] is False
+    finally:
+        store.close()
+
+
+async def test_swipe_mark_applied_stamps_and_leaves_the_deck() -> None:
+    """The deck's capital-``A`` key posts the applied stage to the shared track API:
+    it stamps ``applied_at`` and the row drops out of the default ``new`` queue."""
+    store = _seeded_store()
+    try:
+        async with _client(create_app(store)) as c:
+            assert _ACME_PID in _pids((await _queue(c))[0])  # in the deck to start
+            r = await c.post(
+                "/api/positions/track",
+                json={"site": "acme", "url": _ACME_URL, "track_status": "applied"},
+            )
+            assert r.status_code == 200
+            assert r.json()["track_status"] == "applied"
+            rec = store.get_position("acme", _ACME_URL)
+            assert rec is not None and rec.track_status == "applied"
+            # applied is an application-implying stage, so applied_at is stamped
+            assert rec.applied_at is not None
+            # and the applied row is no longer stage `new` — it leaves the deck
+            assert _ACME_PID not in _pids((await _queue(c))[0])
     finally:
         store.close()
 

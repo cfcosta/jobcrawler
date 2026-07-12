@@ -555,6 +555,48 @@ body:has(.swipe-stage) .site-footer {
   }
 }
 
+/* §16: a persistent pill once `A` marks the card applied — top-center so it clears
+   the avatar/score and both drag stamps. Distinct from the transient stamps; the row
+   also leaves the deck on the next deal. */
+.card-applied-badge {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  padding: 4px 11px;
+  border-radius: 999px;
+  color: var(--good-text);
+  background: color-mix(in srgb, var(--band-strong) 20%, var(--surface));
+  box-shadow: 0 1px 8px color-mix(in srgb, var(--band-strong) 28%, transparent);
+  pointer-events: none;
+  animation: applied-pop 0.3s ease;
+}
+@keyframes applied-pop {
+  from {
+    transform: translateX(-50%) scale(0.6);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(-50%) scale(1);
+    opacity: 1;
+  }
+}
+/* recolor the hue accent strip green so an applied card reads as handled at a glance */
+.swipe-card.applied::before {
+  background: linear-gradient(
+    90deg,
+    var(--band-strong),
+    color-mix(in srgb, var(--band-strong) 22%, transparent)
+  );
+}
+
 /* ---- loading / empty ----------------------------------------------------------- */
 
 .swipe-loading {
@@ -742,6 +784,9 @@ body:has(.swipe-stage) .site-footer {
 }
 .key-item.key-fill kbd {
   color: var(--accent);
+}
+.key-item.key-applied kbd {
+  color: var(--good-text);
 }
 
 .swipe-noscript {
