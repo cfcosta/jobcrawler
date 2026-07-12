@@ -807,7 +807,10 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
         open_kpi: dict[str, Any] = {
             "label": "Open roles",
             "value": lifecycle["open"],
-            "href": "/positions?status=open",
+            # Land on the default triage view (new + hidden applied-companies) newest
+            # first — the pile you actually work, freshest at the top. The filters are
+            # spelled out because a non-empty query bypasses the bare-URL new-view default.
+            "href": "/positions?track_status=new&hide_applied_companies=1&sort=recent",
             "delta": new_today,
         }
         if show_distinct:
@@ -826,7 +829,9 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
             {
                 "label": "Scored",
                 "value": lifecycle["matched"],
-                "href": "/positions?sort=score",
+                # Newest scores first — this tile is "what did the matcher just do",
+                # not "what's the best match" (that's the Match ≥60 tile above).
+                "href": "/positions?sort=matched",
             },
             {"label": "Awaiting score", "value": lifecycle["pending"]},
             {
@@ -1140,6 +1145,24 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
         return _back(
             request, f"/positions/{pid}", f"Status → {tracking.label(track_status)}"
         )
+
+    @app.post("/positions/{pid}/interested")
+    def post_interested(pid: str) -> JSONResponse:
+        """Guarded one-way ``new -> interested`` promotion for the ``i`` keybinding (§16).
+
+        JSON-only (the keyboard shortcut is a JS affordance; no-JS clients use the full
+        status dropdown, which is unconstrained). Only a ``new`` row moves — a rejected or
+        withdrawn posting is deliberately *not* resurrected into the funnel this way, so the
+        endpoint reports ``changed:false`` rather than writing. Idempotent: re-firing ``i``
+        on an already-``interested`` row is a no-op. Returns the current stage either way so
+        the client can reconcile its optimistic update.
+        """
+        site, url = decode_pid(pid)
+        rec = _require(site, url)
+        if not tracking.promotable_to_interested(rec.track_status):
+            return JSONResponse({"changed": False, "track_status": rec.track_status})
+        updated = _apply_track(site, url, tracking.TrackStatus.INTERESTED.value)
+        return JSONResponse({"changed": True, "track_status": updated.track_status})
 
     @app.post("/positions/{pid}/notes")
     def post_notes(request: Request, pid: str, notes: str = Form("")) -> Response:

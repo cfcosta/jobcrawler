@@ -3114,8 +3114,9 @@ class StateStore:
         - ``exclude_company_applied``  drop rows whose hiring company already has an applied-to
           posting (grouped on ``company_canonical``, §16) — the browse twin of :meth:`matches`.
 
-        ``sort`` ∈ {recent, score, updated, salary, title, applied}; NULL scores/salaries/dates
-        sink last under a DESC sort. ``limit``/``offset`` paginate. Returns ``list[PositionRecord]``.
+        ``sort`` ∈ {recent, score, matched, updated, salary, title, applied}; NULL
+        scores/salaries/dates (incl. never-scored ``matched_at``) sink last under a DESC
+        sort. ``limit``/``offset`` paginate. Returns ``list[PositionRecord]``.
 
         §17 cluster flags (all default off ⇒ byte-identical queries):
         ``collapse_duplicates`` hides non-canonical cluster members (each real-world job
@@ -3309,6 +3310,7 @@ class StateStore:
         order = {
             "recent": "first_seen DESC, site, url",
             "score": "effective_score DESC, matched_at DESC, url",
+            "matched": "matched_at DESC, first_seen DESC, url",
             "updated": "track_updated_at DESC, first_seen DESC, url",
             "salary": "COALESCE(salary_usd_max, salary_usd_min) DESC, url",
             "title": "lower(title) ASC, url",

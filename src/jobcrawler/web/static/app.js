@@ -86,6 +86,13 @@ function postForm(path, data) {
   });
 }
 
+// Guarded one-way new->interested promotion (the `i` key). The server enforces the
+// new-only rule and answers JSON {changed, track_status}; callers reconcile their
+// optimistic UI off `changed` (false = the row wasn't `new`, so nothing was written).
+function postInterested(pid) {
+  return postForm(`/positions/${pid}/interested`).then((r) => r.json());
+}
+
 // ---------------------------------------------------------------------------
 // Keyboard-first triage on the positions list. Inbox-zero for jobs: j/k to move,
 // enter to open, o external, a/i to stage, d to dismiss (with undo), x to select.
@@ -166,6 +173,25 @@ function postForm(path, data) {
       Toast.show(`Marked ${label}`);
     });
   }
+  // The `i` key is a one-way new->interested promotion, not a free stage set — so it
+  // routes through the guarded endpoint (not `stage`) and only reflects the change if
+  // the server actually made it. Pressing `i` on a rejected/withdrawn/applied row is a
+  // no-op that says so, instead of silently reviving it into the funnel.
+  function promoteInterested(row) {
+    postInterested(row.dataset.pid).then((res) => {
+      if (!res.changed) {
+        Toast.show("Only new positions can move to interested");
+        return;
+      }
+      const sel = row.querySelector('select[name="track_status"]');
+      if (sel) sel.value = res.track_status;
+      if (slideOpen()) {
+        const panelSel = overBody.querySelector('select[name="track_status"]');
+        if (panelSel) panelSel.value = res.track_status;
+      }
+      Toast.show("Marked interested");
+    });
+  }
   function dismissRow(row) {
     const pid = row.dataset.pid;
     postForm(`/positions/${pid}/dismiss`, { dismissed: "1" }).then(() => {
@@ -238,7 +264,7 @@ function postForm(path, data) {
         }
         case "i": {
           const row = current();
-          if (row) stage(row, "interested", "interested");
+          if (row) promoteInterested(row);
           break;
         }
         case "d": {
@@ -290,7 +316,7 @@ function postForm(path, data) {
       }
       case "i": {
         const row = current();
-        if (row) stage(row, "interested", "interested");
+        if (row) promoteInterested(row);
         break;
       }
       case "d": {
@@ -459,4 +485,36 @@ function postForm(path, data) {
   }
 
   sync();
+})();
+
+// ---------------------------------------------------------------------------
+// Standalone detail page (/positions/{pid}): the list IIFE bails when there are no
+// rows, so the full page would otherwise have no keys. Bind just the one-way `i`
+// promotion here, against the single `.detail[data-pid]`. Guard: if a list is present
+// (tr.js-row exists) it owns the keyboard and this stays inert — so on the list page,
+// where the slide-over also injects a `.detail[data-pid]`, the two never both fire.
+// ---------------------------------------------------------------------------
+(function () {
+  if (document.querySelector("tr.js-row")) return; // list mode owns the keys
+  const detail = document.querySelector(".detail[data-pid]");
+  if (!detail) return;
+  document.addEventListener("keydown", function (event) {
+    if (event.metaKey || event.ctrlKey || event.altKey) return;
+    if (event.key !== "i") return;
+    const t = event.target;
+    if (
+      t &&
+      (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")
+    )
+      return; // don't hijack `i` while typing in the notes/stage fields
+    postInterested(detail.dataset.pid).then((res) => {
+      if (!res.changed) {
+        Toast.show("Only new positions can move to interested");
+        return;
+      }
+      const sel = detail.querySelector('select[name="track_status"]');
+      if (sel) sel.value = res.track_status;
+      Toast.show("Marked interested");
+    });
+  });
 })();

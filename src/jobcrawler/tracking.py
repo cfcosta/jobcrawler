@@ -141,6 +141,21 @@ def is_terminal(status: TrackStatus | str) -> bool:
     return (TrackStatus(status) if isinstance(status, str) else status) in TERMINAL
 
 
+def promotable_to_interested(current: TrackStatus | str) -> bool:
+    """True only when ``current`` is ``new`` — the one transition the quick-triage
+    ``i`` keybinding is allowed to make.
+
+    This is a deliberately narrow, one-way guard (§16): the keyboard shortcut exists
+    to flag a *fresh* posting as worth a look, not to resurrect a ``rejected`` or
+    ``withdrawn`` row back into the active funnel. Every other transition still goes
+    through the full status dropdown, which stays unconstrained. Note this is host-side
+    *keybinding* policy, not a store invariant — `parse` still accepts any value.
+    """
+    return (
+        TrackStatus(current) if isinstance(current, str) else current
+    ) == TrackStatus.NEW
+
+
 def label(value: str) -> str:
     """Human label for a stored status string; falls back to Title Case for legacy values."""
     try:

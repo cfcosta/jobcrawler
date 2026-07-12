@@ -100,6 +100,27 @@ def test_is_terminal() -> None:
     assert not tracking.is_terminal(TrackStatus.APPLIED)
 
 
+@pytest.mark.parametrize(
+    "current,expected",
+    [
+        (TrackStatus.NEW, True),
+        # every non-new stage is unreachable via the `i` keybinding — including the
+        # terminal ones, which is the whole point (no reviving rejected/withdrawn rows).
+        (TrackStatus.INTERESTED, False),
+        (TrackStatus.APPLIED, False),
+        (TrackStatus.INTERVIEWING, False),
+        (TrackStatus.OFFER, False),
+        (TrackStatus.ACCEPTED, False),
+        (TrackStatus.REJECTED, False),
+        (TrackStatus.WITHDRAWN, False),
+    ],
+)
+def test_promotable_to_interested(current: TrackStatus, expected: bool) -> None:
+    assert tracking.promotable_to_interested(current) is expected
+    # accepts the raw stored string too (what the endpoint reads off the record)
+    assert tracking.promotable_to_interested(current.value) is expected
+
+
 def test_label_known_and_legacy_fallback() -> None:
     assert tracking.label("interviewing") == "Interviewing"
     # An unknown/legacy value must not blow up the template — Title Case fallback.

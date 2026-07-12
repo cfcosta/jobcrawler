@@ -47,7 +47,7 @@
       <option value="closed"{{ ' selected' if filters.status == 'closed' else '' }}>Closed only</option>
     </select>
     <select name="sort" aria-label="Sort">
-      {% for value, label in [('recent', 'Newest'), ('score', 'Best match'), ('updated', 'Recently updated'), ('salary', 'Salary'), ('title', 'Title')] %}
+      {% for value, label in [('recent', 'Newest'), ('score', 'Best match'), ('matched', 'Recently scored'), ('updated', 'Recently updated'), ('salary', 'Salary'), ('title', 'Title')] %}
       <option value="{{ value }}"{{ ' selected' if filters.sort == value else '' }}>{{ label }}</option>
       {% endfor %}
     </select>

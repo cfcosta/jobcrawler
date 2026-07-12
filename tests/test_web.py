@@ -204,6 +204,41 @@ async def test_positions_default_view_is_new_with_applied_companies_hidden() -> 
         store.close()
 
 
+async def test_interested_endpoint_is_one_way_from_new_only() -> None:
+    # §16: the `i` keybinding's guarded endpoint promotes new -> interested and nothing
+    # else. It answers JSON {changed, track_status} so the client can reconcile without a
+    # reload, and it never resurrects a terminal row back into the funnel.
+    store = _seeded_store()
+    try:
+        async with _client(create_app(store)) as c:
+            acme_pid = encode_pid("acme", "https://acme.test/a")
+            beta_pid = encode_pid("beta", "https://beta.test/b")
+
+            # new -> interested: the one allowed transition, and it actually writes.
+            r = await c.post(f"/positions/{acme_pid}/interested")
+            assert r.status_code == 200
+            assert r.json() == {"changed": True, "track_status": "interested"}
+            assert _get(store).track_status == "interested"
+
+            # Idempotent: firing again on the now-interested row is a no-op, not an error.
+            again = await c.post(f"/positions/{acme_pid}/interested")
+            assert again.json() == {"changed": False, "track_status": "interested"}
+            assert _get(store).track_status == "interested"
+
+            # A terminal row is never revived — reports the unchanged stage, writes nothing.
+            store.set_track_status("beta", "https://beta.test/b", "rejected")
+            blocked = await c.post(f"/positions/{beta_pid}/interested")
+            assert blocked.json() == {"changed": False, "track_status": "rejected"}
+            beta = store.get_position("beta", "https://beta.test/b")
+            assert beta is not None and beta.track_status == "rejected"
+
+            # Unknown pid still 404s, same as the other per-row mutators.
+            gone = encode_pid("acme", "https://acme.test/gone")
+            assert (await c.post(f"/positions/{gone}/interested")).status_code == 404
+    finally:
+        store.close()
+
+
 async def test_positions_mobility_boxes_or_and_email_apply_hides() -> None:
     # #132/#133 wiring: the three mobility checkboxes reach the store as one
     # OR-group — a two-box query keeps BOTH rows below, where the old AND

@@ -1,6 +1,6 @@
 {# Position detail guts — shared by the full page (detail.html) and the list
    slide-over (rendered standalone via ?partial=1). Contains no <base> shell. #}
-<div class="detail">
+<div class="detail" data-pid="{{ pid }}">
   {% if not partial %}<p><a class="back" href="/positions">← All positions</a></p>{% endif %}
 
   <header class="detail-head">
