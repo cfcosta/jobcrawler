@@ -1,139 +1,96 @@
 
-import datetime
-import html
 import json
 import re
+from datetime import datetime, timezone
+from html import unescape
+
 
 SITE = "https://api.lever.co/v0/postings/mistral?mode=json"
+EXTRA_HOSTS = []
 
 
-def _body(response):
-    if hasattr(response, "text"):
-        return response.text
-    return response
-
-
-def _strip_html(value):
+def _plain_text(value):
     if not value:
         return None
-    value = html.unescape(value)
-    value = re.sub(r"(?i)<br\s*/?>", "\n", value)
-    value = re.sub(r"(?i)</p\s*>", "\n\n", value)
-    value = re.sub(r"(?i)</li\s*>", "\n", value)
-    value = re.sub(r"<[^>]+>", " ", value)
-    value = html.unescape(value)
-    value = re.sub(r"[ \t\r\f\v]+", " ", value)
-    value = re.sub(r"\n\s+", "\n", value)
-    value = re.sub(r"\n{3,}", "\n\n", value)
-    return value.strip() or None
+
+    text = re.sub(
+        r"(?i)<br\s*/?>|</(?:p|div|li|ul|ol|h[1-6]|section|article|tr)>",
+        "\n",
+        value,
+    )
+    text = re.sub(r"<[^>]+>", "", text)
+    text = unescape(text)
+    text = re.sub(r"[ \t\f\v]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip() or None
 
 
-def _first_text(*values):
-    for value in values:
-        if value:
-            text = value.strip()
-            if text:
-                return text
-    return None
+def _full_description(posting):
+    sections = []
 
-
-def _plain_or_html(obj, plain_key, html_key):
-    text = _first_text(obj.get(plain_key))
-    if text:
-        return text
-    return _strip_html(obj.get(html_key))
-
-
-def _posted_at(created_at):
-    if created_at is None:
-        return None
-    try:
-        return datetime.datetime.fromtimestamp(int(created_at) / 1000, datetime.timezone.utc).date().isoformat()
-    except Exception:
-        return None
-
-
-def _description(posting):
-    parts = []
-
-    opening = _plain_or_html(posting, "openingPlain", "opening")
-    if opening:
-        parts.append(opening)
-
-    intro = _plain_or_html(posting, "descriptionPlain", "description")
-    if intro and intro not in parts:
-        parts.append(intro)
-
-    body = _plain_or_html(posting, "descriptionBodyPlain", "descriptionBody")
-    if body and body not in parts:
-        parts.append(body)
+    intro = _plain_text(posting.get("description"))
+    if intro:
+        sections.append(intro)
 
     for section in posting.get("lists") or []:
-        heading = _first_text(section.get("text"))
-        content = _plain_or_html(section, "contentPlain", "content")
+        heading = _plain_text(section.get("text"))
+        content = _plain_text(section.get("content"))
         if heading and content:
-            parts.append(heading + "\n" + content)
+            sections.append(heading + "\n" + content)
         elif heading:
-            parts.append(heading)
+            sections.append(heading)
         elif content:
-            parts.append(content)
+            sections.append(content)
 
-    additional = _plain_or_html(posting, "additionalPlain", "additional")
+    additional = _plain_text(posting.get("additional"))
     if additional:
-        parts.append(additional)
+        sections.append(additional)
 
-    description = "\n\n".join(part for part in parts if part)
-    description = re.sub(r"\n{3,}", "\n\n", description).strip()
-    return description or None
+    return "\n\n".join(sections).strip()
+
+
+def _iso_timestamp(epoch_ms):
+    if epoch_ms is None:
+        return None
+    return datetime.fromtimestamp(
+        epoch_ms / 1000, tz=timezone.utc
+    ).isoformat().replace("+00:00", "Z")
 
 
 def crawl(ctx):
-    data = json.loads(_body(ctx.fetch(SITE)))
-    for posting in data:
-        title = _first_text(posting.get("text"))
-        description = _description(posting)
-        url = _first_text(posting.get("hostedUrl"))
+    postings = json.loads(ctx.fetch(SITE))
+
+    for posting in postings:
         categories = posting.get("categories") or {}
+        location = categories.get("location")
+        locations = categories.get("allLocations")
 
-        location = _first_text(categories.get("location"))
-        if not location:
-            all_locations = categories.get("allLocations") or []
-            location = ", ".join(loc for loc in all_locations if loc) or None
-        if not location:
-            location = _first_text(posting.get("country"))
+        if isinstance(locations, str):
+            locations = [locations]
+        elif locations:
+            locations = [item for item in locations if item]
+        else:
+            locations = None
 
-        if not (title and description and url and location):
-            continue
+        if not location and locations:
+            location = locations[0]
 
-        job = {
-            "url": url,
-            "title": title,
+        fields = {
+            "url": posting.get("hostedUrl"),
+            "title": posting.get("text"),
             "company": "Mistral AI",
             "location": location,
-            "description": description,
+            "description": _full_description(posting),
             "source": SITE,
+            "external_id": posting.get("id"),
+            "apply_url": posting.get("applyUrl"),
+            "department": categories.get("team"),
+            "employment_type": categories.get("commitment"),
+            "workplace_type": posting.get("workplaceType"),
+            "posted_at": _iso_timestamp(posting.get("createdAt")),
         }
+        if locations:
+            fields["locations"] = locations
 
-        field_map = [
-            ("id", "external_id"),
-            ("applyUrl", "apply_url"),
-            ("workplaceType", "workplace_type"),
-        ]
-        for source_key, target_key in field_map:
-            value = _first_text(posting.get(source_key))
-            if value:
-                job[target_key] = value
-
-        employment_type = _first_text(categories.get("commitment"))
-        if employment_type:
-            job["employment_type"] = employment_type
-
-        department = _first_text(categories.get("team"))
-        if department:
-            job["department"] = department
-
-        posted_at = _posted_at(posting.get("createdAt"))
-        if posted_at:
-            job["posted_at"] = posted_at
-
-        yield job
+        yield Job(**{key: value for key, value in fields.items() if value is not None})
