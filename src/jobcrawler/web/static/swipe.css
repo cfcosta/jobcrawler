@@ -544,6 +544,74 @@ body:has(.swipe-stage) .site-footer {
   color: var(--accent);
 }
 
+/* ---- filter drawer ---------------------------------------------------------------- */
+
+.swipe-drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 6;
+  width: min(380px, calc(100vw - 24px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 16px 18px 24px;
+  background: color-mix(in srgb, var(--surface) 90%, transparent);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border-left: 1px solid var(--line);
+  box-shadow: var(--shadow-2);
+  animation: drawer-in 0.22s ease;
+}
+@keyframes drawer-in {
+  from {
+    transform: translateX(28px);
+    opacity: 0;
+  }
+}
+.drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.drawer-head h2 {
+  margin: 0;
+  font-size: 16px;
+}
+.drawer-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.drawer-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.drawer-grid input,
+.drawer-grid select {
+  width: 100%;
+  min-width: 0;
+}
+.drawer-form .chk {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+.drawer-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 6px;
+}
+.drawer-actions .clear {
+  font-size: 13px;
+  color: var(--accent);
+}
+
 /* ---- key legend ------------------------------------------------------------------ */
 
 .swipe-keys {

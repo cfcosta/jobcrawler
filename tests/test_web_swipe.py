@@ -13,6 +13,7 @@ match reasons/concerns) so the client renders without re-deriving display policy
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import httpx
 from fastapi import FastAPI
@@ -149,12 +150,61 @@ async def test_swipe_page_has_deck_scaffolding() -> None:
                 'id="swipe-empty"',
                 'id="swipe-undo"',
                 'id="swipe-bg"',  # WebGL backdrop canvas (fails closed to CSS)
+                'id="swipe-help"',  # keybinding overlay (? toggles)
                 'data-queue-url="/api/swipe/queue"',
                 'data-decide-url="/api/swipe"',
             ):
                 assert hook in body, hook
             for key in ("<kbd>j</kbd>", "<kbd>k</kbd>", "<kbd>h</kbd>", "<kbd>l</kbd>"):
                 assert key in body, key
+    finally:
+        store.close()
+
+
+async def test_swipe_filter_drawer_mirrors_positions_grammar() -> None:
+    """The drawer is the /positions filter form aimed back at /swipe: it lists the
+    site registry, echoes the live query into its controls (so a deep link and the
+    drawer agree), and submits as a plain GET so filtering works without JS."""
+    store = _seeded_store()
+    sites = [
+        SimpleNamespace(slug="acme", company="Acme", name="Acme board"),
+        SimpleNamespace(slug="beta", company="Beta", name="Beta board"),
+    ]
+    try:
+        async with _client(create_app(store, sites=sites)) as c:
+            body = (
+                await c.get("/swipe?q=rust&site=acme&min_score=80&track_status=new")
+            ).text
+            assert 'id="swipe-drawer"' in body
+            assert 'id="swipe-config"' in body  # the HUD toggle button
+            assert 'action="/swipe"' in body  # no-JS fallback: plain GET reload
+            assert 'value="rust"' in body  # q echo
+            assert 'value="80"' in body  # min_score echo
+            assert '<option value="acme" selected>' in body
+            assert '<option value="beta"' in body  # registry drives the dropdown
+            # the same refine axes the list page exposes travel here too
+            for field in (
+                'name="workplace"',
+                'name="country"',
+                'name="remote_in"',
+                'name="level"',
+                'name="min_salary"',
+                'name="remote_anywhere"',
+                'name="show_dismissed"',
+                'name="hide_applied_companies"',
+            ):
+                assert field in body, field
+    finally:
+        store.close()
+
+
+async def test_swipe_nav_link_in_shell() -> None:
+    """The shared shell nav links the deck from every page (and marks it active)."""
+    store = _seeded_store()
+    try:
+        async with _client(create_app(store)) as c:
+            for path in ("/positions", "/swipe"):
+                assert 'href="/swipe"' in (await c.get(path)).text, path
     finally:
         store.close()
 

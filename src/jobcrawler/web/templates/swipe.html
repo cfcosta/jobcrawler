@@ -19,6 +19,8 @@
       <span class="hud-tally tally-like" title="Marked interested this session"><span class="tally-mark">★</span> <strong id="hud-liked">0</strong></span>
       <span id="hud-streak" class="hud-streak" hidden></span>
       <button type="button" id="swipe-undo" class="hud-btn" title="Undo the last decision (u)" disabled>⟲ undo</button>
+      <button type="button" id="swipe-config" class="hud-btn" title="Filters (f)" aria-expanded="false" aria-controls="swipe-drawer">⛭ filters</button>
+      <button type="button" id="swipe-help-btn" class="hud-btn" title="Keyboard help (?)">?</button>
     </div>
   </header>
 
@@ -37,6 +39,76 @@
         <button type="button" id="swipe-reload" class="empty-reload">Deal again</button>
         <a class="empty-link" href="/positions">Open the positions list</a>
       </p>
+    </div>
+  </div>
+
+  {# The drawer is the /positions filter form aimed back at /swipe — one grammar,
+     two surfaces. Plain GET keeps it working without JS; swipe.js intercepts the
+     submit to swap the deck in place instead of reloading. #}
+  <aside id="swipe-drawer" class="swipe-drawer" role="dialog" aria-label="Deck filters" hidden>
+    <div class="drawer-head">
+      <h2>Deck filters</h2>
+      <button type="button" id="swipe-drawer-close" class="hud-btn" aria-label="Close filters">✕</button>
+    </div>
+    <form id="swipe-filters" class="drawer-form" method="get" action="/swipe">
+      <input type="search" name="q" placeholder="Search title, company, location…" value="{{ filters.q }}">
+      <div class="drawer-grid">
+        <select name="site" aria-label="Site">
+          <option value="">All sites</option>
+          {% for s in sites %}
+          <option value="{{ s.slug }}"{{ ' selected' if filters.site == s.slug else '' }}>{{ s.company or s.name or s.slug }}</option>
+          {% endfor %}
+        </select>
+        <select name="track_status" aria-label="Stage">
+          <option value="">Any stage</option>
+          {% for value, label, token in tracking.choices() %}
+          <option value="{{ value }}"{{ ' selected' if filters.track_status == value else '' }}>{{ label }}</option>
+          {% endfor %}
+        </select>
+        <select name="status" aria-label="Lifecycle">
+          <option value="">Open + closed</option>
+          <option value="open"{{ ' selected' if filters.status == 'open' else '' }}>Open only</option>
+          <option value="closed"{{ ' selected' if filters.status == 'closed' else '' }}>Closed only</option>
+        </select>
+        <select name="sort" aria-label="Deck order">
+          {% for value, label in [('recent', 'Newest'), ('score', 'Best match'), ('matched', 'Recently scored'), ('updated', 'Recently updated'), ('salary', 'Salary'), ('title', 'Title')] %}
+          <option value="{{ value }}"{{ ' selected' if filters.sort == value else '' }}>{{ label }}</option>
+          {% endfor %}
+        </select>
+        <input type="text" name="workplace" placeholder="Workplace" value="{{ filters.workplace }}">
+        <input type="text" name="level" placeholder="Level" value="{{ filters.level }}">
+        <input type="text" name="country" placeholder="Country (US)" value="{{ filters.country }}" title="ISO country code — offices there or remote fenced to it (§4.12)">
+        <input type="text" name="remote_in" placeholder="Remote in (BR)" value="{{ filters.remote_in }}" title="ISO country code — remotely workable from there">
+        <input type="number" name="min_score" placeholder="Min score" value="{{ filters.min_score }}" min="0" max="100">
+        <input type="number" name="min_salary" placeholder="Min $/yr" value="{{ filters.min_salary }}" title="Minimum annualized USD salary">
+      </div>
+      <label class="chk"><input type="checkbox" name="remote_anywhere" value="1"{{ ' checked' if filters.remote_anywhere else '' }}> Remote anywhere{% if home_country %} <span class="muted">+{{ home_country }}</span>{% endif %}</label>
+      <label class="chk"><input type="checkbox" name="relocation_offered" value="1"{{ ' checked' if filters.relocation_offered else '' }}> Offers relocation</label>
+      <label class="chk"><input type="checkbox" name="relocation_no_us" value="1"{{ ' checked' if filters.relocation_no_us else '' }}> Relocation (non-US)</label>
+      <label class="chk"><input type="checkbox" name="hide_email_apply" value="1"{{ ' checked' if filters.hide_email_apply else '' }}> Hide e-mail apply</label>
+      <label class="chk"><input type="checkbox" name="show_dismissed" value="1"{{ ' checked' if filters.show_dismissed else '' }}> Show dismissed</label>
+      <label class="chk"><input type="checkbox" name="hide_applied_companies" value="1"{{ ' checked' if filters.hide_applied_companies else '' }}> Hide applied companies</label>
+      <div class="drawer-actions">
+        <button type="submit">Deal this deck</button>
+        <a class="clear" href="/swipe">Reset</a>
+      </div>
+    </form>
+  </aside>
+
+  <div id="swipe-help" class="kbd-help" hidden>
+    <div class="kbd-card">
+      <h2>Deck keys</h2>
+      <dl class="kbd-list">
+        <dt><kbd>l</kbd> or swipe →</dt><dd>Mark interested</dd>
+        <dt><kbd>h</kbd> or swipe ←</dt><dd>Pass (dismiss with undo)</dd>
+        <dt><kbd>j</kbd> / <kbd>k</kbd></dt><dd>Skip forward / back without deciding</dd>
+        <dt><kbd>u</kbd> / <kbd>z</kbd></dt><dd>Undo the last decision</dd>
+        <dt><kbd>o</kbd></dt><dd>Open the external posting</dd>
+        <dt><kbd>enter</kbd></dt><dd>Open the detail page</dd>
+        <dt><kbd>f</kbd></dt><dd>Toggle the filter drawer</dd>
+        <dt><kbd>?</kbd></dt><dd>Toggle this help</dd>
+      </dl>
+      <p class="kbd-dismiss">Press <kbd>esc</kbd> or <kbd>?</kbd> to close</p>
     </div>
   </div>
 

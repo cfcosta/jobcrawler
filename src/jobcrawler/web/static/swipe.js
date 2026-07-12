@@ -483,7 +483,10 @@
     (event) => {
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       const target = event.target;
-      if (target instanceof Element && target.matches("input, select, textarea")) return;
+      if (target instanceof Element && target.matches("input, select, textarea")) {
+        if (event.key === "Escape") target.blur(); // first esc leaves the field
+        return;
+      }
       const actions = {
         j: next,
         k: prev,
@@ -493,9 +496,19 @@
         z: undo,
         o: openExt,
         Enter: openDetail,
+        f: () => setDrawer(drawer.hidden),
+        "?": () => toggleHelp(),
+        Escape: () => {
+          if (!helpEl.hidden) toggleHelp(false);
+          else if (!drawer.hidden) setDrawer(false);
+        },
       };
       const action = actions[event.key];
       if (!action) return;
+      // with the drawer up the deck verbs go inert — a stray h/l while reading
+      // the form must never decide a card
+      if (!drawer.hidden && event.key !== "f" && event.key !== "?" && event.key !== "Escape")
+        return;
       event.preventDefault();
       event.stopPropagation();
       action();
@@ -871,10 +884,27 @@
 
   const bg = initBackdrop(document.getElementById("swipe-bg"));
 
-  // ---- wiring ----------------------------------------------------------------------
+  // ---- filter drawer + help --------------------------------------------------------
 
-  undoBtn.addEventListener("click", undo);
-  reloadBtn.addEventListener("click", () => {
+  const drawer = document.getElementById("swipe-drawer");
+  const configBtn = document.getElementById("swipe-config");
+  const filterForm = document.getElementById("swipe-filters");
+  const helpEl = document.getElementById("swipe-help");
+
+  function setDrawer(open) {
+    drawer.hidden = !open;
+    configBtn.setAttribute("aria-expanded", String(open));
+    if (open) {
+      const first = drawer.querySelector("input, select");
+      if (first) first.focus();
+    }
+  }
+
+  function toggleHelp(force) {
+    helpEl.hidden = force === undefined ? !helpEl.hidden : !force;
+  }
+
+  function resetDeck() {
     state.cards = [];
     state.cursor = 0;
     state.seen.clear();
@@ -883,7 +913,31 @@
     els.forEach((node) => node.remove());
     els.clear();
     refill(true);
+  }
+
+  // Apply filters without a reload: the form's query becomes the deck's query and
+  // the address bar follows, so the visible deck is always a shareable deep link.
+  // (No-JS falls back to the form's own GET /swipe.)
+  filterForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const qs = new URLSearchParams(new FormData(filterForm)).toString();
+    state.query = qs;
+    window.history.replaceState(null, "", qs ? "/swipe?" + qs : "/swipe");
+    setDrawer(false);
+    resetDeck();
   });
+
+  configBtn.addEventListener("click", () => setDrawer(drawer.hidden));
+  document.getElementById("swipe-drawer-close").addEventListener("click", () => setDrawer(false));
+  document.getElementById("swipe-help-btn").addEventListener("click", () => toggleHelp());
+  helpEl.addEventListener("click", (event) => {
+    if (event.target === helpEl) toggleHelp(false); // backdrop click closes
+  });
+
+  // ---- wiring ----------------------------------------------------------------------
+
+  undoBtn.addEventListener("click", undo);
+  reloadBtn.addEventListener("click", resetDeck);
 
   refill(true);
 })();
