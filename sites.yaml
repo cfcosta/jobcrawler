@@ -8240,3 +8240,1436 @@
     Lever board: GET the postings JSON array and map each posting's hostedUrl, text,
     categories.location/department, and salaryRange into a job. Strong AI-infra / database-
     systems fit with roles across Vector Database, Cloud Platform, and Solutions teams.
+
+- slug: coreweave
+  name: "CoreWeave"
+  url: https://boards-api.greenhouse.io/v1/boards/coreweave/jobs?content=true
+  render: static
+  company: "CoreWeave, Inc."
+  hints: >-
+    Greenhouse, token `coreweave` (linked from the careers SPA HTML). Whole board in one
+    GET: /v1/boards/coreweave/jobs?content=true returns all postings in jobs[] with
+    meta.total=287, no pagination. Parse id, title, location.name, absolute_url, updated_at,
+    and content (HTML entity-escaped -> html.unescape then strip tags); offices[].name and
+    departments[].name give structured geo/team. Standard US greenhouse host, not EU. Strong
+    senior/staff backend, distributed-systems and infra fit: GPU cloud provider hiring
+    Principal Engineer Cluster Orchestration, Principal Engineer Managed Databases, GPU/HPC
+    Performance Engineers, Staff Engineers.
+
+- slug: crusoe
+  name: "Crusoe"
+  url: https://api.ashbyhq.com/posting-api/job-board/Crusoe?includeCompensation=true
+  render: static
+  company: "Crusoe Energy Systems LLC"
+  enumerates_all: false
+  hints: >-
+    Ashby, token `Crusoe` (case-sensitive capital C — the exact slug embedded on
+    crusoe.ai/about/careers). Whole board in one GET, no pagination: GET
+    api.ashbyhq.com/posting-api/job-board/Crusoe?includeCompensation=true -> jobs[] (348).
+    Parse per job: id, title, department/team, location (+secondaryLocations[], isRemote,
+    workplaceType, address.postalAddress), employmentType, publishedAt, jobUrl, applyUrl
+    (ready-made jobs.ashbyhq.com/Crusoe/<id>/application), descriptionPlain (already plain
+    text, no unescape) or descriptionHtml, and structured compensation
+    (compensationTierSummary / scrapeableCompensationSalarySummary / compensationTiers[])
+    surfaced via includeCompensation=true. Large board (348) — no server-side filter on
+    posting-api, so filter client-side on department for the infra/backend subset (Cloud
+    Engineering, Digital Infrastructure Group, Manufacturing). Domain fit: vertically-
+    integrated AI-infrastructure + energy (ex-flared-gas bitcoin miner turned AI cloud) with
+    deep Cloud Engineering / Digital Infrastructure / Managed Kubernetes / distributed-
+    systems / SRE staff roles — strong senior/staff backend + infra fit. GOTCHA: this Ashby
+    token sits behind a Cloudflare edge cache that has been observed serving another org's
+    board (airbyte/cerebras jobs) on a plain includeCompensation request — append a random
+    cache-buster query param (e.g. &_cb=<rand>) on every fetch and re-verify the returned
+    board identity is Crusoe.
+
+- slug: groq
+  name: "Groq"
+  url: https://api.gem.com/job_board/v0/groq/job_posts/
+  render: static
+  company: "Groq, Inc."
+  hints: >-
+    Gem-hosted board API (Greenhouse-shaped JSON), token `groq`: a single GET returns a top-
+    level JSON array of every active posting — the whole board, no pagination
+    (per_page/limit/page params are ignored, count stays fixed). Each element has `id`,
+    `title`, `absolute_url` (apply/detail URL on jobs.gem.com/groq/<id>), `location.name`
+    (often empty — fall back to `offices[].name` plus `location_type`, e.g. `remote`),
+    `departments[]`, `employment_type` (e.g. `full_time`), `updated_at`,
+    `first_published_at`, `content` = full HTML-ESCAPED description and `content_plain` =
+    same text pre-stripped; use content_plain or html.unescape+strip on content. No salary
+    field. Keep EXTRA_HOSTS empty — the whole board and descriptions come from api.gem.com.
+    Groq builds LPU AI-inference silicon and the GroqCloud low-latency serving stack
+    (compilers, distributed inference, systems) — strong domain fit for senior/staff backend
+    / distributed-systems / infra, though the live board is currently thin and all non-
+    engineering.
+
+- slug: cerebras
+  name: "Cerebras"
+  url: https://api.ashbyhq.com/posting-api/job-board/cerebras?includeCompensation=true
+  render: static
+  company: "Cerebras Systems, Inc."
+  hints: >-
+    Ashby, token "cerebras" (posting-api/job-board/cerebras?includeCompensation=true). Whole
+    board in one GET — jobs[] array, no pagination (93 roles). Filter isListed==true. Parse
+    per job: id, title, location (+ secondaryLocations[]), department/team, employmentType,
+    isRemote/workplaceType, publishedAt (use as updated_at), applyUrl (already absolute,
+    https://jobs.ashbyhq.com/cerebras/<id>/application) and jobUrl, descriptionPlain (clean
+    text; descriptionHtml also present). Structured pay via compensation.compensationTiers[]
+    / scrapeableCompensationSalarySummary but mostly empty here
+    (shouldDisplayCompensationOnJobPostings=false). Marketing SPA at cerebras.ai/careers
+    loads this board client-side, but the feed itself is a plain JSON GET — render static,
+    no browser. Strong domain fit: senior/staff backend, distributed-systems, kernel, ML
+    runtime, SRE/infra for wafer-scale AI compute; not fintech/crypto.
+
+- slug: weights_and_biases
+  name: "Weights & Biases"
+  url: https://boards-api.greenhouse.io/v1/boards/weights_and_biases/jobs?content=true
+  render: static
+  company: "Weights & Biases"
+  hints: >-
+    Greenhouse boards-api, token `weights_and_biases` (NOT `wandb`/`weightsandbiases`, which
+    404 — W&B is a CoreWeave subsidiary and its board lives under CoreWeave's Greenhouse).
+    Whole board in one GET: /v1/boards/weights_and_biases/jobs?content=true, meta.total=12,
+    no pagination. Parse jobs[]: id, title, location.name (single string, often slash-joined
+    multi-city), updated_at (ISO8601 w/ tz offset), absolute_url (a
+    coreweave.com/careers/job?<id>&board=weights_and_biases&gh_jid=<id> apply link where
+    gh_jid==id), content (HTML entity-encoded — html.unescape once; opens with a content-
+    intro block); departments[].name, offices[].name and company_name also present. No
+    compensation in the feed (pay_input_ranges absent). US host, render=static. Verify
+    identity via /v1/boards/weights_and_biases → name must be 'Weights & Biases'. Domain
+    fit: strong for senior/staff backend / distributed-systems / infra — Senior Data
+    Platform Engineer, SWE Metrics Platform, Staff PM Training Infrastructure, ML Model
+    Training UI, W&B Agent (MLOps / AI-infra, GPU-cloud adjacent).
+
+- slug: motherduck
+  name: "MotherDuck"
+  url: https://api.ashbyhq.com/posting-api/job-board/motherduck?includeCompensation=true
+  render: static
+  company: "MotherDuck"
+  hints: >-
+    Ashby family, token `motherduck` (linked from careers page — authoritative). Whole board
+    in one GET; jobs live in `jobs[]` (no pagination). Per job parse `id`, `title`,
+    `location` (+ `secondaryLocations[]`, `workplaceType`, `isRemote`), `applyUrl`/`jobUrl`
+    (already absolute jobs.ashbyhq.com/motherduck/<id> — no rebuild), `publishedAt`,
+    `department`/`team`, and `descriptionPlain` (or `descriptionHtml`); filter to
+    `isListed==true`. With `?includeCompensation=true` each job carries structured
+    `compensation.compensationTierSummary` + `scrapeableCompensationSalarySummary` ("$100K -
+    $130K"). Domain fit strong: MotherDuck is a DuckDB-based serverless data warehouse —
+    backend + infrastructure roles in distributed data systems, senior/staff-relevant.
+
+- slug: airbyte
+  name: "Airbyte"
+  url: https://api.ashbyhq.com/posting-api/job-board/airbyte?includeCompensation=true
+  render: static
+  company: "Airbyte, Inc."
+  hints: >-
+    Ashby, token `airbyte`; whole board in one GET at api.ashbyhq.com/posting-api/job-
+    board/airbyte?includeCompensation=true — flat jobs[] array, no pagination
+    (apiVersion:1). Per job parse id, title, location (+ secondaryLocations[],
+    address.postalAddress), department/team, employmentType, isRemote + workplaceType
+    (Remote/Hybrid), publishedAt, and jobUrl (canonical) / applyUrl (jobUrl + /application);
+    filter isListed==true. Body = descriptionPlain (clean text) or descriptionHtml.
+    Compensation is structured and needs includeCompensation=true:
+    compensation.compensationTierSummary + scrapeableCompensationSalarySummary strings, else
+    compensationTiers[].components[] with minValue/maxValue/currencyCode/interval. Strong
+    infra/data-platform fit for senior/staff backend, distributed-systems, SRE and platform
+    profiles (Airbyte = open-source ELT/data-integration); roles like Integrations
+    connectors, Platform, AI Platform Engineer, SRE — no crypto/fintech.
+
+- slug: deepgram
+  name: "Deepgram"
+  url: https://api.ashbyhq.com/posting-api/job-board/Deepgram?includeCompensation=true
+  render: static
+  company: "Deepgram, Inc."
+  hints: >-
+    Ashby job board API, token `Deepgram` (note the capital D — the token is case-sensitive
+    in the URL). Whole board in one JSON GET, no pagination; parse the standard Ashby fields
+    straight from jobs[]: `id`, `title`, `location` (plus `secondaryLocations`,
+    `workplaceType`/`isRemote`), `publishedAt`, absolute `jobUrl`/`applyUrl`, and
+    `descriptionPlain`/`descriptionHtml`. Structured pay lives in
+    compensation.compensationTierSummary and .scrapeableCompensationSalarySummary (e.g.
+    "$150K - $220K"). Keep to a single request and never authorize a host merely linked
+    inside a description. Strong match for senior/staff backend, inference/API services,
+    real-time streaming, distributed systems, SRE and ML/AI infrastructure roles.
+
+- slug: assemblyai
+  name: "AssemblyAI"
+  url: https://boards-api.greenhouse.io/v1/boards/assemblyai/jobs?content=true
+  render: static
+  company: "AssemblyAI"
+  hints: >-
+    Standard Greenhouse (US host), token `assemblyai` — linked authoritatively from the
+    careers page via job-boards.greenhouse.io. Whole board in one GET:
+    /v1/boards/assemblyai/jobs?content=true returns meta.total + jobs[]; parse id, title,
+    location.name, absolute_url, updated_at, content (HTML entity-encoded, run
+    html.unescape). Confirm identity via /v1/boards/assemblyai (name == "AssemblyAI"). ~6
+    roles, mostly SF/NYC with some remote-US. Speech-AI infra shop (600M+ monthly
+    inferences, 1M+ audio-hrs/day) — good senior/staff backend / distributed-systems / high-
+    scale inference-infra fit; no fintech/crypto angle.
+
+- slug: elevenlabs
+  name: "ElevenLabs"
+  url: https://api.ashbyhq.com/posting-api/job-board/elevenlabs?includeCompensation=true
+  render: static
+  company: "ElevenLabs"
+  hints: >-
+    Ashby job board API, token `elevenlabs` (Ashby linked from elevenlabs.io/careers; each
+    posting's `jobUrl` is jobs.ashbyhq.com/elevenlabs — identity confirmed). Whole board in
+    one JSON GET, no pagination — jobs[] carry stable `id`, `title`, `department`/`team`,
+    `location` plus `secondaryLocations[]`, full `descriptionPlain` (and `descriptionHtml`),
+    `employmentType`, absolute `jobUrl`/`applyUrl`, `publishedAt`, and structured
+    `compensation` via includeCompensation=true; prefer `workplaceType` over `isRemote`.
+    Strong match for AI-audio infrastructure, high-scale backend, distributed systems,
+    infra/platform-security and data-engineering roles.
+
+- slug: augment_code
+  name: "Augment Code"
+  url: https://boards-api.greenhouse.io/v1/boards/augmentcomputing/jobs?content=true
+  render: static
+  company: "Augment Code (Augment Computing, Inc.)"
+  hints: >-
+    Greenhouse, token `augmentcomputing` (brand "Augment Code" = legal entity Augment
+    Computing, Inc.; board name field confirms "Augment Code"). Whole board in one GET:
+    `https://boards-api.greenhouse.io/v1/boards/augmentcomputing/jobs?content=true` ->
+    `jobs[]` with `meta.total`. Parse id, title, location.name, absolute_url (resolves to
+    job-boards.greenhouse.io/augmentcomputing/jobs/<id>), updated_at, first_published,
+    content (HTML entity-escaped -> html.unescape), departments[].name, offices[].name; no
+    compensation on this board (pay_input_ranges null). Standard Greenhouse shape. Marketing
+    SPA (Next.js) client-fetches api.greenhouse.io/.../departments; use the canonical
+    boards-api host instead. Domain fit: currently a single evergreen "Build With Us"
+    general-application/talent-pool posting (Engineering, Palo Alto) rather than a specific
+    role; when real roles land they're AI-coding-agent / dev-tools infra work with plausible
+    senior/staff backend / distributed-systems relevance.
+
+- slug: llamaindex
+  name: "LlamaIndex"
+  url: https://api.ashbyhq.com/posting-api/job-board/llamaindex?includeCompensation=true
+  render: static
+  company: "LlamaIndex"
+  hints: >-
+    Ashby family, token `llamaindex`; whole board in one GET, no pagination — parse
+    `.jobs[]`. Per job: `id`, `title`, `department`/`team`, `location` (+
+    `secondaryLocations[]`, `isRemote`, `workplaceType` Hybrid/Remote,
+    `address.postalAddress`), `applyUrl` (canonical
+    `https://jobs.ashbyhq.com/llamaindex/<id>/application`, else `jobUrl`), `publishedAt`
+    (ISO, use as updated_at), body in `descriptionPlain` (prefer over `descriptionHtml`),
+    and structured `compensation` (`compensationTierSummary`,
+    `scrapeableCompensationSalarySummary` like "$180K - $250K", tiers/components) — pass
+    `?includeCompensation=true`. Keep only `isListed==true`; drop the evergreen "Don't See
+    Your Role?" placeholder and dedupe repeated titles. Strong senior/staff backend /
+    distributed-systems / infra fit: AI/LLM framework (RAG, document understanding) hiring
+    Member of Technical Staff for Infrastructure, Backend, and Applied Research.
+
+- slug: duckdb_labs
+  name: "DuckDB Labs"
+  url: https://duckdblabs.com/jobs/
+  render: static
+  company: "DuckDB Labs"
+  hints: >-
+    Self-hosted static HTML board (no third-party ATS, no JSON API) — whole board in one GET
+    of https://duckdblabs.com/jobs/. Parse `section.jobs-listings div.jobs_collection >
+    div.job`: title + relative link from `div.title > a[href]` (rebuild absolute with
+    https://duckdblabs.com prefix; page is /jobs/<slug>.html), and `div.subline` =
+    "Department • WorkMode • EmploymentType" split on " • " (U+2022 bullet) → e.g.
+    "Developer Relations • Hybrid • Full-time"; open-role count in `h3.count` text "(N)".
+    Detail page /jobs/<slug>.html has `<title>DuckLabs – <Title></title>` and the full JD in
+    `div.job_content`; apply is an on-page `<form>` (no external ATS apply URL) /
+    hello@ducklabs.com, so apply_url = the detail page itself. render=static, no JS needed,
+    enumerates_all. Domain fit: DuckDB Labs builds the DuckDB in-process OLAP database
+    engine (C++, query execution, database internals) — top-tier for DB-
+    internals/systems/backend/infra profiles, though the ONLY current opening is Developer
+    Relations (DevRel), not a backend/distributed-systems role.
+
+- slug: modular
+  name: "Modular"
+  url: https://api.gem.com/job_board/v0/modular/job_posts/
+  render: static
+  company: "Modular"
+  hints: >-
+    Gem-hosted board API (Greenhouse-shaped JSON): a single GET on
+    api.gem.com/job_board/v0/modular/job_posts/ returns a top-level JSON array of every
+    active posting in one call — the whole board, no pagination. Each element has `id`,
+    `title`, `absolute_url` (the apply/detail URL on jobs.gem.com/modular/<id>),
+    `location.name`, `location_type` (remote/hybrid), `offices[]`, `departments[]` (e.g.
+    Mojo, MAX, Cloud Inference, Platform Engineering), `employment_type` (e.g. `full_time`),
+    `updated_at`, `first_published_at`, `created_at`, and `content` = full HTML-ESCAPED
+    description (`content_plain` is the same text pre-stripped); use content_plain or
+    html.unescape+strip on content. No structured salary field (any pay text lives only
+    inside content). Keep EXTRA_HOSTS empty — the whole board and its descriptions come from
+    this one host. Strong match for senior/staff backend, distributed-systems and infra:
+    multi-cloud inference platform, cloud inference, compiler / AI-graph-compiler, GPU/AI
+    kernel, Mojo libraries and hardware-enablement engineering.
+
+- slug: vast_data
+  name: "VAST Data"
+  url: https://www.comeet.co/careers-api/2.0/company/43.001/positions?token=34110453411D4968234168209C31D49
+  render: static
+  company: "VAST Data"
+  hints: >-
+    Comeet ATS, company uid 43.001, token in URL (extracted from the vastdata.com/careers
+    Nuxt _payload.json — careers page is a JS SPA with no ATS link in raw HTML). Whole board
+    in one GET: response is a flat JSON array (no pagination). Per row parse: uid, name
+    (title), location{name,city,state,country} plus workplace_type (Remote/Hybrid/On-site),
+    department, employment_type, experience_level, time_updated (ISO8601 → updated_at), and
+    url_comeet_hosted_page / url_active_page (public apply URL,
+    comeet.com/jobs/vastdata/43.001/<slug>/<uid>). Comeet repeats a posting once per
+    location with a uid suffix "-XX.XXX" (233 rows → 162 unique) — dedupe on
+    uid.split('-')[0]. JD body is NOT in the list feed: GET position_url with &details=true
+    to get details[] sections (Description, Requirements) whose .value is HTML
+    (html.unescape). Excellent senior/staff backend, distributed-systems, Linux-kernel &
+    cloud-infra fit — VAST is an all-flash AI/data-infrastructure storage vendor.
+
+- slug: lambda_labs
+  name: "Lambda"
+  url: https://api.ashbyhq.com/posting-api/job-board/lambda?includeCompensation=true
+  render: static
+  company: "Lambda"
+  hints: >-
+    Ashby job board API, token `lambda` (linked straight from lambdalabs.com/careers, so
+    authoritative). Whole board in one JSON GET (~35 roles) under jobs[] — parse the
+    standard Ashby fields: `id`, `title`, `location`, `descriptionPlain` (+
+    `descriptionHtml`), `employmentType`, `jobUrl`/`applyUrl`, `department`/`team`,
+    `publishedAt`, `secondaryLocations`, and structured `compensation`
+    (compensationTierSummary + summaryComponents/compensationTiers with minValue/maxValue +
+    currencyCode). Prefer `workplaceType` over `isRemote`. Strong match for distributed
+    systems, GPU/ML cloud infrastructure, control-plane and fleet backend, networking, and
+    platform-reliability roles at senior/staff level.
+
+- slug: firebolt
+  name: "Firebolt"
+  url: https://www.comeet.co/careers-api/2.0/company/26.004/positions?token=62424D80374424D824D8126C126C1EB41890&details=true
+  render: static
+  company: "Firebolt"
+  hints: >-
+    Comeet ATS; company_uid 26.004, public token 62424D80374424D824D8126C126C1EB41890. Whole
+    board in one GET — JSON array from https://www.comeet.co/careers-
+    api/2.0/company/26.004/positions?token=...&details=true (no pagination). Parse per
+    element: uid (id, e.g. "05.865"), name (title), location{}
+    (name/city/country/state/is_remote/timezone/location_uid), department, employment_type,
+    experience_level, workplace_type (Hybrid/Remote/On-site), time_updated (ISO8601 →
+    updated_at), position_url or url_comeet_hosted_page (absolute apply/detail URL under
+    comeet.com/jobs/firebolt/26.004/). Body/description only with &details=true → adds
+    details[] array of {name,value} HTML sections (Description, Requirements) — strip HTML /
+    html.unescape. company_name=="Firebolt" is the identity check. Drop the evergreen "Join
+    the team" talent-pool post (location null). Strong senior/staff backend + distributed-
+    systems fit: Firebolt is a cloud OLAP data-warehouse / query engine (two Munich Query-
+    Processing SWE roles).
+
+- slug: tinybird
+  name: "Tinybird"
+  url: https://api.lever.co/v0/postings/tinybird?mode=json
+  render: static
+  company: "Tinybird"
+  hints: >-
+    Lever v0 postings API, token `tinybird` (mode=json). Whole board in one GET — flat JSON
+    array, no pagination. Per posting parse id, text (title), categories.{location, team,
+    commitment, allLocations[]}, hostedUrl (absolute apply page), applyUrl (= hostedUrl +
+    /apply), createdAt (ms epoch), plus workplaceType/country (ES). Lever descriptionPlain
+    is intro-only — reconstruct the full body from lists[].{text,content} section blocks
+    (The role / Who we're looking for / How we work) then append additional/additionalPlain;
+    content is HTML so unescape. One evergreen "Open Application" posting sits alongside
+    real reqs. Domain fit: real-time analytics / ClickHouse-based data platform out of
+    Madrid — strong senior/staff backend, distributed-systems and infra fit.
+
+- slug: starrocks
+  name: "StarRocks"
+  url: https://api.rippling.com/platform/api/ats/v1/board/celerdataopenroles/jobs
+  render: static
+  company: "CelerData (StarRocks)"
+  hints: >-
+    Rippling ATS (boardType RIPPLING), board slug `celerdataopenroles`; board identity
+    companyName="CelerData" / <title>Current Job Openings | CelerData</title> — CelerData is
+    the commercial company behind the StarRocks OLAP database (now rebranded Phoenix Data).
+    Reached via the StarRocks careers funnel: starrocks.io/careers → celerdata.com/careers
+    301→ phoenixdata.ai/careers, which links the board
+    `https://ats.rippling.com/celerdataopenroles/jobs`. Unlike the other Rippling tenants in
+    the registry (Kevel/Blue Robotics parse __NEXT_DATA__ from SSR HTML), this tenant serves
+    a clean JSON API. LISTING: one static GET of
+    `https://api.rippling.com/platform/api/ats/v1/board/celerdataopenroles/jobs` → JSON
+    array, WHOLE board in one GET (no pagination at this size). Each row: `uuid` (stable
+    external_id), `name` (title), `department`{id,label}, `url` (absolute
+    ats.rippling.com/celerdataopenroles/jobs/<uuid> detail/apply URL),
+    `workLocation`{label,id} (single). GOTCHA: rows are DUPLICATED one-per-work-location
+    (same uuid, e.g. "Lead Product Manager, Database Core" appears for both "Menlo Park, CA"
+    and "Remote (United States)") — dedup by uuid (5 rows → 4 roles). BODY: same-host detail
+    JSON `.../jobs/<uuid>` → `companyName` (identity), `description` = DICT {company, role}
+    of entity-escaped HTML w/ heavy inline styles (concat company+role, html.unescape then
+    strip tags; `role` is the main body, ~9KB), `createdOn` (ISO8601 = posted_at),
+    `employmentType`{label,id} (e.g. SALARIED_FT), `workLocations[]` (plain strings),
+    `department`, `payRangeDetails[]` (structured salary_raw/source but EMPTY on these
+    postings), `jsonLd` (null). Fallback if the JSON host Cloudflare-gates:
+    ats.rippling.com/celerdataopenroles/jobs HTML →
+    props.pageProps.dehydratedState.queries[0].state.data.items[] (list) and detail
+    props.pageProps.apiData.jobPost. Fit: distributed OLAP database / cloud-data vendor;
+    current 4 roles are StarRocks Database Core/System, Cloud Platform, and DB Support/PM —
+    strong senior/staff backend / distributed-systems / infra fit; locations are Menlo Park,
+    CA + Remote (United States) only (US-scoped, no LatAm/BR remote on the current board).
+
+- slug: buildkite
+  name: "Buildkite"
+  url: https://boards-api.greenhouse.io/v1/boards/buildkite/jobs?content=true
+  render: static
+  company: "Buildkite"
+  hints: >-
+    Greenhouse, token "buildkite" (US host boards-api.greenhouse.io, not EU). Whole board in
+    one GET: /v1/boards/buildkite/jobs?content=true. Parse jobs[]: id, title, location.name,
+    absolute_url, updated_at, content (escaped HTML — html.unescape then strip). Board
+    identity confirmed via /v1/boards/buildkite -> name "Buildkite". Note a separate
+    "buildkite-talent-community" board exists (talent pool, skip it) — the real board is
+    "buildkite". Strong domain fit: CI/CD "Scale-Out Delivery Platform" company;
+    senior/staff backend, distributed-systems, infra and security roles (Principal Engineer
+    - Data, Staff ML/Security Engineer, Platform EM, Pipelines).
+
+- slug: depot
+  name: "Depot"
+  url: https://api.ashbyhq.com/posting-api/job-board/depot?includeCompensation=true
+  render: static
+  company: "Depot"
+  hints: >-
+    Ashby, token `depot` (authoritatively linked from depot.dev/careers ->
+    jobs.ashbyhq.com/depot). Whole board in one static GET: `posting-api/job-
+    board/depot?includeCompensation=true`, roles under `jobs[]`, no pagination. Parse id,
+    title, department/team, location plus `secondaryLocations[].location`,
+    `isRemote`/`workplaceType`, `publishedAt` (use as updated_at), `jobUrl` and `applyUrl`
+    (already absolute jobs.ashbyhq.com links). Body is `descriptionPlain` (clean text) or
+    `descriptionHtml` (html.unescape); structured pay under
+    `compensation.compensationTierSummary` / `summaryComponents[]`
+    (minValue/maxValue/currencyCode/interval). Filter to `isListed:true`. Strong domain fit:
+    Depot ships remote container builds, CI, GitHub Actions runners, remote cache/registry
+    -> Staff Software Engineer ($100K-$250K, remote US/EU/UK) is squarely senior/staff
+    backend/infra/distributed-systems.
+
+- slug: earthly
+  name: "Earthly"
+  url: https://jobs.earthly.dev
+  render: static
+  company: "Earthly Technologies"
+  hints: >-
+    Polymer-hosted board (polymer.co) self-served at jobs.earthly.dev (Heroku/Rails);
+    ats_family=other. No JSON API — all .json endpoints 500; parse SSR HTML. Whole board in
+    one GET of https://jobs.earthly.dev: enumerate job anchors
+    href="https://jobs.earthly.dev/<numeric_id>", grouped under category <header> text (e.g.
+    "Sales & Marketing"); no pagination. Each role detail https://jobs.earthly.dev/<id>
+    carries a schema.org JobPosting JSON-LD <script type="application/ld+json"> — parse
+    title, description (HTML, html.unescape), identifier, datePosted ("YYYY-MM-DD HH:MM:SS
+    UTC"), employmentType, hiringOrganization.name (== "Earthly Technologies", use as
+    identity check), url, jobLocationType (TELECOMMUTE=remote),
+    applicantLocationRequirements[].name (country gate, e.g. US/Canada), jobLocation,
+    baseSalary (salary provenance). Apply is an in-page #apply form (directApply=true) — no
+    external apply_url to capture. Domain fit: Earthly is a build/CI-infra company
+    (Earthfile) whose board normally carries backend/infra eng roles, but the sole current
+    opening is a marketing role — weak fit for a senior/staff backend/distributed-
+    systems/infra/fintech/crypto profile at the moment.
+
+- slug: northflank
+  name: "Northflank"
+  url: https://api.ashbyhq.com/posting-api/job-board/northflank.com?includeCompensation=true
+  render: static
+  company: "Northflank"
+  hints: >-
+    Ashby, org token `northflank.com` (the literal `.com` suffix is load-bearing — bare
+    `northflank` 404s on both posting-api and the embed GraphQL; token was recovered from
+    the marketing bundle's `ashbyhq.com/northflank.com/embed` ref). Whole board in one GET:
+    `posting-api/job-board/northflank.com?includeCompensation=true` returns `{jobs:[...],
+    apiVersion:1}` (~6 roles, no pagination). Per job parse: `id` (UUID), `title`,
+    `location` + `address.postalAddress.addressCountry` + `secondaryLocations[]`,
+    `department`/`team`, `employmentType`, `workplaceType`+`isRemote`, `publishedAt` (ISO);
+    canonical URL `jobUrl` = `jobs.ashbyhq.com/northflank.com/<id>` (`applyUrl` =
+    jobUrl+`/application`); body from `descriptionPlain` (also `descriptionHtml`). Gate on
+    `isListed==true`. Structured comp when present: `compensation.compensationTierSummary`
+    (e.g. "£75K – £104K • 0.05% – 0.1%") + `scrapeableCompensationSalarySummary` (e.g. "£75K
+    - £104K") + `compensationTiers[]`; null for some sales roles. Strong senior/staff
+    backend / distributed-systems / infra fit — Northflank is a Kubernetes-based
+    container/microservices/DB deployment PaaS; Backend Software Engineer + Cloud
+    Infrastructure Engineer are directly on-profile.
+
+- slug: qovery
+  name: "Qovery"
+  url: https://jobs.qovery.com/jobs.rss
+  render: static
+  company: "Qovery"
+  hints: >-
+    Teamtailor career site on the custom domain `jobs.qovery.com` (the default
+    `qovery.teamtailor.com` 404s, so the custom domain is the only entry point, surfaced via
+    qovery.com's `/llms.txt`); crawl its RSS 2.0 feed at `/jobs.rss` (the Teamtailor
+    `api.teamtailor.com` JSON API needs an API key, so the RSS is the best public structured
+    endpoint). One GET returns the whole board, no pagination. Each `<item>` carries
+    `title`, `description` = full job body as HTML-ENTITY-ESCAPED HTML (html.unescape then
+    strip tags), `pubDate` (RFC-822 -> updated_at), `link` = the job URL
+    `https://jobs.qovery.com/jobs/<id>-<slug>` (numeric id in the path, also serves as the
+    apply URL), `guid` (UUID), `remoteStatus` (`fully` -> workplace_type Remote), plus
+    Teamtailor `tt:` namespace fields `tt:department`/`tt:role` and a `tt:locations`
+    container of one or more `tt:location` each with
+    `tt:name`/`tt:address`/`tt:zip`/`tt:city`/`tt:country` (the Solution Engineer lists two,
+    US + Canada -> dedupe). A companion `jobs.json` (JSON Feed 1.1) lists the same postings
+    but has no location field. Qovery is a Kubernetes-management / developer-infra platform
+    (Go, cloud-native) -> strong domain fit for senior/staff backend, distributed-systems
+    and infra roles, but the 3 live openings are all remote-first GTM/sales-engineering
+    (customer success, alliances, solution engineering), no core engineering roles open
+    right now.
+
+- slug: spacelift
+  name: "Spacelift"
+  url: https://careers.spacelift.io/jobs.json
+  render: static
+  company: "Spacelift"
+  hints: >-
+    Teamtailor (token spacelift, custom domain careers.spacelift.io;
+    spacelift.teamtailor.com/jobs 302s here). Whole board in one GET of the JSON Feed
+    https://careers.spacelift.io/jobs.json — no pagination, items[] holds every published
+    role; top-level title=="Spacelift" confirms identity. Per item parse: id (UUID) or
+    _jobposting.identifier.value (numeric job id), title, url (absolute canonical Teamtailor
+    job/apply page), date_published (ISO-8601), content_html (FULL HTML body, not intro-
+    only, already entity-decoded — just strip tags). Structured location/org live under
+    _jobposting (schema.org JobPosting):
+    jobLocation[].address.addressLocality/addressCountry/addressRegion +
+    hiringOrganization.name; remote geo is most reliable from the title parenthetical e.g.
+    "(remote Europe)". No compensation in the feed. RSS twin at /jobs.rss adds
+    <remoteStatus> and <tt:locations>/<tt:department> if you want them.
+    api.teamtailor.com/v1 needs a Bearer API key (406 blind) — use the public JSON feed,
+    static GET. Strong infra/distributed-systems fit: Platform Engineer and Product Software
+    Engineer (both remote Europe) on an IaC/Terraform/OpenTofu/Kubernetes orchestration
+    platform.
+
+- slug: netbird
+  name: "NetBird"
+  url: https://api.ashbyhq.com/posting-api/job-board/netbird?includeCompensation=true
+  render: static
+  company: "NetBird"
+  hints: >-
+    Ashby, token `netbird` (linked authoritatively from netbird.io/careers). Whole board in
+    one GET: https://api.ashbyhq.com/posting-api/job-board/netbird?includeCompensation=true
+    — no pagination, jobs in .jobs[]. Filter isListed==true. Parse id, title, location,
+    department/team, employmentType, isRemote, jobUrl (canonical) or applyUrl (append
+    /application), publishedAt (updatedAt is null here). Body from descriptionPlain (already
+    plaintext; descriptionHtml also present); structured compensation via
+    compensation.compensationTierSummary but empty on this board
+    (shouldDisplayCompensationOnJobPostings false). secondaryLocations[] for multi-loc.
+    Strong domain fit: WireGuard-based mesh-VPN / zero-trust networking infra — mostly
+    Berlin/Remote backend, distributed-systems, and networking engineering roles.
+
+- slug: twingate
+  name: "Twingate"
+  url: https://api.lever.co/v0/postings/twingate?mode=json
+  render: static
+  company: "Twingate"
+  hints: >-
+    Lever, token `twingate`; whole board in one GET (JSON array, no pagination). Per element
+    parse: id, text (title), categories.location/.team/.commitment, hostedUrl (absolute
+    view/apply URL — use as apply_url), createdAt (epoch ms → updated_at),
+    workplaceType/country for remote. Lever descriptionPlain is intro-only; reconstruct the
+    full body from descriptionPlain + lists[].content (structured
+    responsibilities/requirements HTML, html.unescape) + additional/additionalPlain (closing
+    EEO). ZTNA / secure-remote-access company — roles skew DevOps, networking/SDWAN,
+    distributed-systems infra; strong senior/staff backend + infra fit. Note one posting is
+    a speculative "Create your own role" future-roles placeholder.
+
+- slug: doppler
+  name: "Doppler"
+  url: https://api.ashbyhq.com/posting-api/job-board/doppler?includeCompensation=true
+  render: static
+  company: "Doppler"
+  hints: >-
+    Ashby, token `doppler`. Whole board in one GET at posting-api/job-
+    board/doppler?includeCompensation=true — a jobs[] array, no pagination (~3 roles). Parse
+    id, title, department/team, location + secondaryLocations[], publishedAt (updatedAt is
+    null → use publishedAt for freshness), jobUrl (canonical), applyUrl (= jobUrl +
+    "/application"). Description is already plain text: descriptionPlain (full, ~7KB)
+    alongside descriptionHtml — no Lever-style reconstruction needed. Structured comp with
+    includeCompensation=true: compensation.compensationTierSummary ("$220K – $250K • Offers
+    Equity") and scrapeableCompensationSalarySummary ("$220K - $250K"). Skip the evergreen
+    isListed "General Application" catch-all (not a real req). SecretOps/secrets-management
+    infra co; current board is Sales-only (AE, Channel Partners) — weak fit for a
+    senior/staff backend/distributed-systems/infra profile right now.
+
+- slug: infisical
+  name: "Infisical"
+  url: https://api.ashbyhq.com/posting-api/job-board/infisical?includeCompensation=true
+  render: static
+  company: "Infisical"
+  hints: >-
+    Ashby, token "infisical". Whole board in one GET, no pagination: GET
+    https://api.ashbyhq.com/posting-api/job-board/infisical?includeCompensation=true returns
+    top-level jobs[]. Per job parse id, title, location (+ secondaryLocations[].location for
+    multi-city), team/department, employmentType, isRemote/workplaceType, publishedAt; use
+    descriptionPlain (descriptionHtml also present) so no HTML reconstruction needed;
+    canonical page = jobUrl, apply = applyUrl (both
+    jobs.ashbyhq.com/infisical/<id>[/application]). includeCompensation=true surfaces
+    structured compensation{compensationTiers[], summaryComponents[]} though most postings
+    leave it empty. Filter isListed==true. Strong domain fit for senior/staff backend /
+    distributed-systems / infra: Infisical is an open-source secrets-management / platform-
+    security company (Senior Full Stack Engineer, Design Engineer Platform, DX Engineer
+    live).
+
+- slug: akeyless
+  name: "Akeyless"
+  url: https://www.comeet.co/careers-api/2.0/company/27.006/positions?token=7262AE41572157215721C984056E4C405623BE
+  render: static
+  company: "Akeyless"
+  hints: >-
+    Comeet ATS (WordPress comeet-wp-plugin embed on the marketing SPA); company uid
+    `27.006`, public token `7262AE41572157215721C984056E4C405623BE`, slug `akeyless` — all
+    scraped from the careers HTML as comeet_uid/comeet_token. Whole board in one GET:
+    `https://www.comeet.co/careers-api/2.0/company/27.006/positions?token=<token>` returns a
+    flat JSON array (13 roles), no pagination. Per item parse: `uid` (position id e.g.
+    `38.158`), `name` (title), `department` (e.g. Engineering),
+    `location{name,city,country,is_remote}`, `workplace_type` (On-site/Hybrid/Remote),
+    `employment_type`, `experience_level`, `time_updated` (updated_at), `company_name`
+    (=="Akeyless", use as identity gate), and `url_comeet_hosted_page`/`url_active_page` as
+    the absolute apply/detail URL (comeet.com/jobs/akeyless/27.006/<slug>/<uid>). No
+    description in the JSON — both the list and single-position (`position_url`) endpoints
+    are metadata-only; fetch the hosted page HTML and read the `.positions__article-
+    description` block for the body. Token is public and baked into the careers page; re-
+    scrape it if it rotates. Strong infra fit — Backend/DevOps/Automation-Infra/AI-Eng-Tech-
+    Lead/Software-Eng-Team-Lead roles at a secrets-management / vault / KMS security-infra
+    vendor; good senior/staff backend / distributed-systems / infra profile match.
+
+- slug: yugabyte_2
+  name: "YugabyteDB"
+  url: https://boards-api.greenhouse.io/v1/boards/yugabyte/jobs?content=true
+  render: static
+  company: "Yugabyte, Inc."
+  hints: >-
+    Greenhouse, token `yugabyte`, US host (boards-api.greenhouse.io); careers page links
+    boards.greenhouse.io and the board name resolves to "YugabyteDB" (identity confirmed).
+    Whole board in one GET at /v1/boards/yugabyte/jobs?content=true — meta.total=23, no
+    pagination. Parse jobs[]: id, title, location.name, absolute_url (job-
+    boards.greenhouse.io/yugabyte/jobs/<id>), updated_at, departments[].name, offices[];
+    content is a single HTML-escaped blob so html.unescape then strip tags. Strong
+    distributed-SQL-database shop: staff distributed-storage/transaction, SQL-engine,
+    control-plane platform, SRE, and core-DB eng leadership roles are a clean fit for a
+    senior/staff backend / distributed-systems / infra profile.
+
+- slug: xai
+  name: "xAI"
+  url: https://boards-api.greenhouse.io/v1/boards/xai/jobs?content=true
+  render: static
+  company: "xAI Corp."
+  hints: >-
+    Greenhouse board, token `xai` (the x.ai/careers SPA embeds
+    boards.greenhouse.io/xai/jobs/<id>). Whole board in one GET: boards-
+    api.greenhouse.io/v1/boards/xai/jobs?content=true -> jobs[] with meta.total (211), no
+    pagination. Parse id, title, location.name, absolute_url, updated_at; content is HTML
+    entity-escaped so html.unescape then strip tags; departments[]/offices[] give team/site.
+    content=true inlines the full description so no per-job fetch needed; confirm identity
+    via /v1/boards/xai (name=="xAI"). Heavy "AI Tutor" data-labeling/contractor noise (all
+    Remote) drowns the list, but ~61 real eng roles sit underneath: Backend Engineer
+    (London), Backend Engineer - API/Enterprise, Application Security Engineer, Data
+    Engineer, plus Memphis/Austin datacenter+power infra — strong senior/staff backend,
+    distributed-systems and infra fit at a frontier AI lab.
+
+- slug: harvey_ai
+  name: "Harvey"
+  url: https://api.ashbyhq.com/posting-api/job-board/harvey?includeCompensation=true
+  render: static
+  company: "Harvey AI"
+  enumerates_all: false
+  hints: >-
+    Ashby posting-api, token "harvey": whole board in one GET at api.ashbyhq.com/posting-
+    api/job-board/harvey?includeCompensation=true — jobs live under top-level jobs[] (no
+    pagination). Per job parse: id, title, department/team, location + secondaryLocations[]
+    + address.postalAddress, employmentType, workplaceType (Hybrid/Remote/OnSite) +
+    isRemote, isListed (filter true), publishedAt (ISO ts → updated_at), absolute
+    jobUrl/applyUrl (jobs.ashbyhq.com/harvey/<id>[/application]), and descriptionHtml +
+    descriptionPlain (use descriptionPlain). Compensation is structured:
+    compensation.compensationTierSummary / scrapeableCompensationSalarySummary plus
+    compensationTiers[].components[] with minValue/maxValue/currencyCode/interval. Mega-
+    board (343 roles, all listed) so enumerates_all=false and no server-side dept filter on
+    the posting-api — client-side filter department=="Engineering". Strong domain fit: many
+    senior/staff backend, SRE, AI-platform, agents, and DevEx roles across
+    SF/NYC/Toronto/Bengaluru (legal-AI, fintech-adjacent, not crypto).
+
+- slug: sierra_ai
+  name: "Sierra"
+  url: https://api.ashbyhq.com/posting-api/job-board/sierra?includeCompensation=true
+  render: static
+  company: "Sierra"
+  hints: >-
+    Ashby, token `sierra` (careers SPA links to jobs.ashbyhq.com/Sierra/<uuid>,
+    authoritative). Whole board in one GET, no pagination: GET
+    https://api.ashbyhq.com/posting-api/job-board/sierra?includeCompensation=true → parse
+    .jobs[]; each has id, title, department, team, location + secondaryLocations[].location
+    (posting repeats per location, so key/dedupe on id), isRemote/workplaceType, publishedAt
+    (use as updated_at), descriptionPlain (clean text; descriptionHtml also present), jobUrl
+    and applyUrl (already absolute, https://jobs.ashbyhq.com/sierra/<id>/application — use
+    directly, no rebuild). Structured pay under compensation:
+    compensation.scrapeableCompensationSalarySummary ("$160K - $270K") plus
+    compensationTiers[].components[] with minValue/maxValue/currencyCode/interval. Strong
+    domain fit for senior/staff backend / distributed-systems / infra: Platform Engineering,
+    Agent Architecture, Intelligence, Security Engineer at an AI-agent-platform company; SF-
+    primary with London/Paris/NYC and 13 remote roles.
+
+- slug: decagon
+  name: "Decagon"
+  url: https://api.ashbyhq.com/posting-api/job-board/decagon?includeCompensation=true
+  render: static
+  company: "Decagon"
+  hints: >-
+    Ashby family, token "decagon"; whole board in one GET at api.ashbyhq.com/posting-
+    api/job-board/decagon?includeCompensation=true, no pagination. Parse jobs[] — id, title,
+    department, team, location plus secondaryLocations[], isRemote/workplaceType,
+    employmentType, publishedAt; applyUrl and jobUrl are already absolute
+    (jobs.ashbyhq.com/decagon/<id>[/application]); prefer descriptionPlain over
+    descriptionHtml; structured pay in compensation.compensationTierSummary /
+    scrapeableCompensationSalarySummary / compensationTiers[].components[] (min/maxValue,
+    currencyCode, EquityPercentage). Keep only isListed:true. Strong domain fit for
+    senior/staff backend/infra/distributed-systems — 39 of 115 roles are Engineering
+    spanning Core/Cloud/Data/Platform Infrastructure, Agent Orchestration, Voice Agent, and
+    Security.
+
+- slug: hebbia
+  name: "Hebbia"
+  url: https://api.ashbyhq.com/posting-api/job-board/hebbia-ai?includeCompensation=true
+  render: static
+  company: "Hebbia"
+  hints: >-
+    Ashby job board API, token `hebbia-ai` (note the `-ai` suffix; bare `hebbia` 404s).
+    Whole board in one JSON GET, roles in `.jobs[]`. Parse the standard Ashby fields: stable
+    `id`, `title`, top-level `location` string plus `secondaryLocations[]` and
+    `address.postalAddress`, `descriptionPlain`/`descriptionHtml`, `department`/`team`,
+    `employmentType`, `publishedAt`, absolute `jobUrl` and `applyUrl`; prefer
+    `workplaceType`/`isRemote` for remote, filter on `isListed`, and read structured
+    `compensation` (compensationTierSummary + summaryComponents). Single request, no
+    pagination. Strong match for senior/staff backend, SRE/infra, distributed-systems and
+    platform roles at an AI-for-finance/fintech company.
+
+- slug: dust
+  name: "Dust"
+  url: https://api.ashbyhq.com/posting-api/job-board/dust?includeCompensation=true
+  render: static
+  company: "Dust"
+  hints: >-
+    Ashby job board API, token `dust`. Whole board in one JSON GET — `jobs[]` with stable
+    `id`, `title`, `department`/`team`, `location` (+`secondaryLocations`),
+    `employmentType`, `workplaceType`/`isRemote`, `publishedAt`, `jobUrl`, `applyUrl`,
+    `descriptionPlain` (and `descriptionHtml`), plus structured `compensation`
+    (compensationTierSummary + summaryComponents carrying currencyCode/minValue/maxValue,
+    EUR or USD). Filter `isListed`, keep to a single request, prefer `workplaceType` over
+    `isRemote`. Enterprise AI-agent platform (Paris/SF): a couple of genuine Software
+    Engineer (Paris) + Growth Engineer roles fit a backend/platform/infra profile, but the
+    board is currently GTM-heavy (sales/marketing/CX); no crypto/fintech.
+
+- slug: pydantic
+  name: "Pydantic"
+  url: https://pydantic.dev/jobs/llms.txt
+  render: static
+  company: "Pydantic"
+  hints: >-
+    Self-hosted Astro careers board, no ATS — machine-readable index at `/jobs/llms.txt`
+    (text/plain markdown), whole board in one GET. Each entry is `- [Title](absolute_url) —
+    posted YYYY-MM-DD` followed by an indented team/department sub-line: parse title,
+    absolute job URL and posted date from the markdown link line, department from the sub-
+    line. Index carries no location/salary; fetch each `/jobs/<slug>` HTML for the body —
+    the full description lives as an HTML-entity-escaped JSON blob inside the inlined Astro
+    island (a `content` field holding an `<html>…<section id="…-section">` string), so
+    html.unescape then strip tags; timezone/remote band and apply info sit in the Non-
+    Technical Requirements and Apply sections. Fully remote within a PT (UTC-8)–CET (UTC+1)
+    timezone band; no apply URL — application is by email to careers@pydantic.dev with the
+    job title in the subject (mailto only). Strong fit for senior/staff/principal backend,
+    distributed-systems and database-internals work (Rust, Apache DataFusion/Arrow query
+    engines, columnar/Parquet storage, disaggregated compute) plus observability ingest and
+    agent infrastructure.
+
+- slug: langfuse
+  name: "Langfuse"
+  url: https://api.ashbyhq.com/posting-api/job-board/langfuse?includeCompensation=true
+  render: static
+  company: "Langfuse (Finto Technologies GmbH)"
+  hints: >-
+    Ashby, token `langfuse` (linked from the careers SPA, authoritative). Whole board in one
+    GET: parse the `jobs[]` array from https://api.ashbyhq.com/posting-api/job-
+    board/langfuse?includeCompensation=true — no pagination. Per job read id, title,
+    location, secondaryLocations[].location, isRemote/workplaceType, employmentType,
+    department/team, publishedAt, jobUrl, applyUrl (jobUrl + /application), and
+    descriptionPlain (fall back to descriptionHtml). Keep only isListed==true. Structured
+    pay lives under compensation.compensationTiers[]/compensationTierSummary when
+    shouldDisplayCompensationOnJobPostings is set, else the arrays are empty. Strong
+    senior/staff backend / distributed-systems / infra fit: LLM-observability platform, all-
+    senior Europe-remote roles (Data Infrastructure, SDK, IAM & Billing, Cloud
+    Infrastructure).
+
+- slug: arize
+  name: "Arize"
+  url: https://boards-api.greenhouse.io/v1/boards/arizeai/jobs?content=true
+  render: static
+  company: "Arize AI"
+  hints: >-
+    Greenhouse board API, token `arizeai` (note: bare `arize` is a 404; the board token
+    carries the `ai` suffix). Whole board in one GET on the standard US host. Parse `id`,
+    `title`, flattened `location.name`, `absolute_url`, `updated_at`, and `content` = full
+    HTML-ENTITY-ESCAPED description; use html.unescape then strip tags. No salary or
+    employment_type fields. Strong match for senior/staff backend, DevOps/infra, distributed
+    systems, observability/ML-monitoring and forward-deployed engineering roles.
+
+- slug: fiddler_ai
+  name: "Fiddler"
+  url: https://api.ashbyhq.com/posting-api/job-board/fiddler-ai?includeCompensation=true
+  render: static
+  company: "Fiddler AI"
+  hints: >-
+    Ashby family, token "fiddler-ai"; whole board in one GET (no pagination), roles in
+    .jobs[]. Parse id, title, location plus secondaryLocations[].location for extra geos,
+    workplaceType/isRemote, employmentType, publishedAt/updatedAt, descriptionPlain (or
+    descriptionHtml), and applyUrl (absolute, .../application) or jobUrl. Keep
+    includeCompensation=true: structured pay lives under
+    compensation.compensationTierSummary / scrapeableCompensationSalarySummary, only
+    populated when shouldDisplayCompensationOnJobPostings is true. Domain fit: Palo Alto AI-
+    observability / ML-monitoring shop shipping Staff Data Platform Engineer + Staff Product
+    Engineer (backend / infra / distributed-systems), thin on crypto/fintech.
+
+- slug: braintrust_dev
+  name: "Braintrust"
+  url: https://api.ashbyhq.com/posting-api/job-board/braintrust?includeCompensation=true
+  render: static
+  company: "Braintrust"
+  hints: >-
+    Ashby, token `braintrust`. Whole board in one GET — https://api.ashbyhq.com/posting-
+    api/job-board/braintrust?includeCompensation=true returns {jobs:[], apiVersion:1}, no
+    pagination. Parse jobs[].{id, title, location, department, team, employmentType,
+    publishedAt (ISO), jobUrl, applyUrl, descriptionPlain (+descriptionHtml),
+    isRemote/workplaceType, secondaryLocations[].location}. applyUrl/jobUrl already absolute
+    (jobs.ashbyhq.com/braintrust/<id>[/application]); descriptionPlain is clean text, no
+    unescape needed. Structured compensation via includeCompensation=true but tiers came
+    back empty here. US-host Ashby. AI observability/eval devtools — strong senior/staff
+    backend, systems, and cloud-infra fit.
+
+- slug: vellum
+  name: "Vellum"
+  url: https://api.ashbyhq.com/posting-api/job-board/vellum?includeCompensation=true
+  render: static
+  company: "Vellum"
+  hints: >-
+    Ashby job board API, token `vellum`. Whole board in one JSON GET — jobs[] carry the
+    standard Ashby fields: stable `id`, `title`, `department`/`team`, `location`
+    (+`secondaryLocations`, `isRemote`/`workplaceType`), `employmentType`, `publishedAt`,
+    `applyUrl` (jobs.ashbyhq.com/vellum/<id>/application),
+    `descriptionPlain`/`descriptionHtml`, and structured `compensation` (empty here). Keep
+    to a single request; never authorize a host merely linked inside a description. AI/LLM
+    agent-building dev-tools platform (vellum.ai) — reasonable domain fit for senior/staff
+    backend, distributed-systems and infra roles, though the sole current opening is Go-To-
+    Market.
+
+- slug: roboflow
+  name: "Roboflow"
+  url: https://api.ashbyhq.com/posting-api/job-board/Roboflow?includeCompensation=true
+  render: static
+  company: "Roboflow, Inc."
+  hints: >-
+    Ashby posting-api, token `Roboflow` (capital R; human page links
+    jobs.ashbyhq.com/roboflow but API canonical is capitalized). Whole board in one GET:
+    `GET https://api.ashbyhq.com/posting-api/job-board/Roboflow?includeCompensation=true`,
+    jobs in `.jobs[]`, no pagination. Parse per job: id, title, location (+
+    secondaryLocations[], workplaceType, isRemote), jobUrl, applyUrl (jobUrl +
+    "/application"), publishedAt (updated_at), department/team, employmentType,
+    descriptionPlain (prefer over descriptionHtml). Structured pay under
+    compensation.compensationTiers[]/scrapeableCompensationSalarySummary but empty here
+    since shouldDisplayCompensationOnJobPostings=false. Solid senior/staff
+    backend/infra/distributed-systems fit: Infrastructure Engineer, Edge Engineer, Data
+    Infrastructure, ML Research/Inference Engineer, Security Engineer, Full Stack Engineer.
+
+- slug: h2o_ai
+  name: "H2O.ai"
+  url: https://app.jazz.co/widgets/basic/create/h2oai
+  render: static
+  company: "H2O.ai, Inc."
+  hints: >-
+    JazzHR (aka Resumator / app.jazz.co / applytojob.com), token `h2oai`. No JSON/XML API —
+    jobs.json/.xml/api all 404; the marketing SPA embeds a widget script and that IS the
+    feed: one GET to https://app.jazz.co/widgets/basic/create/h2oai returns a JS blob with
+    the ENTIRE board inlined as an HTML string (whole board one GET, no pagination). Parse
+    the HTML fragments: each role is `<div class="resumator-job-title ...">TITLE</div>` then
+    `<div class="resumator-job-info ..."><span class="resumator-job-location ...">Location:
+    </span>LOCATION</div>` (e.g. "Sydney, Australia", "Colombo, Sri Lanka", "Dallas, TX")
+    then `<a class="resumator-job-link ..."
+    href="https://h2oai.applytojob.com/apply/<code>/<slug>?source=Our Career Page Widget">`.
+    Fields: title=job-title div text; location=text node after the Location span;
+    apply_url=job-link href with the `?source=` query stripped → canonical
+    `https://h2oai.applytojob.com/apply/<code>/<slug>`; job id=the `<code>` shortcode in the
+    apply path (e.g. LgHJ5SpT3m). html.unescape titles/locations. No description or
+    updated_at in the widget — fetch the SSR per-job apply page
+    https://h2oai.applytojob.com/apply/<code> for descriptionPlain (its <title> = "<Role> -
+    h2o.ai - Career Page"). Identical alternative feed: the hosted board
+    https://h2oai.applytojob.com/ (also SSR). render=static. Domain fit: H2O.ai is a
+    distributed ML / GenAI platform (H2O-3, in-memory JVM compute) — solid for senior/staff
+    backend, distributed-systems and infra/DevOps; ~10 eng roles (AI Engineer,
+    Senior/Principal AI Engineer, Software Engineer, Senior Software Engineer, Software
+    Engineer DevOps, Senior Data Scientist) among mostly sales-engineering listings.
+
+- slug: highnote
+  name: "Highnote"
+  url: https://boards-api.greenhouse.io/v1/boards/highnote/jobs?content=true
+  render: static
+  company: "Highnote"
+  hints: >-
+    Greenhouse, token `highnote` (US host, not EU). Whole board in one GET: boards-
+    api.greenhouse.io/v1/boards/highnote/jobs?content=true. Parse jobs[]: id, title,
+    location.name, absolute_url (job-boards.greenhouse.io/highnote/jobs/<id>), updated_at,
+    content, plus departments[]/offices[]. content is double-HTML-escaped (<, &nbsp;) —
+    html.unescape before parsing. Strong senior/staff fintech fit: card-
+    issuing/programmable-money platform (ex-Braintree/PayPal/Lending Club founders); board
+    carries Principal Core Infrastructure, Senior Core Infrastructure, Senior Core Services,
+    and Senior Software Engineer - Data Platform backend/distributed-systems roles in SF.
+
+- slug: unit_co
+  name: "Unit"
+  url: https://api.ashbyhq.com/posting-api/job-board/unit?includeCompensation=true
+  render: static
+  company: "Unit (Unit Finance Inc.)"
+  hints: >-
+    Ashby, token `unit` (linked authoritatively from the careers SPA via posting-api/job-
+    board/unit). Whole board in one GET at api.ashbyhq.com/posting-api/job-
+    board/unit?includeCompensation=true; jobs in .jobs[]. Parse id, title, department/team,
+    employmentType, location + secondaryLocations[] +
+    address.postalAddress{addressLocality,addressRegion,addressCountry},
+    isRemote/workplaceType, publishedAt (use as updated_at), jobUrl + applyUrl (already
+    absolute jobs.ashbyhq.com/unit/<id>). Body: prefer descriptionPlain, else html.unescape
+    descriptionHtml. Structured compensation present but gated by
+    shouldDisplayCompensationOnJobPostings (false here). Filter isListed==true. Domain fit:
+    embedded-finance/fintech (moves $40b+/yr, 12m+ API calls/day) with live Senior Backend,
+    Senior Distributed Systems, and Principal Engineer roles — strong senior/staff backend /
+    distributed-systems / infra / fintech fit.
+
+- slug: lead_bank
+  name: "Lead Bank"
+  url: https://api.ashbyhq.com/posting-api/job-board/leadbank?includeCompensation=true
+  render: static
+  company: "Lead Bank"
+  hints: >-
+    Ashby, token `leadbank` (linked from the careers SPA as jobBoardName:'leadbank'; feed
+    self-identifies via jobs.ashbyhq.com/leadbank). Whole board in one GET, no pagination:
+    parse jobs[] with id, title, location plus
+    secondaryLocations[]/isRemote/workplaceType/address, department+team, absolute jobUrl
+    and applyUrl, publishedAt, and descriptionPlain (descriptionHtml also present).
+    includeCompensation=true keeps the compensation object but this org leaves it empty
+    (compensationTiers []), so expect no salary. Small board (16 roles) but a real
+    Engineering dept (Software Engineer II/III/IV, Engineering Manager) at a Kansas City
+    BaaS/fintech bank — decent senior/staff backend + fintech-infra fit.
+
+- slug: cross_river
+  name: "Cross River"
+  url: https://boards-api.greenhouse.io/v1/boards/crossriverbank/jobs?content=true
+  render: static
+  company: "Cross River Bank"
+  hints: >-
+    Greenhouse (US host), token `crossriverbank` (linked from the careers SPA,
+    authoritative). Whole board in one GET: /v1/boards/crossriverbank/jobs?content=true
+    returns jobs[] with no pagination (~30 roles). Parse id, title, location.name (single
+    object, e.g. "Fort Lee, New Jersey, United States"), absolute_url (own greenhouse
+    redirect https://www.crossriver.com/greenhouse?gh_jid=<id>), updated_at,
+    first_published, departments[]. content is HTML and DOUBLE-escaped (&lt;p&gt;...), so
+    html.unescape twice then strip tags. Board meta /v1/boards/crossriverbank confirms name
+    "Cross River". Fintech/BaaS bank in Fort Lee NJ (mostly onsite, little remote) —
+    moderate fit for senior/staff backend, infra, and fintech-platform profiles; a handful
+    of eng roles (Full Stack, QA, IT Infrastructure, AI eng/mgmt) amid mostly
+    banking/ops/legal listings.
+
+- slug: clearbank
+  name: "ClearBank"
+  url: https://api.ashbyhq.com/posting-api/job-board/clearbank?includeCompensation=true
+  render: static
+  company: "ClearBank"
+  hints: >-
+    Ashby job board API, token `clearbank`. Parse the standard Ashby fields (id, title,
+    team/department, location + secondaryLocations[], employmentType, publishedAt,
+    applyUrl). One GET returns every open role with its full description in
+    `descriptionPlain`/`descriptionHtml` (fall back to `descriptionHtml` when plain is
+    empty); `includeCompensation` is set but compensationTiers are empty and
+    shouldDisplayCompensationOnJobPostings=false, so no salary data. Filter on `isListed`.
+    Parse straight from the JSON and keep EXTRA_HOSTS empty; never fetch jobs.ashbyhq.com or
+    a per-job page. Strong fit for senior/staff backend, distributed-systems, infra/platform
+    and fintech/crypto payments roles (Platform Engineer, VP Infrastructure, Director of
+    Engineering - Payments/Digital Assets).
+
+- slug: thought_machine
+  name: "Thought Machine"
+  url: https://api.ashbyhq.com/posting-api/job-board/thought-machine?includeCompensation=true
+  render: static
+  company: "Thought Machine"
+  hints: >-
+    Ashby, token `thought-machine` (linked from careers HTML as ashbyhq.com/thought-machine;
+    the "Greenhouse" HTML hit is only a feature-flag name, ignore it). Whole board in one
+    GET — jobs[] (~43 roles), no pagination. Per job parse: id, title, department + team,
+    location (plain string) plus secondaryLocations[], employmentType,
+    workplaceType/isRemote, publishedAt (use as updated_at), jobUrl (absolute posting page)
+    and applyUrl (…/application), descriptionHtml and descriptionPlain (prefer
+    descriptionPlain, no html.unescape needed). Filter isListed==true. Structured pay under
+    compensation.compensationTiers / compensationTierSummary (present but mostly empty here)
+    — keep includeCompensation=true. Strong senior/staff backend + distributed-systems +
+    infra + fintech fit: Thought Machine builds Vault, a cloud-native core banking/payments
+    platform (Run Engineering, Product Engineering - Vault Core, Back End / Full Stack /
+    Cloud Support roles).
+
+- slug: solaris
+  name: "Solaris"
+  url: https://boards-api.greenhouse.io/v1/boards/solarisbank/jobs?content=true
+  render: static
+  company: "Solaris SE"
+  hints: >-
+    Greenhouse, token `solarisbank` (legacy Solarisbank slug; board name resolves to
+    "Solaris", offices "Solaris SE") on the STANDARD US host boards-api.greenhouse.io — NOT
+    the EU host. Whole board in one GET: /v1/boards/solarisbank/jobs?content=true returns
+    meta.total (~28) jobs, no pagination. Parse jobs[]: id, title, location.name (single
+    string, may be multi-city like "Frankfurt; Berlin"), absolute_url (canonical job-
+    boards.greenhouse.io/solarisbank/jobs/<id>), updated_at (ISO8601), content is HTML-
+    escaped markup — html.unescape then strip tags; departments[].name and offices[].name
+    give org/geo. Berlin-based BaaS / embedded-finance fintech with a banking license —
+    strong fit for senior/staff/principal backend, SRE, distributed-systems, infra, and
+    fintech profiles.
+
+- slug: taktile
+  name: "Taktile"
+  url: https://api.ashbyhq.com/posting-api/job-board/taktile?includeCompensation=true
+  render: static
+  company: "Taktile"
+  hints: >-
+    Ashby board, token `taktile` (linked from taktile.com/careers). Whole board in one GET:
+    GET https://api.ashbyhq.com/posting-api/job-board/taktile?includeCompensation=true ->
+    jobs[] (no pagination). Parse id, title, team/department, location plus
+    secondaryLocations[].location for multi-office roles, absolute jobUrl, applyUrl (=
+    jobUrl + /application), descriptionPlain (or descriptionHtml), publishedAt (no updatedAt
+    field, use publishedAt), isRemote/workplaceType, address.postalAddress for structured
+    geo. Filter isListed=true. compensation is structured (Ashby) but
+    shouldDisplayCompensationOnJobPostings is false and tiers are empty here, so expect no
+    salary. Berlin/NYC/London/Iasi/Sao Paulo fintech (AI-native decisioning for financial
+    institutions) — strong fit for a senior/staff backend / platform / applied-AI /
+    distributed-systems profile.
+
+- slug: oscilar
+  name: "Oscilar"
+  url: https://api.ashbyhq.com/posting-api/job-board/oscilar?includeCompensation=true
+  render: static
+  company: "Oscilar"
+  hints: >-
+    Ashby, token `oscilar` (linked straight from oscilar.com/careers, 6 refs). Whole board
+    in one GET at api.ashbyhq.com/posting-api/job-board/oscilar?includeCompensation=true —
+    no pagination, roles live in jobs[]. Per job parse: id, title, location (plain string),
+    department/team, isRemote, applyUrl (…/{id}/application) + jobUrl, descriptionPlain
+    (plain-text body, no html.unescape needed), updatedAt (null in this feed — fall back to
+    fetch time). Compensation is structured when includeCompensation=true:
+    compensationTierSummary is a human string ('$161K – $183.7K • Offers Equity') alongside
+    scrapeableCompensationSalarySummary + compensationTiers for parsing; some postings also
+    carry secondaryLocations[]. Strong domain fit: fraud/risk/AML fintech running many
+    Sr./Staff Backend (Java), Staff ML, Data, and Security Engineer roles,
+    Brazil/Poland/remote-heavy.
+
+- slug: sift
+  name: "Sift"
+  url: https://api.ashbyhq.com/posting-api/job-board/sift?includeCompensation=true
+  render: static
+  company: "Sift"
+  hints: >-
+    Ashby (token `sift`); whole board in one GET, no pagination — parse `jobs[]`, keep
+    `isListed:true`. Fields: id, title, department/team, location + secondaryLocations[],
+    isRemote/workplaceType, publishedAt, jobUrl, applyUrl (…/<id>/application),
+    descriptionPlain (prefer) or html.unescape descriptionHtml. Pass
+    ?includeCompensation=true → compensation.compensationTierSummary +
+    scrapeableCompensationSalarySummary, plus structured compensationTiers[].components[]
+    (compensationType, minValue/maxValue, currencyCode, interval, EquityPercentage). Domain:
+    real-time fraud / trust & safety / risk fintech-adjacent platform — good senior/staff
+    backend, distributed-systems, ML-infra, security-eng fit (saw Senior Security Engineer,
+    Staff Data Scientist, Forward Deployed Engineer).
+
+- slug: feedzai
+  name: "Feedzai"
+  url: https://boards-api.greenhouse.io/v1/boards/feedzai/jobs?content=true
+  render: static
+  company: "Feedzai"
+  hints: >-
+    Greenhouse (US host boards-api.greenhouse.io), token `feedzai`. Whole board in one GET:
+    /v1/boards/feedzai/jobs?content=true returns all roles (meta.total=34, no pagination).
+    Parse jobs[]: id, title, location.name, absolute_url
+    (careers.feedzai.com/job_description?gh_jid=…), updated_at, content (single HTML-escaped
+    body → html.unescape); departments[].name / offices[].name available for filtering.
+    Confirm identity via /v1/boards/feedzai (name == "Feedzai"). Strong fit for senior/staff
+    backend, distributed-systems, platform/SRE and fintech/fraud ("Digital Trust") profiles
+    — most engineering roles based in Portugal.
+
+- slug: forter
+  name: "Forter"
+  url: https://boards-api.greenhouse.io/v1/boards/forter/jobs?content=true
+  render: static
+  company: "Forter"
+  hints: >-
+    Greenhouse, token `forter` (US host, not EU). Whole board in one GET — no pagination;
+    response is `{meta:{total}, jobs:[...]}` with `content=true` inlining each posting. Per
+    job parse `id`, `title`, `location.name`, `absolute_url` (already the canonical job-
+    boards.greenhouse.io/forter/jobs/<id> link), `updated_at`, `first_published`, and
+    `content` (HTML-escaped — html.unescape then strip); `departments[].name` (e.g.
+    Engineering) and `offices[]` are good filter/geo signals, `company_name` confirms
+    identity ("Forter"). Strong domain fit: fraud-prevention / payments fintech with
+    senior+staff backend roles — Staff Engineer Payments/Billing/Data Products, Senior SWE
+    Payments/Decision Engineering/Platform & AI, mostly Tel Aviv + London.
+
+- slug: riskified
+  name: "Riskified"
+  url: https://boards-api.greenhouse.io/v1/boards/riskified/jobs?content=true
+  render: static
+  company: "Riskified Ltd."
+  hints: >-
+    Greenhouse, token "riskified" (US host boards-api.greenhouse.io); whole board in one GET
+    — /v1/boards/riskified/jobs?content=true returns all ~29 under jobs[] (meta.total), no
+    pagination. Parse jobs[].{id, title, location.name, absolute_url (points at
+    riskified.com/careers/job-description/?gh_jid=), updated_at, content, departments[],
+    offices[]}; content is HTML-escaped (<h2>…) → html.unescape before storing. Confirm
+    identity via /v1/boards/riskified whose name == "Riskified". Domain fit: fintech /
+    ecommerce fraud-prevention (chargeback/risk ML) out of Tel Aviv, New York, Lisbon —
+    strong senior/staff backend, distributed-systems, data-infra and DevSecOps supply.
+
+- slug: hawk_ai
+  name: "Hawk AI"
+  url: https://api.ashbyhq.com/posting-api/job-board/hawk?includeCompensation=true
+  render: static
+  company: "Hawk AI"
+  hints: >-
+    Ashby, token `hawk` (linked directly from the careers SPA at hawk.ai/company/careers →
+    jobs.ashbyhq.com/hawk, so authoritative). Whole board in one GET: GET
+    https://api.ashbyhq.com/posting-api/job-board/hawk?includeCompensation=true, roles in
+    .jobs[] (no pagination). Parse id, title, location (+ secondaryLocations[], isRemote,
+    workplaceType, address), department/team, employmentType, publishedAt; body from
+    descriptionPlain (descriptionHtml for markup); apply via applyUrl (absolute,
+    jobs.ashbyhq.com/hawk/<id>/application), jobUrl also absolute. includeCompensation=true
+    attaches a structured per-posting compensation block. Munich-HQ'd AML / anti-financial-
+    crime SaaS fintech — strong senior/staff backend & distributed-systems fit: Senior
+    Fullstack Java Developer, Senior GenAI / Agentic-AI engineers, Customer Cloud Engineer,
+    Solution Architect.
+
+- slug: complyadvantage
+  name: "ComplyAdvantage"
+  url: https://boards-api.greenhouse.io/v1/boards/complyadvantage/jobs?content=true
+  render: static
+  company: "ComplyAdvantage"
+  hints: >-
+    Greenhouse, token `complyadvantage` (US host boards-api.greenhouse.io, linked from the
+    careers SPA). Whole board in one GET at /v1/boards/complyadvantage/jobs?content=true —
+    no pagination. Parse jobs[]: id, title, location.name, absolute_url (already the
+    canonical complyadvantage.com/careers/jobs/<id>?gh_jid=<id> apply link), updated_at,
+    content (escaped HTML, run html.unescape then strip). Board identity verified via
+    /v1/boards/complyadvantage → name "ComplyAdvantage". Strong domain fit for a
+    senior/staff backend / distributed-systems / infra / ML / fintech profile:
+    AML/financial-crime-risk fintech hiring Principal Data Engineer, Principal ML Engineer,
+    SRE Manager (Data Infra), plus EU eng hubs (Lisbon, Prague, Cluj).
+
+- slug: aztec_labs
+  name: "Aztec"
+  url: https://api.ashbyhq.com/posting-api/job-board/aztec-labs?includeCompensation=true
+  render: static
+  company: "Aztec Labs"
+  hints: >-
+    Ashby, token aztec-labs. Whole board in one GET https://api.ashbyhq.com/posting-api/job-
+    board/aztec-labs?includeCompensation=true -> {jobs:[...], apiVersion}, no pagination.
+    Per job parse id, title, location (plain string e.g. "London HQ"; locationName is null
+    on posting-api, use `location`), secondaryLocations[], isRemote/workplaceType,
+    department/team, employmentType, publishedAt (freshness), applyUrl + jobUrl absolute
+    (jobs.ashbyhq.com/aztec-labs/<id>[/application]); body = descriptionPlain (clean text)
+    or descriptionHtml (strip/unescape); structured pay via
+    compensation.compensationTiers/summaryComponents (empty on current roles, gated by
+    shouldDisplayCompensationOnJobPostings). Privacy L2 / zk-rollup on Ethereum -> strong
+    distributed-systems / cryptography / infra / crypto-fintech fit for senior/staff
+    backend, though the 3 current openings skew ops/legal/GTM.
+
+- slug: aleo
+  name: "Aleo"
+  url: https://api.ashbyhq.com/posting-api/job-board/provable?includeCompensation=true
+  render: static
+  company: "Aleo"
+  hints: >-
+    Ashby, token `provable` — Provable Inc., the company behind the Aleo L1
+    (aleo.org/careers is a Sanity-CMS SPA that embeds this Ashby board, no ATS token in the
+    static HTML). Whole board in one GET at posting-api/job-
+    board/provable?includeCompensation=true, jobs in .jobs[] (also apiVersion). Parse id,
+    title, location (plain string, e.g. "Remote"/"Planet Earth"), isRemote+workplaceType,
+    employmentType, team+department, publishedAt, jobUrl and absolute applyUrl
+    (jobs.ashbyhq.com/provable/<id>), descriptionPlain (+descriptionHtml). compensation
+    object is present but empty here (compensationTiers []/compensationTierSummary null;
+    shouldDisplayCompensationOnJobPostings false) so no salary. Drop the evergreen "General
+    Application" catch-all. Strong senior/staff backend, distributed-systems,
+    protocol/infra, ZK-crypto/Web3 profile fit.
+
+- slug: electric_coin_company
+  name: "Electric Coin Company"
+  url: https://api.ashbyhq.com/posting-api/job-board/zodl?includeCompensation=true
+  render: static
+  company: "Electric Coin Company"
+  hints: >-
+    Ashby job board API, token `zodl` (ZODL / Zcash Open Development Lab — Electric Coin
+    Company's board, embedded on electriccoin.co/careers). Whole board in one JSON GET ->
+    jobs[] with stable `id`, `title`, `department`, `location` (+ `secondaryLocations[]`),
+    `employmentType`, `workplaceType`/`isRemote`, `jobUrl`, `applyUrl`, and full
+    `descriptionPlain`/`descriptionHtml`. Prefer `workplaceType` over `isRemote`.
+    Compensation is gated (shouldDisplayCompensationOnJobPostings=false,
+    compensation.compensationTiers empty) so salary lives in the descriptionPlain head (e.g.
+    `Compensation: $190K-$230K base + equity`) — parse it from there. Strong match for
+    senior/staff/principal backend, distributed-systems, Rust (Zallet full-node Zcash
+    wallet), protocol and crypto/fintech infra roles.
+
+- slug: injective_labs
+  name: "Injective Labs"
+  url: https://api.ashbyhq.com/posting-api/job-board/injective?includeCompensation=true
+  render: static
+  company: "Injective Labs"
+  hints: >-
+    Ashby, token `injective` (linked straight from injectivelabs.org/careers). Whole board
+    in one GET: https://api.ashbyhq.com/posting-api/job-
+    board/injective?includeCompensation=true -> jobs[] (no pagination, ~15 roles; apiVersion
+    at top level). Parse id, title, location (+ secondaryLocations[],
+    isRemote/workplaceType/address for geo), department/team, publishedAt; body from
+    descriptionPlain (descriptionHtml alt, already unescaped). applyUrl and jobUrl are
+    absolute jobs.ashbyhq.com links. Ashby structured compensation lives under
+    compensation.compensationTiers[] / summaryComponents[] but is null here
+    (shouldDisplayCompensationOnJobPostings=false). Strong senior/staff backend /
+    distributed-systems / infra / crypto fit: Protocol Engineer, Quant Researcher,
+    Growth/Integration Engineer, Mobile App Developer.
+
+- slug: writer
+  name: "Writer"
+  url: https://api.ashbyhq.com/posting-api/job-board/writer?includeCompensation=true
+  render: static
+  company: "Writer"
+  hints: >-
+    Ashby, token `writer` (linked from writer.com/company/careers → jobs.ashbyhq.com/writer,
+    so authoritative). Whole board in one GET, no pagination: jobs[] holds all 52 roles.
+    Parse id, title, location plus secondaryLocations[].location, workplaceType/isRemote,
+    publishedAt, and descriptionPlain (or descriptionHtml); applyUrl is already absolute
+    (jobs.ashbyhq.com/writer/<id>/application), jobUrl too. Pass includeCompensation=true
+    for the structured compensation block. Filter isListed=true. Strong domain fit for
+    senior/staff backend / distributed-systems / infra — enterprise generative-AI platform
+    with real eng depth (Software engineer generative AI, connectors & MCP, LLM-infra).
+
+- slug: bunnynet
+  name: "bunny.net"
+  url: https://bunnynet.teamtailor.com/jobs.rss
+  render: static
+  company: "bunny.net"
+  hints: >-
+    Teamtailor, token `bunnynet`; whole board in one GET via the public RSS feed
+    https://bunnynet.teamtailor.com/jobs.rss (no API key needed — the Teamtailor JSON:API
+    requires X-Api-Key, RSS does not). Parse `<channel>` > `<item>[]`: title, link
+    (canonical job page = apply URL), guid (UUID), pubDate (RFC-822), description (HTML-
+    encoded full body — html.unescape), remoteStatus, tt:department, tt:role, and
+    tt:locations > tt:location[] with tt:name/tt:city/tt:country/tt:address/tt:zip. ~8
+    items, all remoteStatus=fully; 2 are evergreen "Open Application" talent pools —
+    dedupe/skip by title or /jobs slug. SSR /jobs HTML also carries titles+links if you ever
+    prefer scraping over RSS. Strong senior/staff backend/distributed-systems/infra fit —
+    bunny.net is a global CDN/edge-compute platform (Magic Containers edge orchestration,
+    Developer Platform, Backend Engineer, Security).
+
+- slug: wasabi
+  name: "Wasabi"
+  url: https://boards-api.greenhouse.io/v1/boards/wasabi/jobs?content=true
+  render: static
+  company: "Wasabi Technologies"
+  hints: >-
+    Greenhouse, token `wasabi` (careers SPA embeds it via /greenhouse.html ->
+    boards.greenhouse.io/embed/job_board/js?for=wasabi). Whole board in one GET at boards-
+    api.greenhouse.io/v1/boards/wasabi/jobs?content=true (US host, not EU; meta.total=9, no
+    pagination). Parse jobs[]: id, title, location.name, absolute_url (job-
+    boards.greenhouse.io/wasabi/jobs/<id>), updated_at, content (HTML entity-escaped,
+    html.unescape then strip); departments[]/offices[] present. Board identity confirms
+    "Wasabi Technologies". Domain = S3-compatible hot cloud object storage, a strong
+    distributed-systems/infra/storage-backend fit; current 9 openings skew
+    sales/finance/accounting with one Principal Cloud Support Engineer, so backend/infra
+    reqs are intermittent.
+
+- slug: cloudinary
+  name: "Cloudinary"
+  url: https://api.lever.co/v0/postings/cloudinary?mode=json
+  render: static
+  company: "Cloudinary"
+  hints: >-
+    Lever, token `cloudinary` (authoritative — linked from the inline job-board.js on
+    cloudinary.com/careers/jobs: `const ACCOUNT_NAME='cloudinary'`). Whole board in one GET:
+    https://api.lever.co/v0/postings/cloudinary?mode=json returns a flat JSON array (~29
+    roles, no pagination). Per posting parse: id, text (title),
+    categories.{location,team,commitment,allLocations}, workplaceType
+    (remote|hybrid|onsite), country, createdAt (epoch ms), hostedUrl, applyUrl. Description
+    is intro-only in descriptionPlain; reconstruct the full body from lists[].{text,content}
+    + additionalPlain (additional often empty). Good senior/staff backend + distributed-
+    systems/infra fit: CTO org holds Staff Backend Engineers (Media Management / Accounts /
+    Agent Experience), Senior Edge Compute & Backend, Software Architect – Platform, and
+    Staff Data Engineer — media/CDN infra, mostly Kraków/Israel hybrid.
+
+- slug: mux
+  name: "Mux"
+  url: https://api.ashbyhq.com/posting-api/job-board/mux?includeCompensation=true
+  render: static
+  company: "Mux"
+  hints: >-
+    Ashby, token `mux` (careers SPA at mux.com/jobs links to jobs.ashbyhq.com/mux —
+    authoritative). Whole board in one GET: api.ashbyhq.com/posting-api/job-
+    board/mux?includeCompensation=true, roles in `.jobs[]` (filter `isListed`), no
+    pagination. Parse id, title, department/team, employmentType, location (+
+    secondaryLocations[]), isRemote/workplaceType, publishedAt, jobUrl (canonical
+    jobs.ashbyhq.com/mux/<id>), applyUrl (<jobUrl>/application); body from descriptionPlain
+    (or html.unescape descriptionHtml). Structured comp under compensation:
+    compensationTierSummary + compensationTiers[].components[] and summaryComponents[]
+    (compensationType Salary/EquityCashValue, minValue/maxValue, currencyCode, interval)
+    plus scrapeableCompensationSalarySummary. Strong infra/distributed-systems fit — Mux is
+    video encoding/streaming/real-time observability infrastructure for developers; current
+    listing is a Senior Platform Engineer.
+
+- slug: livekit
+  name: "LiveKit"
+  url: https://api.ashbyhq.com/posting-api/job-board/livekit?includeCompensation=true
+  render: static
+  company: "LiveKit"
+  hints: >-
+    Ashby (token `livekit`), linked straight from livekit.io/careers. Whole board in one GET
+    at api.ashbyhq.com/posting-api/job-board/livekit?includeCompensation=true -> jobs[]
+    array, no pagination. Parse id, title, location plus secondaryLocations[],
+    team/department, employmentType, isRemote/workplaceType, publishedAt; jobUrl is the
+    canonical posting and applyUrl the apply link (jobs.ashbyhq.com/livekit/<id>). Body is
+    descriptionPlain (descriptionHtml also present); salary via
+    compensation.compensationTierSummary / scrapeableCompensationSalarySummary when
+    includeCompensation=true. Strong senior/staff backend + distributed-systems/infra fit:
+    WebRTC/real-time media infra, heavy Rust + Go (Staff Rust SDK Engineer, Senior
+    Infrastructure Engineer, Staff Security Engineer).
+
+- slug: agora
+  name: "Agora"
+  url: https://api.rippling.com/platform/api/ats/v1/board/agora/jobs
+  render: static
+  company: "Agora, Inc."
+  hints: >-
+    Rippling ATS (boardType RIPPLING, board slug `agora`); careers SPA at
+    agora.io/en/careers is Webflow and embeds nothing — the token is linked from
+    /en/careers/open-positions/ (ats.rippling.com/agora/jobs). LISTING: one static GET of
+    https://api.rippling.com/platform/api/ats/v1/board/agora/jobs returns the WHOLE board as
+    a flat JSON array (no pagination wrapper). Each item: `uuid` (stable external_id),
+    `name` (title; trim stray leading/trailing whitespace), `department.label`,
+    `workLocation.label` (single location string), `url` (absolute detail/apply URL =
+    ats.rippling.com/agora/jobs/<uuid>). GOTCHA: the array repeats one posting per location
+    under the SAME uuid (Workable-style) — dedupe by uuid (17 rows -> ~14 unique; Evangelist
+    x3, Product Marketing Manager x2). BODY: same-slug detail GET
+    https://api.rippling.com/platform/api/ats/v1/board/agora/jobs/<uuid> -> `description`
+    object {company, role} (inline HTML — html.unescape + strip tags/inline styles), plus
+    `workLocations[]`, `employmentType`, `createdOn` (posted_at epoch), `payRangeDetails`
+    (compensation), `companyName`, and `jsonLd` (schema.org JobPosting). Fallback if the API
+    shifts: same data ships in ats.rippling.com/agora/jobs SSR `<script
+    id="__NEXT_DATA__">`. Domain fit: real-time engagement / RTC infra (voice/video/live-
+    streaming/ConvoAI at global scale) is a strong distributed-systems/infra story, BUT
+    current openings skew sales/marketing/product/DevRel/solutions with the few product/eng
+    roles concentrated in Shanghai — thin on senior/staff backend IC roles right now.
+
+- slug: ably
+  name: "Ably"
+  url: https://boards-api.greenhouse.io/v1/boards/ably30/jobs?content=true
+  render: static
+  company: "Ably"
+  hints: >-
+    Greenhouse board token `ably30` (careers page is a marketing SPA; its job-listings vite
+    bundle is what fetches Greenhouse — token is non-obvious, NOT `ably` which 404s). Whole
+    board in one GET: /v1/boards/ably30/jobs?content=true → meta.total + jobs[]; parse id,
+    title, location.name, absolute_url (renders on job-boards.eu.greenhouse.io), updated_at,
+    first_published, departments[].name. content is HTML-entity-encoded (<div…) —
+    html.unescape before use. Uses the standard global boards-api.greenhouse.io host (not
+    the EU boards-api). A sibling board `ablyus` ("Ably - Freelance") exists but is
+    currently empty — skip it. Realtime pub/sub messaging / distributed-systems infra shop;
+    strong senior/staff backend + infra fit (e.g. Software Engineer, Pub/Sub; Technical
+    Lead, Developer Experience).
+
+- slug: instaclustr
+  name: "Instaclustr"
+  url: https://netapp.eightfold.ai/api/apply/v2/jobs?domain=netapp.com&query=instaclustr&start=0&num=100
+  render: static
+  company: "Instaclustr (a NetApp company)"
+  enumerates_all: false
+  hints: >-
+    Eightfold board on NetApp's shared tenant (netapp.eightfold.ai, domain=netapp.com),
+    filtered to Instaclustr roles via query=instaclustr — Instaclustr is a NetApp company
+    with no standalone ATS, so this is its board. NOT the whole board: this query slices ~11
+    Instaclustr roles out of NetApp's mega-board, so enumerates_all=false; paginate
+    start/num (num=100 grabs the slice in one GET), total in count. List GET returns
+    positions[]: id (numeric, e.g. 42382025), name/posting_name (title), location +
+    locations[] (array, office code in parens), business_unit (Product Group (B6000) ==
+    Instaclustr engineering), department, canonicalPositionUrl (absolute apply URL
+    https://netapp.eightfold.ai/careers/job/<id>), display_job_id/ats_job_id,
+    t_create/t_update (unix epoch), work_location_option. job_description is EMPTY in the
+    list — fetch per-id detail GET
+    https://netapp.eightfold.ai/api/apply/v2/jobs/<id>?domain=netapp.com&domainType=external
+    for job_description (HTML: html.unescape + strip tags, entities). Strong senior/staff
+    distributed-systems + infra fit: managed Apache Cassandra/Kafka/PostgreSQL/OpenSearch,
+    SRE, open-source committer roles.
+
+- slug: camunda
+  name: "Camunda"
+  url: https://api.ashbyhq.com/posting-api/job-board/camunda?includeCompensation=true
+  render: static
+  company: "Camunda"
+  hints: >-
+    Ashby posting-api, token "camunda"; whole board in one GET (top-level jobs[], ~35 roles,
+    no pagination). Per job parse id, title, department + team, location (plus
+    secondaryLocations[]), employmentType, workplaceType/isRemote, publishedAt; jobUrl and
+    applyUrl are already absolute (jobs.ashbyhq.com/camunda/<id> and .../application) so no
+    rebuild. Body from descriptionPlain (descriptionHtml also present). Structured pay under
+    compensation: compensationTiers[]/summaryComponents plus
+    scrapeableCompensationSalarySummary, only meaningful when
+    shouldDisplayCompensationOnJobPostings is true. Filter isListed==true. Domain fit is
+    strong: senior/staff backend, cloud/infra, distributed-systems (Zeebe/Camunda 8 process
+    orchestration) and appsec roles.
+
+- slug: jetbrains
+  name: "JetBrains"
+  url: https://boards-api.greenhouse.io/v1/boards/jetbrains/jobs?content=true
+  render: static
+  company: "JetBrains"
+  hints: >-
+    Greenhouse (token `jetbrains`), EU-resident board — absolute_url/apply links resolve to
+    job-boards.eu.greenhouse.io, but the global boards-api.greenhouse.io host serves the
+    whole board in one GET (boards-api.eu.greenhouse.io is unreachable here). GET
+    /v1/boards/jetbrains/jobs?content=true → jobs[] (meta.total≈98, no pagination). Parse
+    id, title, location.name, absolute_url, updated_at, departments[]/offices[], and content
+    (HTML-escaped once — html.unescape to recover `<p>` from `<p>`). Verify identity via
+    /v1/boards/jetbrains (name='JetBrains') or per-job company_name. Strong senior/staff
+    backend/infra/platform fit: Kotlin/JVM ecosystem, build & cloud infrastructure, compiler
+    and distributed-systems roles; multi-location EU + remote, no fintech/crypto.
+
+- slug: socket_dev
+  name: "Socket"
+  url: https://api.ashbyhq.com/posting-api/job-board/socket?includeCompensation=true
+  render: static
+  company: "Socket"
+  hints: >-
+    Ashby, token "socket" — whole board in one GET at https://api.ashbyhq.com/posting-
+    api/job-board/socket?includeCompensation=true, roles in .jobs[], no pagination. Parse
+    id, title, department/team, location plus secondaryLocations[], workplaceType/isRemote,
+    employmentType, publishedAt; body from descriptionPlain (descriptionHtml if you need
+    markup); apply link is applyUrl (jobs.ashbyhq.com/socket/<id>/application) or jobUrl for
+    the posting; structured pay via compensation only when
+    shouldDisplayCompensationOnJobPostings is set (mostly hidden here). Filter isListed.
+    IDENTITY TRAP: the "socket" token collides on Greenhouse with a different company
+    (crypto chain-abstraction protocol, socket.tech) — this Ashby board is socket.dev, the
+    open-source supply-chain security firm (customers Anthropic/xAI/Figma/Vercel). Strong
+    senior/staff backend, platform, infra, and security/vuln-research fit; roles are remote
+    US/EU.
+
+- slug: endor_labs
+  name: "Endor Labs"
+  url: https://boards-api.greenhouse.io/v1/boards/endorlabs/jobs?content=true
+  render: static
+  company: "Endor Labs"
+  hints: >-
+    Greenhouse, token `endorlabs` (linked from the careers SPA — authoritative; board name
+    resolves to "Endor Labs"). US host boards-api.greenhouse.io, not EU. Whole board in one
+    GET: /v1/boards/endorlabs/jobs?content=true returns jobs[] (meta.total=18, no
+    pagination). Parse per job: id, title, absolute_url (canonical job-
+    boards.greenhouse.io/endorlabs/jobs/<id>), updated_at (ISO w/ tz), location.name (free-
+    text, often multi-city/"Remote US"), departments[].name, offices[]. content is double-
+    escaped HTML — html.unescape it (fields come back as &lt;h2&gt;…). Strong domain fit:
+    application-security platform with many senior/staff/principal backend + Golang +
+    program-analysis/security-researcher roles (Palo Alto / US-remote / Bengaluru).
+
+- slug: stackblitz
+  name: "StackBlitz"
+  url: https://boards-api.greenhouse.io/v1/boards/stackblitz/jobs?content=true
+  render: static
+  company: "StackBlitz"
+  hints: >-
+    Greenhouse board, token `stackblitz` (board self-identifies as "Bolt.new by StackBlitz"
+    — WebContainers / in-browser runtime; careers SPA at stackblitz.com/careers is Bolt-
+    branded and lazy-loads this feed). Whole board in one GET via boards-
+    api.greenhouse.io/v1/boards/stackblitz/jobs?content=true (US host, meta.total≈10, no
+    pagination); parse jobs[].id, title, location.name (single flattened string, mostly
+    Remote), absolute_url (job-boards.greenhouse.io/stackblitz/jobs/<id>), updated_at,
+    departments[].name, company_name; `content` is the full HTML description, HTML-entity-
+    escaped (html.unescape + strip tags); no salary fields. Strong fit for senior/staff
+    backend / distributed-systems / infra — Staff SRE, Staff/Senior Applied AI Engineer,
+    Fullstack Engineering Manager.
