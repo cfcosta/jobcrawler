@@ -198,6 +198,29 @@ async def test_swipe_filter_drawer_mirrors_positions_grammar() -> None:
         store.close()
 
 
+async def test_swipe_bare_defaults_open_on_the_reachable_set() -> None:
+    """A bare /swipe opens tighter than /positions: remote-anywhere (home-relative,
+    so +BR) OR non-US relocation, stage new, applied companies hidden. The drawer
+    echoes the active defaults so the deck's query is visible + shareable."""
+    store = _seeded_store()
+    try:
+        async with _client(create_app(store)) as c:
+            bare = (await c.get("/swipe")).text
+            for checked in (
+                'name="remote_anywhere" value="1" checked',
+                'name="relocation_no_us" value="1" checked',
+                'name="hide_applied_companies" value="1" checked',
+            ):
+                assert checked in bare, checked
+            # an explicit query is taken verbatim — the defaults never re-assert, so a
+            # mobility box the operator left unchecked stays unchecked
+            explicit = (await c.get("/swipe?track_status=new&sort=score")).text
+            assert 'name="remote_anywhere" value="1" checked' not in explicit
+            assert 'name="relocation_no_us" value="1" checked' not in explicit
+    finally:
+        store.close()
+
+
 async def test_swipe_nav_link_in_shell() -> None:
     """The shared shell nav links the deck from every page (and marks it active)."""
     store = _seeded_store()
@@ -218,9 +241,12 @@ async def test_swipe_queue_defaults_to_new_undismissed() -> None:
         async with _client(create_app(store)) as c:
             cards, body = await _queue(c)
             pids = _pids(cards)
-            # the two fresh `new` rows, best match first (sort=score default)
-            assert pids == [_ACME_PID, _BETA_PID]
-            # dismissed and already-triaged rows stay out of the default deck
+            # the bare deck opens on the operator's reachable set (§16): the strong
+            # remote-anywhere row survives; BETA (Lisbon, office-bound, no relocation)
+            # is filtered out by the remote-anywhere / non-US-relocation default
+            assert pids == [_ACME_PID]
+            assert _BETA_PID not in pids
+            # dismissed and already-triaged rows stay out of the default deck too
             assert _GAMA_PID not in pids
             assert _DELTA_PID not in pids
             assert body["page"] == 1
@@ -287,7 +313,13 @@ async def test_swipe_queue_paginates() -> None:
             store.upsert_position(
                 "acme",
                 f"https://acme.test/{i}",
-                fields={"title": f"Engineer {i}", "company": "Acme", "location": "R"},
+                # remote-anywhere so the rows clear the bare deck's mobility default
+                fields={
+                    "title": f"Engineer {i}",
+                    "company": "Acme",
+                    "location": "Remote",
+                    "remote_scope": "anywhere",
+                },
                 content_hash=f"h{i}",
             )
         async with _client(create_app(store)) as c:

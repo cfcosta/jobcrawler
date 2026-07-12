@@ -417,8 +417,26 @@ def _float_param(params: Any, name: str) -> float | None:
         return None
 
 
+# The swipe deck opens on a tighter working set than /positions: the operator's
+# reachable jobs only. remote_anywhere is home-relative (worldwide remote OR a fence
+# covering config.home_country(), which defaults to BR — the checkbox renders
+# "Remote anywhere +BR"); relocation_no_us adds postings that offer non-US
+# relocation. The two share the mobility OR-group, so together they read "any way I
+# could take this". Stage new + applied companies hidden match the list default. A
+# bare /swipe applies these; any drawer submit carries explicit params and overrides.
+_SWIPE_BARE_FILTERS = {
+    "track_status": "new",
+    "hide_applied_companies": "1",
+    "remote_anywhere": "1",
+    "relocation_no_us": "1",
+}
+
+
 def _read_filters(
-    params: Any, *, default_new_view: bool = False
+    params: Any,
+    *,
+    default_new_view: bool = False,
+    bare_defaults: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Parse the browse query-string into (``search_positions`` kwargs, raw values).
 
@@ -427,17 +445,18 @@ def _read_filters(
     about a posting it applied to even after the board closes it).
 
     ``default_new_view`` opens a BARE request (empty query string) on the operator's
-    working set: stage ``new`` with applied companies hidden. Only a fully-empty query
-    gets the defaults — any form submission carries at least the stage/sort selects, so
-    an explicitly UNchecked checkbox (absent from a non-empty query) is honored rather
-    than re-defaulted, and deep links with their own params stay exactly as written.
+    working set: stage ``new`` with applied companies hidden, unless ``bare_defaults``
+    supplies a richer starting query (the swipe deck opens on a tighter one). Only a
+    fully-empty query gets the defaults — any form submission carries at least the
+    stage/sort selects, so an explicitly UNchecked checkbox (absent from a non-empty
+    query) is honored rather than re-defaulted, and deep links stay as written.
 
     §17 collapse is ON by default (each real-world job shows once, cross-board handled
     state respected); ``?collapse=0`` is the per-request escape to the raw row view (the
     "Everything" pill uses it). The whole axis vanishes when the UI consumer flag is off.
     """
     if default_new_view and not len(params):
-        params = {"track_status": "new", "hide_applied_companies": "1"}
+        params = bare_defaults or {"track_status": "new", "hide_applied_companies": "1"}
     collapse = config.dedup_ui_enabled() and (params.get("collapse") or "") not in {
         "0",
         "false",
@@ -1114,7 +1133,11 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
         The queue itself is fetched from ``/api/swipe/queue`` with the SAME query
         string, so a filtered deep link and the drawer stay one grammar.
         """
-        _, raw = _read_filters(request.query_params, default_new_view=True)
+        _, raw = _read_filters(
+            request.query_params,
+            default_new_view=True,
+            bare_defaults=_SWIPE_BARE_FILTERS,
+        )
         return templates.TemplateResponse(
             request=request,
             name="swipe.html",
@@ -1329,10 +1352,15 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
 
     @app.get("/api/swipe/queue")
     def api_swipe_queue(request: Request) -> JSONResponse:
-        """The deck's card feed: the ``_read_filters`` grammar with the same bare-query
-        default as the positions page (stage ``new``, applied companies hidden, best
-        match first), paged, each row shaped by :func:`_card_dict`."""
-        kwargs, _ = _read_filters(request.query_params, default_new_view=True)
+        """The deck's card feed: the ``_read_filters`` grammar with the swipe bare-query
+        default (``_SWIPE_BARE_FILTERS`` — stage ``new``, applied companies hidden,
+        remote-anywhere or non-US relocation), paged, each row shaped by
+        :func:`_card_dict`."""
+        kwargs, _ = _read_filters(
+            request.query_params,
+            default_new_view=True,
+            bare_defaults=_SWIPE_BARE_FILTERS,
+        )
         page = max(1, _int_param(request.query_params, "page") or 1)
         rows = store.search_positions(
             **kwargs, limit=_PAGE_SIZE + 1, offset=(page - 1) * _PAGE_SIZE
