@@ -4701,33 +4701,6 @@
     is the only reliable software filter. Strong source for broad remote software / SDET /
     backend / fullstack engineering roles.
 
-- slug: dailyremote_software
-  name: "DailyRemote Software Development"
-  url: https://dailyremote.com/remote-software-development-jobs
-  render: static
-  enumerates_all: false
-  hints: >-
-    DailyRemote remote-jobs aggregator, server-rendered HTML with schema.org ld+json (render
-    static, no JS). The software-development listing embeds an `@graph`; locate the member
-    whose `@type` is `ItemList`: `numberOfItems` is the board total (~55.7k) and
-    `itemListElement[]` lists 20 jobs/page as `{position, url, name}` where url is `/remote-
-    job/<slug>-<id>` and name is "Title at Company"; paginate with `?page=N` (position is
-    page-relative, not global). The list also inlines ~10 full JobPosting objects, but their
-    `hiringOrganization.name`/`identifier.name` are masked as `[Unlock with Premium]` for
-    all but the 1-2 freshest — do NOT read company from the list. Instead fetch each detail
-    page `/remote-job/<slug>-<id>`, whose standalone `@type:JobPosting` ld+json carries the
-    REAL `hiringOrganization.name`, `identifier` (name=company, value=`<id>-<slug>`),
-    `title`, `datePosted`, `validThrough`, `employmentType`, `jobLocationType`,
-    `occupationalCategory`, `applicantLocationRequirements` (array of Country objects — the
-    entire world for global-remote, or a single country), and `description` which is HTML-
-    ENTITY-ESCAPED (html.unescape, then strip tags). `baseSalary` exists but is normally a
-    0/0 MonetaryAmount placeholder — treat 0 min/max as no salary. For the outbound apply
-    link, GET `https://dailyremote.com/apply/<id>` (numeric id from the slug tail): it
-    302-redirects to the employer's real ATS (e.g. jobs.micro1.ai) with
-    utm_source=dailyremote params — follow one hop to capture apply_url. Broad remote
-    software/engineering coverage: frontend, backend, devops, security, ML, data,
-    blockchain, and eng-adjacent PM roles.
-
 - slug: remotejobs
   name: "RemoteJobs.com Software Developer Jobs"
   url: https://www.remotejobs.com/jobs?q=software
