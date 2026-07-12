@@ -9,9 +9,46 @@
      data-query="{{ query_string }}">
   <canvas id="swipe-bg" class="swipe-bg" aria-hidden="true"></canvas>
 
+  <header id="swipe-hud" class="swipe-hud">
+    <div class="hud-left">
+      <span class="hud-count" title="Card position / cards in the deck"><strong id="hud-pos">–</strong><span class="hud-sep">/</span><span id="hud-total">–</span></span>
+      <div class="hud-progress" aria-hidden="true"><div id="hud-bar" class="hud-bar"></div></div>
+    </div>
+    <div class="hud-right">
+      <span class="hud-tally tally-pass" title="Passed this session"><span class="tally-mark">✕</span> <strong id="hud-passed">0</strong></span>
+      <span class="hud-tally tally-like" title="Marked interested this session"><span class="tally-mark">★</span> <strong id="hud-liked">0</strong></span>
+      <span id="hud-streak" class="hud-streak" hidden></span>
+      <button type="button" id="swipe-undo" class="hud-btn" title="Undo the last decision (u)" disabled>⟲ undo</button>
+    </div>
+  </header>
+
   <div class="swipe-arena">
     <div id="swipe-deck" class="swipe-deck" aria-live="polite"></div>
+
+    <div id="swipe-loading" class="swipe-loading" hidden>
+      <span class="loading-pulse"></span> Shuffling the deck…
+    </div>
+
+    <div id="swipe-empty" class="swipe-empty" hidden>
+      <div class="empty-glyph" aria-hidden="true">🃏</div>
+      <h2 id="empty-title">Deck cleared</h2>
+      <p id="empty-stats" class="empty-stats"></p>
+      <p class="empty-actions">
+        <button type="button" id="swipe-reload" class="empty-reload">Deal again</button>
+        <a class="empty-link" href="/positions">Open the positions list</a>
+      </p>
+    </div>
   </div>
+
+  <footer class="swipe-keys" aria-label="Keyboard shortcuts">
+    <span class="key-item key-pass"><kbd>h</kbd> pass</span>
+    <span class="key-item"><kbd>k</kbd> back</span>
+    <span class="key-item"><kbd>j</kbd> next</span>
+    <span class="key-item key-like"><kbd>l</kbd> interested</span>
+    <span class="key-item"><kbd>u</kbd> undo</span>
+    <span class="key-item"><kbd>o</kbd> open posting</span>
+    <span class="key-item"><kbd>enter</kbd> details</span>
+  </footer>
 
   <noscript>
     <p class="empty swipe-noscript">

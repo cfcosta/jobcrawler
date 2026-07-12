@@ -135,6 +135,29 @@ async def test_swipe_page_renders() -> None:
         store.close()
 
 
+async def test_swipe_page_has_deck_scaffolding() -> None:
+    """The shell carries every mount the deck JS binds to — the card stack, the
+    HUD (progress + session tally + undo), the cleared-deck state, and the
+    always-visible key legend for the four core keys."""
+    store = _seeded_store()
+    try:
+        async with _client(create_app(store)) as c:
+            body = (await c.get("/swipe")).text
+            for hook in (
+                'id="swipe-deck"',
+                'id="swipe-hud"',
+                'id="swipe-empty"',
+                'id="swipe-undo"',
+                'data-queue-url="/api/swipe/queue"',
+                'data-decide-url="/api/swipe"',
+            ):
+                assert hook in body, hook
+            for key in ("<kbd>j</kbd>", "<kbd>k</kbd>", "<kbd>h</kbd>", "<kbd>l</kbd>"):
+                assert key in body, key
+    finally:
+        store.close()
+
+
 # -- the queue ---------------------------------------------------------------
 
 

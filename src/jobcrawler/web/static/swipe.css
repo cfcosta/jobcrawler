@@ -1,1 +1,593 @@
-/* Swipe-triage deck (§16) — full styling lands in Parts 2/3. */
+/* Swipe-triage deck (§16). Reuses app.css tokens; everything here is scoped under
+   .swipe-stage / .swipe-main so the rest of the tracker never inherits deck style. */
+
+/* Full-bleed stage: the deck owns the viewport below the topbar; no page scroll. */
+.swipe-main {
+  max-width: none;
+  padding: 0;
+}
+body:has(.swipe-stage) {
+  overflow: hidden;
+}
+body:has(.swipe-stage) .site-footer {
+  display: none;
+}
+
+.swipe-stage {
+  position: relative;
+  height: calc(100vh - var(--topbar-h));
+  height: calc(100dvh - var(--topbar-h));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.swipe-bg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+}
+
+/* ---- HUD ----------------------------------------------------------------- */
+
+.swipe-hud {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 20px 4px;
+}
+.hud-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.hud-count {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+.hud-count strong {
+  color: var(--ink);
+  font-size: 15px;
+}
+.hud-sep {
+  margin: 0 3px;
+  color: var(--ink-3);
+}
+.hud-progress {
+  width: clamp(80px, 22vw, 220px);
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink-3) 22%, transparent);
+  overflow: hidden;
+}
+.hud-bar {
+  height: 100%;
+  width: 0%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--band-strong));
+  transition: width 0.35s ease;
+}
+.hud-right {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.hud-tally {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+.hud-tally strong {
+  color: var(--ink);
+}
+.tally-pass .tally-mark {
+  color: var(--critical);
+}
+.tally-like .tally-mark {
+  color: var(--band-strong);
+}
+.hud-streak {
+  font-size: 12px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  animation: streak-pop 0.3s ease;
+}
+.streak-like {
+  color: var(--good-text);
+  background: color-mix(in srgb, var(--band-strong) 18%, transparent);
+}
+.streak-pass {
+  color: var(--critical);
+  background: color-mix(in srgb, var(--critical) 14%, transparent);
+}
+@keyframes streak-pop {
+  from {
+    transform: scale(1.5);
+  }
+  to {
+    transform: scale(1);
+  }
+}
+.hud-btn {
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--ink-2);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 5px 12px;
+  cursor: pointer;
+}
+.hud-btn:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: var(--ink-3);
+}
+.hud-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* ---- arena + stack --------------------------------------------------------- */
+
+.swipe-arena {
+  position: relative;
+  z-index: 2;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.swipe-deck {
+  position: relative;
+  width: min(440px, calc(100vw - 28px));
+  height: min(680px, 100%);
+  margin: 6px 0;
+}
+
+.swipe-card {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  border-radius: 22px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-2);
+  overflow: hidden;
+  touch-action: pan-y; /* horizontal gestures belong to the deck */
+  transform: translateY(calc(var(--i, 0) * 16px)) scale(calc(1 - var(--i, 0) * 0.05));
+  opacity: calc(1 - var(--i, 0) * 0.18);
+  transition:
+    transform 0.38s cubic-bezier(0.22, 0.9, 0.28, 1.12),
+    opacity 0.3s ease,
+    box-shadow 0.3s ease;
+  will-change: transform;
+}
+.swipe-card.is-top {
+  cursor: grab;
+}
+.swipe-card.is-top:active {
+  cursor: grabbing;
+}
+.swipe-card.dragging {
+  transition: none;
+}
+.swipe-card.is-behind {
+  transform: translateY(-126%) rotate(-3deg);
+  opacity: 0;
+  pointer-events: none;
+}
+.swipe-card.dealt {
+  transform: translateY(56px) scale(0.9);
+  opacity: 0;
+}
+.swipe-card.flying {
+  transition:
+    transform 0.42s cubic-bezier(0.3, 0.1, 0.6, 1),
+    opacity 0.38s ease;
+  pointer-events: none;
+}
+.swipe-card.bounce {
+  animation: deck-bounce 0.4s ease;
+}
+@keyframes deck-bounce {
+  0%,
+  100% {
+    translate: 0 0;
+  }
+  30% {
+    translate: 0 -12px;
+  }
+  60% {
+    translate: 0 5px;
+  }
+}
+
+/* decision stamps — opacity driven from JS via --like / --pass */
+.stamp {
+  position: absolute;
+  top: 26px;
+  z-index: 5;
+  font-size: 26px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  padding: 6px 14px;
+  border: 4px solid currentColor;
+  border-radius: 10px;
+  pointer-events: none;
+  opacity: 0;
+}
+.stamp-like {
+  left: 20px;
+  color: var(--band-strong);
+  transform: rotate(-16deg);
+  opacity: var(--like, 0);
+}
+.stamp-pass {
+  right: 20px;
+  color: var(--critical);
+  transform: rotate(16deg);
+  opacity: var(--pass, 0);
+}
+
+/* ---- card content ------------------------------------------------------------ */
+
+.card-inner {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px 20px 12px;
+}
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.card-avatar {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  border-radius: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  font-weight: 700;
+  user-select: none;
+  background: hsl(var(--hue, 210) 45% 50% / 0.18);
+  color: hsl(var(--hue, 210) 55% 38%);
+}
+@media (prefers-color-scheme: dark) {
+  .card-avatar {
+    color: hsl(var(--hue, 210) 60% 72%);
+  }
+}
+.card-who {
+  min-width: 0;
+  flex: 1;
+}
+.card-company {
+  font-weight: 650;
+  font-size: 15px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.card-meta {
+  font-size: 12px;
+  color: var(--ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.card-score {
+  flex: none;
+  min-width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 17px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  border: 2.5px solid var(--band-mid);
+  color: var(--band-mid);
+}
+.card-score.score-strong {
+  border-color: var(--band-strong);
+  color: var(--band-strong);
+}
+.card-score.score-solid {
+  border-color: var(--band-solid);
+  color: var(--band-solid);
+}
+.card-score.score-low {
+  border-color: var(--band-low);
+  color: var(--band-low);
+}
+
+.card-title {
+  margin: 0;
+  font-size: clamp(19px, 4.6vw, 24px);
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+
+.card-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.card-chip {
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--raised);
+  color: var(--ink-2);
+  border: 1px solid var(--line);
+  white-space: nowrap;
+}
+.card-chip.chip-good {
+  color: var(--good-text);
+  background: color-mix(in srgb, var(--band-strong) 14%, transparent);
+  border-color: color-mix(in srgb, var(--band-strong) 30%, transparent);
+}
+.card-chip.chip-warn {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  border-color: color-mix(in srgb, var(--warning) 30%, transparent);
+}
+
+.card-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.card-salary {
+  font-size: 17px;
+  font-weight: 750;
+  color: var(--good-text);
+  font-variant-numeric: tabular-nums;
+}
+.card-location {
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.card-match {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--raised);
+  border: 1px solid var(--line);
+}
+.match-line {
+  display: flex;
+  gap: 8px;
+  font-size: 12.5px;
+  line-height: 1.35;
+  color: var(--ink-2);
+}
+.match-mark {
+  flex: none;
+  font-weight: 700;
+}
+.match-pro .match-mark {
+  color: var(--band-strong);
+}
+.match-con .match-mark {
+  color: var(--warning);
+}
+
+.card-desc {
+  flex: 1;
+  min-height: 40px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-2);
+  border-top: 1px dashed var(--line);
+  padding-top: 10px;
+}
+.card-desc p {
+  margin: 0;
+  white-space: pre-line;
+}
+
+.card-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 16px 16px;
+  border-top: 1px solid var(--line);
+  background: color-mix(in srgb, var(--raised) 55%, transparent);
+}
+.card-btn {
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 700;
+  padding: 10px 16px;
+  border-radius: 999px;
+  border: 1.5px solid var(--line);
+  background: var(--surface);
+  cursor: pointer;
+  transition:
+    transform 0.15s ease,
+    box-shadow 0.15s ease;
+}
+.card-btn:hover {
+  transform: translateY(-1px);
+}
+.card-btn:active {
+  transform: translateY(0) scale(0.97);
+}
+.btn-pass {
+  color: var(--critical);
+  border-color: color-mix(in srgb, var(--critical) 45%, transparent);
+}
+.btn-like {
+  color: var(--good-text);
+  border-color: color-mix(in srgb, var(--band-strong) 50%, transparent);
+}
+.card-links {
+  display: flex;
+  gap: 12px;
+  min-width: 0;
+}
+.card-link {
+  font-size: 12.5px;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+/* ---- loading / empty ----------------------------------------------------------- */
+
+.swipe-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--ink-2);
+  font-size: 14px;
+}
+.loading-pulse {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 0.9s ease-in-out infinite alternate;
+}
+@keyframes pulse {
+  from {
+    transform: scale(0.6);
+    opacity: 0.4;
+  }
+  to {
+    transform: scale(1.3);
+    opacity: 1;
+  }
+}
+
+.swipe-empty {
+  position: relative;
+  z-index: 3;
+  text-align: center;
+  padding: 24px;
+}
+.empty-glyph {
+  font-size: 52px;
+  margin-bottom: 6px;
+}
+.swipe-empty h2 {
+  margin: 0 0 6px;
+  font-size: 22px;
+}
+.empty-stats {
+  margin: 0 0 18px;
+  color: var(--ink-2);
+  font-size: 14px;
+}
+.empty-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin: 0;
+}
+.empty-reload {
+  font: inherit;
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--accent-ink);
+  background: var(--accent);
+  border: none;
+  border-radius: 999px;
+  padding: 10px 22px;
+  cursor: pointer;
+}
+.empty-reload:hover {
+  background: var(--accent-strong);
+}
+.empty-link {
+  font-size: 13.5px;
+  color: var(--accent);
+}
+
+/* ---- key legend ------------------------------------------------------------------ */
+
+.swipe-keys {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  padding: 8px 16px 14px;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+.swipe-keys kbd {
+  display: inline-block;
+  min-width: 18px;
+  text-align: center;
+  padding: 1px 5px;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  background: var(--raised);
+  color: var(--ink-2);
+  font-family: inherit;
+  font-weight: 700;
+  font-size: 11px;
+}
+.key-item.key-like kbd {
+  color: var(--good-text);
+}
+.key-item.key-pass kbd {
+  color: var(--critical);
+}
+
+.swipe-noscript {
+  position: relative;
+  z-index: 5;
+  text-align: center;
+}
+
+@media (max-width: 600px) {
+  .swipe-hud {
+    padding: 8px 12px 2px;
+  }
+  .hud-progress {
+    display: none;
+  }
+  .swipe-keys {
+    display: none; /* touch-first below the fold; gestures carry the verbs */
+  }
+  .swipe-deck {
+    height: calc(100% - 8px);
+  }
+}
