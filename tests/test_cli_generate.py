@@ -126,6 +126,41 @@ def test_snapshot_surfaced_discovery_recognizes_a_prefetched_corpus() -> None:
     assert not cli_generate._snapshot_surfaced_discovery({"homepage": "x"})
 
 
+def test_empty_board_signal_reads_the_snapshot_count() -> None:
+    from jobcrawler.generate.snapshot import build_corpus
+
+    # ATS candidates found + the probe reported zero openings → the empty-board
+    # admission signal (literal 0) that check_completeness keys off.
+    assert (
+        cli_generate._empty_board_signal(
+            build_corpus(
+                homepage="<html/>",
+                apis=["https://boards-api.greenhouse.io/v1/boards/x/jobs"],
+                expected_positions=0,
+            )
+        )
+        == 0
+    )
+    # A board that lists roles → positive probe count → None (no empty signal), so a
+    # broken zero-yield candidate there still fails the enumeration floor.
+    assert (
+        cli_generate._empty_board_signal(
+            build_corpus(homepage="<html/>", apis=["https://x"], expected_positions=12)
+        )
+        is None
+    )
+    # No ATS candidate discovered → absence of a signal, not proof of an empty board;
+    # don't admit (a custom careers page hiding roles behind JS must not sneak through).
+    assert (
+        cli_generate._empty_board_signal(
+            build_corpus(homepage="<html/>", expected_positions=0)
+        )
+        is None
+    )
+    # Non-mapping is safe.
+    assert cli_generate._empty_board_signal(None) is None
+
+
 def test_under_enumeration_fails_when_expected_count_known() -> None:
     # _GOOD yields 8 items; a site with ~40 recent articles → 8 < ceil(0.5 * 40) = 20,
     # so the enumeration floor rejects the feed-sized sample (§6).
@@ -148,12 +183,24 @@ def test_single_posting_passes_min_items_floor() -> None:
 
 
 def test_empty_crawl_fails_completeness() -> None:
-    # Zero postings never clears the floor — an empty board yield is always treated
-    # as a broken crawler, not a quiet-but-healthy one (that distinction lives in
-    # §4.8 health, not the generation gate).
+    # With an UNKNOWN posting count (no expected_items) a zero yield is still treated
+    # as a broken crawler: absent an independent probe proving the board is empty, the
+    # gate can't tell "nothing to find" from "found nothing." The explicit
+    # expected_items=0 admission is exercised in the next test.
     none = 'SITE = "https://example.com"\ndef crawl(ctx):\n    return iter(())\n'
     ok, reason = gate_winner(_pred(), none, _HOSTS)
     assert not ok and "completeness" in reason
+
+
+def test_empty_crawl_admitted_when_probe_reports_zero() -> None:
+    # When the snapshot's independent probe proves the board advertises zero openings
+    # right now (expected_items=0 — a valid ATS meta.total of 0, not an unknown count),
+    # a clean zero-yield crawler is the CORRECT crawl and is admitted end-to-end (§6):
+    # min_items is skipped, and empty/empty is stable (jaccard 1.0) so the two-run
+    # stability gate also passes — instead of regenerating forever against an empty board.
+    none = 'SITE = "https://example.com"\ndef crawl(ctx):\n    return iter(())\n'
+    ok, reason = gate_winner(_pred(), none, _HOSTS, expected_items=0)
+    assert ok, reason
 
 
 # The Greenhouse shape: the crawl host serves an API whose canonical posting links

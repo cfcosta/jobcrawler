@@ -520,6 +520,58 @@ def test_min_items_one_boundary() -> None:
     ).passed
 
 
+def _empty(result: CandidateResult, *, expected_items: int | None) -> bool:
+    return check_completeness(
+        result,
+        min_items=1,
+        min_description_chars=400,
+        allowed_hosts=_HOSTS,
+        expected_items=expected_items,
+    ).passed
+
+
+def test_empty_board_admitted_when_probe_reports_zero() -> None:
+    # An independent probe reached the board and found zero openings
+    # (expected_items == 0); the candidate cleanly enumerated it to the same empty
+    # result. That is a valid crawler on an empty board, not a broken one — admit it
+    # (§6) instead of hard-failing min_items and regenerating forever.
+    assert _empty(_result(item_count=0, samples=[]), expected_items=0)
+
+
+def test_empty_board_signal_requires_explicit_zero() -> None:
+    # The admission is keyed on the literal 0 signal, NOT a mere absence of count:
+    # with expected_items None (the windowed / unknown-count default) a 0-yield is
+    # still a failure. Guards `None == 0` from silently admitting.
+    assert not _empty(_result(item_count=0, samples=[]), expected_items=None)
+
+
+def test_empty_board_with_exception_still_fails() -> None:
+    # A crawler that RAISED tells us nothing about whether the board is empty — the
+    # zero yield is a crash, not a clean enumeration. Never admit it.
+    exc = ExceptionInfo(type="TimeoutError", message="boom", traceback_tail="...")
+    assert not _empty(
+        _result(item_count=0, samples=[], exception=exc), expected_items=0
+    )
+
+
+def test_empty_board_with_schema_errors_still_fails() -> None:
+    # 0 valid items but N schema errors means the crawler DID find postings and
+    # mis-parsed every one (a broken parse), not an empty board — must fail even when
+    # the probe reported zero.
+    assert not _empty(
+        _result(item_count=0, samples=[], schema_errors=["url: invalid"]),
+        expected_items=0,
+    )
+
+
+def test_nonempty_board_zero_yield_still_fails() -> None:
+    # The safety property: a board that advertises roles yields a POSITIVE probe
+    # count, so a broken 0-yield candidate there never reaches the empty-board branch
+    # — it fails the enumeration floor. (Upstream, _empty_board_signal only emits 0
+    # when the probe itself found zero, so this positive case can't be mislabeled.)
+    assert not _empty(_result(item_count=0, samples=[]), expected_items=40)
+
+
 def test_full_yield_offdomain_tail_fails() -> None:
     # The samples are all on-domain (first _SAMPLE_CAP), but the child reports an
     # off-domain host somewhere in the tail: a crawler clean for five then yielding

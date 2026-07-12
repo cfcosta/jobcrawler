@@ -326,6 +326,7 @@ async def _run_generation(
         registry_hosts,
         extra_evidence=authorized,
         url_evidence=observed,
+        expected_items=_empty_board_signal(corpus),
         discovery_prefetched=_snapshot_surfaced_discovery(corpus),
     )
     if not ok:
@@ -751,6 +752,28 @@ def _snapshot_surfaced_discovery(corpus: object) -> bool:
     if not isinstance(corpus, Mapping):
         return False
     return {"feeds", "sitemap", "apis"} <= corpus.keys()
+
+
+def _empty_board_signal(corpus: object) -> int | None:
+    """``0`` iff the prefetched snapshot proved the board is *currently empty* (§6).
+
+    Returns ``0`` only when the snapshot found real ATS API candidates yet its
+    independent probe of them reported zero open roles (``expected_positions == 0``):
+    a valid ATS board advertising nothing right now. That ``0`` is the empty-board
+    admission signal :func:`check_completeness` keys off to promote a clean 0-yield
+    crawler instead of hard-failing ``min_items`` and regenerating forever.
+
+    Returns ``None`` (floor-dormant, the prior behavior) otherwise — including for a
+    board that lists roles, whose probe returns a positive total, so a *broken*
+    0-yield candidate there still fails the floor. Never returns a positive value, so
+    the gen-time enumeration floor stays deliberately dormant (the runtime enforces
+    it over a full crawl; see the ``gate_winner`` call site)."""
+    if not isinstance(corpus, Mapping):
+        return None
+    apis = corpus.get("apis")
+    if corpus.get("expected_positions") == 0 and isinstance(apis, list) and apis:
+        return 0
+    return None
 
 
 def _source_text(pred: object) -> str:

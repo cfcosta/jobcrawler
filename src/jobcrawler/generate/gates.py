@@ -396,6 +396,12 @@ def check_completeness(
     is None (a source that only shows a recent window — ``enumerates_all: false``
     — never sets it, since a diff against a partial listing is unsound).
 
+    The value ``0`` is a *distinct* signal from ``None``: an independent probe that
+    reached the board and found it advertises zero openings right now. A candidate
+    that cleanly enumerates it to the same empty result is then admitted (an empty
+    board is a valid terminal state, not a broken crawler) rather than failing the
+    ``min_items`` floor forever — see the empty-board admission below.
+
     The boilerplate check is INVERTED from the news port (see the module
     docstring): blocks shared across samples are STRIPPED, not rejected, and a
     sample fails only when its unique residual falls below ``min_unique_chars``,
@@ -417,7 +423,25 @@ def check_completeness(
         failures.append(
             f"crawler raised {result.exception.type}: {result.exception.message}"
         )
-    if result.item_count < min_items:
+    # §6 empty-board admission: ``expected_items == 0`` is an independent probe that
+    # REACHED the board and found it advertises zero openings (an ATS ``meta.total``
+    # of 0), distinct from ``None`` (no count known). A candidate that cleanly
+    # enumerates it to the same empty result is the CORRECT crawl of an empty board,
+    # not a broken one — admit it (parked; the runtime re-crawl picks up roles when
+    # they appear) instead of hard-failing ``min_items`` and regenerating forever. A
+    # board that lists roles cannot reach here: the same probe returns a positive
+    # total, so a broken 0-yield crawler there still fails below. Schema errors mean
+    # the crawler DID find postings but mis-parsed them (0 valid, N dropped) — a broken
+    # parse, not an empty board — so that falls through to the normal failure path.
+    board_empty = (
+        expected_items == 0
+        and result.item_count == 0
+        and result.exception is None
+        and not result.schema_errors
+    )
+    if board_empty:
+        pass
+    elif result.item_count < min_items:
         failures.append(f"yielded {result.item_count} items, need >= {min_items}")
     elif expected_items is not None and expected_items > 0:
         floor = math.ceil(enum_floor_ratio * expected_items)
