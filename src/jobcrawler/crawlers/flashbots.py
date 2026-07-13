@@ -1,106 +1,119 @@
 
+import html
 import json
 import re
-from html import unescape
+
 
 SITE = "https://api.ashbyhq.com/posting-api/job-board/flashbots.net?includeCompensation=true"
 EXTRA_HOSTS = []
+COMPANY = "Flashbots"
 
 
-def _clean_html(value):
-    if not value:
+def _plain_description(source):
+    text = source.get("descriptionPlain")
+    if text:
+        return text.strip()
+
+    markup = source.get("descriptionHtml")
+    if not markup:
         return None
-    text = unescape(value)
-    text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", text)
-    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
-    text = re.sub(r"(?i)</p\s*>", "\n\n", text)
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = unescape(text)
-    text = re.sub(r"[ \t\r\f\v]+", " ", text)
-    text = re.sub(r"\n\s+", "\n", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip() or None
+    markup = re.sub(r"(?i)<br\s*/?>", "\n", markup)
+    markup = re.sub(r"(?i)</(?:p|div|li|h[1-6])\s*>", "\n", markup)
+    text = re.sub(r"<[^>]+>", "", markup)
+    text = html.unescape(text)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    return re.sub(r"\n\s*\n+", "\n\n", text).strip() or None
 
 
-def _location(job):
-    loc = job.get("location")
-    if isinstance(loc, dict):
-        loc = loc.get("name") or loc.get("location") or loc.get("address")
-    if isinstance(loc, str) and loc.strip():
-        return loc.strip()
-    secondary = job.get("secondaryLocations") or []
-    names = []
-    for item in secondary:
-        if isinstance(item, dict):
-            name = item.get("name") or item.get("location")
+def _locations(source):
+    result = []
+    primary = source.get("location")
+    if primary:
+        result.append(primary)
+
+    for item in source.get("secondaryLocations") or []:
+        if isinstance(item, str):
+            value = item
+        elif isinstance(item, dict):
+            value = item.get("location")
         else:
-            name = item
-        if isinstance(name, str) and name.strip():
-            names.append(name.strip())
-    if names:
-        return ", ".join(names)
-    if job.get("workplaceType") or job.get("isRemote") is True:
-        return "Remote"
-    return None
+            value = None
+        if value and value not in result:
+            result.append(value)
+    return result
 
 
-def _compensation(job):
-    comp = job.get("compensation") or {}
-    pieces = []
-    for item in comp.get("summaryComponents") or []:
-        if not isinstance(item, dict):
+def _salary(source):
+    compensation = source.get("compensation") or {}
+    components = compensation.get("summaryComponents") or []
+    candidates = []
+    for component in components:
+        if not isinstance(component, dict):
             continue
-        min_value = item.get("minValue")
-        max_value = item.get("maxValue")
-        currency = item.get("currencyCode")
-        interval = item.get("interval")
-        if min_value is None and max_value is None:
+        kind = component.get("compensationType") or component.get("type")
+        if kind and str(kind).lower() != "salary":
             continue
-        if min_value is not None and max_value is not None and min_value != max_value:
-            amount = f"{min_value} - {max_value}"
-        else:
-            amount = str(min_value if min_value is not None else max_value)
-        label = " ".join(str(x) for x in [currency, amount, interval] if x)
-        if label:
-            pieces.append(label)
-    return "; ".join(pieces) or None
+        if component.get("minValue") is not None or component.get("maxValue") is not None:
+            candidates.append(component)
+
+    if not candidates:
+        return {}
+
+    currencies = {
+        component.get("currencyCode")
+        for component in candidates
+        if component.get("currencyCode")
+    }
+    if len(currencies) > 1:
+        return {}
+
+    component = candidates[0]
+    values = {}
+    mappings = {
+        "minValue": "salary_min",
+        "maxValue": "salary_max",
+        "currencyCode": "salary_currency",
+        "interval": "salary_period",
+    }
+    for source_key, target_key in mappings.items():
+        value = component.get(source_key)
+        if value is not None and value != "":
+            values[target_key] = value
+
+    printed = compensation.get("compensationTierSummary") or compensation.get("summary")
+    if printed:
+        values["salary"] = printed
+    return values
+
+
+def _put(values, key, value):
+    if value is not None and value != "" and value != []:
+        values[key] = value
 
 
 def crawl(ctx):
-    raw = ctx.fetch(SITE)
-    data = json.loads(raw)
-    for job in data.get("jobs") or []:
-        if job.get("isListed") is False:
-            continue
-        title = (job.get("title") or "").strip()
-        description = (job.get("descriptionPlain") or "").strip() or _clean_html(job.get("descriptionHtml"))
-        url = (job.get("jobUrl") or job.get("applyUrl") or "").strip()
-        location = _location(job)
-        if not (title and description and url and location):
-            continue
+    payload = json.loads(ctx.fetch(SITE))
 
-        item = {
-            "url": url,
-            "title": title,
-            "company": "Flashbots",
-            "location": location,
-            "description": description,
-            "source": SITE,
-            "external_id": job.get("id"),
-            "apply_url": job.get("applyUrl"),
-            "employment_type": job.get("employmentType"),
-            "department": job.get("department") or job.get("team"),
-            "posted_at": job.get("publishedAt"),
-        }
+    for source in payload.get("jobs") or []:
+        values = {"company": COMPANY}
+        _put(values, "url", source.get("jobUrl"))
+        _put(values, "title", source.get("title"))
+        _put(values, "location", source.get("location"))
+        _put(values, "description", _plain_description(source))
+        _put(values, "employment_type", source.get("employmentType"))
+        _put(values, "workplace_type", source.get("workplaceType"))
+        _put(values, "department", source.get("department"))
+        _put(values, "posted_at", source.get("publishedAt"))
+        _put(values, "expires_at", source.get("expiresAt"))
+        _put(values, "external_id", source.get("id"))
+        _put(values, "apply_url", source.get("applyUrl"))
 
-        workplace = job.get("workplaceType")
-        if workplace:
-            item["workplace_type"] = workplace
-        elif job.get("isRemote") is True:
-            item["workplace_type"] = "Remote"
+        locations = _locations(source)
+        if locations:
+            values["locations"] = locations
 
-        salary = _compensation(job)
-        if salary:
-            item["salary"] = salary
+        if not values.get("workplace_type") and source.get("isRemote") is True:
+            values["workplace_type"] = "Remote"
 
-        yield {k: v for k, v in item.items() if v is not None and v != ""}
+        values.update(_salary(source))
+        yield Job(**values)
