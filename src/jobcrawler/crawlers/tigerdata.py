@@ -14,6 +14,30 @@ def _clean(value):
     return value
 
 
+def _geo_string(location, address):
+    """Best §4.12 location string for an Ashby location slot.
+
+    Ashby's display ``location`` can carry employment-type noise ('US
+    Full-time'), which the geo parser mis-reads as a city ('Full-time
+    Full-time'); that bogus city then blocks the remote-fence promotion for the
+    whole posting, so a remote-from-Brazil role reads as a plain Brazil office.
+    When the structured ``address`` is country-only, the clean ``addressCountry``
+    name parses correctly (and, on a remote role, becomes a remote fence). When
+    it carries a city/region the display string is the richer source, so keep it.
+    """
+    location = _clean(location)
+    postal = {}
+    if isinstance(address, dict):
+        postal = address.get("postalAddress") or {}
+    country = _clean(postal.get("addressCountry"))
+    has_locale = _clean(postal.get("addressLocality")) or _clean(
+        postal.get("addressRegion")
+    )
+    if country and not has_locale:
+        return country
+    return location
+
+
 def crawl(ctx):
     data = json.loads(ctx.fetch(SITE))
     for job in data.get("jobs", []):
@@ -23,7 +47,7 @@ def crawl(ctx):
         title = _clean(job.get("title"))
         description = _clean(job.get("descriptionPlain"))
         url = _clean(job.get("jobUrl"))
-        location = _clean(job.get("location"))
+        location = _geo_string(job.get("location"), job.get("address"))
         if not (title and description and url and location):
             continue
 
@@ -35,6 +59,24 @@ def crawl(ctx):
             "description": description,
             "source": SITE,
         }
+
+        # Ashby carries extra offices/remote scopes in secondaryLocations; keep
+        # them so multi-location roles (e.g. US + Brazil + Spain + Remote) project
+        # every §4.12 place/fence rather than only the primary location. Each slot
+        # resolves through _geo_string so a noisy display string ('Spain
+        # Full-time') falls back to its clean structured country.
+        secondary = job.get("secondaryLocations") or []
+        if secondary:
+            locations = [location]
+            for entry in secondary:
+                if isinstance(entry, dict):
+                    value = _geo_string(entry.get("location"), entry.get("address"))
+                else:
+                    value = _clean(entry)
+                if value and value not in locations:
+                    locations.append(value)
+            if len(locations) > 1:
+                out["locations"] = locations
 
         mappings = {
             "employmentType": "employment_type",
