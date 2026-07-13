@@ -1025,15 +1025,17 @@ def bootstrap_budget() -> float:
 
 
 def bootstrap_concurrency() -> int:
-    """How many §4.2 cold-start generations may run at once (default 8).
+    """How many crawler generations may run at once (default 16).
 
-    A fresh roster of N crawler-less boards otherwise generates one crawler at a time —
-    N back-to-back multi-minute LM generations before the fleet is online. Bounded
-    concurrency brings the roster up in waves of this size. Kept modest: each generation
-    is LM-heavy, so a large fan-out would multiply the instantaneous token load and risk
-    provider rate limits. ``1`` restores the fully sequential pass. The per-tick time
-    budget and the forced-slug exemption apply across waves exactly as before."""
-    return max(1, _int("JOBCRAWLER_BOOTSTRAP_CONCURRENCY", 8))
+    Paces both generation passes: the §4.2 cold-start bootstrap and the §4.8 staleness
+    sweep run their assesses in concurrent waves of this size. A fresh roster (or a
+    correlated drift wave) otherwise generates one crawler at a time — N back-to-back
+    multi-minute LM generations before the fleet is online. Each generation is LM-heavy,
+    so this fan-out multiplies the instantaneous token load — back it off if the
+    provider starts rate-limiting. ``1`` restores the fully sequential passes. The
+    per-pass time budgets and the forced-slug exemption apply across waves exactly as
+    before."""
+    return max(1, _int("JOBCRAWLER_BOOTSTRAP_CONCURRENCY", 16))
 
 
 def regen_budget() -> float:

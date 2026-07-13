@@ -454,9 +454,10 @@ class Scheduler:
             if bootstrap_budget is not None
             else config.bootstrap_budget()
         )
-        # §4.2 cold-start fan-out: how many crawler generations run concurrently per wave.
-        # 1 restores the fully sequential pass; the time budget still bounds the whole
-        # pass and forced slugs are still attempted regardless (see _bootstrap_missing).
+        # Generation fan-out: how many crawler generations run concurrently per wave —
+        # paces both the §4.2 cold-start pass and the §4.8 regen sweep. 1 restores the
+        # fully sequential passes; the time budgets still bound each whole pass and
+        # forced slugs are still attempted regardless (see _bootstrap_missing).
         self._bootstrap_concurrency = (
             bootstrap_concurrency
             if bootstrap_concurrency is not None
@@ -950,10 +951,18 @@ class Scheduler:
         least-recently-attempted first (every assess bumps the site's health timestamp),
         so the budget-deferred tail cannot starve behind early sites that keep
         re-becoming expensive — no resume cursor needed.
+
+        Assesses run in concurrent waves of ``JOBCRAWLER_BOOTSTRAP_CONCURRENCY`` — the
+        same knob that paces the §4.2 bootstrap pass, one fleet-wide bound on
+        simultaneous generations — so a correlated drift wave heals in parallel instead
+        of one multi-minute regeneration at a time. The budget is checked at each wave
+        boundary (the coarser grain a concurrent pass allows, mirroring
+        ``_bootstrap_missing``); ``1`` restores the per-site check.
         """
         self._regen_incomplete = False
         if self._healer is None:
             return {}
+        healer = self._healer
         assessable = [s for s in self._sites if s.enabled and self._has_crawler(s.slug)]
         # Same fairness rule as the §4.2 bootstrap pass: least-recently-attempted
         # first, so a correlated drift wave at the roster head can't starve the tail.
@@ -961,15 +970,23 @@ class Scheduler:
         assessable.sort(key=lambda s: last_attempt.get(s.slug, ""))
         states: dict[str, HealthState] = {}
         pass_started = self._monotonic()
-        for done, site in enumerate(assessable, start=1):
+
+        async def _assess(slug: str) -> None:
             try:
-                state = await self._assess_bounded(self._healer, site.slug)
+                state = await self._assess_bounded(healer, slug)
                 if state is not None:
-                    states[site.slug] = state
+                    states[slug] = state
             except Exception:
                 # One site's regenerate (LM / Deno / network) raising must not abort
                 # the sweep or the daemon — isolate it, log, and assess the rest (§4.8).
-                _log.exception("regen sweep failed for %s; skipping", site.slug)
+                _log.exception("regen sweep failed for %s; skipping", slug)
+
+        k = max(1, self._bootstrap_concurrency)
+        done = 0
+        for i in range(0, len(assessable), k):
+            wave = assessable[i : i + k]
+            await asyncio.gather(*(_assess(s.slug) for s in wave))
+            done += len(wave)
             elapsed = self._monotonic() - pass_started
             if elapsed > self._regen_budget and done < len(assessable):
                 self._regen_incomplete = True

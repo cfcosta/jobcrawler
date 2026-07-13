@@ -378,6 +378,7 @@ async def test_regen_tick_defers_over_budget_and_stays_due() -> None:
         monotonic=monotonic,
         regen_check="24h",
         regen_budget=0.0,
+        bootstrap_concurrency=1,  # per-site budget granularity (see the wave test below)
     )
 
     states = await sched.regen_tick()
@@ -388,6 +389,43 @@ async def test_regen_tick_defers_over_budget_and_stays_due() -> None:
     now = T0
     sched.mark_regen(now, completed=not sched._regen_incomplete)
     assert sched.regen_due(now) is True
+
+
+async def test_regen_tick_budget_defers_at_wave_boundaries() -> None:
+    # The sweep assesses in concurrent waves of bootstrap_concurrency (the shared
+    # generation fan-out knob), so the budget is checked between waves: with waves
+    # of 2 over a 3-site drift roster and a zero budget, the first wave completes
+    # whole (2 assessed) and only the remainder defers to the next tick.
+    store = StateStore(":memory:", clock=lambda: T0)
+    slugs = ["s0", "s1", "s2"]
+    for slug in slugs:
+        base = store.start_run(slug)
+        store.finish_run(base, items_found=8, new_items=8, errors=0, pages_fetched=2)
+        latest = store.start_run(slug)
+        store.finish_run(latest, items_found=0, new_items=0, errors=1, pages_fetched=1)
+
+    mono = {"t": 0.0}
+
+    def monotonic() -> float:
+        cur = mono["t"]
+        mono["t"] = cur + 1.0
+        return cur
+
+    sched = Scheduler(
+        [Site(slug=s, url=f"https://{s}.com") for s in slugs],
+        store=store,
+        crawl=_ok_crawl,
+        healer=_healer(store, reprobe_items=0, regen_passes=False),
+        clock=lambda: T0,
+        monotonic=monotonic,
+        regen_check="24h",
+        regen_budget=0.0,
+        bootstrap_concurrency=2,
+    )
+
+    states = await sched.regen_tick()
+    assert len(states) == 2  # the whole first wave landed, despite the blown budget
+    assert sched._regen_incomplete is True  # the third site stays due next tick
 
 
 # -- structured run-loop logging (§4.9 operability) --------------------------
