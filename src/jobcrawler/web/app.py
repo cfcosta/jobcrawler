@@ -418,16 +418,19 @@ def _float_param(params: Any, name: str) -> float | None:
 
 
 # The swipe deck opens on a tighter working set than /positions: the operator's
-# reachable jobs only. remote_anywhere is home-relative (worldwide remote OR a fence
-# covering config.home_country(), which defaults to BR — the checkbox renders
-# "Remote anywhere +BR"); relocation_no_us adds postings that offer non-US
-# relocation. The two share the mobility OR-group, so together they read "any way I
-# could take this". Stage new + applied companies hidden match the list default. A
-# bare /swipe applies these; any drawer submit carries explicit params and overrides.
+# reachable jobs only. remote_anywhere (worldwide remote) OR remote_home (a fence
+# covering config.home_country(), which defaults to BR) OR relocation_no_us
+# (postings offering non-US relocation) — three arms of the mobility OR-group, so
+# together they read "any way I could take this". remote_anywhere + remote_home
+# reproduce what the single "Remote anywhere +BR" checkbox used to mean, now split
+# so each is independently toggleable. Stage new + applied companies hidden match
+# the list default. A bare /swipe applies these; any drawer submit carries explicit
+# params and overrides.
 _SWIPE_BARE_FILTERS = {
     "track_status": "new",
     "hide_applied_companies": "1",
     "remote_anywhere": "1",
+    "remote_home": "1",
     "relocation_no_us": "1",
 }
 
@@ -476,20 +479,25 @@ def _read_filters(
     hide_applied_companies = _flag("hide_applied_companies")
     applied = _flag("applied")
     remote_anywhere = _flag("remote_anywhere")
+    # "Remote {home}": remotely workable from config.home_country() — a fence
+    # covering it directly or via a macro region. The home-relative companion to
+    # remote_anywhere (worldwide); the two were one "+home" checkbox until split.
+    remote_home = _flag("remote_home")
     relocation_offered = _flag("relocation_offered")
     # "Relocation (non-US)": relocation offered AND no resolved US office/fence —
     # a US destination means the visa entry the operator wants to avoid. Unresolved
     # rows stay (an exclusion never fires on absence of evidence, §4.12).
     relocation_no_us = _flag("relocation_no_us")
     hide_email_apply = _flag("hide_email_apply")
-    # The three mobility checkboxes are alternative routes into the same job, so
-    # together they OR ("any way I could take this") — a posting that is all three
-    # at once barely exists. One store-side OR-group keeps each lone checkbox
-    # exactly as strict as its old standalone filter.
+    # The mobility checkboxes are alternative routes into the same job, so together
+    # they OR ("any way I could take this") — a posting that is every one at once
+    # barely exists. One store-side OR-group keeps each lone checkbox exactly as
+    # strict as its old standalone filter.
     mobility = [
         arm
         for arm, on in (
             ("remote_anywhere", remote_anywhere),
+            ("remote_home", remote_home),
             ("relocation_offered", relocation_offered),
             ("relocation_no_us", relocation_no_us),
         )
@@ -545,6 +553,7 @@ def _read_filters(
         "hide_applied_companies": hide_applied_companies,
         "applied": applied,
         "remote_anywhere": remote_anywhere,
+        "remote_home": remote_home,
         "relocation_offered": relocation_offered,
         "relocation_no_us": relocation_no_us,
         "hide_email_apply": hide_email_apply,

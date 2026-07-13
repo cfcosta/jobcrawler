@@ -3077,17 +3077,18 @@ class StateStore:
           "remote anywhere" filter; ``'restricted'``/``'unspecified'`` also selectable).
         - ``relocation_offered``  keep only rows whose posting states relocation/visa support
           (``relocation = 'offered'``, §4.6) — the "offers relocation" filter.
-        - ``mobility``  the UI's three mobility checkboxes as one OR-group: arms
-          ``'remote_anywhere'`` / ``'relocation_offered'`` / ``'relocation_no_us'``. Any
-          satisfied arm keeps the row — checking several widens the result set ("any way
-          I could take this job") instead of demanding a posting that is all of them at
-          once. ``relocation_no_us`` = relocation offered AND no §4.12-resolved US
-          office/fence. ``remote_anywhere`` is home-relative: a worldwide remote
-          (``remote_scope = 'anywhere'``) OR a §4.12 remote fence that covers
-          ``config.home_country()`` (default ``BR``) directly or through a macro region —
-          a role remotely workable from home counts as "anywhere I can take it", so this
-          arm is broader than the exact ``remote_scope = 'anywhere'`` param. Unknown arm
-          names raise ``ValueError``.
+        - ``mobility``  the UI's mobility checkboxes as one OR-group: arms
+          ``'remote_anywhere'`` / ``'remote_home'`` / ``'relocation_offered'`` /
+          ``'relocation_no_us'``. Any satisfied arm keeps the row — checking several
+          widens the result set ("any way I could take this job") instead of demanding a
+          posting that is all of them at once. ``relocation_no_us`` = relocation offered
+          AND no §4.12-resolved US office/fence. ``remote_anywhere`` is worldwide remote:
+          ``remote_scope = 'anywhere'`` OR a §4.12 ``remote_anywhere`` projection row.
+          ``remote_home`` is its home-relative companion: a §4.12 remote fence that covers
+          ``config.home_country()`` (default ``BR``) directly or through a macro region
+          (LATAM ⊇ BR) — a role remotely workable from home. The two were one
+          "remote anywhere +home" arm until split into independent checkboxes; OR-ing
+          both reproduces that union. Unknown arm names raise ``ValueError``.
         - ``country``  ISO2 (case-folded): rows with ANY §4.12 resolved row in that country —
           an office there or remote fenced to it ("show me everything touching DE").
         - ``remote_in``  ISO2: rows REMOTELY WORKABLE from that country — kind-scoped to
@@ -3216,13 +3217,15 @@ class StateStore:
             # the §4.12 exclusion discipline — only a *resolved* US office/fence
             # drops the row, unresolved geography stays in.
             #
-            # remote_anywhere is home-relative: a worldwide remote (the column's
-            # 'anywhere') OR a remote fence that covers config.home_country() —
-            # directly or via a macro region — because a role remotely workable
-            # from home is exactly as reachable as a global one. The country code
-            # is a validated ISO2 config constant (never user/crawler input), so
-            # it is inlined rather than parameterized to keep this arm dict
-            # param-free like the others.
+            # remote_anywhere is worldwide remote: the column's 'anywhere' scope OR
+            # a §4.12 remote_anywhere projection row. remote_home is its home-relative
+            # companion: a remote fence that covers config.home_country() directly or
+            # via a macro region (LATAM ⊇ BR), because a role remotely workable from
+            # home is as reachable as a global one. The two were a single "remote
+            # anywhere +home" arm until split into independent checkboxes — OR-ing
+            # both reproduces that union. The home code is a validated ISO2 config
+            # constant (never user/crawler input), so it is inlined rather than
+            # parameterized to keep the arm dict param-free like the others.
             from jobcrawler import config
 
             home = config.home_country()
@@ -3231,11 +3234,15 @@ class StateStore:
                     "(lower(COALESCE(remote_scope, '')) = 'anywhere' "
                     "OR EXISTS (SELECT 1 FROM position_locations pl "
                     "WHERE pl.site = positions.site AND pl.url = positions.url "
-                    "AND (pl.kind = 'remote_anywhere' "
-                    "OR (pl.kind = 'remote_fence' AND (pl.country = '" + home + "' "
+                    "AND pl.kind = 'remote_anywhere'))"
+                ),
+                "remote_home": (
+                    "EXISTS (SELECT 1 FROM position_locations pl "
+                    "WHERE pl.site = positions.site AND pl.url = positions.url "
+                    "AND pl.kind = 'remote_fence' AND (pl.country = '" + home + "' "
                     "OR EXISTS (SELECT 1 FROM geo_region_members gm "
                     "WHERE gm.region = pl.macro_region "
-                    "AND gm.country = '" + home + "'))))))"
+                    "AND gm.country = '" + home + "')))"
                 ),
                 "relocation_offered": "lower(COALESCE(relocation, '')) = 'offered'",
                 "relocation_no_us": (

@@ -2771,6 +2771,7 @@ def test_search_mobility_arms_or_together(store: StateStore) -> None:
 
     # Single arms == the standalone filters they mirror.
     assert urls("remote_anywhere") == ["anywhere"]
+    assert urls("remote_home") == []  # no home fence among these rows
     assert urls("relocation_offered") == ["berlin-relo", "sf-relo"]
     assert urls("relocation_no_us") == ["berlin-relo"]  # resolved-US office drops
     # Combined arms widen (OR), never narrow to the impossible intersection.
@@ -2784,15 +2785,18 @@ def test_search_mobility_arms_or_together(store: StateStore) -> None:
         store.search_positions(mobility=["jetpack"])
 
 
-def test_search_mobility_remote_anywhere_is_home_relative(
+def test_search_mobility_remote_anywhere_and_home_split(
     store: StateStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # #144: "Remote anywhere" is home-relative — a role remotely workable *from
-    # home* is as reachable as a worldwide one. The arm keeps a worldwide anywhere
-    # plus any remote fence that covers config.home_country() directly (a BR fence)
-    # or through a macro region (LATAM ⊇ BR). A fence for a *different* country
-    # (US) does not, and a home-country *office* (a 'place', not a fence) does not —
-    # being physically in Brazil is not the same as being remotely hireable from it.
+    # #144 / two-checkbox split: "Remote anywhere" (worldwide) and "Remote {home}"
+    # are now independent OR-arms. remote_anywhere is strict worldwide — the column
+    # 'anywhere' scope or a remote_anywhere projection, home-blind. remote_home is
+    # the home-relative companion: a remote fence covering config.home_country()
+    # directly (a BR fence) or through a macro region (LATAM ⊇ BR). A fence for a
+    # *different* country (US) matches neither at home=BR, and a home-country
+    # *office* (a 'place', not a fence) matches neither — being physically in Brazil
+    # is not the same as being remotely hireable from it. OR-ing both arms
+    # reproduces the old single home-relative "remote anywhere +home" set.
     rows = [
         # url, location, workplace, remote_scope
         ("worldwide", "Anywhere in the World", "remote", "anywhere"),
@@ -2812,24 +2816,31 @@ def test_search_mobility_remote_anywhere_is_home_relative(
             "acme", url, location=loc, workplace=wp, force=True
         )
 
-    def anywhere() -> list[str]:
-        return sorted(
-            r.url for r in store.search_positions(mobility=["remote_anywhere"])
-        )
+    def urls(*arms: str) -> list[str]:
+        return sorted(r.url for r in store.search_positions(mobility=list(arms)))
 
-    # Home = Brazil (the default): worldwide + BR fence + LATAM macro fence.
+    # Home = Brazil (the default). remote_anywhere is home-blind worldwide; the
+    # BR/LATAM fences belong to remote_home; OR-ing both is the old union.
     monkeypatch.setenv("JOBCRAWLER_HOME_COUNTRY", "BR")
-    assert anywhere() == ["br-fence", "latam-fence", "worldwide"]
+    assert urls("remote_anywhere") == ["worldwide"]
+    assert urls("remote_home") == ["br-fence", "latam-fence"]
+    assert urls("remote_anywhere", "remote_home") == [
+        "br-fence",
+        "latam-fence",
+        "worldwide",
+    ]
 
-    # The lever is real, not a hardcoded BR: from the US the US fence joins and the
-    # Brazil-only ones drop, while a worldwide anywhere still matches from anywhere.
+    # The lever is real, not a hardcoded BR: from the US the US fence joins
+    # remote_home and the Brazil-only ones drop, while worldwide is unmoved.
     monkeypatch.setenv("JOBCRAWLER_HOME_COUNTRY", "US")
-    assert anywhere() == ["us-fence", "worldwide"]
+    assert urls("remote_anywhere") == ["worldwide"]
+    assert urls("remote_home") == ["us-fence"]
+    assert urls("remote_anywhere", "remote_home") == ["us-fence", "worldwide"]
 
-    # A malformed override can never reach the inlined SQL literal — it falls back
-    # to BR rather than injecting or emptying the result.
+    # A malformed override can never reach the inlined SQL literal — remote_home
+    # falls back to BR rather than injecting or emptying the result.
     monkeypatch.setenv("JOBCRAWLER_HOME_COUNTRY", "not-a-country")
-    assert anywhere() == ["br-fence", "latam-fence", "worldwide"]
+    assert urls("remote_home") == ["br-fence", "latam-fence"]
 
 
 def test_search_exclude_email_apply(store: StateStore) -> None:

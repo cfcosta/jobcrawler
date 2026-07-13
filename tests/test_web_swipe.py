@@ -190,6 +190,7 @@ async def test_swipe_filter_drawer_mirrors_positions_grammar() -> None:
                 'name="level"',
                 'name="min_salary"',
                 'name="remote_anywhere"',
+                'name="remote_home"',
                 'name="show_dismissed"',
                 'name="hide_applied_companies"',
             ):
@@ -199,15 +200,18 @@ async def test_swipe_filter_drawer_mirrors_positions_grammar() -> None:
 
 
 async def test_swipe_bare_defaults_open_on_the_reachable_set() -> None:
-    """A bare /swipe opens tighter than /positions: remote-anywhere (home-relative,
-    so +BR) OR non-US relocation, stage new, applied companies hidden. The drawer
-    echoes the active defaults so the deck's query is visible + shareable."""
+    """A bare /swipe opens tighter than /positions: remote-anywhere (worldwide) OR
+    remote-home (fenced to the home country, +BR) OR non-US relocation, stage new,
+    applied companies hidden. The two remote arms are what the old single "+BR"
+    checkbox meant, now split. The drawer echoes the active defaults so the deck's
+    query is visible + shareable."""
     store = _seeded_store()
     try:
         async with _client(create_app(store)) as c:
             bare = (await c.get("/swipe")).text
             for checked in (
                 'name="remote_anywhere" value="1" checked',
+                'name="remote_home" value="1" checked',
                 'name="relocation_no_us" value="1" checked',
                 'name="hide_applied_companies" value="1" checked',
             ):
@@ -216,6 +220,7 @@ async def test_swipe_bare_defaults_open_on_the_reachable_set() -> None:
             # mobility box the operator left unchecked stays unchecked
             explicit = (await c.get("/swipe?track_status=new&sort=score")).text
             assert 'name="remote_anywhere" value="1" checked' not in explicit
+            assert 'name="remote_home" value="1" checked' not in explicit
             assert 'name="relocation_no_us" value="1" checked' not in explicit
     finally:
         store.close()
