@@ -1156,13 +1156,13 @@ def genfail_backoff() -> float:
     backoff it is re-tried with the *current* generator (which the offline §4.11 loop
     keeps improving). The delay grows geometrically per consecutive failure (×2 each)
     up to ``genfail_backoff_cap``, so a chronically broken site backs off without ever
-    giving up. Default 3h."""
-    return _duration_secs("JOBCRAWLER_GENFAIL_BACKOFF", "3h")
+    giving up. Default 1h."""
+    return _duration_secs("JOBCRAWLER_GENFAIL_BACKOFF", "1h")
 
 
 def genfail_backoff_cap() -> float:
-    """Ceiling (seconds) for the generation-failed retry backoff. Default 7d."""
-    return _duration_secs("JOBCRAWLER_GENFAIL_BACKOFF_CAP", "7d")
+    """Ceiling (seconds) for the generation-failed retry backoff. Default 5d."""
+    return _duration_secs("JOBCRAWLER_GENFAIL_BACKOFF_CAP", "5d")
 
 
 def genfail_max_attempts() -> int:
@@ -1175,8 +1175,8 @@ def genfail_max_attempts() -> int:
     and no longer re-generated — so the spend is bounded. It stays surfaced (not silent),
     and un-parks the moment it heals on its own or an operator regenerates it by hand.
     ``0`` disables the cap (retry forever, the historical behavior). Default 8 — with the
-    6h→7d backoff that is roughly three weeks of escalating retries, enough to ride out a
-    long outage before giving up."""
+    1h→5d backoff that is roughly five days of escalating retries, enough to ride out an
+    outage before giving up."""
     return _int("JOBCRAWLER_GENFAIL_MAX_ATTEMPTS", 8)
 
 
