@@ -385,8 +385,13 @@ def fanout_token_cap() -> int:
 
 
 def fanout_n() -> int:
-    """Number of candidates the §6 best-of-N generates (default N≈4–8)."""
-    return _int("JOBCRAWLER_FANOUT_N", 4)
+    """Number of candidates the §6 best-of-N generates (default 2).
+
+    Each candidate is a full ~20-call RLM trajectory, so N is the dominant factor in
+    an attempt's LM bill. 2 keeps one comparison pair — enough for the argmax to
+    reject a degenerate draw — at half the spend of the earlier default of 4; raise
+    it back for quality-critical reruns."""
+    return _int("JOBCRAWLER_FANOUT_N", 2)
 
 
 def fanout_retries() -> int:
@@ -1176,10 +1181,12 @@ def genfail_max_attempts() -> int:
     After this many consecutive failures the site is *parked* — held ``generation_failed``
     and no longer re-generated — so the spend is bounded. It stays surfaced (not silent),
     and un-parks the moment it heals on its own or an operator regenerates it by hand.
-    ``0`` disables the cap (retry forever, the historical behavior). Default 8 — with the
-    1h→5d backoff that is roughly five days of escalating retries, enough to ride out an
-    outage before giving up."""
-    return _int("JOBCRAWLER_GENFAIL_MAX_ATTEMPTS", 8)
+    ``0`` disables the cap (retry forever, the historical behavior). Default 5 — with the
+    1h base backoff that is roughly fifteen hours of escalating retries (1+2+4+8h),
+    enough to ride out an overnight outage before giving up; a genuinely hopeless board
+    (a bot wall, a retired URL) stops burning ~85-call generation attempts within a
+    day."""
+    return _int("JOBCRAWLER_GENFAIL_MAX_ATTEMPTS", 5)
 
 
 def reopt_check() -> str:

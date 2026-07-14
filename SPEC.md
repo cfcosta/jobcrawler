@@ -735,7 +735,7 @@ backoff, then re-tried with the — §4.11-improved — current generator), surf
 `jobcrawl list`/`status` and *not* silently re-enqueued into the same failing generation (which
 would spin). The backoff alone never gives up — at its cap it would re-generate a chronically dead
 board (a retired URL, an un-crawlable rewrite) forever — so after `JOBCRAWLER_GENFAIL_MAX_ATTEMPTS`
-consecutive failures (default 8, `0` disables) the board is **parked**: held generation-failed and
+consecutive failures (default 5, `0` disables) the board is **parked**: held generation-failed and
 no longer auto-re-generated, bounding the spend. It stays surfaced and un-parks the moment it heals
 on its own or an operator regenerates it by hand. A regeneration that **crashes** (the entrypoint refusing the corpus prefetch, LM
 transport, sandbox runtime) lands in the same held state: an escaping exception writes no health
@@ -1492,7 +1492,7 @@ an `openrouter/…` slug billed per token. Selected knobs:
 | `JOBCRAWLER_ADOPT_PROBATION` | `48h` | post-adoption window the §4.11 rollback watcher judges (`off` disables) |
 | `JOBCRAWLER_ADOPT_REGRESSION_DELTA` | `2` | extra generation-failures over baseline that trip auto-rollback |
 | `JOBCRAWLER_MAX_ITERATIONS` / `MAX_LLM_CALLS` / `MAX_SUBCALLS` | `20` / `40` / `60` | RLM caps + the unconditional host sub-call kill (§4.2) |
-| `JOBCRAWLER_FANOUT_N` / `FANOUT_TOKEN_CAP` | `4` / `2M/site` | §6 best-of-N width + the aggregate fan-out token ceiling (dspy records tokens for every provider; USD isn't priced for many slugs) |
+| `JOBCRAWLER_FANOUT_N` / `FANOUT_TOKEN_CAP` | `2` / `2M/site` | §6 best-of-N width + the aggregate fan-out token ceiling (dspy records tokens for every provider; USD isn't priced for many slugs) |
 | `JOBCRAWLER_FANOUT_RETRIES` | `= FANOUT_N` | §6 redraws for LM/adapter-dead attempts (a failure never eats a comparison slot; attempts ≤ 2N) |
 | `JOBCRAWLER_BOOTSTRAP_BUDGET` | `3m` | §4.9 per-tick time budget for the cold-start bootstrap pass (over budget → roster defers to next tick) |
 | `JOBCRAWLER_BOOTSTRAP_CONCURRENCY` | `16` | §4.9 max generations run in parallel per wave — paces the cold-start bootstrap AND the §4.8 staleness sweep (1 = sequential; caps concurrent LM spend/rate) |
