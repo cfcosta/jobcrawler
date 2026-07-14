@@ -1,122 +1,116 @@
 
 import json
-import re
 
 SITE = "https://jobs.ashbyhq.com/uniswap"
-EXTRA_HOSTS = []
+EXTRA_HOSTS = ["api.ashbyhq.com"]
+API_URL = "https://api.ashbyhq.com/posting-api/job-board/uniswap?includeCompensation=true"
 
 
-def _app_data(page):
-    if not isinstance(page, str):
-        page = page.text
-    match = re.search(
-        r"window\.__appData\s*=\s*(\{.*?\});\s*(?:\n|fetch\()",
-        page,
-        re.S,
-    )
-    if not match:
-        raise ValueError("Ashby app data was not found")
-    return json.loads(match.group(1))
+def _location_value(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return value.get("location") or value.get("name")
+    return None
 
 
-def _locations(posting):
-    values = []
-    primary = posting.get("locationExternalName") or posting.get("locationName")
-    if primary:
-        values.append(primary)
-
-    secondary = posting.get("secondaryLocationNames") or []
-    for item in secondary:
-        if isinstance(item, dict):
-            value = (
-                item.get("locationExternalName")
-                or item.get("locationName")
-                or item.get("location")
-            )
-        else:
-            value = item
-        if value and value not in values:
-            values.append(value)
-    return values
-
-
-def _salary_fields(posting):
+def _compensation_fields(posting):
+    compensation = posting.get("compensation") or {}
     result = {}
-    if posting.get("shouldDisplayCompensation"):
-        printed = (
-            posting.get("compensationTierSummary")
-            or posting.get("scrapeableCompensationSalarySummary")
-        )
-        if printed:
-            result["salary"] = printed
 
-        for component in posting.get("summaryComponents") or []:
-            if not isinstance(component, dict):
-                continue
-            mapping = {
-                "salary_min": component.get("minValue"),
-                "salary_max": component.get("maxValue"),
-                "salary_currency": component.get("currencyCode"),
-                "salary_period": component.get("interval"),
-            }
-            if any(value is not None for value in mapping.values()):
-                result.update(
-                    (key, value) for key, value in mapping.items()
-                    if value is not None
-                )
-                break
+    printed = (
+        compensation.get("compensationTierSummary")
+        or compensation.get("summary")
+        or posting.get("compensationTierSummary")
+    )
+    if printed:
+        result["salary"] = printed
+
+    components = compensation.get("summaryComponents") or []
+    if isinstance(components, dict):
+        components = [components]
+
+    numeric = []
+    for component in components:
+        if not isinstance(component, dict):
+            continue
+        minimum = component.get("minValue")
+        maximum = component.get("maxValue")
+        currency = component.get("currencyCode")
+        if minimum is not None and maximum is not None and currency:
+            numeric.append(component)
+
+    currencies = {component.get("currencyCode") for component in numeric}
+    if numeric and len(currencies) == 1:
+        minimums = [component["minValue"] for component in numeric]
+        maximums = [component["maxValue"] for component in numeric]
+        periods = {
+            component.get("interval")
+            for component in numeric
+            if component.get("interval")
+        }
+
+        result["salary_min"] = min(minimums)
+        result["salary_max"] = max(maximums)
+        result["salary_currency"] = next(iter(currencies))
+        if len(periods) == 1:
+            result["salary_period"] = next(iter(periods))
+
     return result
 
 
 def crawl(ctx):
-    board_data = _app_data(ctx.fetch(SITE))
-    board = board_data.get("jobBoard") or {}
+    payload = json.loads(ctx.fetch(API_URL))
 
-    seen = set()
-    for summary in board.get("jobPostings") or []:
-        posting_id = summary.get("id")
-        if not posting_id or posting_id in seen or summary.get("isListed") is False:
-            continue
-        seen.add(posting_id)
-
-        url = SITE.rstrip("/") + "/" + posting_id
-        detail_data = _app_data(ctx.fetch(url))
-        posting = detail_data.get("posting") or {}
-        if posting.get("isListed") is False:
-            continue
-
-        locations = _locations(posting)
-        location = (
-            posting.get("locationExternalName")
-            or posting.get("locationName")
-            or (locations[0] if locations else None)
+    for posting in payload.get("jobs") or []:
+        description = (
+            posting.get("descriptionPlain")
+            or posting.get("descriptionHtml")
         )
-        description = posting.get("descriptionPlainText")
+        title = posting.get("title")
+        posting_id = posting.get("id")
+        url = (
+            posting.get("jobUrl")
+            or posting.get("url")
+            or (
+                "https://jobs.ashbyhq.com/uniswap/" + posting_id
+                if posting_id else None
+            )
+        )
+        primary_location = _location_value(posting.get("location"))
 
-        job = {
-            "source": SITE,
+        if not title or not description or not url or not primary_location:
+            continue
+
+        locations = [primary_location]
+        for secondary in posting.get("secondaryLocations") or []:
+            value = _location_value(secondary)
+            if value and value not in locations:
+                locations.append(value)
+
+        fields = {
             "url": url,
-            "title": posting.get("title") or summary.get("title"),
+            "title": title,
             "company": "Uniswap Labs",
-            "location": location,
+            "location": primary_location,
+            "locations": locations,
             "description": description,
-            "external_id": posting.get("id") or posting_id,
+            "source": SITE,
+            "external_id": posting_id,
+            "apply_url": posting.get("applyUrl"),
             "employment_type": posting.get("employmentType"),
             "workplace_type": posting.get("workplaceType"),
-            "department": (
-                posting.get("departmentExternalName")
-                or posting.get("departmentName")
-                or posting.get("teamExternalName")
-                or posting.get("teamName")
+            "department": posting.get("department"),
+            "posted_at": (
+                posting.get("publishedAt")
+                or posting.get("publishedDate")
             ),
-            "posted_at": posting.get("publishedDate"),
             "expires_at": posting.get("applicationDeadline"),
         }
-        if locations:
-            job["locations"] = locations
-        job.update(_salary_fields(posting))
+        fields.update(_compensation_fields(posting))
 
         yield {
-            key: value for key, value in job.items()
+            key: value
+            for key, value in fields.items()
             if value is not None and value != ""
         }

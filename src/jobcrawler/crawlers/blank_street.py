@@ -1,90 +1,109 @@
-
-import html
 import json
 import re
+from html import unescape
+
 
 SITE = "https://boards-api.greenhouse.io/v1/boards/blankstreet/jobs?content=true"
 EXTRA_HOSTS = []
+_DISCOVERY_URL = SITE + "&pay_transparency=true"
 
 
-def _clean_description(value):
-    if not value:
-        return None
-    text = html.unescape(value)
-    text = re.sub(r"(?i)<\s*br\s*/?\s*>", "\n", text)
-    text = re.sub(r"(?i)</\s*(p|div|h[1-6]|li|ul|ol|tr|section|article)\s*>", "\n", text)
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = html.unescape(text)
-    text = text.replace("\xa0", " ")
-    text = re.sub(r"[ \t\r\f\v]+", " ", text)
-    text = re.sub(r"\n\s+", "\n", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip() or None
+def _html_to_text(value):
+    value = unescape(value or "")
+    value = re.sub(
+        r"(?is)<(?:script|style|noscript|template)\b[^>]*>.*?</(?:script|style|noscript|template)\s*>",
+        " ",
+        value,
+    )
+    value = re.sub(
+        r"(?i)<\s*(?:br|hr)\s*/?\s*>|</?\s*(?:address|article|blockquote|div|dl|dt|dd|figcaption|figure|footer|h[1-6]|header|li|main|ol|p|pre|section|table|tbody|td|th|thead|tr|ul)\b[^>]*>",
+        "\n",
+        value,
+    )
+    value = re.sub(r"(?s)<[^>]+>", " ", value)
+    value = unescape(value)
+
+    lines = []
+    for line in value.splitlines():
+        normalized = " ".join(line.split())
+        if normalized:
+            lines.append(normalized)
+    return "\n".join(lines)
 
 
-def _salary_fields(job):
-    ranges = job.get("pay_input_ranges") or []
-    currencies = {r.get("currency_type") for r in ranges if r.get("currency_type")}
-    if len(currencies) != 1:
+def _pay_fields(ranges):
+    ranges = [item for item in (ranges or []) if isinstance(item, dict)]
+    currencies = {
+        item.get("currency_type")
+        for item in ranges
+        if item.get("currency_type")
+    }
+    if not ranges or len(currencies) != 1:
         return {}
-    mins = [r.get("min_cents") for r in ranges if isinstance(r.get("min_cents"), (int, float))]
-    maxs = [r.get("max_cents") for r in ranges if isinstance(r.get("max_cents"), (int, float))]
-    if not mins and not maxs:
-        return {}
-    out = {"salary_currency": next(iter(currencies))}
-    if mins:
-        out["salary_min"] = min(mins) / 100
-    if maxs:
-        out["salary_max"] = max(maxs) / 100
-    periods = [r.get("pay_period") or r.get("interval") for r in ranges if r.get("pay_period") or r.get("interval")]
-    if periods and len(set(periods)) == 1:
-        out["salary_period"] = periods[0]
-    return out
+
+    minimums = [
+        item["min_cents"] / 100
+        for item in ranges
+        if item.get("min_cents") is not None
+    ]
+    maximums = [
+        item["max_cents"] / 100
+        for item in ranges
+        if item.get("max_cents") is not None
+    ]
+
+    fields = {"salary_currency": next(iter(currencies))}
+    if minimums:
+        fields["salary_min"] = min(minimums)
+    if maximums:
+        fields["salary_max"] = max(maximums)
+    return fields
 
 
 def crawl(ctx):
-    url = SITE
-    if "pay_transparency=" not in url:
-        url += "&pay_transparency=true" if "?" in url else "?pay_transparency=true"
+    response = ctx.fetch(_DISCOVERY_URL)
+    payload = json.loads(response)
 
-    data = json.loads(ctx.fetch(url))
-    for item in data.get("jobs") or []:
-        title = (item.get("title") or "").strip()
-        description = _clean_description(item.get("content"))
-        location = ((item.get("location") or {}).get("name") or "").strip()
-        job_url = item.get("absolute_url") or item.get("url")
-        if not (title and description and location and job_url):
+    for record in payload.get("jobs", []):
+        title = record.get("title")
+        url = record.get("absolute_url")
+        location = (record.get("location") or {}).get("name")
+        description = _html_to_text(record.get("content"))
+
+        if not title or not url or not location or not description:
             continue
 
-        record = {
-            "url": job_url,
+        fields = {
+            "url": url,
             "title": title,
             "company": "Blank Street",
             "location": location,
             "description": description,
             "source": SITE,
+            "external_id": str(record["id"]),
+            "apply_url": url,
         }
 
-        offices = item.get("offices") or []
-        locations = []
-        for office in offices:
-            loc = office.get("location") or office.get("name")
-            if loc and loc not in locations:
-                locations.append(loc)
-        if locations:
-            record["locations"] = locations
+        departments = [
+            item.get("name")
+            for item in record.get("departments", [])
+            if item.get("name")
+        ]
+        if departments:
+            fields["department"] = ", ".join(departments)
 
-        departments = item.get("departments") or []
-        dept_names = [d.get("name") for d in departments if d.get("name")]
-        if dept_names:
-            record["department"] = dept_names[0]
+        offices = [
+            item.get("name")
+            for item in record.get("offices", [])
+            if item.get("name")
+        ]
+        if offices:
+            fields["locations"] = offices
 
-        if item.get("id") is not None:
-            record["external_id"] = str(item.get("id"))
-        if item.get("first_published"):
-            record["posted_at"] = item.get("first_published")
-        if item.get("absolute_url"):
-            record["apply_url"] = item.get("absolute_url")
+        if record.get("first_published"):
+            fields["posted_at"] = record["first_published"]
+        if record.get("application_deadline"):
+            fields["expires_at"] = record["application_deadline"]
 
-        record.update(_salary_fields(item))
-        yield record
+        fields.update(_pay_fields(record.get("pay_input_ranges")))
+        yield fields
