@@ -382,3 +382,51 @@ def run_llm_loop(coro: Coroutine[Any, Any, _T]) -> _T:
             await drain_litellm_logging()
 
     return asyncio.run(_main())
+
+
+def usage_rows(usage: object) -> list[tuple[str, int, int]]:
+    """Flatten a dspy usage mapping into ``(model, tokens_in, tokens_out)`` rows.
+
+    Accepts the ``{model: usage_dict}`` shape both ``Prediction.get_lm_usage()`` and
+    ``UsageTracker.get_total_tokens()`` return, feeding the §8 ``llm_usage`` ledger.
+    Token counts are read defensively — ``prompt_tokens``/``completion_tokens``
+    (litellm's normalized names) with the Responses-API ``input_tokens``/
+    ``output_tokens`` accepted as fallbacks — because the ledger must survive any
+    provider's shape without raising into the caller. Entries with nothing countable
+    are dropped rather than recorded as zero-token rows.
+    """
+    if not isinstance(usage, dict):
+        return []
+    rows: list[tuple[str, int, int]] = []
+    for model, entry in usage.items():
+        if not isinstance(entry, dict):
+            continue
+        tokens_in = _first_count(entry, "prompt_tokens", "input_tokens")
+        tokens_out = _first_count(entry, "completion_tokens", "output_tokens")
+        if tokens_in <= 0 and tokens_out <= 0:
+            continue
+        rows.append((str(model), tokens_in, tokens_out))
+    return rows
+
+
+def _first_count(entry: dict[Any, Any], *keys: str) -> int:
+    for key in keys:
+        value = entry.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            return int(value)
+    return 0
+
+
+def prediction_usage_rows(prediction: object) -> list[tuple[str, int, int]]:
+    """:func:`usage_rows` over a dspy prediction; ``[]`` when tracking was off.
+
+    Defensive on every hop (missing getter, raising getter, odd shapes): usage
+    accounting is bookkeeping and must never break the call it observed.
+    """
+    getter = getattr(prediction, "get_lm_usage", None)
+    if not callable(getter):
+        return []
+    try:
+        return usage_rows(getter() or {})
+    except Exception:
+        return []

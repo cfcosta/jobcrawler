@@ -440,3 +440,39 @@ def test_neutered_worker_accepts_litellms_exact_call_shapes() -> None:
     for coro in (by_keyword, enqueue_keyword, positional):
         assert inspect.getcoroutinestate(coro) == "CORO_CLOSED"
     assert GLOBAL_LOGGING_WORKER._worker_task is None
+
+
+# -- usage_rows / prediction_usage_rows (the llm_usage ledger's parser) --------
+
+
+def test_usage_rows_reads_litellm_and_responses_shapes() -> None:
+    usage = {
+        "openrouter/foo": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120},
+        "chatgpt/bar": {"input_tokens": 7, "output_tokens": 3},  # Responses-API names
+    }
+    assert sorted(lm.usage_rows(usage)) == [
+        ("chatgpt/bar", 7, 3),
+        ("openrouter/foo", 100, 20),
+    ]
+
+
+def test_usage_rows_drops_garbage_without_raising() -> None:
+    assert lm.usage_rows(None) == []
+    assert lm.usage_rows("nope") == []
+    assert lm.usage_rows({"m": "not-a-dict"}) == []
+    assert lm.usage_rows({"m": {"prompt_tokens": 0, "completion_tokens": 0}}) == []
+    assert lm.usage_rows({"m": {"prompt_tokens": "many"}}) == []
+
+
+def test_prediction_usage_rows_is_defensive() -> None:
+    class WithUsage:
+        def get_lm_usage(self) -> dict[str, Any]:
+            return {"m": {"prompt_tokens": 5, "completion_tokens": 1}}
+
+    class Raises:
+        def get_lm_usage(self) -> dict[str, Any]:
+            raise RuntimeError("tracker exploded")
+
+    assert lm.prediction_usage_rows(WithUsage()) == [("m", 5, 1)]
+    assert lm.prediction_usage_rows(Raises()) == []  # never raises into the caller
+    assert lm.prediction_usage_rows(object()) == []  # tracking off / plain object

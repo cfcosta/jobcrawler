@@ -332,6 +332,14 @@ CREATE TABLE IF NOT EXISTS match_spend (
     day    TEXT PRIMARY KEY,
     scored INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS llm_usage (
+    day        TEXT NOT NULL,
+    purpose    TEXT NOT NULL,
+    model      TEXT NOT NULL,
+    tokens_in  INTEGER NOT NULL DEFAULT 0,
+    tokens_out INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, purpose, model)
+);
 CREATE TABLE IF NOT EXISTS extract_cache (
     content_hash    TEXT,
     model           TEXT,
@@ -3949,6 +3957,57 @@ class StateStore:
                 )
                 self._conn.commit()
             return granted
+
+    def bump_llm_usage(
+        self, purpose: str, model: str, *, tokens_in: int, tokens_out: int
+    ) -> None:
+        """Add one LLM interaction's token counts to today's ``(purpose, model)`` ledger row.
+
+        The per-UTC-day token ledger behind the usage observability surface: every LLM
+        entry point (§4.7 match + extract, §4.2/§4.8 generation, §4.11 optimize, §18
+        autofill) bumps its own purpose, keyed by the exact model slug it billed — a
+        root/sub LM pair lands as two rows, so mixed-model flows stay individually
+        visible. Counts come from the provider's own usage block (via dspy's usage
+        tracker), never estimated; a call with nothing measured writes nothing, so
+        absent usage data can't fabricate zero-token rows. Unlike ``match_spend`` (a
+        *cap* counter, charged up front) this ledger is bookkeeping only — nothing
+        reads it to gate work."""
+        if tokens_in <= 0 and tokens_out <= 0:
+            return
+        day = self._clock().strftime("%Y-%m-%d")
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO llm_usage (day, purpose, model, tokens_in, tokens_out) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT (day, purpose, model) DO UPDATE SET "
+                "tokens_in = tokens_in + ?, tokens_out = tokens_out + ?",
+                (day, purpose, model, tokens_in, tokens_out, tokens_in, tokens_out),
+            )
+            self._conn.commit()
+
+    def llm_usage_recent(self, days: int = 14) -> list[dict[str, object]]:
+        """Per-``(day, purpose, model)`` token totals for the last ``days`` UTC days.
+
+        Newest day first, then purpose/model for a stable render — the reader behind
+        ``status`` and ``/api/llm-usage``. Rows are returned as plain dicts so both
+        surfaces can dump them without post-processing."""
+        since = (self._clock() - timedelta(days=max(0, days))).strftime("%Y-%m-%d")
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT day, purpose, model, tokens_in, tokens_out FROM llm_usage "
+                "WHERE day >= ? ORDER BY day DESC, purpose, model",
+                (since,),
+            ).fetchall()
+        return [
+            {
+                "day": row["day"],
+                "purpose": row["purpose"],
+                "model": row["model"],
+                "tokens_in": int(row["tokens_in"]),
+                "tokens_out": int(row["tokens_out"]),
+            }
+            for row in rows
+        ]
 
     def close(self) -> None:
         self._conn.close()

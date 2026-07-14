@@ -25,7 +25,7 @@ from typing import cast
 import dspy
 
 from jobcrawler import config
-from jobcrawler.lm import build_lm
+from jobcrawler.lm import build_lm, usage_rows
 from jobcrawler.generate.budget import CappedLM
 from jobcrawler.generate.evaluate import evaluate_generator
 from jobcrawler.generate.generator import (
@@ -102,7 +102,11 @@ def _run_optimize(args: argparse.Namespace) -> int:
 
     holdout_n, val_n = _split_sizes(n_sites)
     train, val, holdout = split_by_site(examples, holdout=holdout_n, val=val_n)
-    result = _optimize(train, val, holdout)
+    # dspy's tracker rides settings.context, so every rollout the compile makes —
+    # root, sub and reflection LMs alike — lands in one per-model usage total.
+    with dspy.track_usage() as usage_tracker:
+        result = _optimize(train, val, holdout)
+    _persist_optimize_usage(usage_tracker)
 
     for note_key in ("pareto_health", "budget_health"):
         if result.get(note_key):
@@ -304,6 +308,32 @@ def _prefetch_corpus(site_url: str) -> dict[str, object]:
     against the site's *current* (drifted) state (§4.11)."""
     host = normalize_host(site_url)
     return prefetch_corpus(site_url, Ctx({host} if host else set()))
+
+
+def _persist_optimize_usage(tracker: object) -> None:
+    """Ledger the compile's per-model token usage; best-effort, never fails the run.
+
+    The multi-hour §4.11 job is the most expensive LLM consumer in the system, so its
+    spend belongs in the same ``llm_usage`` ledger as everything else. A short-lived
+    store handle is opened just for the bump — the long-lived one ``_run_optimize``
+    used for the trainset pool is already closed by the time the compile ends."""
+    try:
+        getter = getattr(tracker, "get_total_tokens", None)
+        rows = usage_rows(getter() if callable(getter) else {})
+        if not rows:
+            return
+        from jobcrawler.cli import _db_path  # avoid an import cycle
+
+        store = StateStore(_db_path())
+        try:
+            for model, tokens_in, tokens_out in rows:
+                store.bump_llm_usage(
+                    "optimize", model, tokens_in=tokens_in, tokens_out=tokens_out
+                )
+        finally:
+            store.close()
+    except Exception as exc:  # noqa: BLE001 - bookkeeping must not fail the compile
+        print(f"llm usage not persisted: {exc}")
 
 
 def _stable_runs(store: StateStore, slug: str) -> int:

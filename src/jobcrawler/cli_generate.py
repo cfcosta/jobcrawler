@@ -49,7 +49,7 @@ from jobcrawler.generate.gates import (
 from jobcrawler.generate.adversarial import cross_validate
 from jobcrawler.generate.budget import CappedLM
 from jobcrawler.generate.lm_capture import begin_capture, capture_callback, end_capture
-from jobcrawler.lm import build_lm, run_llm_loop
+from jobcrawler.lm import build_lm, prediction_usage_rows, run_llm_loop
 from jobcrawler.generate.generator import best_of_n, load_generator
 from jobcrawler.generate.scoring import CandidateResult, make_reward_fn
 from jobcrawler.generate.snapshot import prefetch_corpus
@@ -197,9 +197,10 @@ async def _generate_one(
     result = RegenOutcome.FAILED
     attempt_reason = "generation did not complete"
     attempt_score: float | None = None
+    usage_acc: list[tuple[str, int, int]] = []  # per-candidate (model, in, out) rows
     try:
         result, attempt_reason, attempt_score = await _run_generation(
-            site, root_lm, sub_lm, mode=mode
+            site, root_lm, sub_lm, mode=mode, usage=usage_acc
         )
         return result
     except Exception as exc:  # enrich the record, then let the healer see the failure
@@ -210,16 +211,26 @@ async def _generate_one(
             _persist_attempt(
                 store, site.slug, result, attempt_reason, attempt_score, end_capture()
             )
+            _persist_usage(store, usage_acc)
 
 
 async def _run_generation(
-    site: Site, root_lm: dspy.LM, sub_lm: dspy.LM, *, mode: str
+    site: Site,
+    root_lm: dspy.LM,
+    sub_lm: dspy.LM,
+    *,
+    mode: str,
+    usage: list[tuple[str, int, int]] | None = None,
 ) -> tuple[RegenOutcome, str, float | None]:
     """Run one §6 generation and report ``(outcome, reason, score)`` for the attempt record.
 
     Split from :func:`_generate_one` so the capture/persist wrapper stays a thin,
     single-exit shell: this returns the structured triple at every decision point instead
     of leaving the "why" only in the ``print`` lines.
+
+    ``usage`` (when given) accumulates each candidate's per-model token rows — root and
+    ``sub_lm`` land under their own model slugs — so the caller can ledger the attempt's
+    whole fan-out, not just the winner.
     """
     registry_hosts = {normalize_host(site.url)}
     # §4.10 render escalation: provision the boot ctx with the process-wide render
@@ -292,12 +303,15 @@ async def _run_generation(
         with dspy.context(
             lm=root_lm.copy(rollout_id=i, temperature=1.0), track_usage=True
         ):
-            return await generator.aforward(
+            pred = await generator.aforward(
                 site_url=site.url,
                 corpus=corpus,
                 render=site.render,
                 hints=site.hints,
             )
+        if usage is not None:  # ledger every candidate, not just best_of_n's winner
+            usage.extend(prediction_usage_rows(pred))
+        return pred
 
     best, score = await best_of_n(
         make_attempt,
@@ -377,6 +391,25 @@ def _persist_attempt(
         )
     except Exception as exc:  # noqa: BLE001 - logging must not break a self-heal
         print(f"  generation log not persisted for {slug}: {exc}")
+
+
+def _persist_usage(store: StateStore, rows: list[tuple[str, int, int]]) -> None:
+    """Ledger one attempt's per-model token usage; never raise into the generation path.
+
+    Rows are pre-summed per model so an attempt writes at most one ledger bump per LM
+    (root + sub land individually) instead of one per candidate."""
+    totals: dict[str, list[int]] = {}
+    for model, tokens_in, tokens_out in rows:
+        entry = totals.setdefault(model, [0, 0])
+        entry[0] += tokens_in
+        entry[1] += tokens_out
+    try:
+        for model, (tokens_in, tokens_out) in totals.items():
+            store.bump_llm_usage(
+                "generate", model, tokens_in=tokens_in, tokens_out=tokens_out
+            )
+    except Exception as exc:  # noqa: BLE001 - bookkeeping must not break a self-heal
+        print(f"  llm usage not persisted: {exc}")
 
 
 def _open_store() -> StateStore:

@@ -35,7 +35,7 @@ from pydantic import ValidationError
 
 from jobcrawler import config
 from jobcrawler.cdp import CdpBrowser, CdpError
-from jobcrawler.lm import build_lm
+from jobcrawler.lm import build_lm, prediction_usage_rows
 from jobcrawler.profile import load_profile
 from jobcrawler.sites import find_site, load_sites
 from jobcrawler.state import PositionRecord, StateStore, autofill_target
@@ -1072,8 +1072,16 @@ class AutofillWorker:
 
     def _call_llm(self, profile: str, context: str, page: str) -> str:
         lm = build_lm(self._model, temperature=0.0, max_tokens=self._max_tokens)
-        with dspy.context(lm=lm):
+        with dspy.context(lm=lm, track_usage=True):
             prediction = self._predict(profile=profile, context=context, page=page)
+        try:
+            # Bookkeeping only — a ledger write must never abort a fill round.
+            for model, tokens_in, tokens_out in prediction_usage_rows(prediction):
+                self._store.bump_llm_usage(
+                    "autofill", model, tokens_in=tokens_in, tokens_out=tokens_out
+                )
+        except Exception:
+            _log.exception("llm usage ledger write failed; continuing")
         return str(prediction.actions)
 
     def _context(

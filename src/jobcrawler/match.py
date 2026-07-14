@@ -56,7 +56,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, Protocol, Sequence, c
 import dspy
 
 from jobcrawler import config
-from jobcrawler.lm import build_lm
+from jobcrawler.lm import build_lm, prediction_usage_rows
 from jobcrawler.profile import Profile, ProfilePrefs
 from jobcrawler.runtime.geo import parse_location
 from jobcrawler.runtime.normalize import normalize_location
@@ -668,8 +668,11 @@ class Matcher:
         # slug, but routes a chatgpt/* slug to the Codex Responses backend (dropping both,
         # which that backend ignores and dspy's gpt-5 guard would reject) — §9.
         lm = build_lm(self._model, temperature=0.0, max_tokens=self._max_tokens)
-        with dspy.context(lm=lm):
+        with dspy.context(lm=lm, track_usage=True):
             prediction = self._predict(profile=self._profile.body, jobs=jobs_json)
+        # Ledger the spend before parsing: the tokens were billed the moment the call
+        # returned, whether or not the verdicts below turn out usable.
+        self._record_usage("match", prediction)
 
         items = _parse_verdict_list(getattr(prediction, "verdicts", None))
         if len(items) != len(batch):
@@ -701,6 +704,19 @@ class Matcher:
             )
             applied.append((site, url, verdict))
         return applied
+
+    def _record_usage(self, purpose: str, prediction: object) -> None:
+        """Ledger the provider-reported token usage of one LLM call (never raises).
+
+        Bookkeeping only — a ledger write failing must not park a batch the LLM
+        already answered, so storage errors are logged and swallowed."""
+        try:
+            for model, tokens_in, tokens_out in prediction_usage_rows(prediction):
+                self._store.bump_llm_usage(
+                    purpose, model, tokens_in=tokens_in, tokens_out=tokens_out
+                )
+        except Exception:
+            _log.exception("llm usage ledger write failed; continuing")
 
     def _apply(
         self, site: str, url: str, verdict: MatchVerdict, *, origin: str
@@ -784,8 +800,9 @@ class Matcher:
         jobs_json = json.dumps(payload, ensure_ascii=False)
         model = cast(str, self._extract_model)
         lm = build_lm(model, temperature=0.0, max_tokens=self._max_tokens)
-        with dspy.context(lm=lm):
+        with dspy.context(lm=lm, track_usage=True):
             prediction = self._extract_predict(jobs=jobs_json)
+        self._record_usage("extract", prediction)
 
         items = _parse_extraction_list(getattr(prediction, "extractions", None))
         by_index: dict[int, object] = {}

@@ -1489,6 +1489,12 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
         queued, requeued = _recrawl_all()
         return JSONResponse({"queued": queued, "requeued": requeued}, status_code=202)
 
+    @app.get("/api/llm-usage")
+    def api_llm_usage(days: int = 14) -> JSONResponse:
+        """The per-day ``(purpose, model)`` LLM token ledger — provider-reported counts
+        from every LLM entry point (match/extract/generate/optimize/autofill)."""
+        return JSONResponse({"usage": store.llm_usage_recent(days=max(1, min(days, 90)))})
+
     @app.get("/health")
     def health() -> dict[str, bool]:
         return {"ok": True}

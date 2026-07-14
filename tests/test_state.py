@@ -3158,3 +3158,36 @@ def test_positions_status_score_index_is_created():
     }
     assert "positions_status_score" in names
     s.close()
+
+
+# -- llm_usage ledger (token observability) -----------------------------------
+
+
+def test_llm_usage_accumulates_per_day_purpose_model() -> None:
+    t0 = datetime(2026, 7, 14, 12, 0, tzinfo=timezone.utc)
+    store = StateStore(":memory:", clock=lambda: t0)
+    store.bump_llm_usage("match", "m1", tokens_in=100, tokens_out=10)
+    store.bump_llm_usage("match", "m1", tokens_in=50, tokens_out=5)  # same key: sums
+    store.bump_llm_usage("generate", "m1", tokens_in=7, tokens_out=3)  # purpose splits
+    store.bump_llm_usage("generate", "m2", tokens_in=1, tokens_out=1)  # model splits
+    rows = store.llm_usage_recent(days=7)
+    assert [(r["purpose"], r["model"], r["tokens_in"], r["tokens_out"]) for r in rows] == [
+        ("generate", "m1", 7, 3),
+        ("generate", "m2", 1, 1),
+        ("match", "m1", 150, 15),
+    ]
+    assert all(r["day"] == "2026-07-14" for r in rows)
+
+
+def test_llm_usage_skips_empty_bumps_and_old_days() -> None:
+    now = {"t": datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)}
+    store = StateStore(":memory:", clock=lambda: now["t"])
+    store.bump_llm_usage("match", "m1", tokens_in=0, tokens_out=0)  # nothing measured
+    assert store.llm_usage_recent(days=7) == []  # no fabricated zero-token rows
+    store.bump_llm_usage("match", "m1", tokens_in=9, tokens_out=1)
+    now["t"] = datetime(2026, 7, 14, 12, 0, tzinfo=timezone.utc)
+    store.bump_llm_usage("match", "m1", tokens_in=2, tokens_out=2)  # lands on a new day
+    recent = store.llm_usage_recent(days=7)
+    assert [(r["day"], r["tokens_in"]) for r in recent] == [("2026-07-14", 2)]
+    both = store.llm_usage_recent(days=30)
+    assert [r["day"] for r in both] == ["2026-07-14", "2026-07-01"]

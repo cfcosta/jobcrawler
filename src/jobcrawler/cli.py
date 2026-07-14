@@ -260,6 +260,13 @@ def _positions_block(store: StateStore) -> list[str]:
     lines.append(
         f"match spend: {store.match_spent(day)}/{config.match_daily_cap()} today"
     )
+    for usage in store.llm_usage_recent(days=1):
+        if usage["day"] != day:
+            continue  # the 1-day window can include yesterday's tail
+        lines.append(
+            f"llm tokens today [{usage['purpose']} @ {usage['model']}]: "
+            f"{usage['tokens_in']:,} in + {usage['tokens_out']:,} out"
+        )
     top = store.matches(config.match_min_score(), limit=1)
     if top:
         best = top[0]

@@ -500,7 +500,12 @@ async def test_generate_one_records_the_attempt_outcome(
     # _generate_one wraps _run_generation: whatever triple it returns is persisted once,
     # with the captured (here empty) LLM log, so a failure's reason is durable.
     async def fake_run(
-        site: Site, root_lm: object, sub_lm: object, *, mode: str
+        site: Site,
+        root_lm: object,
+        sub_lm: object,
+        *,
+        mode: str,
+        usage: list[tuple[str, int, int]] | None = None,
     ) -> tuple[RegenOutcome, str, float | None]:
         return RegenOutcome.FAILED, "no candidate produced", None
 
@@ -524,7 +529,12 @@ async def test_generate_one_records_and_reraises_on_unexpected_error(
     # An unexpected raise (e.g. Deno/network) is still recorded as a failed attempt with the
     # exception as the reason, then re-raised so the healer sees the failure.
     async def boom(
-        site: Site, root_lm: object, sub_lm: object, *, mode: str
+        site: Site,
+        root_lm: object,
+        sub_lm: object,
+        *,
+        mode: str,
+        usage: list[tuple[str, int, int]] | None = None,
     ) -> tuple[RegenOutcome, str, float | None]:
         raise RuntimeError("deno exploded")
 
@@ -546,7 +556,12 @@ async def test_generate_one_without_a_store_records_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fake_run(
-        site: Site, root_lm: object, sub_lm: object, *, mode: str
+        site: Site,
+        root_lm: object,
+        sub_lm: object,
+        *,
+        mode: str,
+        usage: list[tuple[str, int, int]] | None = None,
     ) -> tuple[RegenOutcome, str, float | None]:
         return RegenOutcome.PROMOTED, "ok", 0.9
 
@@ -556,6 +571,39 @@ async def test_generate_one_without_a_store_records_nothing(
         Site(slug="acme", url="https://acme.com"), _NO_LM, _NO_LM
     )
     assert out is RegenOutcome.PROMOTED
+
+
+async def test_generate_one_ledgers_fanout_usage_per_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Every candidate's per-model rows land in the llm_usage ledger, summed per model
+    # (root and sub_lm individually) — even for a FAILED attempt, whose tokens were
+    # still billed.
+    async def fake_run(
+        site: Site,
+        root_lm: object,
+        sub_lm: object,
+        *,
+        mode: str,
+        usage: list[tuple[str, int, int]] | None = None,
+    ) -> tuple[RegenOutcome, str, float | None]:
+        assert usage is not None
+        usage.extend([("root-m", 100, 10), ("root-m", 50, 5), ("sub-m", 7, 3)])
+        return RegenOutcome.FAILED, "no candidate produced", None
+
+    monkeypatch.setattr(cli_generate, "_run_generation", fake_run)
+    store = StateStore(":memory:")
+    try:
+        await cli_generate._generate_one(
+            Site(slug="acme", url="https://acme.com"), _NO_LM, _NO_LM, store=store
+        )
+        rows = store.llm_usage_recent(days=1)
+        assert [(r["purpose"], r["model"], r["tokens_in"], r["tokens_out"]) for r in rows] == [
+            ("generate", "root-m", 150, 15),
+            ("generate", "sub-m", 7, 3),
+        ]
+    finally:
+        store.close()
 
 
 def test_crawlers_dir_default_is_config_driven() -> None:

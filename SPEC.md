@@ -677,6 +677,15 @@ daemon was down is caught immediately:
 rows, then one capped LLM drain from the store) and refreshes `meta.profile_hash`, so the
 daemon doesn't requeue a second time for an edit the operator already rematched by hand.
 
+**Token ledger (observability, not a cap).** Every LLM entry point — match scoring, §4.6
+extraction, §4.2/§4.8 generation (root and `sub_lm` under their own model slugs), the §4.11
+optimize compile, and §18 autofill — records its provider-reported token counts into a
+per-UTC-day `llm_usage` ledger keyed `(day, purpose, model)`, read from dspy's usage tracker
+(never estimated; a call with no usage block writes nothing). Unlike `match_spend` — a *cap*
+counter denominated in scored jobs and charged up front — the ledger is pure bookkeeping:
+nothing gates on it. Surfaced in `jobcrawl status` (today's rows) and `GET /api/llm-usage`
+(per-day breakdown, default 14 days).
+
 **Operator tracking axis (host-side policy, §16).** Orthogonal to the crawler's `open`/`closed`
 lifecycle above, the store carries a second, purely operator-owned axis for the §16 tracker:
 `track_status` (a personal pipeline — `new → interested → applied → interviewing → offer` with
