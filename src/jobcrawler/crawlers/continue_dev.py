@@ -1,89 +1,111 @@
 import json
 
-SITE = "https://api.ashbyhq.com/posting-api/job-board/continue?includeCompensation=true"
+SITE = 'https://api.ashbyhq.com/posting-api/job-board/continue?includeCompensation=true'
 EXTRA_HOSTS = []
 
 
+def _value(mapping, *names):
+    for name in names:
+        value = mapping.get(name)
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _compensation_fields(posting):
+    compensation = posting.get("compensation") or {}
+    components = compensation.get("summaryComponents") or []
+    numeric = [
+        item for item in components
+        if isinstance(item, dict)
+        and (item.get("minValue") is not None or item.get("maxValue") is not None)
+    ]
+    currencies = {
+        _value(item, "currencyCode", "currency")
+        for item in numeric
+        if _value(item, "currencyCode", "currency")
+    }
+    periods = {
+        _value(item, "interval", "period")
+        for item in numeric
+        if _value(item, "interval", "period")
+    }
+
+    fields = {}
+    printed = _value(
+        compensation,
+        "compensationTierSummary",
+        "summary",
+        "scrapeableCompensationSalarySummary",
+    )
+    if printed:
+        fields["salary"] = printed
+
+    # A single coherent range maps safely to the host's salary quartet.
+    if numeric and len(currencies) <= 1 and len(periods) <= 1:
+        minimums = [item["minValue"] for item in numeric if item.get("minValue") is not None]
+        maximums = [item["maxValue"] for item in numeric if item.get("maxValue") is not None]
+        if minimums:
+            fields["salary_min"] = min(minimums)
+        if maximums:
+            fields["salary_max"] = max(maximums)
+        if currencies:
+            fields["salary_currency"] = next(iter(currencies))
+        if periods:
+            fields["salary_period"] = next(iter(periods))
+    return fields
+
+
 def crawl(ctx):
-    data = json.loads(ctx.fetch(SITE))
-    for job in data.get("jobs", []):
-        if job.get("isListed") is False:
+    try:
+        response = ctx.fetch(SITE)
+    except Exception:
+        # Ashby removes retired boards with HTTP 404.
+        return
+
+    if isinstance(response, str):
+        data = json.loads(response)
+    elif isinstance(response, (bytes, bytearray)):
+        data = json.loads(response.decode("utf-8"))
+    elif hasattr(response, "json"):
+        data = response.json()
+    else:
+        data = response
+
+    for posting in data.get("jobs", []):
+        if posting.get("isListed") is False:
             continue
 
-        title = job.get("title")
-        description = job.get("descriptionPlain") or ""
-        url = job.get("jobUrl")
-        location = job.get("location")
-        if not (title and description and url and location):
+        title = posting.get("title")
+        description = posting.get("descriptionPlain")
+        url = posting.get("jobUrl")
+        location = posting.get("location")
+        if not title or not description or not url or not location:
             continue
 
-        out = {
+        locations = [location]
+        for secondary in posting.get("secondaryLocations") or []:
+            value = secondary.get("location") if isinstance(secondary, dict) else secondary
+            if value and value not in locations:
+                locations.append(value)
+
+        fields = {
             "url": url,
             "title": title,
             "company": "Continue",
             "location": location,
+            "locations": locations,
             "description": description,
-            "source": SITE,
         }
-
-        external_id = job.get("id")
-        if external_id:
-            out["external_id"] = external_id
-
-        apply_url = job.get("applyUrl")
-        if apply_url:
-            out["apply_url"] = apply_url
-
-        employment_type = job.get("employmentType")
-        if employment_type:
-            out["employment_type"] = employment_type
-
-        workplace_type = job.get("workplaceType")
-        if workplace_type:
-            out["workplace_type"] = workplace_type
-
-        department = job.get("department") or job.get("team")
-        if department:
-            out["department"] = department
-
-        posted_at = job.get("publishedAt")
-        if posted_at:
-            out["posted_at"] = posted_at
-
-        locations = []
-        if location:
-            locations.append(location)
-        for secondary in job.get("secondaryLocations") or []:
-            if isinstance(secondary, dict):
-                secondary_location = secondary.get("location") or secondary.get("name")
-            else:
-                secondary_location = secondary
-            if secondary_location and secondary_location not in locations:
-                locations.append(secondary_location)
-        if locations:
-            out["locations"] = locations
-
-        comp = job.get("compensation") or {}
-        summary = comp.get("scrapeableCompensationSalarySummary") or comp.get(
-            "compensationTierSummary"
-        )
-        if summary:
-            out["salary"] = summary
-
-        components = comp.get("summaryComponents") or []
-        if len(components) == 1:
-            component = components[0] or {}
-            min_value = component.get("minValue")
-            max_value = component.get("maxValue")
-            currency = component.get("currencyCode")
-            interval = component.get("interval")
-            if min_value is not None:
-                out["salary_min"] = min_value
-            if max_value is not None:
-                out["salary_max"] = max_value
-            if currency:
-                out["salary_currency"] = currency
-            if interval:
-                out["salary_period"] = interval
-
-        yield out
+        optional = {
+            "department": _value(posting, "department", "team"),
+            "employment_type": posting.get("employmentType"),
+            "workplace_type": posting.get("workplaceType"),
+            "posted_at": _value(posting, "publishedAt", "postedAt"),
+            "expires_at": posting.get("expiresAt"),
+            "external_id": _value(posting, "id", "jobId"),
+            "apply_url": posting.get("applyUrl"),
+        }
+        fields.update({key: value for key, value in optional.items() if value is not None and value != ""})
+        fields.update(_compensation_fields(posting))
+        yield Job(**fields)
