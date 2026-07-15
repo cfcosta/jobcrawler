@@ -16741,3 +16741,18 @@
     "Passively seeking" headings and some titles embed the location/timezone (e.g. "gmt-7 to
     gmt-3"). One render enumerates the whole board (~3 roles: Junior Growth Engineer, Rust
     Engineer, Infrastructure Engineer).
+
+- slug: artie
+  name: "Artie"
+  url: https://api.ashbyhq.com/posting-api/job-board/artie?includeCompensation=true
+  render: static
+  company: "Artie"
+  hints: >-
+    Ashby job board API, token `artie`. Whole board in one JSON GET — jobs[] carry stable
+    `id`, `title`, `location` (plus `secondaryLocations`), `employmentType`,
+    `workplaceType`/`isRemote`, `jobUrl`, `applyUrl`, `descriptionHtml`, and compensation
+    fields when present. Parse the standard Ashby fields straight from it, keep to a single
+    request, prefer `workplaceType` over `isRemote`, and never authorize a host merely linked
+    inside a description. Artie builds real-time database replication (CDC streaming into
+    warehouses), so a small SF onsite board — strong match for backend, distributed systems,
+    data/streaming infrastructure and database internals roles.
