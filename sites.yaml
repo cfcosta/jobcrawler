@@ -16756,3 +16756,32 @@
     inside a description. Artie builds real-time database replication (CDC streaming into
     warehouses), so a small SF onsite board — strong match for backend, distributed systems,
     data/streaming infrastructure and database internals roles.
+
+- slug: modem
+  name: "Modem"
+  url: https://jobs.modem.dev/
+  render: static
+  company: "Modem"
+  hints: >-
+    Notion Sites custom domain (page "Work @ Modem"); the HTML is a JS shell — do NOT
+    browser-render, drive Notion's public v3 API on the same host instead. Roles live in the
+    "Open Positions" collection: POST `https://jobs.modem.dev/api/v3/queryCollection?src=initial_load`
+    with JSON body `{"collection":{"id":"3022c584-2de0-800d-b56a-000b87d4aee8","spaceId":
+    "56375bb1-2041-440f-b314-ae4c1824ce63"},"collectionView":{"id":
+    "3022c584-2de0-80d0-aa0b-000cb6894802","spaceId":<same>},"loader":{"type":"reducer",
+    "reducers":{"collection_group_results":{"type":"results","limit":50}},"searchQuery":"",
+    "userTimeZone":"UTC"}}` → `result.reducerResults.collection_group_results.blockIds` plus
+    `recordMap.block` rows. The response IGNORES the public view's filter and returns closed
+    rows too: schema keys are `title` = Job Title, `NpAY` = Location (multi_select, comma-joined
+    like "SF,Toronto"), `mCSG` = Status (select) — emit ONLY rows whose Status is "Open". Job
+    detail/description: POST `/api/v3/loadCachedPageChunkV2` with `{"page":{"id":<row-uuid>},
+    "limit":100,"cursor":{"stack":[]},"chunkNumber":0,"verticalColumns":false}` and join the
+    child blocks' title text segments; public job URL is `https://jobs.modem.dev/<row-hex-
+    without-dashes>`. No salary fields in the schema; apply is via careers@modem.dev. If the
+    hardcoded IDs ever rot, re-derive them with loadCachedPageChunkV2 on the root page
+    `3022c584-2de0-801c-9b8f-e896dbb2f445` (its collection_view_page block carries
+    collection_pointer + view_ids). Keep every request on jobs.modem.dev (EXTRA_HOSTS empty).
+    Modem is an AI-native product-management platform (agentic feedback triage across
+    Slack/Discord/GitHub/Sentry/Linear; 5-person Toronto/SF team, Accel-led $4M seed) — tiny
+    board, currently ~1 open role; strong match for early-stage full-stack, product and growth
+    engineering.
