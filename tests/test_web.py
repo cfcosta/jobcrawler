@@ -1280,8 +1280,9 @@ async def test_dashboard_top_matches_collapse_role_variants() -> None:
 
 async def test_dashboard_top_matches_one_card_per_company() -> None:
     # Two scored roles at one employer are genuinely separate leads, but the
-    # shortlist shows only the company's best; another company keeps its slot,
-    # and unattributed rows (blank company) never fold into each other.
+    # shortlist seats one Acme card per draw (the shuffle picks which); another
+    # company keeps its slot, and unattributed rows (blank company) never fold
+    # into each other.
     s = StateStore(":memory:")
     for url, title, company, ch in [
         ("https://acme.test/platform", "Platform Engineer", "Acme", "c1"),
@@ -1312,8 +1313,11 @@ async def test_dashboard_top_matches_one_card_per_company() -> None:
     try:
         async with _client(create_app(s)) as c:
             html = (await c.get("/")).text
-            assert encode_pid("board", "https://acme.test/platform") in html
-            assert encode_pid("board", "https://acme.test/support") not in html
+            acme_pids = [
+                encode_pid("board", "https://acme.test/platform"),
+                encode_pid("board", "https://acme.test/support"),
+            ]
+            assert sum(pid in html for pid in acme_pids) == 1
             assert encode_pid("board", "https://beta.test/eng") in html
             assert encode_pid("board", "https://mystery.test/1") in html
             assert encode_pid("board", "https://mystery.test/2") in html
@@ -1321,9 +1325,10 @@ async def test_dashboard_top_matches_one_card_per_company() -> None:
         s.close()
 
 
-async def test_dashboard_top_matches_only_attainable_rows() -> None:
-    # The shortlist's mobility gate: a geo-fenced remote role without relocation
-    # support never takes a slot, however strong the fit.
+async def test_dashboard_top_matches_gate_is_score_not_mobility() -> None:
+    # The shortlist samples EVERYTHING open scoring ≥60 — a geo-fenced remote
+    # role with no relocation support gets a look too (maybe worth a relocation
+    # conversation) — but nothing under the score bar ever takes a slot.
     s = StateStore(":memory:")
     for url, extra, score in [
         ("https://a.test/anywhere", {"company": "Alpha", "remote_scope": "anywhere"}, 70),
@@ -1333,6 +1338,7 @@ async def test_dashboard_top_matches_only_attainable_rows() -> None:
             65,
         ),
         ("https://c.test/fenced", {"company": "Gamma", "remote_scope": "restricted"}, 95),
+        ("https://d.test/weak", {"company": "Delta", "remote_scope": "anywhere"}, 45),
     ]:
         s.upsert_position("board", url, fields={**FIELDS, **extra}, content_hash=url)
         s.set_match("board", url, score=score, verdict="strong", reasons="[]")
@@ -1341,7 +1347,8 @@ async def test_dashboard_top_matches_only_attainable_rows() -> None:
             html = (await c.get("/")).text
             assert encode_pid("board", "https://a.test/anywhere") in html
             assert encode_pid("board", "https://b.test/relo") in html
-            assert encode_pid("board", "https://c.test/fenced") not in html
+            assert encode_pid("board", "https://c.test/fenced") in html
+            assert encode_pid("board", "https://d.test/weak") not in html
     finally:
         s.close()
 

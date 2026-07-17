@@ -61,7 +61,7 @@
   </section>
 
   <section class="panel">
-    <h2>Top matches</h2>
+    <h2 title="A random taste of everything open scoring ≥60 — refresh for a different set">Top matches</h2>
     {% if top_matches %}
     <ul class="matches">
       {% for p in top_matches %}
@@ -77,7 +77,7 @@
       </li>
       {% endfor %}
     </ul>
-    {% else %}<p class="empty">No remote-anywhere or relocation-offered matches yet — run a crawl or “Rescore all”.</p>{% endif %}
+    {% else %}<p class="empty">Nothing scoring ≥60 yet — run a crawl or “Rescore all”.</p>{% endif %}
   </section>
 </div>
 

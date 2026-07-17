@@ -13,6 +13,7 @@ match reasons/concerns) so the client renders without re-deriving display policy
 from __future__ import annotations
 
 import json
+import re
 from types import SimpleNamespace
 
 import httpx
@@ -226,6 +227,24 @@ async def test_swipe_bare_defaults_open_on_the_reachable_set() -> None:
         store.close()
 
 
+async def test_swipe_shell_mints_a_deck_seed() -> None:
+    """Each /swipe load mints a shuffle seed and hands it to the JS on a data
+    attribute (NOT the page query string — a query param would void the bare-deck
+    defaults). The bare drawer echoes the shuffled default sort so a drawer
+    submit round-trips it; an explicit sort still wins."""
+    store = _seeded_store()
+    try:
+        async with _client(create_app(store)) as c:
+            body = (await c.get("/swipe")).text
+            assert re.search(r'data-seed="\d+"', body)
+            assert '<option value="shuffle" selected>' in body
+            explicit = (await c.get("/swipe?track_status=new&sort=score")).text
+            assert '<option value="score" selected>' in explicit
+            assert '<option value="shuffle" selected>' not in explicit
+    finally:
+        store.close()
+
+
 async def test_swipe_nav_link_in_shell() -> None:
     """The shared shell nav links the deck from every page (and marks it active)."""
     store = _seeded_store()
@@ -334,6 +353,53 @@ async def test_swipe_queue_paginates() -> None:
             cards, body = await _queue(c, "?page=2")
             assert len(cards) == 5
             assert body["has_next"] is False
+    finally:
+        store.close()
+
+
+async def test_swipe_queue_presentation_params_keep_bare_defaults() -> None:
+    """page/seed are presentation params, not filters: a bare deck's later page
+    fetches arrive as ``?page=2&seed=…``, and that must not void the bare-deck
+    defaults mid-walk (bareness is judged on the FILTER params only)."""
+    store = _seeded_store()
+    try:
+        async with _client(create_app(store)) as c:
+            cards, _ = await _queue(c, "?seed=123&page=1")
+            assert _pids(cards) == [_ACME_PID]  # same membership as the bare deck
+    finally:
+        store.close()
+
+
+async def test_swipe_queue_seeded_shuffle_pages_without_repeats() -> None:
+    """The bare deck deals in seeded shuffle order: refetching a page with the
+    same seed is stable, the page walk is disjoint and complete (no card repeats
+    across pages, none fall through the cracks), and a new seed re-deals."""
+    store = StateStore(":memory:")
+    try:
+        urls = [f"https://acme.test/{i}" for i in range(55)]
+        for i, url in enumerate(urls):
+            store.upsert_position(
+                "acme",
+                url,
+                fields={
+                    "title": f"Engineer {i}",
+                    "company": "Acme",
+                    "location": "Remote",
+                    "remote_scope": "anywhere",
+                },
+                content_hash=f"h{i}",
+            )
+            # equal scores: the seeded jitter is the only thing ordering the deck
+            store.set_match("acme", url, score=70, verdict="fit", reasons="[]")
+        async with _client(create_app(store)) as c:
+            p1, _ = await _queue(c, "?seed=42")
+            p1_again, _ = await _queue(c, "?seed=42&page=1")
+            assert _pids(p1) == _pids(p1_again)  # same seed → same deal
+            p2, _ = await _queue(c, "?seed=42&page=2")
+            walked = _pids(p1) + _pids(p2)
+            assert sorted(walked) == sorted(encode_pid("acme", u) for u in urls)
+            other, _ = await _queue(c, "?seed=43")
+            assert _pids(other) != _pids(p1)  # a new seed re-deals the deck
     finally:
         store.close()
 

@@ -1053,6 +1053,27 @@ def test_matches_filters_by_min_score_and_orders_best_first(store: StateStore) -
     assert [(r.url, r.match_score) for r in store.matches(70)] == [("a", 90), ("c", 75)]
 
 
+def test_matches_shuffle_samples_the_same_qualifying_pool(store: StateStore) -> None:
+    # shuffle=True is the dashboard's serendipity draw: the score gate and the
+    # hygiene filters still decide WHO qualifies (a dismissed row and an under-bar
+    # row stay out), only the order is a fresh random deal each call.
+    for i in range(8):
+        url = f"u{i}"
+        store.upsert_position("acme", url, fields=FIELDS, content_hash=url)
+        store.set_match("acme", url, score=60 + i * 5, verdict="x", reasons="")
+    store.upsert_position("acme", "weak", fields=FIELDS, content_hash="weak")
+    store.set_match("acme", "weak", score=40, verdict="x", reasons="")
+    store.set_dismissed("acme", "u0", True)
+
+    ranked = [r.url for r in store.matches(60, exclude_dismissed=True)]
+    orders = {
+        tuple(r.url for r in store.matches(60, exclude_dismissed=True, shuffle=True))
+        for _ in range(25)
+    }
+    assert all(set(o) == set(ranked) for o in orders)
+    assert len(orders) > 1  # 25 deals of a 7-row pool all identical ≈ impossible
+
+
 def test_matches_excludes_closed_positions(store: StateStore) -> None:
     store.upsert_position("acme", "u", fields=FIELDS, content_hash="h")
     store.set_match("acme", "u", score=95, verdict="strong", reasons="")
@@ -2919,6 +2940,45 @@ def test_search_positions_salary_sort_and_filter_are_usd_coherent(
     assert [r.url for r in store.search_positions(sort="salary")] == ["usd", "brl"]
     # the floor is USD/yr: $60k drops the ~$54k BRL role, keeps the $140k USD role
     assert [r.url for r in store.search_positions(min_salary=60000.0)] == ["usd"]
+
+
+def test_search_positions_shuffle_is_seeded_and_pageable(store: StateStore) -> None:
+    # sort=shuffle must hold ONE permutation per seed, so a paging client walking
+    # limit/offset windows sees every row exactly once; a different seed deals a
+    # different deck. Equal scores make the jitter the only tiebreaker.
+    urls = [f"u{i:02d}" for i in range(12)]
+    for url in urls:
+        store.upsert_position("acme", url, fields=FIELDS, content_hash=url)
+        store.set_match("acme", url, score=70, verdict="x", reasons="")
+
+    full = [r.url for r in store.search_positions(sort="shuffle", shuffle_seed=7)]
+    assert sorted(full) == urls  # nothing dropped or duplicated
+    again = [r.url for r in store.search_positions(sort="shuffle", shuffle_seed=7)]
+    assert again == full  # the permutation is pinned by the seed
+    pages = [
+        r.url
+        for off in (0, 4, 8)
+        for r in store.search_positions(
+            sort="shuffle", shuffle_seed=7, limit=4, offset=off
+        )
+    ]
+    assert pages == full  # the page walk IS the full order — disjoint and complete
+    assert [r.url for r in store.search_positions(sort="shuffle", shuffle_seed=8)] != full
+
+
+def test_search_positions_shuffle_jitter_is_bounded(store: StateStore) -> None:
+    # The jitter tops out below any real score tier (30 < the 55-point gap), so a
+    # strong match wanders within its neighborhood but never behind a weak one —
+    # and unscored rows (NULL effective score) deal last, whatever the seed.
+    for url, score in [("strong", 95), ("weak", 40)]:
+        store.upsert_position("acme", url, fields=FIELDS, content_hash=url)
+        store.set_match("acme", url, score=score, verdict="x", reasons="")
+    store.upsert_position("acme", "unscored", fields=FIELDS, content_hash="u")
+    for seed in range(40):
+        order = [
+            r.url for r in store.search_positions(sort="shuffle", shuffle_seed=seed)
+        ]
+        assert order == ["strong", "weak", "unscored"], f"seed={seed}"
 
 
 def test_positions_migration_is_idempotent(tmp_path: object) -> None:

@@ -38,8 +38,10 @@ invariant); the store records state and never invents policy.
 from __future__ import annotations
 
 import json
+import random
 import sqlite3
 import threading
+import zlib
 from collections.abc import Callable, Collection, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -761,6 +763,17 @@ class StateStore:
         if path != ":memory:":
             conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
+        # Deterministic per-row shuffle rank for ``sort='shuffle'`` (§16): the same
+        # (url, seed) always ranks the same, so a seeded deck pages without repeats,
+        # while a new seed is a new permutation. crc32 rather than Python's hash():
+        # hash() is salted per process and the rank must be stable across restarts
+        # (a half-swiped deck refetching page 2 after a daemon bounce).
+        conn.create_function(
+            "shuffle_rank",
+            2,
+            lambda url, seed: zlib.crc32(f"{seed}:{url}".encode()),
+            deterministic=True,
+        )
         conn.executescript(_SCHEMA)
         self._conn = _SerializedConnection(conn, self._lock)
         self._migrate()
@@ -2204,8 +2217,14 @@ class StateStore:
         collapse_duplicates: bool = False,
         exclude_cluster_handled: bool = False,
         collapse_role_groups: bool = False,
+        shuffle: bool = False,
     ) -> list[PositionRecord]:
         """Open, scored positions at or above ``min_score``, best **effective** fit first (§4.7).
+
+        ``shuffle`` replaces the ranked head with a uniform random draw from the same
+        qualifying pool (``ORDER BY RANDOM()``) — the dashboard's serendipity sample:
+        every threshold and exclusion still applies, but which qualifying rows come
+        back (and in what order) changes on every call.
 
         Ranked and thresholded on the freshness-decayed *effective* score (base match fit ×
         a recency multiplier), not the raw fit — so "top matches" leads with fresh-and-strong
@@ -2273,6 +2292,7 @@ class StateStore:
         # dashboard "top matches" leads with fresh-and-good and an old great fit slips only
         # as far as the floor allows. ``min_score`` is compared against the effective score.
         eff = self._effective_score_sql()
+        order = "RANDOM()" if shuffle else "effective_score DESC, matched_at DESC, url"
         rows = self._conn.execute(
             f"SELECT *, {eff} AS effective_score FROM positions "
             "WHERE status = 'open' AND match_score IS NOT NULL "
@@ -2280,7 +2300,7 @@ class StateStore:
             # the UI (a fresh 80 rounds up from 79.999… instead of just missing an >= 80 gate).
             f"AND round({eff}) >= ? "
             + clauses
-            + "ORDER BY effective_score DESC, matched_at DESC, url LIMIT ?",
+            + f"ORDER BY {order} LIMIT ?",
             (min_score, limit),
         ).fetchall()
         return [_to_position(r) for r in rows]
@@ -3060,6 +3080,7 @@ class StateStore:
         exclude_cluster_handled: bool = False,
         collapse_role_groups: bool = False,
         sort: str = "recent",
+        shuffle_seed: int | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[PositionRecord]:
@@ -3123,9 +3144,18 @@ class StateStore:
         - ``exclude_company_applied``  drop rows whose hiring company already has an applied-to
           posting (grouped on ``company_canonical``, §16) — the browse twin of :meth:`matches`.
 
-        ``sort`` ∈ {recent, score, matched, updated, salary, title, applied}; NULL
-        scores/salaries/dates (incl. never-scored ``matched_at``) sink last under a DESC
-        sort. ``limit``/``offset`` paginate. Returns ``list[PositionRecord]``.
+        ``sort`` ∈ {recent, score, matched, updated, salary, title, applied, shuffle};
+        NULL scores/salaries/dates (incl. never-scored ``matched_at``) sink last under a
+        DESC sort. ``limit``/``offset`` paginate. Returns ``list[PositionRecord]``.
+
+        ``sort='shuffle'`` is the score sort with a seeded jitter on top (§16 swipe):
+        each row's effective score gains a deterministic 0–30 point bump derived from
+        ``(shuffle_seed, url)``, so strong matches still surface early but the exact
+        order reshuffles per seed — "randomize it a bit", not a uniform scramble.
+        The jitter is stable for a given seed, which is what makes it pageable: the
+        deck fetches page 2 under the same seed and gets a disjoint continuation, not
+        a re-deal. ``shuffle_seed=None`` draws a fresh seed per call (single-shot
+        callers); unscored rows still sink last (NULL + jitter is NULL).
 
         §17 cluster flags (all default off ⇒ byte-identical queries):
         ``collapse_duplicates`` hides non-canonical cluster members (each real-world job
@@ -3322,19 +3352,29 @@ class StateStore:
                 "AND p2.applied_at IS NOT NULL)"
             )
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-        order = {
-            "recent": "first_seen DESC, site, url",
-            "score": "effective_score DESC, matched_at DESC, url",
-            "matched": "matched_at DESC, first_seen DESC, url",
-            "updated": "track_updated_at DESC, first_seen DESC, url",
-            "salary": "COALESCE(salary_usd_max, salary_usd_min) DESC, url",
-            "title": "lower(title) ASC, url",
-            "applied": "applied_at DESC, track_updated_at DESC, url",
-        }.get(sort, "first_seen DESC, site, url")
+        order_params: list[object] = []
+        if sort == "shuffle":
+            seed = (
+                shuffle_seed
+                if shuffle_seed is not None
+                else random.randrange(1 << 30)
+            )
+            order = f"({eff} + (shuffle_rank(url, ?) % 31)) DESC, url"
+            order_params.append(seed)
+        else:
+            order = {
+                "recent": "first_seen DESC, site, url",
+                "score": "effective_score DESC, matched_at DESC, url",
+                "matched": "matched_at DESC, first_seen DESC, url",
+                "updated": "track_updated_at DESC, first_seen DESC, url",
+                "salary": "COALESCE(salary_usd_max, salary_usd_min) DESC, url",
+                "title": "lower(title) ASC, url",
+                "applied": "applied_at DESC, track_updated_at DESC, url",
+            }.get(sort, "first_seen DESC, site, url")
         rows = self._conn.execute(
             f"SELECT *, {eff} AS effective_score FROM positions{where} "
             f"ORDER BY {order} LIMIT ? OFFSET ?",
-            [*params, limit, offset],
+            [*params, *order_params, limit, offset],
         ).fetchall()
         return [_to_position(r) for r in rows]
 

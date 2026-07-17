@@ -34,6 +34,7 @@ import binascii
 import hashlib
 import json
 import logging
+import random
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -425,13 +426,16 @@ def _float_param(params: Any, name: str) -> float | None:
 # reproduce what the single "Remote anywhere +BR" checkbox used to mean, now split
 # so each is independently toggleable. Stage new + applied companies hidden match
 # the list default. A bare /swipe applies these; any drawer submit carries explicit
-# params and overrides.
+# params and overrides. sort=shuffle deals the deck in seeded score-jittered order
+# (strong matches still lead, but each session is a different walk) — the drawer's
+# sort select can pin a strict order back.
 _SWIPE_BARE_FILTERS = {
     "track_status": "new",
     "hide_applied_companies": "1",
     "remote_anywhere": "1",
     "remote_home": "1",
     "relocation_no_us": "1",
+    "sort": "shuffle",
 }
 
 
@@ -905,27 +909,27 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
             },
         ]
 
-        # §17: the shortlist collapses clusters AND role groups (gated on the UI
-        # consumer flag) — inherited verdicts give every sibling a score, so
-        # without this one strong job fills the list via its board copies and
-        # location variants. On top of that, one card per employer: distinct
-        # roles at one company are genuinely separate leads (nothing here merges
-        # them), but eight slots read further when a company's best role stands
-        # for it. matches() ranks best-effective-fit-first, so the first row per
-        # company key IS that best; a blank key is an unattributed row and never
-        # groups (the applied-company exclusion's convention). limit=64 is
-        # bounded over-fetch headroom for prolific employers, not a page size.
-        # attainable_only (remote-anywhere OR relocation-offered) gates in SQL,
-        # not here, so sparse qualifying rows can't under-fill the over-fetch.
+        # A serendipity sample, not a ranked head: the card draws 8 at random from
+        # EVERYTHING open scoring ≥60 (the same threshold as the "Match ≥60" tile),
+        # so each refresh surfaces a different slice of the strong pool instead of
+        # the same eight fresh-and-strong rows forever. Deliberately wider than the
+        # old shortlist: no attainable_only mobility gate — discovery is the point,
+        # and the swipe deck / positions list keep the tight working set. The §16/§17
+        # hygiene still applies (nothing applied, dismissed, at an applied-to
+        # company, or cluster/role-group duplicated), and one card per employer —
+        # under a shuffled draw the survivor is a random role of the company's
+        # qualifying ones, which suits the sample. limit=64 is over-fetch headroom
+        # for the company dedup, not a page size; shuffle randomizes IN SQL so the
+        # over-fetch is a fresh uniform draw per page load.
         top_matches: list[PositionRecord] = []
         seen_companies: set[str] = set()
         for rec in store.matches(
-            0,
+            60,
             limit=64,
+            shuffle=True,
             exclude_applied=True,
             exclude_dismissed=True,
             exclude_company_applied=True,
-            attainable_only=True,
             collapse_duplicates=ui_on,
             exclude_cluster_handled=ui_on,
             collapse_role_groups=ui_on,
@@ -1141,6 +1145,12 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
         filter echo + site registry so the drawer form mirrors /positions exactly.
         The queue itself is fetched from ``/api/swipe/queue`` with the SAME query
         string, so a filtered deep link and the drawer stay one grammar.
+
+        Each page render also mints a shuffle seed (``data-seed``): the deck sends it
+        on every queue fetch so the seeded ``sort=shuffle`` order stays coherent
+        across its page walk, and a reload deals a fresh order. The seed rides a data
+        attribute, not the query string — appending it there would make a bare deck's
+        query non-empty and silently void the bare-filter defaults.
         """
         _, raw = _read_filters(
             request.query_params,
@@ -1156,6 +1166,7 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
                 "sites": site_list,
                 "home_country": config.home_country(),
                 "query_string": str(request.url.query or ""),
+                "queue_seed": random.randrange(1 << 30),
             },
         )
 
@@ -1363,16 +1374,29 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
     def api_swipe_queue(request: Request) -> JSONResponse:
         """The deck's card feed: the ``_read_filters`` grammar with the swipe bare-query
         default (``_SWIPE_BARE_FILTERS`` — stage ``new``, applied companies hidden,
-        remote-anywhere or non-US relocation), paged, each row shaped by
-        :func:`_card_dict`."""
+        remote-anywhere or non-US relocation, seeded shuffle order), paged, each row
+        shaped by :func:`_card_dict`.
+
+        ``page`` and ``seed`` are presentation params, not filters: they are stripped
+        before ``_read_filters`` so a bare deck stays bare when the client appends
+        them — previously ``?page=2`` alone flipped the whole filter set off
+        mid-walk. ``seed`` pins the shuffle permutation (the deck sends one per
+        session) so successive pages continue one deal instead of re-dealing.
+        """
+        filter_params = {
+            k: v for k, v in request.query_params.items() if k not in {"page", "seed"}
+        }
         kwargs, _ = _read_filters(
-            request.query_params,
+            filter_params,
             default_new_view=True,
             bare_defaults=_SWIPE_BARE_FILTERS,
         )
         page = max(1, _int_param(request.query_params, "page") or 1)
         rows = store.search_positions(
-            **kwargs, limit=_PAGE_SIZE + 1, offset=(page - 1) * _PAGE_SIZE
+            **kwargs,
+            shuffle_seed=_int_param(request.query_params, "seed"),
+            limit=_PAGE_SIZE + 1,
+            offset=(page - 1) * _PAGE_SIZE,
         )
         has_next = len(rows) > _PAGE_SIZE
         return JSONResponse(

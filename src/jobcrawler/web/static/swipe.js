@@ -31,6 +31,9 @@
 
   const QUEUE_URL = stage.dataset.queueUrl;
   const DECIDE_URL = stage.dataset.decideUrl;
+  // One shuffle seed per page load: every queue fetch carries it so the seeded
+  // deal stays coherent across the page walk; a reload mints a new one server-side.
+  const QUEUE_SEED = stage.dataset.seed || "";
 
   const VISIBLE_DEPTH = 3; // top card + this many peeking behind it
   const REFILL_LOW_WATER = 12; // refill when fewer undealt cards remain
@@ -64,6 +67,9 @@
     const params = new URLSearchParams(state.query);
     params.delete("page");
     if (page > 1) params.set("page", String(page));
+    // seed + page are presentation params — the server strips them before judging
+    // whether the query is bare, so sending them never voids the deck defaults.
+    if (QUEUE_SEED) params.set("seed", QUEUE_SEED);
     const qs = params.toString();
     const r = await fetch(QUEUE_URL + (qs ? "?" + qs : ""), {
       credentials: "same-origin",
