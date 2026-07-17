@@ -1,145 +1,64 @@
 import html
 import json
 import re
-from urllib.parse import urljoin
 
-SITE = "https://jobicy.com/api/v2/remote-jobs?count=100&industry=dev"
+
+SITE = 'https://jobicy.com/api/v2/remote-jobs?count=100&industry=dev'
 EXTRA_HOSTS = []
 
-_TAG_RE = re.compile(r"<[^>]+>")
-_BLOCK_RE = re.compile(
-    r"</?(?:p|div|br|li|ul|ol|h[1-6]|section|article|tr|td|th)[^>]*>", re.I
-)
 
-
-def _clean_html(value):
-    if not value:
+def _text(value):
+    if value is None:
         return None
-    text = html.unescape(str(value))
-    text = _BLOCK_RE.sub("\n", text)
-    text = _TAG_RE.sub(" ", text)
-    text = html.unescape(text)
-    text = re.sub(r"[ \t\r\f\v]+", " ", text)
-    text = re.sub(r"\n\s+", "\n", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    text = text.strip()
-    return text or None
+    value = html.unescape(str(value))
+    value = re.sub(r"(?i)<br\s*/?>", "\n", value)
+    value = re.sub(r"(?i)</(?:p|div|li|h[1-6])\s*>", "\n", value)
+    value = re.sub(r"<[^>]+>", "", value)
+    value = value.replace("\xa0", " ")
+    value = re.sub(r"[ \t]+", " ", value)
+    value = re.sub(r" *\n *", "\n", value)
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    return value.strip() or None
 
 
 def _first_text(value):
-    if value is None:
-        return None
     if isinstance(value, list):
-        parts = [str(v).strip() for v in value if str(v).strip()]
-        return ", ".join(parts) if parts else None
-    text = str(value).strip()
-    return text or None
-
-
-def _salary(job):
-    min_v = job.get("salaryMin")
-    max_v = job.get("salaryMax")
-    if min_v is None and max_v is None:
-        return None
-    pieces = []
-    currency = _first_text(job.get("salaryCurrency"))
-    if currency:
-        pieces.append(currency)
-    if min_v is not None and max_v is not None:
-        pieces.append("%s-%s" % (min_v, max_v))
-    elif min_v is not None:
-        pieces.append("from %s" % min_v)
-    elif max_v is not None:
-        pieces.append("up to %s" % max_v)
-    period = _first_text(job.get("salaryPeriod"))
-    if period:
-        pieces.append(period)
-    return " ".join(pieces) or None
-
-
-def _positive_amount(value):
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        number = float(value)
-    elif isinstance(value, str):
-        try:
-            number = float(value.replace(",", "").strip())
-        except ValueError:
-            return None
-    else:
-        return None
-    return number if number > 0 else None
-
-
-def _salary_fields(job):
-    """Jobicy serves salaryMin/salaryMax/salaryCurrency/salaryPeriod; keep the
-    joined text AND the structured quartet (zero bounds omitted, period passed
-    as stated — the host maps the wording)."""
-    fields = {}
-    text = _salary(job)
-    if text:
-        fields["salary"] = text
-    min_v = _positive_amount(job.get("salaryMin"))
-    max_v = _positive_amount(job.get("salaryMax"))
-    if min_v is not None:
-        fields["salary_min"] = min_v
-    if max_v is not None:
-        fields["salary_max"] = max_v
-    if min_v is None and max_v is None:
-        return fields
-    currency = _first_text(job.get("salaryCurrency"))
-    if currency:
-        fields["salary_currency"] = currency
-    period = _first_text(job.get("salaryPeriod"))
-    if period:
-        fields["salary_period"] = period
-    return fields
+        value = value[0] if value else None
+    return _text(value)
 
 
 def crawl(ctx):
-    raw = ctx.fetch(SITE)
-    data = json.loads(raw)
-    for job in data.get("jobs") or []:
-        title = _first_text(job.get("jobTitle") or job.get("title"))
-        url = _first_text(job.get("url"))
-        company = _first_text(job.get("companyName") or job.get("company"))
-        location = _first_text(job.get("jobGeo") or job.get("location"))
-        description = _clean_html(job.get("jobDescription") or job.get("description"))
-        if not (title and url and company and location and description):
+    data = json.loads(ctx.fetch(SITE))
+    for item in data.get("jobs", []):
+        title = _text(item.get("jobTitle") or item.get("title"))
+        company = _text(item.get("companyName") or item.get("company"))
+        location = _text(item.get("jobGeo") or item.get("location"))
+        description = _text(
+            item.get("jobDescription")
+            or item.get("description")
+            or item.get("content")
+        )
+        url = item.get("url") or item.get("jobUrl")
+
+        if not all((title, company, location, url, description)):
             continue
         if len(description) < 200:
             continue
 
-        item = {
+        fields = {
             "url": url,
             "title": title,
             "company": company,
             "location": location,
             "description": description,
             "source": SITE,
+            "external_id": str(item["id"]) if item.get("id") is not None else None,
+            "posted_at": item.get("pubDate") or item.get("publishedAt"),
+            "employment_type": _first_text(item.get("jobType")),
+            "department": _first_text(item.get("jobIndustry")),
+            "salary_min": item.get("salaryMin"),
+            "salary_max": item.get("salaryMax"),
+            "salary_currency": item.get("salaryCurrency"),
+            "salary_period": item.get("salaryPeriod"),
         }
-
-        optional = {
-            "employment_type": _first_text(job.get("jobType")),
-            "department": _first_text(job.get("jobIndustry") or job.get("department")),
-            "posted_at": _first_text(
-                job.get("pubDate") or job.get("publishedAt") or job.get("datePosted")
-            ),
-            "external_id": _first_text(job.get("id") or job.get("jobSlug")),
-            "apply_url": _first_text(job.get("url")),
-        }
-        for key, value in _salary_fields(job).items():
-            optional[key] = value
-        # Jobicy's /api/v2/remote-jobs feed is remote-only, so every listing is
-        # remote by construction. Marking it so turns each jobGeo region into a
-        # remote fence downstream ("USA" -> Remote (US), "Europe" -> Remote
-        # (Europe)) instead of a physical place, and keeps the Anywhere bucket
-        # worldwide. The old gate only set it when the literal word "remote"
-        # appeared in jobGeo — which it never does — and used the capitalized
-        # "Remote" that the §4.6 promotion (workplace == "remote") never matched.
-        optional["workplace_type"] = "remote"
-        for key, value in optional.items():
-            if value:
-                item[key] = value
-        yield item
+        yield {key: value for key, value in fields.items() if value is not None}

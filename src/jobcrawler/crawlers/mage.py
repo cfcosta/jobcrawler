@@ -1,77 +1,72 @@
 
 import re
 from html import unescape
+from urllib.parse import urlparse
 
 SITE = "https://www.mage.ai/company/careers"
 EXTRA_HOSTS = []
 
-
-def clean_text(fragment):
-    fragment = re.sub(r"<br\s*/?>", "\n", fragment, flags=re.I)
-    fragment = re.sub(r"<[^>]+>", "", fragment)
-    return " ".join(unescape(fragment).split())
-
-
-def detail_urls(page):
-    hrefs = re.findall(
-        r"<a\b[^>]*\bhref=[\"']\./careers/([a-z0-9-]+)(?:[?#][^\"']*)?[\"']",
-        page,
-        flags=re.I,
-    )
-    seen = set()
-    for slug in hrefs:
-        url = SITE + "/" + slug.lower()
-        if url not in seen:
-            seen.add(url)
-            yield url
+SITEMAP_URL = "https://www.mage.ai/sitemap.xml"
+CAREER_PATH = re.compile(r"^/company/careers/[^/?#]+$")
+LOC_RE = re.compile(r"<loc\b[^>]*>(.*?)</loc>", re.I | re.S)
+TITLE_RE = re.compile(r"<h1\b[^>]*>(.*?)</h1>", re.I | re.S)
+ARTICLE_RE = re.compile(r"<article\b[^>]*>(.*?)</article>", re.I | re.S)
+BLOCK_RE = re.compile(
+    r"</?(?:h[1-6]|p|li|ul|ol|section|div|br)\b[^>]*>",
+    re.I,
+)
+TAG_RE = re.compile(r"<[^>]+>")
+SCRIPT_RE = re.compile(
+    r"<(?:script|style)\b[^>]*>.*?</(?:script|style)>",
+    re.I | re.S,
+)
 
 
-def parse_posting(page):
-    blocks = []
-    for match in re.finditer(
-        r"<(h1|h2|h3|p)\b[^>]*>(.*?)</\1\s*>",
-        page,
-        flags=re.I | re.S,
-    ):
-        tag = match.group(1).lower()
-        text = clean_text(match.group(2))
-        if text:
-            blocks.append((tag, text))
+def _plain(fragment):
+    fragment = SCRIPT_RE.sub(" ", fragment)
+    fragment = BLOCK_RE.sub("\n", fragment)
+    fragment = TAG_RE.sub(" ", fragment)
+    fragment = unescape(fragment)
 
-    title_indexes = [
-        index
-        for index, block in enumerate(blocks)
-        if block[0] == "h1" and block[1]
-    ]
-    if not title_indexes:
-        return None, None
-
-    # Framer emits responsive copies; the last H1 immediately precedes the JD.
-    start = title_indexes[-1]
-    title = blocks[start][1]
-    body = []
-
-    for tag, text in blocks[start + 1:]:
-        if tag == "h3" and text.casefold() == "open positions":
-            break
-        if tag in ("h2", "h3", "p"):
-            body.append(text)
-
-    return title, "\n\n".join(body).strip()
+    lines = []
+    for line in fragment.splitlines():
+        value = " ".join(line.split())
+        if value:
+            lines.append(value)
+    return "\n".join(lines)
 
 
 def crawl(ctx):
-    listing = ctx.fetch(SITE)
-    for url in detail_urls(listing):
-        page = ctx.fetch(url)
-        title, description = parse_posting(page)
+    sitemap_html = ctx.fetch(SITEMAP_URL)
+    seen = set()
+
+    for raw_url in LOC_RE.findall(sitemap_html):
+        discovered_url = unescape(TAG_RE.sub("", raw_url)).strip()
+        path = urlparse(discovered_url).path
+        if not CAREER_PATH.fullmatch(path):
+            continue
+
+        # Sitemap canonicals use mage.ai; normalize to SITE's authorized host.
+        url = "https://www.mage.ai" + path
+        if url in seen:
+            continue
+        seen.add(url)
+
+        html = ctx.fetch(url)
+        title_match = TITLE_RE.search(html)
+        article_match = ARTICLE_RE.search(html)
+        if not title_match or not article_match:
+            continue
+
+        title = _plain(title_match.group(1))
+        description = _plain(article_match.group(1))
         if not title or not description:
             continue
 
         yield {
             "url": url,
             "title": title,
-            "company": "Mage AI",
+            "company": "Mage",
             "location": "Not specified",
             "description": description,
             "source": SITE,
