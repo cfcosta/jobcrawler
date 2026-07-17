@@ -42,8 +42,8 @@
       {% endfor %}
     </select>
     <select name="status" aria-label="Lifecycle">
-      <option value="">Open + closed</option>
-      <option value="open"{{ ' selected' if filters.status == 'open' else '' }}>Open only</option>
+      <option value=""{{ ' selected' if filters.status in ('', 'open') else '' }}>Open</option>
+      <option value="all"{{ ' selected' if filters.status == 'all' else '' }}>Open + closed</option>
       <option value="closed"{{ ' selected' if filters.status == 'closed' else '' }}>Closed only</option>
     </select>
     <select name="sort" aria-label="Sort">

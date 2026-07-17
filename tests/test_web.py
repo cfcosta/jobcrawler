@@ -661,6 +661,66 @@ async def test_api_dismissed_hidden_by_default() -> None:
         store.close()
 
 
+async def test_closed_positions_hidden_by_default_everywhere() -> None:
+    # A closed posting is a dead end the operator can no longer apply to, so no
+    # default browse surface shows it: /positions, /api/positions, and the swipe
+    # queue are open-only unless ?status says otherwise. 'all' is the explicit
+    # escape (the Everything pill's token), 'closed' the audit view, and the
+    # lifecycle select echoes the active choice back.
+    store = _seeded_store()
+    try:
+        store.mark_closed("beta", "https://beta.test/b", reason="recheck http 404")
+        async with _client(create_app(store)) as c:
+            bare = (await c.get("/api/positions")).json()
+            assert [r["site"] for r in bare] == ["acme"]
+            both = (await c.get("/api/positions?status=all")).json()
+            assert {r["site"] for r in both} == {"acme", "beta"}
+            closed = (await c.get("/api/positions?status=closed")).json()
+            assert [r["site"] for r in closed] == ["beta"]
+            open_only = (await c.get("/api/positions?status=open")).json()
+            assert [r["site"] for r in open_only] == ["acme"]
+
+            # The HTML list follows the same grammar on a NON-bare query too (no
+            # new-view defaults involved), and the Everything pill carries the
+            # explicit all-token rather than leaning on an empty status param.
+            page = await c.get("/positions?sort=score")
+            assert "Frontend Engineer" not in page.text
+            assert "status=all" in page.text
+            page = await c.get("/positions?sort=score&status=all")
+            assert "Frontend Engineer" in page.text
+            assert '<option value="all" selected>' in page.text
+            page = await c.get("/positions?sort=score&status=closed")
+            assert "Frontend Engineer" in page.text
+            assert "Staff Engineer" not in page.text
+
+            # The Everything pill still highlights as the active saved view.
+            pilled = await c.get("/positions?sort=score&status=all&collapse=0")
+            assert re.search(r'class="view-pill is-active"[^>]*>Everything<', pilled.text)
+
+            # The swipe deck deals no closed cards either.
+            deck = (await c.get("/api/swipe/queue?sort=score")).json()
+            assert [card["site"] for card in deck["positions"]] == ["acme"]
+    finally:
+        store.close()
+
+
+async def test_applications_tracker_keeps_closed_applied_rows() -> None:
+    # The tracker is the one surface where a closed row must STAY visible by
+    # default: an application you made doesn't un-happen when the board closes
+    # the posting — losing it would silently drop live interview pipelines.
+    store = _seeded_store()
+    try:
+        store.set_track_status(
+            "acme", "https://acme.test/a", "applied", stamp_applied=True
+        )
+        store.mark_closed("acme", "https://acme.test/a", reason="recheck http 404")
+        async with _client(create_app(store)) as c:
+            r = await c.get("/applications")
+            assert "Staff Engineer" in r.text
+    finally:
+        store.close()
+
+
 async def test_api_single_position() -> None:
     store = _seeded_store()
     try:

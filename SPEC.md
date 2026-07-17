@@ -1739,9 +1739,11 @@ it, exactly like the match `reasons`; only the offline `jobcrawl match-trainset`
 
 - **Browse / search** (`GET /`) — full-text query plus rich filters (site, company, lifecycle, `track_status`,
   workplace, level, min score, min salary, dismissed) and sort (score / recent / updated / salary / title —
-  **default score desc**, so the listing leads with the best match and unscored rows sink last); dismissed rows are
-  hidden by default, both lifecycle states shown (you still care about a posting you applied to after the board
-  closes it). Paginated; every position links to its detail page and carries lifecycle + match-score pills.
+  **default score desc**, so the listing leads with the best match and unscored rows sink last); dismissed AND
+  closed rows are hidden by default on every browse surface (a closed posting is a dead end — `status=all` is the
+  explicit both-lifecycles escape, `status=closed` the audit view; the Applications tracker bypasses this grammar,
+  because you still care about a posting you applied to after the board closes it). Paginated; every position links
+  to its detail page and carries lifecycle + match-score pills.
 - **Applications** (`GET /applications`) — the focused view of postings you've actually **applied to**
   (`search_positions(applied=True)` → `applied_at IS NOT NULL`, so a later `rejected`/`withdrawn` stays visible —
   the stamp is never cleared). A per-stage **funnel** across the applied→outcome stages (`applied_counts()`,

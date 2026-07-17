@@ -92,10 +92,12 @@ SAVED_VIEWS = (
     },
     # "Everything" is the raw-rows escape: lifecycle unfiltered AND §17 collapse off,
     # so every crawled copy of a job is individually visible (audit/debug view).
+    # status=all is the explicit both-lifecycles token — a bare/empty status now
+    # means open-only everywhere.
     {
         "key": "all",
         "label": "Everything",
-        "href": "/positions?sort=score&status=&collapse=0",
+        "href": "/positions?sort=score&status=all&collapse=0",
     },
     {"key": "applied", "label": "Applied", "href": "/applications"},
 )
@@ -448,8 +450,10 @@ def _read_filters(
     """Parse the browse query-string into (``search_positions`` kwargs, raw values).
 
     The raw dict re-populates the filter form so the UI reflects the active query. By
-    default dismissed rows are hidden and both lifecycle states are shown (a tracker cares
-    about a posting it applied to even after the board closes it).
+    default dismissed AND closed rows are hidden — browse surfaces show only jobs the
+    operator can still act on; ``status=all`` is the explicit escape. (/applications
+    bypasses this grammar entirely: a tracker cares about a posting it applied to even
+    after the board closes it.)
 
     ``default_new_view`` opens a BARE request (empty query string) on the operator's
     working set: stage ``new`` with applied companies hidden, unless ``bare_defaults``
@@ -507,7 +511,13 @@ def _read_filters(
         )
         if on
     ]
-    status = _s("status")  # None/'all' => both open and closed
+    # Closed rows are hidden unless asked for: a bare/absent status means open-only
+    # (a closed posting is a dead end the operator can no longer apply to), the
+    # explicit 'all' token (the Everything pill) shows both lifecycles, and
+    # 'open'/'closed' read as written. The /applications tracker deliberately
+    # bypasses this grammar — an applied row stays visible after its board closes.
+    raw_status = _s("status")
+    status = None if raw_status == "all" else (raw_status or "open")
     track_status = _s("track_status")
     sort = _s("sort") or "score"
     kwargs: dict[str, Any] = {
@@ -999,7 +1009,7 @@ def create_app(store: StateStore, *, sites: list[Any] | None = None) -> FastAPI:
             return "strong"
         if (
             params.get("sort") == "score"
-            and params.get("status") == ""
+            and params.get("status") == "all"
             and not (set(params.keys()) - {"sort", "status", "collapse"})
         ):
             return "all"
