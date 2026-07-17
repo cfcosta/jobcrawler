@@ -1079,12 +1079,14 @@ class Scheduler:
           * **expiry** — every open position whose stated ``expires_at`` has passed is
             closed fleet-wide via :meth:`StateStore.expire_due` (one indexed UPDATE across
             all sites, regardless of ``enumerates_all``).
-          * **windowed re-verification** — for each enabled ``enumerates_all=False`` source
-            (RSS / latest-N feeds, where diffing against the recent view would false-close
-            everything that scrolled off it) re-fetch up to ``recheck_cap`` of its stalest
-            known-open URLs through the SAME politeness layer as a crawl and close the ones
-            that come back HTTP 404/410 or show an expired-posting marker. Full-enumeration
-            sources are skipped here — their closure is the runner's guarded diff.
+          * **per-URL re-verification** — pull ONE fleet-wide queue of the stalest
+            known-open rows across every eligible site (:meth:`_recheck_slugs` — the
+            sources the runner's guarded diff cannot protect), capped once by
+            ``recheck_cap``, and re-fetch each through the SAME politeness layer as a
+            crawl, closing the ones that come back HTTP 404/410 or show an
+            expired-posting marker. The single stalest-first deal means a huge windowed
+            source can't starve a small one out of its turn, and a tick never runs
+            cap×sites fetches.
 
         A transient fetch error is **not** a closure signal: it is isolated and skipped
         (a blip must never close a live posting — mirrors the §4.8 re-probe's blip
@@ -1098,92 +1100,97 @@ class Scheduler:
         closed = self._store.expire_due()
         if closed:
             _log.info("recheck expired closed=%d", closed)
-        # #9: the windowed pass fetches sequentially and in-band; this stamps the sweep's
-        # start (on the monotonic seam — #A6) so each attempted URL can check the aggregate
-        # elapsed budget below without a wall-clock jump un-bounding it.
+        # #9: the sweep fetches sequentially and in-band; this stamps its start (on the
+        # monotonic seam — #A6) so each attempted URL can check the aggregate elapsed
+        # budget below without a wall-clock jump un-bounding it.
         pass_started = self._monotonic()
-        for site in self._sites:
-            if not site.enabled or site.enumerates_all:
-                continue
-            urls = self._store.open_urls(site.slug, limit=self._recheck_cap)
-            if not urls:
-                continue
-            checked = 0
-            site_closed = 0
-            for url in urls:
-                try:
-                    status, text = await asyncio.wait_for(
-                        fetch(url), self._recheck_timeout or None
-                    )
-                except TimeoutError:
-                    # The fetch neither returned nor raised within the watchdog ceiling —
-                    # a connect wedged beneath httpx's own timeout (the egress broker),
-                    # not an ordinary httpx timeout (which RAISES and lands below). Skip it
-                    # like any transient error (closure is one-way), but log distinctly so
-                    # a frozen-loop postmortem finds the culprit at once.
-                    _log.error(
-                        "recheck watchdog: fetch slug=%s url=%s exceeded %.0fs — "
-                        "abandoning it and resuming the sweep",
-                        site.slug,
-                        url,
-                        self._recheck_timeout,
-                    )
-                    # A wedged fetch is never closed, so without this the same poison URL
-                    # stays stalest-first and re-burns the watchdog every sweep (§4.9, #39).
-                    self._store.note_rechecked(site.slug, url)
-                except Exception as exc:
-                    # A transient fetch failure is not evidence the posting closed — skip
-                    # it (closure is one-way; a blip must never end a live job). Routine
-                    # (timeouts happen), so one WARNING line; the traceback only at DEBUG.
-                    _log.warning(
-                        "recheck fetch failed slug=%s url=%s (%s: %s); skipping",
-                        site.slug,
-                        url,
-                        type(exc).__name__,
-                        exc,
-                    )
-                    _log.debug(
-                        "recheck fetch failure detail slug=%s url=%s",
-                        site.slug,
-                        url,
-                        exc_info=True,
-                    )
-                    # Attempted but unconfirmed: rotate it off the head too, so a URL that
-                    # only ever errors can't pin the sweep and starve fresher rows (#39).
-                    self._store.note_rechecked(site.slug, url)
+        slugs = self._recheck_slugs()
+        rows = (
+            self._store.recheck_rows(slugs, limit=self._recheck_cap) if slugs else []
+        )
+        checked = 0
+        swept = 0
+        for slug, url, _apply_url in rows:
+            try:
+                status, text = await asyncio.wait_for(
+                    fetch(url), self._recheck_timeout or None
+                )
+            except TimeoutError:
+                # The fetch neither returned nor raised within the watchdog ceiling —
+                # a connect wedged beneath httpx's own timeout (the egress broker),
+                # not an ordinary httpx timeout (which RAISES and lands below). Skip it
+                # like any transient error (closure is one-way), but log distinctly so
+                # a frozen-loop postmortem finds the culprit at once.
+                _log.error(
+                    "recheck watchdog: fetch slug=%s url=%s exceeded %.0fs — "
+                    "abandoning it and resuming the sweep",
+                    slug,
+                    url,
+                    self._recheck_timeout,
+                )
+                # A wedged fetch is never closed, so without this the same poison URL
+                # stays stalest-first and re-burns the watchdog every sweep (§4.9, #39).
+                self._store.note_rechecked(slug, url)
+            except Exception as exc:
+                # A transient fetch failure is not evidence the posting closed — skip
+                # it (closure is one-way; a blip must never end a live job). Routine
+                # (timeouts happen), so one WARNING line; the traceback only at DEBUG.
+                _log.warning(
+                    "recheck fetch failed slug=%s url=%s (%s: %s); skipping",
+                    slug,
+                    url,
+                    type(exc).__name__,
+                    exc,
+                )
+                _log.debug(
+                    "recheck fetch failure detail slug=%s url=%s",
+                    slug,
+                    url,
+                    exc_info=True,
+                )
+                # Attempted but unconfirmed: rotate it off the head too, so a URL that
+                # only ever errors can't pin the sweep and starve fresher rows (#39).
+                self._store.note_rechecked(slug, url)
+            else:
+                checked += 1
+                reason = self._closure_reason(status, text)
+                if reason is not None:
+                    self._store.mark_closed(slug, url, reason=reason)
+                    swept += 1
                 else:
-                    checked += 1
-                    reason = self._closure_reason(status, text)
-                    if reason is not None:
-                        self._store.mark_closed(site.slug, url, reason=reason)
-                        site_closed += 1
-                    else:
-                        # Still open — advance its recheck order so the sweep moves on to
-                        # the next stalest rows next pass, not re-verifying this one (#39).
-                        self._store.note_rechecked(site.slug, url)
-                # #9: bound the aggregate sweep. Every branch above attempted a fetch and
-                # rotated the URL off the head (#39), so once the pass exceeds its budget we
-                # defer the rest — the next tick resumes at the still-stalest remainder
-                # rather than re-checking this head. 0 disables the budget (unbounded).
-                if (
-                    self._recheck_budget
-                    and self._monotonic() - pass_started > self._recheck_budget
-                ):
-                    self._recheck_incomplete = True
-                    break
-            _log.info(
-                "recheck slug=%s checked=%d closed=%d cap=%d",
-                site.slug,
-                checked,
-                site_closed,
-                self._recheck_cap,
-            )
-            closed += site_closed
-            if self._recheck_incomplete:
-                # Budget tripped mid-site: defer the remaining windowed sources too, so no
-                # one tick runs cap×sites fetches. Resumes next tick (mark_recheck below).
+                    # Still open — advance its recheck order so the sweep moves on to
+                    # the next stalest rows next pass, not re-verifying this one (#39).
+                    self._store.note_rechecked(slug, url)
+            # #9: bound the aggregate sweep. Every branch above attempted a fetch and
+            # rotated the URL off the head (#39), so once the pass exceeds its budget we
+            # defer the rest — the next tick resumes at the still-stalest remainder
+            # rather than re-checking this head. 0 disables the budget (unbounded).
+            if (
+                self._recheck_budget
+                and self._monotonic() - pass_started > self._recheck_budget
+            ):
+                self._recheck_incomplete = True
                 break
-        return closed
+        if rows:
+            _log.info(
+                "recheck checked=%d closed=%d rows=%d cap=%d incomplete=%s",
+                checked,
+                swept,
+                len(rows),
+                self._recheck_cap,
+                self._recheck_incomplete,
+            )
+        return closed + swept
+
+    def _recheck_slugs(self) -> list[str]:
+        """Sites whose open rows the §4.9 sweep must re-verify (registry order).
+
+        The sources the runner's guarded enumerate-diff cannot protect: today the
+        enabled windowed ones (``enumerates_all=False``, where diffing against a
+        recent-window view would false-close everything that scrolled off it).
+        Full-enumeration sources close through the diff instead.
+        """
+        return [s.slug for s in self._sites if s.enabled and not s.enumerates_all]
 
     def match_drain_due(self, now: datetime) -> bool:
         """True if a §4.7 match-drain pass is due (``JOBCRAWLER_MATCH_DRAIN_INTERVAL``).

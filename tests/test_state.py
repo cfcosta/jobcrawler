@@ -1043,6 +1043,43 @@ def test_note_rechecked_rotates_a_url_off_the_recheck_head() -> None:
     s.close()
 
 
+def test_recheck_rows_are_fleet_wide_stalest_first_with_apply_targets() -> None:
+    # The §4.9 sweep pulls ONE fleet-wide queue, not per-site quotas: stalest
+    # last_seen first ACROSS the requested sites, each row carrying its apply_url so
+    # the sweep can verify an aggregator row at the real ATS posting it points to.
+    clock = _MutableClock(datetime(2026, 1, 1, tzinfo=timezone.utc))
+    s = StateStore(":memory:", clock=clock)
+    try:
+        s.upsert_position(
+            "agg",
+            "a_old",
+            fields={**FIELDS, "apply_url": "https://ats.test/x"},
+            content_hash="h1",
+        )
+        clock.now += timedelta(hours=1)
+        s.upsert_position("board", "b_mid", fields=FIELDS, content_hash="h2")
+        clock.now += timedelta(hours=1)
+        s.upsert_position("agg", "a_new", fields=FIELDS, content_hash="h3")
+        # a closed row and an unrequested site never enter the queue
+        s.upsert_position("agg", "a_gone", fields=FIELDS, content_hash="h4")
+        s.mark_closed("agg", "a_gone", reason="filled")
+        s.upsert_position("other", "o1", fields=FIELDS, content_hash="h5")
+
+        rows = s.recheck_rows(["agg", "board"], limit=10)
+        assert rows == [
+            ("agg", "a_old", "https://ats.test/x"),
+            ("board", "b_mid", None),
+            ("agg", "a_new", None),
+        ]
+        # the cap is fleet-wide: the 2 stalest across both sites, not 2 per site
+        assert s.recheck_rows(["agg", "board"], limit=2) == rows[:2]
+        assert s.recheck_rows([], limit=10) == []
+        # open_urls (the single-site view) shares the same ordering contract
+        assert s.open_urls("agg", limit=10) == ["a_old", "a_new"]
+    finally:
+        s.close()
+
+
 # -- match verdicts, pending backlog, counts (§6) ----------------------------
 
 

@@ -1873,10 +1873,17 @@ def test_site_accepts_a_company_and_a_windowed_flag() -> None:
 class _RecheckStore(StateStore):
     """A store whose §4.9 recheck surface returns canned data and records closures."""
 
-    def __init__(self, open_by_site: dict[str, list[str]], *, expired: int = 0) -> None:
+    def __init__(
+        self,
+        open_by_site: dict[str, list[str]],
+        *,
+        expired: int = 0,
+        apply_urls: dict[tuple[str, str], str] | None = None,
+    ) -> None:
         super().__init__(":memory:")
         self._open_by_site = open_by_site
         self._expired = expired
+        self._apply_urls = apply_urls or {}
         self.closed: list[tuple[str, str, str]] = []
         self.rechecked: list[tuple[str, str]] = []
 
@@ -1885,6 +1892,18 @@ class _RecheckStore(StateStore):
 
     def open_urls(self, site: str, *, limit: int) -> list[str]:
         return list(self._open_by_site.get(site, [])[:limit])
+
+    def recheck_rows(
+        self, sites: list[str], *, limit: int
+    ) -> list[tuple[str, str, str | None]]:
+        # The canned fleet queue: requested-site order stands in for the real store's
+        # stalest-first ordering; the cap applies ONCE across the whole deal.
+        rows = [
+            (site, url, self._apply_urls.get((site, url)))
+            for site in sites
+            for url in self._open_by_site.get(site, [])
+        ]
+        return rows[:limit]
 
     def mark_closed(self, site: str, url: str, *, reason: str) -> None:
         self.closed.append((site, url, reason))
@@ -2014,6 +2033,32 @@ async def test_recheck_skips_full_enumeration_sources() -> None:
 
     assert fetched == ["w1"]  # only the windowed source was re-verified
     assert closed == 1
+
+
+async def test_recheck_cap_is_fleet_wide_not_per_site() -> None:
+    # Throughput/fairness: a per-site quota let one tick run cap×sites fetches, and
+    # per-site loops let a huge windowed source starve smaller ones. The sweep pulls
+    # ONE stalest-first queue across every eligible site and caps it once.
+    fetched: list[str] = []
+
+    async def fetch(url: str) -> tuple[int, str]:
+        fetched.append(url)
+        return (200, "<h1>Still hiring</h1>")
+
+    store = _RecheckStore({"wa": ["a1", "a2"], "wb": ["b1", "b2"]})
+    sched = _recheck_sched(
+        store,
+        sites=[
+            Site(slug="wa", url="https://a.com", enumerates_all=False),
+            Site(slug="wb", url="https://b.com", enumerates_all=False),
+        ],
+        fetch=fetch,
+        cap=3,
+    )
+    await sched.recheck_tick()
+
+    # 3 fetches TOTAL — the store's fleet-wide deal, capped once (never 3 per site)
+    assert fetched == ["a1", "a2", "b1"]
 
 
 async def test_recheck_watchdog_unwedges_the_sweep() -> None:

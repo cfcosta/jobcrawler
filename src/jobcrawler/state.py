@@ -42,7 +42,7 @@ import random
 import sqlite3
 import threading
 import zlib
-from collections.abc import Callable, Collection, Iterable, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -2143,20 +2143,36 @@ class StateStore:
             ).fetchall()
         return [_to_position(r) for r in rows]
 
+    def recheck_rows(
+        self, sites: Sequence[str], *, limit: int
+    ) -> list[tuple[str, str, str | None]]:
+        """The §4.9 sweep's fleet queue: ``(site, url, apply_url)`` stalest-first.
+
+        ONE queue across every requested site, ordered least-recently-``last_seen``
+        first and capped once — so the sweep's budget always goes to the rows most
+        likely to have quietly closed, wherever they live, and a huge windowed source
+        can't starve a small one out of its turn (per-site quotas did). ``apply_url``
+        rides along so the sweep can verify an aggregator row at the real ATS posting
+        it points to rather than at the aggregator's own copy.
+        """
+        if not sites:
+            return []
+        marks = ",".join("?" * len(sites))
+        rows = self._conn.execute(
+            f"SELECT site, url, apply_url FROM positions "
+            f"WHERE status = 'open' AND site IN ({marks}) "
+            f"ORDER BY last_seen ASC, site, url LIMIT ?",
+            (*sites, limit),
+        ).fetchall()
+        return [(row["site"], row["url"], row["apply_url"]) for row in rows]
+
     def open_urls(self, site: str, *, limit: int) -> list[str]:
         """Open URLs for ``site``, stalest ``last_seen`` first (§4.9 recheck order).
 
-        Ordered least-recently-seen first so the recheck loop's cap spends its budget on
-        the positions most likely to have quietly closed — the ones that have fallen out
-        of a windowed source's (``enumerates_all=False``) recent view, where the
-        closure-diff is unsound and this per-URL re-verification stands in for it.
+        The single-site view of :meth:`recheck_rows` — delegated so the recheck
+        ordering contract (stalest ``last_seen`` leads) lives in exactly one query.
         """
-        rows = self._conn.execute(
-            "SELECT url FROM positions WHERE site = ? AND status = 'open' "
-            "ORDER BY last_seen ASC, url LIMIT ?",
-            (site, limit),
-        ).fetchall()
-        return [row["url"] for row in rows]
+        return [url for _, url, _ in self.recheck_rows([site], limit=limit)]
 
     def pending_urls(self, site: str, *, limit: int) -> list[str]:
         """Open URLs for ``site`` still awaiting scoring (``match_pending = 1``), FIFO.
