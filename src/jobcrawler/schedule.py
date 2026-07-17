@@ -39,6 +39,7 @@ from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Literal, Protocol
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -238,6 +239,29 @@ def _state_summary(states: dict[str, HealthState]) -> str:
     """A compact ``healthy=2 pending_review=1`` tally for the regen sweep log line."""
     counts = Counter(state.value for state in states.values())
     return " ".join(f"{name}={counts[name]}" for name in sorted(counts))
+
+
+def _apply_target(url: str, apply_url: str | None) -> str | None:
+    """The URL the §4.9 sweep should verify a row at instead of ``url``, or None.
+
+    An aggregator row points at the real ATS posting via ``apply_url``; the
+    aggregator's own page often outlives the job, so liveness must be judged at the
+    target. Only a well-formed **cross-host** http(s) ``apply_url`` diverts: a
+    same-host apply form rises and falls with the posting itself, and a mailto: /
+    relative / malformed target is no fetchable posting at all.
+    """
+    if not apply_url:
+        return None
+    try:
+        target = urlsplit(apply_url)
+        row = urlsplit(url)
+    except ValueError:
+        return None
+    if target.scheme not in ("http", "https") or not target.hostname:
+        return None
+    if target.hostname.lower() == (row.hostname or "").lower():
+        return None
+    return apply_url
 
 
 class Scheduler:
@@ -1116,10 +1140,16 @@ class Scheduler:
         )
         checked = 0
         swept = 0
-        for slug, url, _apply_url in rows:
+        for slug, url, apply_url in rows:
+            # An aggregator row is verified at the real ATS posting it points to —
+            # the aggregator's own page often outlives the job (cached copies, soft
+            # 200s), so its liveness proves nothing. Only a cross-host apply_url
+            # diverts; the row URL stays the store key for every write below.
+            target = _apply_target(url, apply_url)
+            probe = target or url
             try:
                 status, text = await asyncio.wait_for(
-                    fetch(url), self._recheck_timeout or None
+                    fetch(probe), self._recheck_timeout or None
                 )
             except TimeoutError:
                 # The fetch neither returned nor raised within the watchdog ceiling —
@@ -1131,7 +1161,7 @@ class Scheduler:
                     "recheck watchdog: fetch slug=%s url=%s exceeded %.0fs — "
                     "abandoning it and resuming the sweep",
                     slug,
-                    url,
+                    probe,
                     self._recheck_timeout,
                 )
                 # A wedged fetch is never closed, so without this the same poison URL
@@ -1144,14 +1174,14 @@ class Scheduler:
                 _log.warning(
                     "recheck fetch failed slug=%s url=%s (%s: %s); skipping",
                     slug,
-                    url,
+                    probe,
                     type(exc).__name__,
                     exc,
                 )
                 _log.debug(
                     "recheck fetch failure detail slug=%s url=%s",
                     slug,
-                    url,
+                    probe,
                     exc_info=True,
                 )
                 # Attempted but unconfirmed: rotate it off the head too, so a URL that
@@ -1161,6 +1191,13 @@ class Scheduler:
                 checked += 1
                 reason = self._closure_reason(status, text)
                 if reason is not None:
+                    if target is not None:
+                        # The verdict is second-hand — say so, so an operator reading
+                        # closed_reason knows WHICH page 404'd/showed the marker (the
+                        # ATS posting, not the aggregator row being closed).
+                        reason = (
+                            f"recheck apply-target {reason.removeprefix('recheck ')}"
+                        )
                     self._store.mark_closed(slug, url, reason=reason)
                     swept += 1
                 else:

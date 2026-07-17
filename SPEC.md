@@ -784,7 +784,10 @@ operates the whole loop itself rather than relying on an external cron.
   boards whose last error-free run is older than `JOBCRAWLER_RECHECK_STALE_AFTER` (default 3d;
   `off` disables — a **stalled** board's rows would otherwise rot open forever), and **orphaned**
   slugs (open rows whose site left the registry). It also re-verifies rows against
-  `expired_markers` / `expires_at` and calls `expire_due()`. The recheck GET follows **same-host** redirects (bounded,
+  `expired_markers` / `expires_at` and calls `expire_due()`. A row carrying a **cross-host**
+  `apply_url` (an aggregator row pointing at the real ATS posting) is verified at that TARGET, not
+  at the aggregator's own page — which often outlives the job — and its closure reason is prefixed
+  `recheck apply-target …` so the operator knows which page produced the verdict. The recheck GET follows **same-host** redirects (bounded,
   each hop SSRF-rechecked, robots-gated and paced — boards commonly locale-redirect every posting
   URL, which would otherwise blind the sweep to the real 200/404 behind the 3xx); a **cross-host**
   redirect is a moved posting, not closure evidence, so the 3xx is surfaced and the row stays open.

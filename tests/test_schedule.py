@@ -2082,6 +2082,61 @@ async def test_recheck_adopts_full_enum_boards_with_stalled_diffs() -> None:
     assert fetched == []
 
 
+async def test_recheck_verifies_aggregator_rows_at_their_apply_target() -> None:
+    # An aggregator's own page often outlives the real posting (cached copies, soft
+    # 200s), so a row carrying a CROSS-HOST apply_url — the real ATS posting — is
+    # verified THERE, and the closure reason says so. A same-host apply form or a
+    # non-http target tells nothing more than the posting itself: row URL as usual.
+    fetched: list[str] = []
+    urls = [f"https://agg.test/j{n}" for n in range(1, 6)]
+    store = _RecheckStore(
+        {"agg": urls},
+        apply_urls={
+            ("agg", "https://agg.test/j1"): "https://ats.example/post/1",
+            ("agg", "https://agg.test/j2"): "https://agg.test/apply/2",
+            ("agg", "https://agg.test/j3"): "mailto:jobs@example.test",
+            ("agg", "https://agg.test/j4"): "https://AGG.test/apply/4",
+            ("agg", "https://agg.test/j5"): "https://ats.example/post/5",
+        },
+    )
+
+    async def fetch(url: str) -> tuple[int, str]:
+        fetched.append(url)
+        if url == "https://ats.example/post/1":
+            return (404, "")
+        if url == "https://ats.example/post/5":
+            return (200, "Sorry, this position filled last week.")
+        return (200, "<h1>Still hiring</h1>")
+
+    sched = _recheck_sched(
+        store,
+        sites=[Site(slug="agg", url="https://agg.test", enumerates_all=False)],
+        fetch=fetch,
+    )
+    closed = await sched.recheck_tick()
+
+    # j1/j5 diverted to the ATS; j2 (same host), j3 (mailto), j4 (same host, only
+    # case differs) verified at the aggregator row itself.
+    assert fetched == [
+        "https://ats.example/post/1",
+        "https://agg.test/j2",
+        "https://agg.test/j3",
+        "https://agg.test/j4",
+        "https://ats.example/post/5",
+    ]
+    assert closed == 2
+    # Closure lands on the AGGREGATOR row (the store key), reason naming the signal
+    # as second-hand so an operator knows which page produced the verdict.
+    assert store.closed == [
+        ("agg", "https://agg.test/j1", "recheck apply-target http 404"),
+        (
+            "agg",
+            "https://agg.test/j5",
+            "recheck apply-target expired-marker 'position filled'",
+        ),
+    ]
+
+
 async def test_recheck_adopts_disabled_boards_and_orphaned_rows() -> None:
     # A disabled site is never crawled, so no diff will ever close its rows — and a
     # slug with open rows but no registry entry has no crawler at all. Both rot open
