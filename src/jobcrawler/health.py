@@ -8,7 +8,10 @@
     is normal), so only ``items_found == 0`` — the board returning *no open positions at
     all* — is a blackout. A one-off network blip would trip this, so the candidate is
     confirmed by a short **re-probe that re-parses >= 1 position** (not merely
-    network-OK); one re-probe-cleared blip is tolerated.
+    network-OK); one re-probe-cleared blip is tolerated. A confirmed 0-yield whose
+    board's own ATS *advertises zero openings* is a **validly empty** board, not
+    drift: it parks healthy and is re-checked by the sweep, never regenerated
+    (regeneration cannot conjure postings that don't exist).
   * **partial drift** — positions still come back, but their descriptions collapse to
     boilerplate/truncated bodies (the description-completeness signal, persisted under the
     ``body_quality`` key, falls below the host-side floor) for the latest *two* runs
@@ -174,6 +177,7 @@ class SelfHealer:
         *,
         reprobe: Callable[[str], Awaitable[int]],
         regenerate: Callable[[str], Awaitable[RegenOutcome]],
+        board_empty: Callable[[str], Awaitable[bool]] | None = None,
         on_confirmed_failure: Callable[[str], None] | None = None,
         body_quality_floor: float = 0.5,
         clock: Callable[[], datetime] = _utcnow,
@@ -187,6 +191,18 @@ class SelfHealer:
         self._store = store
         self._reprobe = reprobe  # async (slug) -> items re-parsed
         self._regenerate = regenerate  # async (slug) -> how the regen was delivered
+        # Is the board *validly empty* — its own ATS API advertising zero open
+        # roles? A 0-yield crawl against an empty board is a fact about the site,
+        # not crawler drift: regenerating cannot conjure postings that don't
+        # exist, and on an empty board a regenerated candidate is promoted via
+        # the §6 empty-board admission without writing a run row — so the
+        # staleness signal never clears and the sweep regenerates forever (the
+        # mistral loop: ~900 LM calls against a board that had simply emptied).
+        # When this answers True the site parks HEALTHY instead; the sweep's
+        # cheap probe re-checks every pass, and the first crawl that yields again
+        # clears the blackout signal naturally. None → feature off (regen as
+        # ever).
+        self._board_empty = board_empty
         # Does the site have a committed crawler yet? A registry entry with none is a
         # §4.2 cold-start: there's nothing to crawl, so assess writes the first crawler
         # before the loop can crawl it. Defaults to "always present", so a healer wired
@@ -251,8 +267,21 @@ class SelfHealer:
         # A blackout might be a transient outage, so confirm it with a re-probe. A
         # body-quality collapse (two consecutive sub-floor runs) and a missing crawler
         # (nothing to crawl) are already confirmed, so they skip straight to regeneration.
-        if blackout and not missing and await self._reprobe(slug) > 0:
-            return self._record(slug, HealthState.HEALTHY)  # re-parsed: tolerated blip
+        if blackout and not missing:
+            if await self._reprobe(slug) > 0:
+                # re-parsed: tolerated blip
+                return self._record(slug, HealthState.HEALTHY)
+            # A confirmed 0-yield can also mean the board itself is empty — its
+            # ATS advertising zero openings. That needs watching, not healing:
+            # park HEALTHY and let the sweep's probe re-check each pass (see
+            # ``board_empty`` in __init__ for why regenerating here loops).
+            if self._board_empty is not None and await self._board_empty(slug):
+                _log.info(
+                    "%s: board is validly empty (its ATS advertises 0 openings); "
+                    "parking healthy and watching instead of regenerating",
+                    slug,
+                )
+                return self._record(slug, HealthState.HEALTHY)
         # Drift confirmed: a real failure, not a transient outage. Capture it as a §4.11
         # hard case (the optimizer learns from failures) before self-healing. A cold-start
         # is a new site, not a failure to learn from, so it is not captured.

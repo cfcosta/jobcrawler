@@ -39,6 +39,7 @@ from pydantic import ValidationError
 
 from jobcrawler import config, fx, generator_pointer, notify
 from jobcrawler.generate.scoring import CandidateResult
+from jobcrawler.generate.snapshot import probe_board_empty
 from jobcrawler.governor import RateGovernor
 from jobcrawler.health import (
     HealthState,
@@ -56,7 +57,7 @@ from jobcrawler.metrics import (
 )
 from jobcrawler.profile import ProfileNotFound, load_profile
 from jobcrawler.runtime.contract import allowed_hosts_of
-from jobcrawler.runtime.live_ctx import build_recheck_fetch
+from jobcrawler.runtime.live_ctx import build_live_ctx, build_recheck_fetch
 from jobcrawler.runtime.runner import (
     CrawlSummary,
     crawl_site_isolated,
@@ -67,6 +68,7 @@ from jobcrawler.schedule import Scheduler, Site
 from jobcrawler.sites import find_site, load_sites
 from jobcrawler.state import PositionRecord, RunRecord, StateStore
 from jobcrawler.trainset import record_failure
+from jobcrawler.urls import normalize_host
 
 if TYPE_CHECKING:
     from jobcrawler.match import Matcher
@@ -1338,6 +1340,26 @@ def _probe(slug: str, *, crawlers_dir: Path = _CRAWLERS_DIR) -> int:
     )
 
 
+def _board_validly_empty(site: Site) -> bool:
+    """Is ``site``'s board authoritatively empty — its ATS advertising 0 openings?
+
+    The §4.8 park-not-heal probe: run on a ``to_thread`` worker by the healer once
+    a blackout's re-probe confirmed 0 yield. Fetches the board page + its detected
+    ATS API through the same polite live ctx as a crawl, allowed exactly the
+    registry host plus the operator-declared extra hosts (§8). Anything short of
+    an authoritative "zero openings" — no ATS, no answer, an error stub, a crash —
+    returns False, keeping the site on the regeneration path.
+    """
+    hosts = {normalize_host(site.url)} | {
+        h for h in (normalize_host(f"https://{e}") for e in site.extra_hosts) if h
+    }
+    try:
+        return probe_board_empty(build_live_ctx(hosts), site.url) is True
+    except Exception:  # can't tell → not provably empty → let regeneration decide
+        _log.warning("empty-board probe crashed for %s", site.slug, exc_info=True)
+        return False
+
+
 def _record_site_failure(sites: Sequence[Site], slug: str) -> None:
     """Capture a confirmed-failed site as a §4.11 hard case (the optimizer's signal).
 
@@ -1416,6 +1438,15 @@ def _build_healer(
     async def reprobe(slug: str) -> int:
         return await asyncio.to_thread(_probe, slug)
 
+    async def board_empty(slug: str) -> bool:
+        # Resolved against the *live* roster (like failures below): a re-pointed
+        # registry URL must be probed at its new address, so a moved board falls
+        # through to regeneration rather than parking on the old one's answer.
+        site = find_site(resolve_sites(), slug)
+        if site is None:
+            return False
+        return await asyncio.to_thread(_board_validly_empty, site)
+
     async def regenerate(slug: str) -> RegenOutcome:
         from jobcrawler.cli_generate import regenerate_one
 
@@ -1438,6 +1469,7 @@ def _build_healer(
         store,
         reprobe=reprobe,
         regenerate=regenerate,
+        board_empty=board_empty,
         on_confirmed_failure=lambda slug: _record_site_failure(resolve_sites(), slug),
         body_quality_floor=config.description_quality_floor(),
         genfail_backoff=config.genfail_backoff(),

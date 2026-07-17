@@ -249,6 +249,133 @@ async def test_reprobe_clears_a_blip() -> None:
     assert await healer.assess("s") is HealthState.HEALTHY
 
 
+# -- validly-empty boards park instead of regenerating (§4.8) -----------------
+
+
+async def test_validly_empty_board_parks_healthy_without_regenerating() -> None:
+    # The mistral loop: the board emptied (0-yield vs a yielding baseline) and the
+    # re-probe confirms 0 — but the board's own ATS advertises zero openings.
+    # Regenerating cannot conjure postings that don't exist, and on an empty board
+    # a regenerated candidate is promoted via the §6 empty-board admission without
+    # writing a run row, so the staleness signal never clears and the sweep would
+    # regenerate forever. Park healthy; the sweep re-checks every pass.
+    store = _stale_store()
+    asked: list[str] = []
+
+    async def reprobe(slug: str) -> int:
+        return 0
+
+    async def board_empty(slug: str) -> bool:
+        asked.append(slug)
+        return True
+
+    async def regenerate(slug: str) -> RegenOutcome:
+        raise AssertionError("a validly empty board must not regenerate")
+
+    healer = SelfHealer(
+        store, reprobe=reprobe, regenerate=regenerate, board_empty=board_empty
+    )
+    assert await healer.assess("s") is HealthState.HEALTHY
+    assert asked == ["s"]
+    assert store.get_health("s") == HealthState.HEALTHY.value
+
+
+async def test_empty_board_park_is_not_captured_as_a_hard_case() -> None:
+    # A validly empty board is a fact about the site, not a crawler failure — it
+    # must not feed the §4.11 optimizer's failure trainset.
+    store = _stale_store()
+    captured: list[str] = []
+
+    async def reprobe(slug: str) -> int:
+        return 0
+
+    async def board_empty(slug: str) -> bool:
+        return True
+
+    async def regenerate(slug: str) -> RegenOutcome:
+        raise AssertionError("must not regenerate")
+
+    healer = SelfHealer(
+        store,
+        reprobe=reprobe,
+        regenerate=regenerate,
+        board_empty=board_empty,
+        on_confirmed_failure=captured.append,
+    )
+    await healer.assess("s")
+    assert captured == []
+
+
+async def test_populated_board_still_regenerates_despite_the_hook() -> None:
+    # The probe says the board HAS openings (or can't tell → False): a confirmed
+    # 0-yield is real drift and the regeneration path is unchanged.
+    store = _stale_store()
+    regens: list[str] = []
+
+    async def reprobe(slug: str) -> int:
+        return 0
+
+    async def board_empty(slug: str) -> bool:
+        return False
+
+    async def regenerate(slug: str) -> RegenOutcome:
+        regens.append(slug)
+        return RegenOutcome.PROMOTED
+
+    healer = SelfHealer(
+        store, reprobe=reprobe, regenerate=regenerate, board_empty=board_empty
+    )
+    assert await healer.assess("s") is HealthState.HEALTHY
+    assert regens == ["s"]
+
+
+async def test_a_blip_never_consults_the_empty_board_probe() -> None:
+    # reprobe re-parsed positions → tolerated blip; the extra probe must not run.
+    store = _stale_store()
+
+    async def reprobe(slug: str) -> int:
+        return 3
+
+    async def board_empty(slug: str) -> bool:
+        raise AssertionError("a blip must not probe the board for emptiness")
+
+    async def regenerate(slug: str) -> RegenOutcome:
+        raise AssertionError("a blip must not regenerate")
+
+    healer = SelfHealer(
+        store, reprobe=reprobe, regenerate=regenerate, board_empty=board_empty
+    )
+    assert await healer.assess("s") is HealthState.HEALTHY
+
+
+async def test_cold_start_never_consults_the_empty_board_probe() -> None:
+    # A registry entry with no committed crawler must still get its first crawler
+    # written, even if its board is currently empty (§4.2 cold-start): the probe
+    # guards only the blackout path.
+    store = StateStore(":memory:", clock=lambda: T0)
+    regens: list[str] = []
+
+    async def reprobe(slug: str) -> int:
+        raise AssertionError("nothing to re-probe on a cold start")
+
+    async def board_empty(slug: str) -> bool:
+        raise AssertionError("cold start must not probe for emptiness")
+
+    async def regenerate(slug: str) -> RegenOutcome:
+        regens.append(slug)
+        return RegenOutcome.STAGED
+
+    healer = SelfHealer(
+        store,
+        reprobe=reprobe,
+        regenerate=regenerate,
+        board_empty=board_empty,
+        has_crawler=lambda _slug: False,
+    )
+    assert await healer.assess("s") is HealthState.PENDING_REVIEW
+    assert regens == ["s"]
+
+
 async def test_confirmed_stale_regenerates_live_and_recovers() -> None:
     # review_gate off (or auto-deliver): the regen goes live → the site is healed.
     healer = await _healer(

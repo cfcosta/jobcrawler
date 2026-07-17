@@ -271,7 +271,7 @@ def _ats_posting_samples(
         data = json.loads(raw)
     except (ValueError, TypeError):
         return [], 0
-    postings, total = _ats_postings(data)
+    postings, total = _ats_postings(data) or ([], 0)
     out: list[dict[str, str]] = []
     for posting in postings[:count]:
         if not isinstance(posting, Mapping):
@@ -289,14 +289,20 @@ def _ats_posting_samples(
     return out, total
 
 
-def _ats_postings(data: object) -> tuple[list, int]:
-    """The postings list + total from a parsed ATS payload.
+def _ats_postings(data: object) -> tuple[list, int] | None:
+    """The postings list + total from a parsed ATS payload, ``None`` if the payload
+    is not a *recognized* ATS shape.
 
     Lever/Gem are bare arrays; Greenhouse/Ashby wrap them under ``jobs`` (with a
     ``meta.total`` for Greenhouse); Rippling/Join wrap them under ``items`` with an
     authoritative count in ``totalItems`` (Rippling) / ``pagination.rowCount``
     (Join). The count is the board's OWN total, so a populated board never reads as
-    empty even when a broken crawler yields nothing (the §6 precision guard)."""
+    empty even when a broken crawler yields nothing (the §6 precision guard).
+
+    ``None`` vs ``([], 0)`` is load-bearing for :func:`probe_board_empty`: a JSON
+    *error* body (Lever's 404 ``{"ok": false, ...}``, a tenant-gone stub) parses
+    fine but is not a board saying "zero openings" — only a recognized shape may
+    assert authoritative emptiness."""
     if isinstance(data, list):
         return data, len(data)
     if isinstance(data, Mapping):
@@ -316,7 +322,34 @@ def _ats_postings(data: object) -> tuple[list, int]:
                     else None
                 )
             return items, total if isinstance(total, int) and total > 0 else len(items)
-    return [], 0
+    return None
+
+
+def probe_board_empty(ctx: Ctx, site_url: str) -> bool | None:
+    """Does the board's own ATS API say it is empty right now? Tri-state (§4.8).
+
+    ``True`` — a known ATS API answered with a recognized payload advertising zero
+    open roles: the board is *validly empty*, a fact about the site rather than
+    the crawler, so a 0-yield crawl there needs no healing. ``False`` — the
+    payload advertised at least one role (a 0-yield crawl IS drift). ``None`` —
+    emptiness cannot be established: no known ATS detected, none answered, or the
+    answer wasn't a recognized board payload. The False/None split keeps a
+    retired or moved board — whose candidates 404 (``ctx.fetch`` raises on 4xx)
+    or answer an error stub — on the regeneration path instead of parking it.
+    """
+    homepage = _try_fetch(ctx, site_url)
+    for api in ats_api_candidates(site_url, homepage):
+        raw = _try_fetch(ctx, api)
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        parsed = _ats_postings(data)
+        if parsed is None:
+            continue  # parseable JSON, but not a recognized board payload
+        postings, total = parsed
+        return not postings and total == 0
+    return None
 
 
 def _ats_field(mapping: Mapping[object, object], keys: tuple[str, ...]) -> str:

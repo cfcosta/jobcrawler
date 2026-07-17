@@ -33,6 +33,7 @@ from jobcrawler.generate.snapshot import (
     on_domain_links,
     pick_jobs_sitemap,
     prefetch_corpus,
+    probe_board_empty,
     sitemaps_from_robots,
 )
 from jobcrawler.runtime.ctx import Ctx
@@ -205,6 +206,12 @@ def test_ats_api_candidates_empty_on_a_plain_careers_page() -> None:
 # never reads as empty even when a broken crawler yields nothing (the §6 guard).
 
 
+def _parsed(data: object) -> tuple[list, int]:
+    parsed = _ats_postings(data)
+    assert parsed is not None, "expected a recognized ATS payload shape"
+    return parsed
+
+
 def test_ats_postings_rippling_items_with_total() -> None:
     data = {
         "items": [{"name": "Eng"}, {"name": "PM"}],
@@ -213,13 +220,13 @@ def test_ats_postings_rippling_items_with_total() -> None:
         "pageSize": 1000,
         "totalPages": 1,
     }
-    postings, total = _ats_postings(data)
+    postings, total = _parsed(data)
     assert postings == data["items"]
     assert total == 20  # totalItems wins over len(items), the enumeration target
 
 
 def test_ats_postings_rippling_empty_board_is_zero() -> None:
-    postings, total = _ats_postings({"items": [], "totalItems": 0, "totalPages": 0})
+    postings, total = _parsed({"items": [], "totalItems": 0, "totalPages": 0})
     assert postings == []
     assert total == 0
 
@@ -230,13 +237,13 @@ def test_ats_postings_join_items_with_pagination_rowcount() -> None:
         "items": [{"title": "Eng"}],
         "pagination": {"rowCount": 15, "pageCount": 3, "page": 1, "pageSize": 5},
     }
-    postings, total = _ats_postings(data)
+    postings, total = _parsed(data)
     assert postings == data["items"]
     assert total == 15  # pagination.rowCount is the board's own total
 
 
 def test_ats_postings_join_empty_board_is_zero() -> None:
-    postings, total = _ats_postings(
+    postings, total = _parsed(
         {"items": [], "pagination": {"rowCount": 0, "pageCount": 0, "pageSize": 0}}
     )
     assert postings == []
@@ -252,15 +259,79 @@ def test_ats_postings_workable_jobs_without_meta_uses_len() -> None:
         "description": "We build things.",
         "jobs": [{"title": "Eng", "url": "u1"}, {"title": "PM", "url": "u2"}],
     }
-    postings, total = _ats_postings(data)
+    postings, total = _parsed(data)
     assert postings == data["jobs"]
     assert total == 2
 
 
 def test_ats_postings_workable_empty_board_is_zero() -> None:
-    postings, total = _ats_postings({"name": "Acme", "description": "", "jobs": []})
+    postings, total = _parsed({"name": "Acme", "description": "", "jobs": []})
     assert postings == []
     assert total == 0
+
+
+def test_ats_postings_unrecognized_shape_is_none_not_empty() -> None:
+    # A JSON *error* body (Lever's tenant-gone {"ok": false, ...}) parses fine but
+    # is not a board saying "zero openings" — None keeps probe_board_empty from
+    # parking a retired board as validly empty.
+    assert _ats_postings({"ok": False, "error": "Document not found"}) is None
+    assert _ats_postings("not a board") is None
+    assert _ats_postings(42) is None
+
+
+# -- authoritative-emptiness probe (§4.8 park-not-heal) ----------------------
+
+
+def _lever_ctx(api_body: httpx.Response) -> Ctx:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api.lever.co":
+            return api_body
+        return httpx.Response(200, text="<html>board shell</html>")
+
+    return Ctx(
+        {"jobs.lever.co", "api.lever.co"},
+        client=httpx.Client(
+            transport=httpx.MockTransport(handler), follow_redirects=False
+        ),
+    )
+
+
+def test_probe_board_empty_true_on_empty_lever_array() -> None:
+    # The mistral shape: the board exists and answers `[]` — validly empty.
+    ctx = _lever_ctx(httpx.Response(200, json=[]))
+    assert probe_board_empty(ctx, "https://jobs.lever.co/acme") is True
+
+
+def test_probe_board_empty_false_when_roles_are_advertised() -> None:
+    ctx = _lever_ctx(httpx.Response(200, json=[{"text": "Eng", "hostedUrl": "u"}]))
+    assert probe_board_empty(ctx, "https://jobs.lever.co/acme") is False
+
+
+def test_probe_board_empty_none_when_the_tenant_is_gone() -> None:
+    # A retired/moved tenant 404s (ctx.fetch raises on 4xx) — emptiness cannot be
+    # established, so the healer keeps the site on the regeneration path.
+    ctx = _lever_ctx(httpx.Response(404, json={"ok": False, "error": "not found"}))
+    assert probe_board_empty(ctx, "https://jobs.lever.co/acme") is None
+
+
+def test_probe_board_empty_none_on_a_200_error_stub() -> None:
+    # Parseable JSON that is not a recognized board payload must read as
+    # "can't tell", never as "empty".
+    ctx = _lever_ctx(httpx.Response(200, json={"ok": False, "error": "moved"}))
+    assert probe_board_empty(ctx, "https://jobs.lever.co/acme") is None
+
+
+def test_probe_board_empty_none_without_a_known_ats() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>plain careers page</html>")
+
+    ctx = Ctx(
+        {"x.com"},
+        client=httpx.Client(
+            transport=httpx.MockTransport(handler), follow_redirects=False
+        ),
+    )
+    assert probe_board_empty(ctx, "https://x.com/careers") is None
 
 
 # -- sitemaps / robots -------------------------------------------------------
