@@ -776,10 +776,15 @@ operates the whole loop itself rather than relying on an external cron.
   3d]`. Adaptive cadence is **timing, not code**, and stays within the politeness band, so it is
   **exempt from the §4.8/§4.11 autonomy brake** (which freezes only self-*modification*).
 - **NEW — recheck / expiry timer.** On `JOBCRAWLER_RECHECK_INTERVAL` (default 12h) the scheduler
-  re-fetches up to `recheck_cap` (default 300, oldest-checked first) standing **open** positions to
-  confirm they are still live. This is the **only** closure signal for `enumerates_all: false` sources
-  (where the diff is unsound), and it also re-verifies enumerating rows against `expired_markers` /
-  `expires_at` and calls `expire_due()`. The recheck GET follows **same-host** redirects (bounded,
+  re-fetches up to `recheck_cap` (default 300; ONE fleet-wide stalest-`last_seen`-first queue, the
+  cap applied once across all eligible sites so a huge source can't starve a small one) standing
+  **open** positions to confirm they are still live. Eligible are every source the guarded diff
+  can't protect: `enumerates_all: false` sources (where the diff is unsound — this is their **only**
+  closure signal), **disabled** sites (never crawled again, so never diffed), full-enumeration
+  boards whose last error-free run is older than `JOBCRAWLER_RECHECK_STALE_AFTER` (default 3d;
+  `off` disables — a **stalled** board's rows would otherwise rot open forever), and **orphaned**
+  slugs (open rows whose site left the registry). It also re-verifies rows against
+  `expired_markers` / `expires_at` and calls `expire_due()`. The recheck GET follows **same-host** redirects (bounded,
   each hop SSRF-rechecked, robots-gated and paced — boards commonly locale-redirect every posting
   URL, which would otherwise blind the sweep to the real 200/404 behind the 3xx); a **cross-host**
   redirect is a moved posting, not closure evidence, so the 3xx is surfaced and the row stays open.
@@ -1460,7 +1465,8 @@ an `openrouter/…` slug billed per token. Selected knobs:
 | `JOBCRAWLER_FIRST_CRAWL_CAP` | `30` | newest-K new positions matched on a board's *first* crawl (§4.7) |
 | `JOBCRAWLER_CLOSE_AFTER_MISSES` | `2` | consecutive absences from an enumerating board before a position closes (§4.7) |
 | `JOBCRAWLER_RECHECK_INTERVAL` | `12h` | §4.9 recheck loop cadence (the only closure signal for `enumerates_all:false`) |
-| `JOBCRAWLER_RECHECK_CAP` | `300` | max standing open positions re-fetched per recheck pass |
+| `JOBCRAWLER_RECHECK_CAP` | `300` | max standing open positions re-fetched per recheck pass (one fleet-wide cap) |
+| `JOBCRAWLER_RECHECK_STALE_AFTER` | `3d` | full-enum board with no error-free run for this long → §4.9 sweep adopts its open rows; `off` disables |
 | `JOBCRAWLER_MIN_ITEMS` | `1` | §6 min positions (a 1–2 role board is legitimate; enum-floor+stability carry completeness) |
 | `JOBCRAWLER_MIN_DESCRIPTION_CHARS` | `300` | §6/§4.6 min description length |
 | `JOBCRAWLER_MIN_DESCRIPTION_QUALITY` | `0.6` | §6 fraction of sampled descriptions that must clear the length floor |

@@ -265,6 +265,7 @@ class Scheduler:
         recheck_check: str | None = None,
         recheck_cap: int | None = None,
         recheck_fetch: RecheckFetch | None = None,
+        recheck_stale_after: str | None = None,
         match_drain: MatchDrain | None = None,
         match_drain_check: str | None = None,
         fx_refresh: FxRefresh | None = None,
@@ -360,6 +361,11 @@ class Scheduler:
         )
         self._recheck_cap = (
             recheck_cap if recheck_cap is not None else config.recheck_cap()
+        )
+        self._recheck_stale_after = _optional_interval(
+            config.recheck_stale_after()
+            if recheck_stale_after is None
+            else recheck_stale_after
         )
         self._recheck_fetch = recheck_fetch
         self._expired_markers = (
@@ -1183,14 +1189,43 @@ class Scheduler:
         return closed + swept
 
     def _recheck_slugs(self) -> list[str]:
-        """Sites whose open rows the §4.9 sweep must re-verify (registry order).
+        """Sites whose open rows the §4.9 sweep must re-verify (registry order,
+        orphans last).
 
-        The sources the runner's guarded enumerate-diff cannot protect: today the
-        enabled windowed ones (``enumerates_all=False``, where diffing against a
-        recent-window view would false-close everything that scrolled off it).
-        Full-enumeration sources close through the diff instead.
+        The sweep owns closure wherever the runner's guarded enumerate-diff can't run:
+
+          * **windowed** enabled sources (``enumerates_all=False``) — diffing a
+            recent-window view would false-close everything that scrolled off it, so
+            the sweep is their only closure path;
+          * **disabled** sites — never crawled, so no diff will ever run, whatever
+            their shape (a recent success changes nothing: there won't be another);
+          * **stalled** full-enumeration boards — the diff only protects rows while
+            crawls succeed, so once a board's last error-free run is older than
+            ``recheck_stale_after`` (or it has none on record) its open rows are
+            adopted here until the diff comes back ('off' disables this widening);
+          * **orphaned** slugs — open rows whose site left the registry entirely.
         """
-        return [s.slug for s in self._sites if s.enabled and not s.enumerates_all]
+        slugs: list[str] = []
+        stalled_cutoff = (
+            self._clock() - self._recheck_stale_after
+            if self._recheck_stale_after is not None
+            else None
+        )
+        successes = (
+            self._store.last_successful_crawls() if stalled_cutoff is not None else {}
+        )
+        for site in self._sites:
+            if not site.enabled or not site.enumerates_all:
+                slugs.append(site.slug)
+            elif stalled_cutoff is not None:
+                last = successes.get(site.slug)
+                if last is None or last < stalled_cutoff:
+                    slugs.append(site.slug)
+        registry = {s.slug for s in self._sites}
+        slugs.extend(
+            slug for slug in self._store.open_position_slugs() if slug not in registry
+        )
+        return slugs
 
     def match_drain_due(self, now: datetime) -> bool:
         """True if a §4.7 match-drain pass is due (``JOBCRAWLER_MATCH_DRAIN_INTERVAL``).

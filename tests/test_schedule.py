@@ -1879,16 +1879,24 @@ class _RecheckStore(StateStore):
         *,
         expired: int = 0,
         apply_urls: dict[tuple[str, str], str] | None = None,
+        successes: dict[str, datetime] | None = None,
     ) -> None:
         super().__init__(":memory:")
         self._open_by_site = open_by_site
         self._expired = expired
         self._apply_urls = apply_urls or {}
+        self._successes = successes or {}
         self.closed: list[tuple[str, str, str]] = []
         self.rechecked: list[tuple[str, str]] = []
 
     def expire_due(self) -> int:
         return self._expired
+
+    def last_successful_crawls(self) -> dict[str, datetime]:
+        return dict(self._successes)
+
+    def open_position_slugs(self) -> list[str]:
+        return sorted(self._open_by_site)
 
     def open_urls(self, site: str, *, limit: int) -> list[str]:
         return list(self._open_by_site.get(site, [])[:limit])
@@ -1924,6 +1932,7 @@ def _recheck_sched(
     cap: int = 150,
     recheck_timeout: float | None = None,
     recheck_budget: float | None = None,
+    stale_after: str = "3d",
     clock: Callable[[], datetime] = lambda: T0,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> Scheduler:
@@ -1942,6 +1951,7 @@ def _recheck_sched(
         reopt_check="off",
         recheck_timeout=recheck_timeout,
         recheck_budget=recheck_budget,
+        recheck_stale_after=stale_after,
     )
 
 
@@ -2012,10 +2022,14 @@ async def test_recheck_closes_only_definitively_gone_windowed_positions() -> Non
 
 
 async def test_recheck_skips_full_enumeration_sources() -> None:
-    # A full-enumeration board is closed by the runner's guarded diff, never re-fetched
-    # here — so even though it has open URLs, none are touched by the sweep.
+    # A full-enumeration board whose guarded diff is demonstrably alive — a recent
+    # successful crawl — is closed by that diff, never re-fetched here. So even
+    # though it has open URLs, none are touched by the sweep.
     fetched: list[str] = []
-    store = _RecheckStore({"windowed": ["w1"], "full": ["f1", "f2"]})
+    store = _RecheckStore(
+        {"windowed": ["w1"], "full": ["f1", "f2"]},
+        successes={"full": T0 - timedelta(hours=6)},
+    )
 
     async def fetch(url: str) -> tuple[int, str]:
         fetched.append(url)
@@ -2033,6 +2047,65 @@ async def test_recheck_skips_full_enumeration_sources() -> None:
 
     assert fetched == ["w1"]  # only the windowed source was re-verified
     assert closed == 1
+
+
+async def test_recheck_adopts_full_enum_boards_with_stalled_diffs() -> None:
+    # The guarded diff only protects a board's rows while its crawls succeed. Once
+    # the last successful crawl is older than the staleness window — or there has
+    # never been one — the board's open rows would rot forever, so the sweep adopts
+    # them until the diff comes back.
+    fetched: list[str] = []
+    store = _RecheckStore(
+        {"stalled": ["s1"], "nevercrawled": ["n1"], "fresh": ["f1"]},
+        successes={
+            "stalled": T0 - timedelta(days=4),
+            "fresh": T0 - timedelta(hours=1),
+        },
+    )
+
+    async def fetch(url: str) -> tuple[int, str]:
+        fetched.append(url)
+        return (200, "<h1>Still hiring</h1>")
+
+    sites = [
+        Site(slug="stalled", url="https://a.com", enumerates_all=True),
+        Site(slug="nevercrawled", url="https://b.com", enumerates_all=True),
+        Site(slug="fresh", url="https://c.com", enumerates_all=True),
+    ]
+    await _recheck_sched(store, sites=sites, fetch=fetch).recheck_tick()
+    assert fetched == ["s1", "n1"]
+
+    # The widening is opt-out: 'off' restores the diff-only contract for full-enum.
+    fetched.clear()
+    sched = _recheck_sched(store, sites=sites, fetch=fetch, stale_after="off")
+    await sched.recheck_tick()
+    assert fetched == []
+
+
+async def test_recheck_adopts_disabled_boards_and_orphaned_rows() -> None:
+    # A disabled site is never crawled, so no diff will ever close its rows — and a
+    # slug with open rows but no registry entry has no crawler at all. Both rot open
+    # unless the sweep adopts them; crawl freshness is irrelevant (there will never
+    # be another diff), so a disabled board is swept even with a recent success.
+    fetched: list[str] = []
+    store = _RecheckStore(
+        {"disabled": ["d1"], "ghost": ["g1"]},
+        successes={"disabled": T0 - timedelta(minutes=5)},
+    )
+
+    async def fetch(url: str) -> tuple[int, str]:
+        fetched.append(url)
+        return (404, "")
+
+    sched = _recheck_sched(
+        store,
+        sites=[Site(slug="disabled", url="https://x.com", enabled=False)],
+        fetch=fetch,
+    )
+    closed = await sched.recheck_tick()
+
+    assert fetched == ["d1", "g1"]  # registry sites first, orphans after
+    assert closed == 2
 
 
 async def test_recheck_cap_is_fleet_wide_not_per_site() -> None:

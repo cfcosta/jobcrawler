@@ -743,6 +743,19 @@ def recheck_cap() -> int:
     return _int("JOBCRAWLER_RECHECK_CAP", 300)
 
 
+def recheck_stale_after() -> str:
+    """How long a full-enumeration board may go without a successful crawl before the
+    §4.9 recheck sweep adopts its open rows. The runner's guarded diff (§4.7) only
+    closes rows while crawls succeed — a board whose crawler broke, whose host started
+    blocking, or whose health state parked it stops diffing, and its open rows would
+    rot forever. Past this window the sweep re-verifies them per-URL like a windowed
+    source (closing only on a definitive 404/410/expired-marker) until the diff comes
+    back. Default 3d — a couple of failed dailies is routine flake, three days of no
+    successful crawl means the diff is genuinely not protecting the rows; ``off``
+    restores the old diff-only contract (stalled boards then never re-verified)."""
+    return _str("JOBCRAWLER_RECHECK_STALE_AFTER", "3d")
+
+
 def match_drain_interval() -> str:
     """How often the daemon's §4.7 match-drain tick runs: reload ``PROFILE.md`` (a hash
     change requeues the open backlog for rescoring) and re-present parked pending rows

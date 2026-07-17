@@ -1080,6 +1080,35 @@ def test_recheck_rows_are_fleet_wide_stalest_first_with_apply_targets() -> None:
         s.close()
 
 
+def test_last_successful_crawls_and_open_position_slugs() -> None:
+    # The §4.9 sweep's eligibility reads: per-site instant of the last error-free
+    # finished run (a stalled full-enum board = none recent), and the distinct slugs
+    # still holding open rows (a slug absent from the registry = orphaned rows).
+    clock = _MutableClock(datetime(2026, 1, 1, tzinfo=timezone.utc))
+    s = StateStore(":memory:", clock=clock)
+    try:
+        t0 = clock.now
+        run = s.start_run("alpha")
+        s.finish_run(run, items_found=1, new_items=0, errors=0, pages_fetched=1)
+        clock.now += timedelta(hours=2)
+        # a newer but ERRORED run must not advance alpha's success instant
+        run = s.start_run("alpha")
+        s.finish_run(run, items_found=0, new_items=0, errors=3, pages_fetched=1)
+        run = s.start_run("beta")
+        s.finish_run(run, items_found=2, new_items=1, errors=0, pages_fetched=1)
+        s.start_run("gamma")  # never finished → no success on record
+        assert s.last_successful_crawls() == {"alpha": t0, "beta": clock.now}
+
+        s.upsert_position("wa", "u1", fields=FIELDS, content_hash="h1")
+        s.upsert_position("wb", "u2", fields=FIELDS, content_hash="h2")
+        s.upsert_position("wb", "u3", fields=FIELDS, content_hash="h3")
+        s.upsert_position("gone", "u4", fields=FIELDS, content_hash="h4")
+        s.mark_closed("gone", "u4", reason="filled")
+        assert s.open_position_slugs() == ["wa", "wb"]
+    finally:
+        s.close()
+
+
 # -- match verdicts, pending backlog, counts (§6) ----------------------------
 
 

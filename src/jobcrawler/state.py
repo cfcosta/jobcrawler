@@ -2174,6 +2174,33 @@ class StateStore:
         """
         return [url for _, url, _ in self.recheck_rows([site], limit=limit)]
 
+    def last_successful_crawls(self) -> dict[str, datetime]:
+        """Per-site instant of the most recent error-free finished run.
+
+        The §4.9 sweep's stalled-board read: the runner's guarded diff (§4.7) only
+        protects a full-enumeration board's rows on a successful crawl, so a board
+        whose latest success here is old (or absent) has open rows nothing is
+        re-verifying — the sweep adopts them. Errored runs don't count: a raising
+        crawl skips the diff entirely, so it protected nothing.
+        """
+        rows = self._conn.execute(
+            "SELECT site, MAX(finished) AS finished FROM runs "
+            "WHERE finished IS NOT NULL AND errors = 0 GROUP BY site"
+        ).fetchall()
+        return {row["site"]: datetime.fromisoformat(row["finished"]) for row in rows}
+
+    def open_position_slugs(self) -> list[str]:
+        """Distinct site slugs still holding open rows, sorted.
+
+        The §4.9 sweep's orphan read: a slug here with no registry entry has rows no
+        crawl will ever diff again (its site was removed), so the sweep is their only
+        remaining closure path.
+        """
+        rows = self._conn.execute(
+            "SELECT DISTINCT site FROM positions WHERE status = 'open' ORDER BY site"
+        ).fetchall()
+        return [row["site"] for row in rows]
+
     def pending_urls(self, site: str, *, limit: int) -> list[str]:
         """Open URLs for ``site`` still awaiting scoring (``match_pending = 1``), FIFO.
 
