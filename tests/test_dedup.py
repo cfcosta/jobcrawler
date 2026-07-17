@@ -152,8 +152,13 @@ def test_t6_linkedin_indeed_posting_ids_only() -> None:
 
 
 def test_junk_urls_yield_no_keys() -> None:
-    for junk in ("", "mailto:jobs@acme.test", "not a url", "ftp://x.test/a",
-                 "https://boards.greenhouse.io"):
+    for junk in (
+        "",
+        "mailto:jobs@acme.test",
+        "not a url",
+        "ftp://x.test/a",
+        "https://boards.greenhouse.io",
+    ):
         assert ats_keys(junk) == []
 
 
@@ -169,8 +174,15 @@ def test_normalize_apply_url_strips_tracking_but_keeps_identity_params() -> None
     assert norm == "https://boards.greenhouse.io/acme/jobs/400123"
     # Identity-BEARING params must survive — dice's applyData, greenhouse's gh_jid,
     # indeed's jk… stripping them would fuse every job behind one apply endpoint.
-    for param in ("gh_jid=400123", "ashby_jid=x", "for=acme", "token=1",
-                  "jk=abc", "pid=7", "applyData=eyJhbGci"):
+    for param in (
+        "gh_jid=400123",
+        "ashby_jid=x",
+        "for=acme",
+        "token=1",
+        "jk=abc",
+        "pid=7",
+        "applyData=eyJhbGci",
+    ):
         name = param.split("=")[0]
         assert name not in IDENTITY_APPLY_TRACKING_PARAMS
         norm = normalize_apply_url(
@@ -271,12 +283,18 @@ def test_identity_keys_company_tier_guards() -> None:
 def test_sweep_t1_joins_across_boards_and_survives_title_drift(store) -> None:
     # mongodb shape (board row + careers page via gh_jid) + figma shape (the
     # aggregator retitled the posting — T1 identity must still join).
-    _put(store, "greenhouse_mongodb",
-         "https://boards.greenhouse.io/mongodb/jobs/5970004",
-         title="Senior Backend Engineer")
-    _put(store, "mongodb_careers",
-         "https://www.mongodb.com/careers/job?gh_jid=5970004",
-         title="Sr. Backend Engineer (Distributed Systems)")
+    _put(
+        store,
+        "greenhouse_mongodb",
+        "https://boards.greenhouse.io/mongodb/jobs/5970004",
+        title="Senior Backend Engineer",
+    )
+    _put(
+        store,
+        "mongodb_careers",
+        "https://www.mongodb.com/careers/job?gh_jid=5970004",
+        title="Sr. Backend Engineer (Distributed Systems)",
+    )
     _put(store, "other_board", "https://other.test/jobs/999")  # bystander
 
     report = _sweep(store)
@@ -295,8 +313,12 @@ def test_sweep_t1_org_conflict_vetoes_and_autoblocklists(store) -> None:
     # One (vendor, id) under two tenants: recycled id, not identity. The key must
     # form no edge AND land on the blocklist so live gates can't join through it.
     _put(store, "board_a", "https://boards.greenhouse.io/acme/jobs/400123")
-    _put(store, "board_b", "https://boards.greenhouse.io/globex/jobs/400123",
-         company="Globex")
+    _put(
+        store,
+        "board_b",
+        "https://boards.greenhouse.io/globex/jobs/400123",
+        company="Globex",
+    )
 
     report = _sweep(store)
 
@@ -311,10 +333,20 @@ def test_sweep_higher_tier_separator_grafana_shape(store) -> None:
     # Two rows carrying DIFFERENT T1 identities share weaker evidence (same company
     # + identical content hash — boilerplate text). The separator must win: distinct
     # reqs can never be fused by a weaker tier.
-    _put(store, "board_a", "https://boards.greenhouse.io/grafana/jobs/400111",
-         company="Grafana Labs", content_hash="samehash")
-    _put(store, "board_b", "https://boards.greenhouse.io/grafana/jobs/400222",
-         company="Grafana Labs", content_hash="samehash")
+    _put(
+        store,
+        "board_a",
+        "https://boards.greenhouse.io/grafana/jobs/400111",
+        company="Grafana Labs",
+        content_hash="samehash",
+    )
+    _put(
+        store,
+        "board_b",
+        "https://boards.greenhouse.io/grafana/jobs/400222",
+        company="Grafana Labs",
+        content_hash="samehash",
+    )
 
     report = _sweep(store, tiers=frozenset({0, 1, 4}))
 
@@ -326,12 +358,27 @@ def test_sweep_t4_ambiguity_veto_anthropic_dual_req_shape(store) -> None:
     # One site holds the same content hash twice (same text, two live reqs — the
     # anthropic/ramp shape). The hash is not identity for ANY pair of this key,
     # including the cross-site one.
-    _put(store, "board_a", "https://a.test/jobs/1", content_hash="dup",
-         company="Anthropic")
-    _put(store, "board_a", "https://a.test/jobs/2", content_hash="dup",
-         company="Anthropic")
-    _put(store, "board_b", "https://b.test/jobs/9", content_hash="dup",
-         company="Anthropic")
+    _put(
+        store,
+        "board_a",
+        "https://a.test/jobs/1",
+        content_hash="dup",
+        company="Anthropic",
+    )
+    _put(
+        store,
+        "board_a",
+        "https://a.test/jobs/2",
+        content_hash="dup",
+        company="Anthropic",
+    )
+    _put(
+        store,
+        "board_b",
+        "https://b.test/jobs/9",
+        content_hash="dup",
+        company="Anthropic",
+    )
 
     report = _sweep(store, tiers=frozenset({0, 4}))
 
@@ -341,16 +388,301 @@ def test_sweep_t4_ambiguity_veto_anthropic_dual_req_shape(store) -> None:
 
 def test_sweep_robinhood_same_title_reqs_stay_singletons(store) -> None:
     # The robinhood hazard: nine open same-title rows on ONE board are nine reqs.
-    # Even with the fuzzy tier force-enabled, same-site pairs never join and the
-    # open-count veto kills the key — no tier set may fuse them.
+    # Even with the fuzzy tier force-enabled, same-site pairs never join and — with
+    # no direct board named in direct_sites — the anchored-T5 rule finds no anchor,
+    # so no tier set may fuse them.
     for i in range(9):
-        _put(store, "robinhood", f"https://careers.robinhood.test/jobs/{i}",
-             title="Senior Software Engineer", company="Robinhood",
-             content_hash=f"rh{i}")
+        _put(
+            store,
+            "robinhood",
+            f"https://careers.robinhood.test/jobs/{i}",
+            title="Senior Software Engineer",
+            company="Robinhood",
+            content_hash=f"rh{i}",
+        )
 
     report = _sweep(store, tiers=frozenset({0, 1, 2, 3, 5, 6}))
 
     assert report["clusters"] == 0
+
+
+# --- T5 anchored recall -------------------------------------------------------
+# Merge an aggregator copy into the SINGLE open direct-board posting it copies,
+# while making direct<->direct fusion structurally impossible. The "anchor" is the
+# lone direct-board row carrying a fuzzy (company+title) key; 2+ direct rows on the
+# key (open OR closed) void it, so an employer's N same-title reqs never bridge
+# through an aggregator. Aggregators co-cluster only transitively via the anchor.
+# Tier 5 remains a shadow tier for the live between-sweep gates (state.py
+# _live_key_clause excludes it regardless of dedup_tiers), so these corroborated
+# edges live only inside the materialized cluster after a sweep.
+_ANCHORED = frozenset({0, 1, 2, 3, 5, 6})
+
+
+def test_t5_anchor_merges_single_open_direct_with_aggregator(store) -> None:
+    _put(
+        store,
+        "airbnb",
+        "https://careers.airbnb.test/jobs/1",
+        title="Senior Data Scientist, Guest & Host",
+        company="Airbnb",
+        location="Remote",
+    )
+    _put(
+        store,
+        "workew",
+        "https://workew.test/jobs/9",
+        title="Senior Data Scientist, Guest & Host",
+        company="Airbnb",
+        location="Fully Remote",
+    )
+
+    report = _sweep(store, tiers=_ANCHORED, direct_sites={"airbnb"})
+
+    assert report["clusters"] == 1
+    assert report["edges_by_tier"]["5"] == 1
+    assert report["guards"]["t5_anchor_edges"] == 1
+    (members,) = _clusters(store).values()
+    assert members == {
+        ("airbnb", "https://careers.airbnb.test/jobs/1"),
+        ("workew", "https://workew.test/jobs/9"),
+    }
+    # The employer's own posting wins the canonical election.
+    assert _canonical_of(store, "workew", "https://workew.test/jobs/9") == (
+        "airbnb",
+        "https://careers.airbnb.test/jobs/1",
+    )
+
+
+def test_t5_anchor_refuses_multi_open_direct_and_does_not_bridge(store) -> None:
+    # abnormal_ai's N identical "Enterprise Account Executive" reqs across countries:
+    # 2+ open direct rows on the key => no lone anchor => the aggregator must NOT
+    # bridge them. This is the 10.5k-row naive-T5 risk, structurally refused.
+    for i in range(6):
+        _put(
+            store,
+            "abnormal_ai",
+            f"https://boards.greenhouse.io/abnormalai/jobs/{i}",
+            title="Enterprise Account Executive",
+            company="Abnormal AI",
+            location=f"Remote - country {i}",
+            content_hash=f"ab{i}",
+        )
+    _put(
+        store,
+        "web3career",
+        "https://web3.career/jobs/9",
+        title="Enterprise Account Executive",
+        company="Abnormal AI",
+        location="Anywhere",
+    )
+
+    report = _sweep(store, tiers=_ANCHORED, direct_sites={"abnormal_ai"})
+
+    assert report["clusters"] == 0
+    assert report["edges_by_tier"].get("5", 0) == 0
+    assert report["guards"]["t5_anchor_edges"] == 0
+    assert report["guards"]["t5_no_anchor"] >= 1
+
+
+def test_t5_anchor_never_forms_direct_to_direct(store) -> None:
+    # Two of an employer's OWN boards (single row each), same company+title, no
+    # shared ATS id: a per-site-count T5 would wrongly merge them; the anchor rule
+    # sees 2 direct rows => no lone anchor => nothing merges.
+    _put(
+        store,
+        "yugabyte",
+        "https://careers.yugabyte.test/jobs/1",
+        title="Software Engineer II",
+        company="YugabyteDB",
+        location="Sunnyvale, CA",
+    )
+    _put(
+        store,
+        "yugabyte_2",
+        "https://jobs.yugabyte.test/2",
+        title="Software Engineer II",
+        company="YugabyteDB",
+        location="Sunnyvale, CA",
+    )
+
+    report = _sweep(store, tiers=_ANCHORED, direct_sites={"yugabyte", "yugabyte_2"})
+
+    assert report["clusters"] == 0
+    assert "5" not in report["edges_by_tier"]
+    assert report["guards"]["t5_no_anchor"] >= 1
+
+
+def test_t5_anchor_voided_by_closed_direct_sibling(store) -> None:
+    # A closed same-title direct sibling voids the anchor (uniqueness counts ALL
+    # direct rows, not just open): the aggregator could be a stale copy of the
+    # closed repost, so refuse rather than mis-attach.
+    _put(
+        store,
+        "acme",
+        "https://careers.acme.test/jobs/open",
+        title="Staff Engineer",
+        company="Acme",
+    )
+    _put(
+        store,
+        "acme",
+        "https://careers.acme.test/jobs/old",
+        title="Staff Engineer",
+        company="Acme",
+        content_hash="acme-old",
+    )
+    store.mark_closed("acme", "https://careers.acme.test/jobs/old", reason="missing")
+    _put(
+        store,
+        "startup_jobs",
+        "https://startup.jobs/9",
+        title="Staff Engineer",
+        company="Acme",
+    )
+
+    report = _sweep(store, tiers=_ANCHORED, direct_sites={"acme"})
+
+    assert report["clusters"] == 0
+    assert report["guards"]["t5_anchor_edges"] == 0
+    assert report["guards"]["t5_no_anchor"] >= 1
+
+
+def test_t5_anchor_multiple_aggregators_join_only_through_anchor(store) -> None:
+    _put(
+        store,
+        "airbnb",
+        "https://careers.airbnb.test/jobs/1",
+        title="Senior Data Scientist, Guest & Host",
+        company="Airbnb",
+        location="Remote",
+    )
+    _put(
+        store,
+        "workew",
+        "https://workew.test/jobs/9",
+        title="Senior Data Scientist, Guest & Host",
+        company="Airbnb",
+        location="Remote US",
+    )
+    _put(
+        store,
+        "remotejobs",
+        "https://remotejobs.test/8",
+        title="Senior Data Scientist, Guest & Host",
+        company="Airbnb",
+        location="Remote - USA",
+    )
+
+    report = _sweep(store, tiers=_ANCHORED, direct_sites={"airbnb"})
+
+    assert report["clusters"] == 1
+    # Two anchor edges (each aggregator -> the direct row); NO aggregator<->aggregator
+    # edge — they co-cluster only transitively through the anchor.
+    assert report["edges_by_tier"]["5"] == 2
+    (members,) = _clusters(store).values()
+    assert len(members) == 3
+
+
+def test_t5_anchor_aggregators_do_not_merge_without_a_direct_anchor(store) -> None:
+    # Control for the case above: the SAME two aggregators with NO direct anchor
+    # row present never merge to each other.
+    _put(
+        store,
+        "workew",
+        "https://workew.test/jobs/9",
+        title="Senior Data Scientist, Guest & Host",
+        company="Airbnb",
+        location="Remote US",
+    )
+    _put(
+        store,
+        "remotejobs",
+        "https://remotejobs.test/8",
+        title="Senior Data Scientist, Guest & Host",
+        company="Airbnb",
+        location="Remote - USA",
+    )
+
+    report = _sweep(store, tiers=_ANCHORED, direct_sites={"airbnb"})
+
+    assert report["clusters"] == 0
+    assert report["guards"]["t5_no_anchor"] >= 1
+
+
+def test_t5_anchor_respects_higher_tier_separator(store) -> None:
+    # A conflicting T1 ATS id on the aggregator side blocks the anchored edge: the
+    # higher-tier separator wins (two distinct greenhouse reqs are not one job).
+    _put(
+        store,
+        "airbnb",
+        "https://careers.airbnb.test/jobs/1",
+        title="Senior Data Scientist, Guest & Host",
+        company="Airbnb",
+        location="Remote",
+        apply_url="https://boards.greenhouse.io/airbnb/jobs/1234567",
+    )
+    _put(
+        store,
+        "agg",
+        "https://agg.test/j?gh_jid=9999999",
+        title="Senior Data Scientist, Guest & Host",
+        company="Airbnb",
+        location="Remote",
+    )
+
+    report = _sweep(store, tiers=_ANCHORED, direct_sites={"airbnb"})
+
+    assert report["clusters"] == 0
+    assert report["guards"]["separator_splits"] >= 1
+
+
+def test_t5_anchor_location_incompatible_rejected(store) -> None:
+    # Same company+title, single open direct anchor, but two specific unequal
+    # locations (neither remote-ish) => location gate rejects; flipping the
+    # aggregator to a remote-ish location lets it merge.
+    _put(
+        store,
+        "acme",
+        "https://careers.acme.test/jobs/1",
+        title="Staff Engineer",
+        company="Acme",
+        location="Berlin, Germany",
+    )
+    _put(
+        store,
+        "startup_jobs",
+        "https://startup.jobs/9",
+        title="Staff Engineer",
+        company="Acme",
+        location="Tokyo, Japan",
+    )
+
+    report = _sweep(store, tiers=_ANCHORED, direct_sites={"acme"})
+    assert report["clusters"] == 0
+    assert report["guards"]["t5_anchor_rejects"] >= 1
+
+    s2 = StateStore(":memory:")
+    try:
+        _put(
+            s2,
+            "acme",
+            "https://careers.acme.test/jobs/1",
+            title="Staff Engineer",
+            company="Acme",
+            location="Berlin, Germany",
+        )
+        _put(
+            s2,
+            "startup_jobs",
+            "https://startup.jobs/9",
+            title="Staff Engineer",
+            company="Acme",
+            location="Remote",
+        )
+        report2 = _sweep(s2, tiers=_ANCHORED, direct_sites={"acme"})
+        assert report2["clusters"] == 1
+    finally:
+        s2.close()
 
 
 def test_sweep_t2_applyats_equality_is_identity(store) -> None:
@@ -404,10 +736,8 @@ def test_sweep_generic_apply_rejected_when_a_site_reuses_it(store) -> None:
 
 
 def test_sweep_t3_joins_inside_family_never_across(store) -> None:
-    _put(store, "workingnomads_golang", "https://wn.test/golang/630",
-         external_id="630")
-    _put(store, "workingnomads_rust", "https://wn.test/rust/630",
-         external_id="630")
+    _put(store, "workingnomads_golang", "https://wn.test/golang/630", external_id="630")
+    _put(store, "workingnomads_rust", "https://wn.test/rust/630", external_id="630")
     _put(store, "arc_rust", "https://arc.test/rust/630", external_id="630")
 
     report = _sweep(store)
@@ -432,9 +762,14 @@ def test_sweep_blocklisted_key_forms_no_edges(store) -> None:
 def test_sweep_degenerate_key_is_skipped_not_clustered(store) -> None:
     # >100 rows behind one key = an extraction bug, not one job with 101 copies.
     for i in range(101):
-        _put(store, f"site_{i}", f"https://s{i}.test/job",
-             company=f"Co {i}", content_hash=f"h{i}",
-             apply_url="https://careers.hub.test/apply?gh_jid=400777")
+        _put(
+            store,
+            f"site_{i}",
+            f"https://s{i}.test/job",
+            company=f"Co {i}",
+            content_hash=f"h{i}",
+            apply_url="https://careers.hub.test/apply?gh_jid=400777",
+        )
 
     report = _sweep(store)
 
@@ -449,44 +784,57 @@ def test_sweep_degenerate_key_is_skipped_not_clustered(store) -> None:
 
 def _pair(store, **b_extra) -> None:
     """Two boards, one greenhouse req — the smallest real cluster."""
-    _put(store, "board_a", "https://boards.greenhouse.io/acme/jobs/400123",
-         description="short")
-    _put(store, "board_b", "https://acme.test/careers?gh_jid=400123",
-         description="a much longer and more informative description " * 5,
-         **b_extra)
+    _put(
+        store,
+        "board_a",
+        "https://boards.greenhouse.io/acme/jobs/400123",
+        description="short",
+    )
+    _put(
+        store,
+        "board_b",
+        "https://acme.test/careers?gh_jid=400123",
+        description="a much longer and more informative description " * 5,
+        **b_extra,
+    )
 
 
 def test_election_prefers_longest_description_then_upgrades_to_open(store) -> None:
     _pair(store)
     _sweep(store)
-    assert _canonical_of(store, "board_a",
-                         "https://boards.greenhouse.io/acme/jobs/400123") == (
-        "board_b", "https://acme.test/careers?gh_jid=400123")
+    assert _canonical_of(
+        store, "board_a", "https://boards.greenhouse.io/acme/jobs/400123"
+    ) == ("board_b", "https://acme.test/careers?gh_jid=400123")
 
     # The canonical's board closes it → the open sibling takes over next sweep.
-    store.mark_closed("board_b", "https://acme.test/careers?gh_jid=400123",
-                      reason="missing")
+    store.mark_closed(
+        "board_b", "https://acme.test/careers?gh_jid=400123", reason="missing"
+    )
     _sweep(store)
-    assert _canonical_of(store, "board_b",
-                         "https://acme.test/careers?gh_jid=400123") == (
-        "board_a", "https://boards.greenhouse.io/acme/jobs/400123")
+    assert _canonical_of(
+        store, "board_b", "https://acme.test/careers?gh_jid=400123"
+    ) == ("board_a", "https://boards.greenhouse.io/acme/jobs/400123")
 
 
 def test_election_prefers_direct_site_and_applied_overrides_all(store) -> None:
     _pair(store)
     # Direct company board beats the aggregator even with a shorter description.
     _sweep(store, direct_sites={"board_a"})
-    assert _canonical_of(store, "board_b",
-                         "https://acme.test/careers?gh_jid=400123") == (
-        "board_a", "https://boards.greenhouse.io/acme/jobs/400123")
+    assert _canonical_of(
+        store, "board_b", "https://acme.test/careers?gh_jid=400123"
+    ) == ("board_a", "https://boards.greenhouse.io/acme/jobs/400123")
 
     # …but the copy the operator APPLIED to pins the cluster forever.
-    store.set_track_status("board_b", "https://acme.test/careers?gh_jid=400123",
-                           "applied", stamp_applied=True)
+    store.set_track_status(
+        "board_b",
+        "https://acme.test/careers?gh_jid=400123",
+        "applied",
+        stamp_applied=True,
+    )
     _sweep(store, direct_sites={"board_a"})
-    assert _canonical_of(store, "board_a",
-                         "https://boards.greenhouse.io/acme/jobs/400123") == (
-        "board_b", "https://acme.test/careers?gh_jid=400123")
+    assert _canonical_of(
+        store, "board_a", "https://boards.greenhouse.io/acme/jobs/400123"
+    ) == ("board_b", "https://acme.test/careers?gh_jid=400123")
 
 
 def test_sweep_is_deterministic_and_idempotent(store) -> None:
@@ -516,10 +864,17 @@ def test_sweep_never_touches_lifecycle_or_verdicts(store) -> None:
     # §17 boundary: clustering interprets rows, it never mutates them. Guarded
     # closure (per-board lifecycle) and match verdicts are untouchable.
     _pair(store)
-    store.set_match("board_a", "https://boards.greenhouse.io/acme/jobs/400123",
-                    score=88, verdict="strong", reasons="[]", origin="llm")
-    store.mark_closed("board_b", "https://acme.test/careers?gh_jid=400123",
-                      reason="missing")
+    store.set_match(
+        "board_a",
+        "https://boards.greenhouse.io/acme/jobs/400123",
+        score=88,
+        verdict="strong",
+        reasons="[]",
+        origin="llm",
+    )
+    store.mark_closed(
+        "board_b", "https://acme.test/careers?gh_jid=400123", reason="missing"
+    )
     before = store._conn.execute(
         "SELECT site, url, status, closed_at, dismissed, match_score, match_verdict, "
         "match_origin, track_status FROM positions ORDER BY site, url"
@@ -536,12 +891,25 @@ def test_sweep_never_touches_lifecycle_or_verdicts(store) -> None:
 
 def test_sweep_report_flags_conflicts_and_dismissal_leaks(store) -> None:
     _pair(store)
-    store.set_match("board_a", "https://boards.greenhouse.io/acme/jobs/400123",
-                    score=88, verdict="strong", reasons="[]", origin="llm")
-    store.set_match("board_b", "https://acme.test/careers?gh_jid=400123",
-                    score=30, verdict="weak", reasons="[]", origin="llm")
-    store.set_dismissed("board_a",
-                        "https://boards.greenhouse.io/acme/jobs/400123", True)
+    store.set_match(
+        "board_a",
+        "https://boards.greenhouse.io/acme/jobs/400123",
+        score=88,
+        verdict="strong",
+        reasons="[]",
+        origin="llm",
+    )
+    store.set_match(
+        "board_b",
+        "https://acme.test/careers?gh_jid=400123",
+        score=30,
+        verdict="weak",
+        reasons="[]",
+        origin="llm",
+    )
+    store.set_dismissed(
+        "board_a", "https://boards.greenhouse.io/acme/jobs/400123", True
+    )
 
     report = _sweep(store)
 
@@ -559,15 +927,22 @@ def test_sweep_report_flags_conflicts_and_dismissal_leaks(store) -> None:
 def test_donor_via_live_keys_before_any_sweep(store) -> None:
     # The ingest hook wrote both rows' keys; no sweep has run (empty overlay).
     # A sibling scored seconds earlier must already be visible.
-    _put(store, "board_a", "https://a.test/jobs/1",
-         description="full text " * 50)
+    _put(store, "board_a", "https://a.test/jobs/1", description="full text " * 50)
     _put(store, "board_b", "https://b.test/jobs/2")
-    store.set_match("board_a", "https://a.test/jobs/1",
-                    score=88, verdict="strong", reasons='["fit"]', origin="llm")
-    store.replace_identity_keys("board_a", "https://a.test/jobs/1",
-                                [(TIER_ATS, "ats:greenhouse:400123")])
-    store.replace_identity_keys("board_b", "https://b.test/jobs/2",
-                                [(TIER_ATS, "ats:greenhouse:400123")])
+    store.set_match(
+        "board_a",
+        "https://a.test/jobs/1",
+        score=88,
+        verdict="strong",
+        reasons='["fit"]',
+        origin="llm",
+    )
+    store.replace_identity_keys(
+        "board_a", "https://a.test/jobs/1", [(TIER_ATS, "ats:greenhouse:400123")]
+    )
+    store.replace_identity_keys(
+        "board_b", "https://b.test/jobs/2", [(TIER_ATS, "ats:greenhouse:400123")]
+    )
 
     donor = store.cluster_verdict_donor(
         "board_b", "https://b.test/jobs/2", min_desc_len=10, tiers=DEFAULT_TIERS
@@ -576,37 +951,58 @@ def test_donor_via_live_keys_before_any_sweep(store) -> None:
     assert donor.match_score == 88
 
     # The stub guard: a donor thinner than the candidate's digest never donates.
-    assert store.cluster_verdict_donor(
-        "board_b", "https://b.test/jobs/2", min_desc_len=10_000, tiers=DEFAULT_TIERS
-    ) is None
+    assert (
+        store.cluster_verdict_donor(
+            "board_b", "https://b.test/jobs/2", min_desc_len=10_000, tiers=DEFAULT_TIERS
+        )
+        is None
+    )
 
     # A parked donor (profile edit re-queued it) is not a settled verdict.
     store.set_match_pending("board_a", "https://a.test/jobs/1")
-    assert store.cluster_verdict_donor(
-        "board_b", "https://b.test/jobs/2", min_desc_len=10, tiers=DEFAULT_TIERS
-    ) is None
+    assert (
+        store.cluster_verdict_donor(
+            "board_b", "https://b.test/jobs/2", min_desc_len=10, tiers=DEFAULT_TIERS
+        )
+        is None
+    )
 
 
 def test_donor_live_join_respects_tier_gate_and_blocklist(store) -> None:
     _put(store, "board_a", "https://a.test/jobs/1", description="full text " * 50)
     _put(store, "board_b", "https://b.test/jobs/2")
-    store.set_match("board_a", "https://a.test/jobs/1",
-                    score=70, verdict="good", reasons="[]", origin="llm")
+    store.set_match(
+        "board_a",
+        "https://a.test/jobs/1",
+        score=70,
+        verdict="good",
+        reasons="[]",
+        origin="llm",
+    )
     # A generic 'apply:' T2 key is NEVER live-safe (needs sweep corroboration).
-    for site, url in (("board_a", "https://a.test/jobs/1"),
-                      ("board_b", "https://b.test/jobs/2")):
+    for site, url in (
+        ("board_a", "https://a.test/jobs/1"),
+        ("board_b", "https://b.test/jobs/2"),
+    ):
         store.replace_identity_keys(
             site, url, [(TIER_APPLY, "apply:https://forms.test/1")]
         )
-    assert store.cluster_verdict_donor(
-        "board_b", "https://b.test/jobs/2", min_desc_len=0, tiers=DEFAULT_TIERS
-    ) is None
+    assert (
+        store.cluster_verdict_donor(
+            "board_b", "https://b.test/jobs/2", min_desc_len=0, tiers=DEFAULT_TIERS
+        )
+        is None
+    )
 
     # An applyats: T2 key IS live-safe…
-    for site, url in (("board_a", "https://a.test/jobs/1"),
-                      ("board_b", "https://b.test/jobs/2")):
+    for site, url in (
+        ("board_a", "https://a.test/jobs/1"),
+        ("board_b", "https://b.test/jobs/2"),
+    ):
         store.replace_identity_keys(
-            site, url, [(TIER_APPLY, "applyats:https://boards.greenhouse.io/a/jobs/4001")]
+            site,
+            url,
+            [(TIER_APPLY, "applyats:https://boards.greenhouse.io/a/jobs/4001")],
         )
     donor = store.cluster_verdict_donor(
         "board_b", "https://b.test/jobs/2", min_desc_len=0, tiers=DEFAULT_TIERS
@@ -614,22 +1010,33 @@ def test_donor_live_join_respects_tier_gate_and_blocklist(store) -> None:
     assert donor is not None
     # …unless the operator blocked the key.
     store.block_identity_key("applyats:https://boards.greenhouse.io/a/jobs/4001")
-    assert store.cluster_verdict_donor(
-        "board_b", "https://b.test/jobs/2", min_desc_len=0, tiers=DEFAULT_TIERS
-    ) is None
+    assert (
+        store.cluster_verdict_donor(
+            "board_b", "https://b.test/jobs/2", min_desc_len=0, tiers=DEFAULT_TIERS
+        )
+        is None
+    )
 
 
 def test_donor_via_materialized_cluster_even_with_no_live_tiers(store) -> None:
     # The sweep already guarded the materialized edges, so the overlay half of the
     # donor lookup is not tier-gated — an empty live set still finds the sibling.
     _pair(store)
-    store.set_match("board_b", "https://acme.test/careers?gh_jid=400123",
-                    score=91, verdict="strong", reasons="[]", origin="llm")
+    store.set_match(
+        "board_b",
+        "https://acme.test/careers?gh_jid=400123",
+        score=91,
+        verdict="strong",
+        reasons="[]",
+        origin="llm",
+    )
     _sweep(store)
 
     donor = store.cluster_verdict_donor(
-        "board_a", "https://boards.greenhouse.io/acme/jobs/400123",
-        min_desc_len=5, tiers=frozenset(),
+        "board_a",
+        "https://boards.greenhouse.io/acme/jobs/400123",
+        min_desc_len=5,
+        tiers=frozenset(),
     )
     assert donor is not None and donor.site == "board_b"
 
@@ -637,8 +1044,14 @@ def test_donor_via_materialized_cluster_even_with_no_live_tiers(store) -> None:
 def test_requeue_inherited_reverses_only_cluster_verdicts(store) -> None:
     for i, origin in enumerate(("llm", "cache", "cluster:board_x\nhttps://x.test/1")):
         _put(store, "board", f"https://board.test/jobs/{i}")
-        store.set_match("board", f"https://board.test/jobs/{i}",
-                        score=80, verdict="strong", reasons="[]", origin=origin)
+        store.set_match(
+            "board",
+            f"https://board.test/jobs/{i}",
+            score=80,
+            verdict="strong",
+            reasons="[]",
+            origin=origin,
+        )
 
     assert store.requeue_inherited() == 1
 
@@ -669,37 +1082,50 @@ def test_notify_gate_one_ping_per_cluster(store) -> None:
     assert store.notify_gate(*a, tiers=DEFAULT_TIERS) is False
     assert store.notify_gate(*b, tiers=DEFAULT_TIERS) is False
     # An unrelated row is untouched.
-    assert store.notify_gate("board_c", "https://c.test/jobs/9",
-                             tiers=DEFAULT_TIERS) is True
+    assert (
+        store.notify_gate("board_c", "https://c.test/jobs/9", tiers=DEFAULT_TIERS)
+        is True
+    )
 
 
 def test_notify_gate_dismissed_or_applied_sibling_suppresses(store) -> None:
     _pair(store)
     _sweep(store)
-    store.set_dismissed("board_a",
-                        "https://boards.greenhouse.io/acme/jobs/400123", True)
+    store.set_dismissed(
+        "board_a", "https://boards.greenhouse.io/acme/jobs/400123", True
+    )
     # No ledger fact anywhere — the handled SIBLING alone must silence the ping
     # (a job you dismissed under one board never pings from another).
-    assert store.notify_gate("board_b", "https://acme.test/careers?gh_jid=400123",
-                             tiers=DEFAULT_TIERS) is False
+    assert (
+        store.notify_gate(
+            "board_b", "https://acme.test/careers?gh_jid=400123", tiers=DEFAULT_TIERS
+        )
+        is False
+    )
 
 
 def test_notify_ledger_seed_counts_existing_strong_matches(store, monkeypatch) -> None:
     monkeypatch.setenv("JOBCRAWLER_MATCH_MIN_SCORE", "70")
     _put(store, "board_a", "https://a.test/jobs/1")
     _put(store, "board_b", "https://b.test/jobs/2")
-    store.set_match("board_a", "https://a.test/jobs/1",
-                    score=90, verdict="strong", reasons="[]")
-    store.set_match("board_b", "https://b.test/jobs/2",
-                    score=40, verdict="weak", reasons="[]")
+    store.set_match(
+        "board_a", "https://a.test/jobs/1", score=90, verdict="strong", reasons="[]"
+    )
+    store.set_match(
+        "board_b", "https://b.test/jobs/2", score=40, verdict="weak", reasons="[]"
+    )
 
     store.seed_notify_ledger()
 
     # The pre-feature strong match now counts as notified; the weak row doesn't.
-    assert store.notify_gate("board_a", "https://a.test/jobs/1",
-                             tiers=DEFAULT_TIERS) is False
-    assert store.notify_gate("board_b", "https://b.test/jobs/2",
-                             tiers=DEFAULT_TIERS) is True
+    assert (
+        store.notify_gate("board_a", "https://a.test/jobs/1", tiers=DEFAULT_TIERS)
+        is False
+    )
+    assert (
+        store.notify_gate("board_b", "https://b.test/jobs/2", tiers=DEFAULT_TIERS)
+        is True
+    )
     assert (store.get_meta("notify_ledger_seeded") or "").startswith("threshold=")
 
 
@@ -748,18 +1174,23 @@ def test_anti_resurrection_dismissing_one_copy_retires_the_cluster(store) -> Non
     legacy = store.search_positions(dismissed=False, limit=100)
     assert "https://boards.greenhouse.io/acme/jobs/400123" in _urls(legacy)
     suppressed = store.search_positions(
-        dismissed=False, collapse_duplicates=True, exclude_cluster_handled=True,
+        dismissed=False,
+        collapse_duplicates=True,
+        exclude_cluster_handled=True,
         limit=100,
     )
     assert _urls(suppressed) == set()
 
     # …and it survives the dismissed copy's board closing the row (the ledger of
     # record is the positions row, which closure never deletes).
-    store.mark_closed("board_b", "https://acme.test/careers?gh_jid=400123",
-                      reason="missing")
+    store.mark_closed(
+        "board_b", "https://acme.test/careers?gh_jid=400123", reason="missing"
+    )
     _sweep(store)
     still = store.search_positions(
-        dismissed=False, collapse_duplicates=True, exclude_cluster_handled=True,
+        dismissed=False,
+        collapse_duplicates=True,
+        exclude_cluster_handled=True,
         limit=100,
     )
     assert _urls(still) == set()
@@ -774,7 +1205,9 @@ def test_user_data_queries_bypass_collapse(store) -> None:
     # Dismissed view: the operator's own action must stay reachable even though
     # the row's cluster is "handled" and the row may be non-canonical.
     got = store.search_positions(
-        dismissed=True, collapse_duplicates=True, exclude_cluster_handled=True,
+        dismissed=True,
+        collapse_duplicates=True,
+        exclude_cluster_handled=True,
         limit=100,
     )
     assert _urls(got) == {b[1]}
@@ -783,7 +1216,9 @@ def test_user_data_queries_bypass_collapse(store) -> None:
     store.set_dismissed(*b, False)
     store.set_track_status(*b, "applied", stamp_applied=True)
     got = store.search_positions(
-        applied=True, collapse_duplicates=True, exclude_cluster_handled=True,
+        applied=True,
+        collapse_duplicates=True,
+        exclude_cluster_handled=True,
         limit=100,
     )
     assert _urls(got) == {b[1]}
@@ -791,12 +1226,16 @@ def test_user_data_queries_bypass_collapse(store) -> None:
     # An operator-set stage bypasses; the schema-default 'new' does NOT (it is
     # exactly the untriaged view collapsing exists for).
     got = store.search_positions(
-        track_status="applied", collapse_duplicates=True,
-        exclude_cluster_handled=True, limit=100,
+        track_status="applied",
+        collapse_duplicates=True,
+        exclude_cluster_handled=True,
+        limit=100,
     )
     assert _urls(got) == {b[1]}
     got = store.search_positions(
-        track_status="new", collapse_duplicates=True, limit=100,
+        track_status="new",
+        collapse_duplicates=True,
+        limit=100,
     )
     assert b[1] not in _urls(got)  # non-canonical members stay collapsed
 
@@ -947,9 +1386,7 @@ def test_role_group_excludes_shadowed_copies_and_closed_rows(store) -> None:
     }
 
     # One variant closing leaves a single open location: nothing left to pick.
-    store.mark_closed(
-        "board_c", "https://acme.test/careers/london-1", reason="missing"
-    )
+    store.mark_closed("board_c", "https://acme.test/careers/london-1", reason="missing")
     _sweep(store)
     assert _role_groups(store) == {}
 

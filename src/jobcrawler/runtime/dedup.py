@@ -17,7 +17,7 @@ explicit precision contract and veto:
   T2  normalized ``apply_url`` equality                 (ATS-host or corroboration)
   T3  ``external_id`` within a declared slug family     (never global)
   T4  content_hash + company key, cross-site            (ambiguity veto; edges off)
-  T5  (company key, GEO-gated title key), cross-site    (shadow only; edges off)
+  T5  (company key, GEO-gated title key), cross-site    (single-open-direct anchor)
   T6  LinkedIn / Indeed posting ids                     (global)
 
 Keys for ALL tiers are always computed and written (free shadow measurement);
@@ -42,7 +42,9 @@ from urllib.parse import parse_qsl, urlsplit
 from jobcrawler.runtime.normalize import normalize_title_key
 from jobcrawler.urls import DEFAULT_TRACKING_PARAMS, canonicalize_url, host_on_domain
 
-if TYPE_CHECKING:  # pragma: no cover - import cycle guard (state imports nothing from here)
+if (
+    TYPE_CHECKING
+):  # pragma: no cover - import cycle guard (state imports nothing from here)
     import sqlite3
 
     from jobcrawler.state import StateStore
@@ -77,7 +79,9 @@ _TIER_STRENGTH: dict[int, int] = {
 # ever applied to ``apply_url`` inside key derivation. Entries are lowercase (the
 # canonicalizer lowercases before matching). Identity-BEARING params are never
 # listed here: gh_jid, ashby_jid, for, token, jk, pid, applyData.
-IDENTITY_APPLY_TRACKING_PARAMS: frozenset[str] = frozenset(DEFAULT_TRACKING_PARAMS) | frozenset(
+IDENTITY_APPLY_TRACKING_PARAMS: frozenset[str] = frozenset(
+    DEFAULT_TRACKING_PARAMS
+) | frozenset(
     {
         "ref",
         "source",
@@ -246,7 +250,12 @@ def _smartrecruiters_keys(host: str, path_segs: list[str]) -> list[IdentityKey]:
         segs = path_segs
         org: str | None = None
         posting: str | None = None
-        if len(segs) >= 4 and segs[0] == "v1" and segs[1] == "companies" and segs[3] == "postings":
+        if (
+            len(segs) >= 4
+            and segs[0] == "v1"
+            and segs[1] == "companies"
+            and segs[3] == "postings"
+        ):
             org, posting = segs[2], segs[4] if len(segs) >= 5 else None
         elif len(segs) >= 2:
             org, posting = segs[0], segs[1]
@@ -320,7 +329,9 @@ def _linkjob_keys(parts: Any, host: str, path_segs: list[str]) -> list[IdentityK
                 out.append(IdentityKey(TIER_LINKJOB, f"li:{v.strip()}"))
     if host_on_domain(host, ("indeed.com",)):
         for k, v in _qs(parts):
-            if k.lower() == "jk" and re.match(r"^[0-9a-f]{10,}$", v.strip(), re.IGNORECASE):
+            if k.lower() == "jk" and re.match(
+                r"^[0-9a-f]{10,}$", v.strip(), re.IGNORECASE
+            ):
                 out.append(IdentityKey(TIER_LINKJOB, f"indeed:{v.strip().lower()}"))
     return out
 
@@ -569,6 +580,7 @@ def resweep(
     verdicts, notify, and lifecycle never read it). ``False`` clears the table.
     """
     enabled = set(tiers)
+    direct = set(direct_sites)
     rows = store.dedup_sweep_rows()
     blocked = store.blocked_key_set()
     n = len(rows)
@@ -613,9 +625,7 @@ def resweep(
     # Effective T1 identity per row (for the higher-tier separator) excludes
     # vetoed/blocked keys — a void identity neither joins nor separates.
     t1_of: list[frozenset[str]] = [
-        frozenset(
-            k.key for k in keys if k.tier == TIER_ATS and k.key not in blocked
-        )
+        frozenset(k.key for k in keys if k.tier == TIER_ATS and k.key not in blocked)
         for keys in row_keys
     ]
     ck_of = [company_key(r["company"], r["company_canonical"]) for r in rows]
@@ -629,7 +639,9 @@ def resweep(
             "t1_org_conflict": len(org_conflicts),
             "t2_generic_rejects": 0,
             "t4_hash_ambiguous": 0,
-            "t5_vetoes": 0,
+            "t5_anchor_edges": 0,
+            "t5_no_anchor": 0,
+            "t5_anchor_rejects": 0,
             "separator_splits": 0,
             "blocklist_splits": 0,
             "degenerate_keys": 0,
@@ -666,7 +678,9 @@ def resweep(
             continue
         if len(idxs) > _DEGENERATE_KEY_ROWS:
             guards["degenerate_keys"] += 1
-            log.warning("dedup: degenerate key %r spans %d rows; skipped", key, len(idxs))
+            log.warning(
+                "dedup: degenerate key %r spans %d rows; skipped", key, len(idxs)
+            )
             continue
         idxs = sorted(idxs)
         generic_t2 = tier == TIER_APPLY and key.startswith("apply:")
@@ -678,15 +692,25 @@ def resweep(
                 guards["t4_hash_ambiguous"] += 1
                 continue
         t2_site_counts = Counter(rows[i]["site"] for i in idxs) if generic_t2 else None
-        t5_open_counts = (
-            Counter(rows[i]["site"] for i in idxs if rows[i]["status"] == "open")
-            if tier == TIER_FUZZY
-            else None
-        )
+        # T5 anchored recall: a fuzzy (company+title) key merges an aggregator copy
+        # into the employer's OWN posting only when the key names EXACTLY ONE
+        # direct-board row and that row is open (the single-open-direct anchor).
+        # Uniqueness counts ALL direct rows (open AND closed): a second direct row —
+        # even a closed repost — voids the anchor, so an employer's N same-title reqs
+        # never bridge through an aggregator. Aggregators co-cluster only transitively
+        # through the shared anchor; direct<->direct fusion is structurally impossible.
+        t5_anchor: int | None = None
+        if tier == TIER_FUZZY:
+            direct_idxs = [i for i in idxs if rows[i]["site"] in direct]
+            if len(direct_idxs) == 1 and rows[direct_idxs[0]]["status"] == "open":
+                t5_anchor = direct_idxs[0]
         for x in range(len(idxs)):
             for y in range(x + 1, len(idxs)):
                 a, b = idxs[x], idxs[y]
-                if tier in (TIER_CONTENT, TIER_FUZZY) and rows[a]["site"] == rows[b]["site"]:
+                if (
+                    tier in (TIER_CONTENT, TIER_FUZZY)
+                    and rows[a]["site"] == rows[b]["site"]
+                ):
                     continue  # cross-site only, never within one board
                 if generic_t2:
                     # Generic apply link: corroboration required — same company key,
@@ -704,14 +728,21 @@ def resweep(
                         guards["t2_generic_rejects"] += 1
                         continue
                 if tier == TIER_FUZZY:
-                    assert t5_open_counts is not None
+                    # Exactly one side must be the single-open-direct anchor; the
+                    # other must be an aggregator (never direct<->direct) and
+                    # location-compatible. Aggregators join only through the anchor.
+                    if t5_anchor is None:
+                        guards["t5_no_anchor"] += 1
+                        continue
+                    other = b if a == t5_anchor else a if b == t5_anchor else None
                     if (
-                        t5_open_counts[rows[a]["site"]] > 1
-                        or t5_open_counts[rows[b]["site"]] > 1
+                        other is None
+                        or rows[other]["site"] in direct
                         or not _locations_compatible(rows[a], rows[b])
                     ):
-                        guards["t5_vetoes"] += 1
+                        guards["t5_anchor_rejects"] += 1
                         continue
+                    guards["t5_anchor_edges"] += 1
                 try_union(a, b, tier)
 
     # Components → materialized clusters (size ≥ 2; absence = standalone row).
@@ -734,7 +765,10 @@ def resweep(
     shadowed: set[int] = set()  # non-canonical members: hidden in the collapsed list
     top: list[dict[str, Any]] = []
     for members in clusters:
-        root = min(members, key=lambda i: (rows[i]["first_seen"], rows[i]["site"], rows[i]["url"]))
+        root = min(
+            members,
+            key=lambda i: (rows[i]["first_seen"], rows[i]["site"], rows[i]["url"]),
+        )
         cid = _cluster_id(rows[root]["site"], rows[root]["url"])
         canonical = min(members, key=lambda i: _election_key(rows[i], direct_sites))
         shadowed.update(i for i in members if i != canonical)
@@ -749,9 +783,7 @@ def resweep(
                     rank[1] if rank else TIER_FUZZY,
                 )
             )
-        verdicts = {
-            rows[i]["match_verdict"] for i in members if rows[i]["matched_at"]
-        }
+        verdicts = {rows[i]["match_verdict"] for i in members if rows[i]["matched_at"]}
         matched = sum(1 for i in members if rows[i]["matched_at"])
         if matched > 1:
             multi_matched += 1
@@ -801,7 +833,10 @@ def resweep(
             if len(members) > _ROLE_GROUP_CAP:
                 guards["role_group_cap_skips"] += 1
                 log.warning(
-                    "dedup: role key (%r, %r) spans %d rows; skipped", ck, tk, len(members)
+                    "dedup: role key (%r, %r) spans %d rows; skipped",
+                    ck,
+                    tk,
+                    len(members),
                 )
                 continue
             if len({_role_location(rows[i]) for i in members}) < 2:

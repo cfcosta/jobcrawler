@@ -894,15 +894,20 @@ def dedup_refresh_interval() -> str:
 
 def dedup_tiers() -> frozenset[int]:
     """Identity tiers whose keys may form §17 cluster edges (comma-separated ints).
-    Default ``0,1,2,3,6``: exact canonical URL (0), ATS req-ids (1), normalized
-    external apply target (2), external ids within a slug family (3), LinkedIn/Indeed
-    job ids (6). Deliberately NOT default: 4 (content-hash — corroboration signal
-    only) and 5 (fuzzy company+title — operator opted out). Keys for disabled tiers
-    are still *written* for audit; they just never join rows. Unknown tier numbers
-    are harmless (no such keys exist)."""
+    Default ``0,1,2,3,5,6``: exact canonical URL (0), ATS req-ids (1), normalized
+    external apply target (2), external ids within a slug family (3), fuzzy
+    company+title (5), LinkedIn/Indeed job ids (6). Tier 5 is the *anchored* fuzzy
+    recall — resweep fuses it only when the key names exactly one open direct-board
+    posting (the single-open-direct anchor) and the copy is location-compatible, so
+    an aggregator duplicate folds under the employer's own row while direct<->direct
+    fusion stays structurally impossible. The live between-sweep gates ignore tier 5
+    regardless (state._live_key_clause), so it shapes only the materialized clusters.
+    Deliberately NOT default: 4 (content-hash — corroboration signal only). Keys for
+    disabled tiers are still *written* for audit; they just never join rows. Unknown
+    tier numbers are harmless (no such keys exist)."""
     raw = os.getenv("JOBCRAWLER_DEDUP_TIERS")
     if raw is None:
-        return frozenset({0, 1, 2, 3, 6})
+        return frozenset({0, 1, 2, 3, 5, 6})
     return frozenset(int(p.strip()) for p in raw.split(",") if p.strip())
 
 

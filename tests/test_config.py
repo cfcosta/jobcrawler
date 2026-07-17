@@ -851,3 +851,17 @@ def test_dedup_role_groups_knob_anded_with_master(monkeypatch) -> None:
     monkeypatch.delenv("JOBCRAWLER_DEDUP_ROLE_GROUPS")
     monkeypatch.setenv("JOBCRAWLER_DEDUP", "0")  # the §17 master brakes it too
     assert not config.dedup_role_groups_enabled()
+
+
+def test_dedup_tiers_default_includes_anchored_fuzzy(monkeypatch) -> None:
+    # Tier 5 (fuzzy company+title) is ON by default as the *anchored* recall — it
+    # only ever fuses an aggregator copy into a single-open-direct posting, and the
+    # live between-sweep gates exclude it regardless (state._live_key_clause). A
+    # silent revert to {0,1,2,3,6} would drop those direct<-aggregator merges.
+    monkeypatch.delenv("JOBCRAWLER_DEDUP_TIERS", raising=False)
+    assert config.dedup_tiers() == frozenset({0, 1, 2, 3, 5, 6})
+
+
+def test_dedup_tiers_env_override(monkeypatch) -> None:
+    monkeypatch.setenv("JOBCRAWLER_DEDUP_TIERS", "0,1,2,3,6")  # roll back tier 5
+    assert config.dedup_tiers() == frozenset({0, 1, 2, 3, 6})
