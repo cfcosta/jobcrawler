@@ -17117,4 +17117,21 @@
     description from the <article> body. The three "Future Opportunities:" pages are
     evergreen talent-pool reqs the company lists — kept as-is; the classifier sorts
     discipline downstream. Small board (~5 roles); validate passes in ~5s.
+- slug: bjak
+  name: "Bjak"
+  url: https://api.ashbyhq.com/posting-api/job-board/bjakcareer?includeCompensation=true
+  render: static
+  company: "Bjak"
+  hints: >-
+    Bjak's careers SPA (bjak.my/en/career) fronts an Ashby board via a first-party API
+    (be.bjak.my/career/api-v1/get-all-jobs), but that feed carries no descriptions. The
+    underlying Ashby board (token `bjakcareer`, seen in the applyLink
+    jobs.ashbyhq.com/bjakcareer/<id>) has the PUBLIC posting-api ENABLED, so the url returns
+    every listed role WITH inline descriptionPlain in one ~9MB call — no per-posting detail
+    fetch. Same shape as the ruby-labs/artie crawlers: iterate payload["jobs"], skip
+    isListed=false, read jobUrl/title/location/descriptionPlain + secondaryLocations,
+    employmentType, workplaceType, department, publishedAt, applyUrl, compensation. LARGE
+    single-employer board (~900 listed roles, ~280 Engineering, many international/remote and
+    per-country clones + mirror "A1 *" departments) — not an aggregator; dedup collapses the
+    near-duplicates downstream. validate passes (single fetch) in well under 10s.
 
