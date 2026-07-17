@@ -426,15 +426,18 @@
 
 - slug: mistral
   name: "Mistral AI"
-  url: https://api.lever.co/v0/postings/mistral?mode=json
+  url: https://api.ashbyhq.com/posting-api/job-board/mistral.ai?includeCompensation=true
   render: static
   company: "Mistral AI"
   hints: >-
-    Lever postings API. Whole board as JSON list. Reconstruct full text from description +
-    lists[].content + `additional`. Parse workplaceType,
-    categories.location/team/commitment, `createdAt`, `id`, and `hostedUrl`. Strong match
-    for AI infrastructure, backend platforms, distributed systems, Go services and remote
-    Europe-timezone roles.
+    Ashby job board API, token `mistral.ai` — Mistral moved off Lever in July 2026 (the
+    old Lever tenant still answers 200 with an empty list, so only this Ashby board is
+    authoritative). Whole board in one JSON GET — jobs[] carry stable `id`, `title`,
+    `location` (plus `secondaryLocations`), `employmentType`, `workplaceType`/`isRemote`,
+    `jobUrl`, `applyUrl`, `descriptionHtml`, and compensation fields when present. Parse
+    the standard Ashby fields straight from it, keep to a single request, and prefer
+    `workplaceType` over `isRemote`. Strong match for AI infrastructure, backend
+    platforms, distributed systems, Go services and remote Europe-timezone roles.
 
 - slug: offchain_labs
   name: "Offchain Labs"
@@ -7596,9 +7599,13 @@
   name: "Continue"
   url: https://api.ashbyhq.com/posting-api/job-board/continue?includeCompensation=true
   render: static
+  enabled: false
   company: "Continue"
   hints: >-
-    Single-company Ashby board for Continue, the maker of the open-source AI code assistant
+    RETIRED July 2026 — the `continue` Ashby tenant is gone (posting API 404s, the
+    board GraphQL resolves null) and continue.dev no longer links any careers page, so
+    there is no board to crawl; re-enable if one reappears. Was: single-company Ashby
+    board for Continue, the maker of the open-source AI code assistant
     and IDE extensions (hub.continue.dev) — an AI-infra / devtools employer. The posting-api
     job-board endpoint returns a flat jobs[] array; each entry carries title,
     descriptionPlain, jobUrl, location, department/team, and optional compensation. Parse is
