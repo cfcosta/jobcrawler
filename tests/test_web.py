@@ -1198,6 +1198,46 @@ async def test_positions_collapse_on_by_default_with_escape() -> None:
         store.close()
 
 
+async def test_show_duplicates_does_not_resurrect_dismissed_cluster() -> None:
+    # Anti-resurrection is decoupled from the collapse toggle. "Show duplicates"
+    # (?collapse=0) reveals every crawled copy of LIVE jobs, but must NOT bring back
+    # a real-world job the operator retired by dismissing one copy. Here the canonical
+    # (board_b) is dismissed; its sibling board_a is another copy of the same retired
+    # req and must stay hidden even in the raw-rows view — the "Everything" escape is
+    # about duplicates, not un-dismissing.
+    store = _cluster_store()
+    store.set_dismissed("board_b", "https://acme.test/careers?gh_jid=400123", True)
+    try:
+        async with _client(create_app(store)) as c:
+            dup = (await c.get("/positions?collapse=0")).text
+            # board_a is a copy of the dismissed-handled req — not resurrected…
+            assert "boards.greenhouse.io/acme/jobs/400123" not in dup
+            # …while the unrelated solo row is unaffected (collapse=0 still lists rows).
+            assert "solo.test/jobs/1" in dup
+    finally:
+        store.close()
+
+
+async def test_show_dismissed_reveals_handled_cluster() -> None:
+    # The explicit dismissed view (?show_dismissed=1) is the ONE place anti-resurrection
+    # stands down: a job you dismissed must be reachable there via its canonical row —
+    # even though show_dismissed maps to dismissed=None, which does NOT trip the store's
+    # applied/dismissed=True auto-force. Binding exclude_cluster_handled to
+    # `not show_dismissed` closes that gap.
+    store = _cluster_store()
+    canon_pid = encode_pid("board_b", "https://acme.test/careers?gh_jid=400123")
+    store.set_dismissed("board_b", "https://acme.test/careers?gh_jid=400123", True)
+    try:
+        async with _client(create_app(store)) as c:
+            # Default browse hides the whole handled cluster…
+            assert canon_pid not in (await c.get("/positions")).text
+            # …but the dismissed view reveals its canonical.
+            shown = (await c.get("/positions?show_dismissed=1")).text
+            assert canon_pid in shown
+    finally:
+        store.close()
+
+
 async def test_detail_lists_cluster_siblings() -> None:
     store = _cluster_store()
     try:

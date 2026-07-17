@@ -544,7 +544,12 @@ def _read_filters(
         "applied": applied,
         "exclude_company_applied": hide_applied_companies,
         "collapse_duplicates": collapse,
-        "exclude_cluster_handled": collapse,
+        # Anti-resurrection is decoupled from the collapse toggle: it stays ON in the
+        # raw-rows "Show duplicates" escape (collapse=0) — that escape reveals crawled
+        # copies of LIVE jobs, not jobs the operator retired — and stands down ONLY in
+        # the explicit dismissed view. show_dismissed maps to dismissed=None, which does
+        # not trip the store's applied/dismissed=True auto-force, so bind it here.
+        "exclude_cluster_handled": config.dedup_ui_enabled() and not show_dismissed,
         "collapse_role_groups": collapse,
         "sort": sort,
     }
