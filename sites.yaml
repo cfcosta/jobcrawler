@@ -17099,4 +17099,22 @@
     call. Same shape as the crowdstrike crawler. Note: most roles are US-onsite and
     clearance-gated (weak fit for a remote Brazil-based profile), but it is a top-500-by-
     openings employer so the board is covered; the matcher filters downstream.
+- slug: zoobean
+  name: "Zoobean"
+  url: https://joyfulreading.com/who-we-are/careers
+  render: static
+  company: "Zoobean"
+  extra_hosts:
+    - beanstack.com
+  hints: >-
+    Zoobean (dba Beanstack / Joyful Reading Co.) has no ATS/JSON feed — each opening is a
+    static HubSpot page linked from the careers index at the url. Engineering roles live on
+    www.beanstack.com/jobs/<slug>, other roles on joyfulreading.com/jobs/<slug>; both hosts
+    are first-party and robots-crawlable (beanstack.com in EXTRA_HOSTS covers the www.
+    subdomain via §8 on-domain match). Enumerate all /jobs/<slug> links from the index HTML,
+    then GET each page: title from og:title/<title> (strip the " - Zoobean"/" - Joyful
+    Reading Co." suffix), location from the `masthead__location-text` span (all Remote),
+    description from the <article> body. The three "Future Opportunities:" pages are
+    evergreen talent-pool reqs the company lists — kept as-is; the classifier sorts
+    discipline downstream. Small board (~5 roles); validate passes in ~5s.
 
