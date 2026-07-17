@@ -16792,3 +16792,236 @@
     Slack/Discord/GitHub/Sentry/Linear; 5-person Toronto/SF team, Accel-led $4M seed) — tiny
     board, currently ~1 open role; strong match for early-stage full-stack, product and growth
     engineering.
+
+- slug: airbnb
+  name: "Airbnb"
+  url: https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true
+  render: static
+  company: "Airbnb"
+  hints: >-
+    Greenhouse board API, token `airbnb` (careers.airbnb.com links carry gh_jid). One JSON GET
+    returns ~190 jobs with `absolute_url` on careers.airbnb.com, `location.name`, `offices`,
+    HTML-escaped `content`, and `metadata`. Standard boards-api parse; aggregators (Working
+    Nomads etc.) carried ~70 copies of these rows, so the direct board wins dedup.
+
+- slug: pinterest
+  name: "Pinterest"
+  url: https://boards-api.greenhouse.io/v1/boards/pinterest/jobs?content=true
+  render: static
+  company: "Pinterest"
+  hints: >-
+    Greenhouse board API, token `pinterest` (pinterestcareers.com is a Phenom skin whose
+    postings carry gh_jid). Single JSON GET, ~190 jobs, standard boards-api fields with
+    `absolute_url` on www.pinterestcareers.com and location in `location.name`/`offices`.
+
+- slug: zscaler
+  name: "Zscaler"
+  url: https://boards-api.greenhouse.io/v1/boards/zscaler/jobs?content=true
+  render: static
+  company: "Zscaler"
+  hints: >-
+    Greenhouse board API, token `zscaler`. Single JSON GET, ~330 jobs across cloud-security
+    engineering, sales and support; standard boards-api parse (absolute_url, location.name,
+    offices, HTML-escaped content).
+
+- slug: okx
+  name: "OKX"
+  url: https://boards-api.greenhouse.io/v1/boards/okx/jobs?content=true
+  render: static
+  company: "OKX"
+  hints: >-
+    Greenhouse board API, token `okx` (crypto exchange; job-boards.greenhouse.io/okx is the
+    human board). Single JSON GET, ~315 jobs, standard boards-api fields; many locations are
+    APAC (Singapore/Hong Kong) plus remote engineering.
+
+- slug: spacex
+  name: "SpaceX"
+  url: https://boards-api.greenhouse.io/v1/boards/spacex/jobs?content=true
+  render: static
+  company: "SpaceX"
+  hints: >-
+    Greenhouse board API, token `spacex`. Single JSON GET but a huge board (~1900 jobs, mostly
+    on-site US manufacturing/hardware plus software roles); standard boards-api parse. Expect a
+    large payload — parse the one response, no pagination.
+
+- slug: nearform
+  name: "Nearform"
+  url: https://boards-api.greenhouse.io/v1/boards/nearform/jobs?content=true
+  render: static
+  company: "Nearform"
+  hints: >-
+    Greenhouse board API, token `nearform` (remote-first Node/React consultancy;
+    job-boards.greenhouse.io/nearform is the human board). Single JSON GET, ~35 jobs, standard
+    boards-api fields; locations are mostly "Remote, <Country>".
+
+- slug: alpaca
+  name: "Alpaca"
+  url: https://boards-api.greenhouse.io/v1/boards/alpaca/jobs?content=true
+  render: static
+  company: "Alpaca"
+  hints: >-
+    Greenhouse board API, token `alpaca` (API-first stock/crypto brokerage). Single JSON GET,
+    ~55 jobs, standard boards-api fields; most roles are distributed/remote with region tags in
+    the title or location.
+
+- slug: akuna_capital
+  name: "Akuna Capital"
+  url: https://boards-api.greenhouse.io/v1/boards/akunacapital/jobs?content=true
+  render: static
+  company: "Akuna Capital"
+  hints: >-
+    Greenhouse board API, token `akunacapital` (prop trading firm; www.akunacapital.com embeds
+    it). Single JSON GET, ~38 jobs including C++/Python engineering in Chicago; standard
+    boards-api parse.
+
+- slug: entefy
+  name: "Entefy"
+  url: https://api.lever.co/v0/postings/entefy?mode=json
+  render: static
+  company: "Entefy"
+  hints: >-
+    Lever postings API, account `entefy` (AI/ML platform). One JSON GET returns a bare array
+    (~14 postings) with `hostedUrl`, `applyUrl`, `text` (title), `categories`
+    (location/team/commitment), `workplaceType`, and `descriptionBody`; standard Lever parse.
+
+- slug: jeeves
+  name: "Jeeves"
+  url: https://api.lever.co/v0/postings/tryjeeves?mode=json
+  render: static
+  company: "Jeeves"
+  hints: >-
+    Lever postings API, account `tryjeeves` (global fintech). One JSON GET, bare array of ~55
+    postings, standard Lever fields (hostedUrl/applyUrl/text/categories/workplaceType); many
+    roles LATAM-remote.
+
+- slug: netomi
+  name: "Netomi"
+  url: https://api.lever.co/v0/postings/netomi?mode=json
+  render: static
+  company: "Netomi"
+  hints: >-
+    Lever postings API, account `netomi` (AI customer-service platform). One JSON GET, bare
+    array of ~28 postings, standard Lever fields; engineering mostly in India (Gurgaon) plus
+    some remote.
+
+- slug: nibiru
+  name: "Nibiru"
+  url: https://api.lever.co/v0/postings/nibiru?mode=json
+  render: static
+  company: "Nibiru"
+  hints: >-
+    Lever postings API, account `nibiru` (L1 blockchain). One JSON GET, bare array of ~9
+    postings, standard Lever fields; remote-first crypto engineering.
+
+- slug: mapbox
+  name: "Mapbox"
+  url: https://api.ashbyhq.com/posting-api/job-board/mapbox?includeCompensation=true
+  render: static
+  company: "Mapbox"
+  hints: >-
+    Ashby job board API, token `mapbox`. Whole board in one JSON GET (~65 jobs) — standard
+    Ashby fields (id, title, location + secondaryLocations, employmentType,
+    workplaceType/isRemote, jobUrl, applyUrl, descriptionHtml, compensation when displayed).
+
+- slug: masabi
+  name: "Masabi"
+  url: https://api.ashbyhq.com/posting-api/job-board/masabi?includeCompensation=true
+  render: static
+  company: "Masabi"
+  hints: >-
+    Ashby job board API, token `masabi` (fare-payments SaaS). Single JSON GET, ~20 jobs,
+    standard Ashby posting-api fields; London/remote-UK heavy.
+
+- slug: douro_labs
+  name: "Douro Labs"
+  url: https://api.ashbyhq.com/posting-api/job-board/dourolabs.xyz?includeCompensation=true
+  render: static
+  company: "Douro Labs"
+  hints: >-
+    Ashby job board API — note the token is `dourolabs.xyz` (with the TLD), not `dourolabs`.
+    Single JSON GET, small board (~4 jobs), standard Ashby posting-api fields; Pyth/Solana
+    ecosystem engineering, remote.
+
+- slug: thomson_reuters
+  name: "Thomson Reuters"
+  url: https://thomsonreuters.wd5.myworkdayjobs.com/wday/cxs/thomsonreuters/External_Career_Site/jobs
+  render: static
+  company: "Thomson Reuters"
+  enumerates_all: false
+  hints: >-
+    Workday CXS API, tenant `thomsonreuters` wd5, site `External_Career_Site`. POST JSON
+    {"limit":20,"offset":N,"searchText":""} pages `jobPostings[]` (~500 total, `total` field);
+    each has title, externalPath (prefix with
+    https://thomsonreuters.wd5.myworkdayjobs.com/External_Career_Site to build the job URL),
+    locationsText, postedOn, bulletFields. Same shape as the allstate/bigcommerce crawlers.
+
+- slug: zillow
+  name: "Zillow"
+  url: https://zillow.wd5.myworkdayjobs.com/wday/cxs/zillow/Zillow_Group_External/jobs
+  render: static
+  company: "Zillow"
+  enumerates_all: false
+  hints: >-
+    Workday CXS API, tenant `zillow` wd5, site `Zillow_Group_External`. POST JSON
+    {"limit":20,"offset":N} pages `jobPostings[]` (~115 total); externalPath joins onto
+    https://zillow.wd5.myworkdayjobs.com/Zillow_Group_External. Standard Workday CXS parse
+    like allstate/bigcommerce.
+
+- slug: boeing
+  name: "Boeing"
+  url: https://boeing.wd1.myworkdayjobs.com/wday/cxs/boeing/EXTERNAL_CAREERS/jobs
+  render: static
+  company: "Boeing"
+  enumerates_all: false
+  hints: >-
+    Workday CXS API, tenant `boeing` wd1, site `EXTERNAL_CAREERS`. POST JSON
+    {"limit":20,"offset":N} pages `jobPostings[]` — huge board (~1000+ total, mostly US
+    defense/aerospace with some software); externalPath joins onto
+    https://boeing.wd1.myworkdayjobs.com/en-US/EXTERNAL_CAREERS. Standard Workday CXS parse.
+
+- slug: mlabs
+  name: "MLabs"
+  url: https://apply.workable.com/api/v1/widget/accounts/mlabs
+  render: static
+  company: "MLabs"
+  hints: >-
+    Workable widget API, account `mlabs` (Haskell/Cardano consultancy). One JSON GET returns
+    {name, description, jobs[]} — ~180 entries with title, shortcode, url
+    (apply.workable.com/mlabs/j/<shortcode>/), country/city/telecommuting flags. Same shape as
+    the anza_xyz/codesandbox crawlers; per-job detail at
+    /api/v1/accounts/mlabs/jobs/<shortcode> if description text is needed.
+
+- slug: trafilea
+  name: "Trafilea"
+  url: https://trafilea.recruitee.com/api/offers/
+  render: static
+  company: "Trafilea"
+  hints: >-
+    Recruitee offers API, subdomain `trafilea` (remote e-commerce group). One JSON GET returns
+    {offers:[...]} (~40) with title, careers_url, apply_url, location, remote flag, and HTML
+    description. Same shape as the aikido_security/holepunch crawlers.
+
+- slug: storyteller
+  name: "Storyteller"
+  url: https://storyteller.applytojob.com/
+  render: static
+  company: "Storyteller"
+  enumerates_all: false
+  hints: >-
+    JazzHR hosted board, subdomain `storyteller` (Stories-format video SDK). Static HTML list
+    page whose job links match https://storyteller.applytojob.com/apply/<id>/<slug> (~88
+    links); titles are the anchor text and each detail page is static HTML. Same shape as the
+    maxio crawler.
+
+- slug: kast
+  name: "Kast"
+  url: https://careers.kast.xyz/postings.json
+  render: static
+  company: "Kast"
+  hints: >-
+    Pinpoint ATS on a custom domain (careers.kast.xyz, Rails/webpacker build like
+    *.pinpointhq.com). GET /postings.json returns {data:[...]} (~34 postings) with title,
+    employment_type, compensation_minimum/maximum/currency/frequency/visible, description
+    HTML, and url at /en/postings/<uuid>. Same shape as the surrealdb crawler
+    (postings.json).
+
