@@ -17025,3 +17025,78 @@
     HTML, and url at /en/postings/<uuid>. Same shape as the surrealdb crawler
     (postings.json).
 
+- slug: affinidi
+  name: "Affinidi"
+  url: https://boards-api.greenhouse.io/v1/boards/affinidi/jobs?content=true
+  render: static
+  company: "Affinidi"
+  hints: >-
+    Greenhouse board API, token `affinidi`. Whole board in one GET (~9 roles). Each job has
+    stable `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and
+    `content` = full HTML-ENTITY-ESCAPED description (html.unescape then strip tags). Same
+    shape as the gitlab crawler. Affinidi builds decentralized-identity / verifiable-
+    credential data infrastructure (Singapore) — fit for backend, platform and data roles.
+
+- slug: iherb
+  name: "iHerb"
+  url: https://boards-api.greenhouse.io/v1/boards/iherb/jobs?content=true
+  render: static
+  company: "iHerb"
+  hints: >-
+    Greenhouse board API, token `iherb`. Whole board in one GET (~54 roles). Each job has
+    stable `id`, `title`, flattened `location.name`, `absolute_url`, `updated_at`, and
+    `content` = full HTML-ENTITY-ESCAPED description (html.unescape then strip tags). Same
+    shape as the gitlab crawler. iHerb is a global e-commerce retailer with a sizable
+    engineering org — fit for backend, platform, data and infrastructure roles.
+
+- slug: rubylabs
+  name: "Ruby Labs"
+  url: https://api.ashbyhq.com/posting-api/job-board/ruby-labs?includeCompensation=true
+  render: static
+  company: "Ruby Labs"
+  hints: >-
+    Ashby job board API, token `ruby-labs`. Whole board in one JSON GET (~43 roles) — jobs[]
+    carry stable `id`, `title`, `location` (plus `secondaryLocations`), `employmentType`,
+    `workplaceType`/`isRemote`, `jobUrl`, `applyUrl`, `descriptionPlain`, and compensation
+    fields when present. Parse the standard Ashby fields straight from it and keep to a single
+    request. Same shape as the artie crawler. Ruby Labs builds consumer mobile apps
+    (health/education) on a remote-first team — fit for backend, mobile and data roles.
+
+- slug: lawnstarter
+  name: "LawnStarter"
+  url: https://apply.workable.com/api/v1/widget/accounts/lawnstarter?details=true
+  render: static
+  company: "LawnStarter"
+  hints: >-
+    Workable widget API, account `lawnstarter`. `details=true` returns the full HTML
+    description inline on every job, so the whole board (~46 roles) comes back in one GET with
+    NO per-shortcode detail fetch. Each job carries `shortcode`, `title`, `description`
+    (HTML — html.unescape then strip tags), `locations[]` (country/city/region/hidden),
+    `telecommuting`, `employment_type`, `department`, `published_on`. IMPORTANT: store the
+    account-scoped public URLs (https://apply.workable.com/lawnstarter/j/<shortcode>/ and
+    …/apply/), NOT the widget's account-less /j/<code> shortlinks — the §17 Workable identity
+    key only fires on the /<account>/j/<code> shape. Same shape as the anza_xyz crawler but
+    descriptions are inline. Fit: on-demand lawn-care marketplace; backend, data, mobile.
+
+- slug: leidos
+  name: "Leidos"
+  url: https://leidos.wd5.myworkdayjobs.com/wday/cxs/leidos/External/jobs
+  render: static
+  company: "Leidos"
+  enumerates_all: false
+  hints: >-
+    Workday CXS board, tenant `leidos`, site `External`, wd5 pod. MEGA-BOARD: unfiltered
+    total≈1924 (defense-heavy), so LIST via POST to the url with Content-Type:
+    application/json and body
+    `{"appliedFacets":{"jobFamilyGroup":["96064918a76d1023f15857f0a8156d30"]},"limit":20,"offset":0}`
+    — the "Engineering" job-family facet (~784 roles; sibling "Information Technology"
+    96064918a76d1023f1586f686a4d6d3c adds 471). Workday hard-caps limit at 20 — page
+    offset += 20 until offset>=total; the crawler bounds itself to a 40-role rolling sample.
+    Rows: `title`, `externalPath`, `locationsText`, `bulletFields`=[reqId "R-00185833"].
+    BODY: GET /wday/cxs/leidos/External/job/<externalPath> -> jobPostingInfo: `jobDescription`
+    raw HTML (strip tags), `jobReqId`, `location`, `remoteType`, `timeType`, `startDate`,
+    `externalUrl` (apply_url). Facet ids can drift — re-read from facets[] on an unfiltered
+    call. Same shape as the crowdstrike crawler. Note: most roles are US-onsite and
+    clearance-gated (weak fit for a remote Brazil-based profile), but it is a top-500-by-
+    openings employer so the board is covered; the matcher filters downstream.
+
