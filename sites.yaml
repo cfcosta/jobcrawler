@@ -17135,3 +17135,267 @@
     per-country clones + mirror "A1 *" departments) — not an aggregator; dedup collapses the
     near-duplicates downstream. validate passes (single fetch) in well under 10s.
 
+
+- slug: calendly
+  name: "Calendly"
+  url: https://boards-api.greenhouse.io/v1/boards/calendly/jobs?content=true
+  render: static
+  company: "Calendly"
+  hints: >-
+    Greenhouse boards API, token `calendly`. One GET returns the whole board; parse id, title, location.name, absolute_url, departments[], first_published, content (html.unescape+strip), pay_input_ranges.
+
+- slug: varicent
+  name: "Varicent"
+  url: https://boards-api.greenhouse.io/v1/boards/varicent/jobs?content=true
+  render: static
+  company: "Varicent"
+  hints: >-
+    Greenhouse boards API, token `varicent`. One GET returns the whole board; parse id, title, location.name, absolute_url, departments[], first_published, content (html.unescape+strip), pay_input_ranges.
+
+- slug: innovecs
+  name: "Innovecs"
+  url: https://boards-api.greenhouse.io/v1/boards/innovecs/jobs?content=true
+  render: static
+  company: "Innovecs"
+  hints: >-
+    Greenhouse boards API, token `innovecs`. One GET returns the whole board; parse id, title, location.name, absolute_url, departments[], first_published, content (html.unescape+strip), pay_input_ranges.
+
+- slug: kobold_metals
+  name: "KoBold Metals"
+  url: https://boards-api.greenhouse.io/v1/boards/koboldmetals/jobs?content=true
+  render: static
+  company: "KoBold Metals"
+  hints: >-
+    Greenhouse boards API, token `koboldmetals`. One GET returns the whole board; parse id, title, location.name, absolute_url, departments[], first_published, content (html.unescape+strip), pay_input_ranges.
+
+- slug: nuvolar
+  name: "Nuvolar"
+  url: https://boards-api.greenhouse.io/v1/boards/nuvolar/jobs?content=true
+  render: static
+  company: "Nuvolar"
+  hints: >-
+    Greenhouse boards API, token `nuvolar`. One GET returns the whole board; parse id, title, location.name, absolute_url, departments[], first_published, content (html.unescape+strip), pay_input_ranges.
+
+- slug: conga
+  name: "Conga"
+  url: https://boards-api.greenhouse.io/v1/boards/conga/jobs?content=true
+  render: static
+  company: "Conga"
+  hints: >-
+    Greenhouse boards API, token `conga`. One GET returns the whole board; parse id, title, location.name, absolute_url, departments[], first_published, content (html.unescape+strip), pay_input_ranges.
+
+- slug: devrev
+  name: "DevRev"
+  url: https://boards-api.greenhouse.io/v1/boards/devrev/jobs?content=true
+  render: static
+  company: "DevRev"
+  hints: >-
+    Greenhouse boards API, token `devrev`. One GET returns the whole board; parse id, title, location.name, absolute_url, departments[], first_published, content (html.unescape+strip), pay_input_ranges.
+
+- slug: cayuse
+  name: "Cayuse Holdings"
+  url: https://boards-api.greenhouse.io/v1/boards/cayuse/jobs?content=true
+  render: static
+  company: "Cayuse Holdings"
+  hints: >-
+    Greenhouse boards API, token `cayuse`. One GET returns the whole board; parse id, title, location.name, absolute_url, departments[], first_published, content (html.unescape+strip), pay_input_ranges.
+
+- slug: cresta
+  name: "Cresta"
+  url: https://boards-api.greenhouse.io/v1/boards/cresta/jobs?content=true
+  render: static
+  company: "Cresta"
+  hints: >-
+    Greenhouse boards API, token `cresta`. One GET returns the whole board; parse id, title, location.name, absolute_url, departments[], first_published, content (html.unescape+strip), pay_input_ranges.
+
+- slug: instacart
+  name: "Instacart"
+  url: https://boards-api.greenhouse.io/v1/boards/instacart/jobs?content=true
+  render: static
+  company: "Instacart"
+  hints: >-
+    Greenhouse boards API, token `instacart`. One GET returns the whole board; parse id, title, location.name, absolute_url, departments[], first_published, content (html.unescape+strip), pay_input_ranges.
+
+- slug: kalepa
+  name: "Kalepa"
+  url: https://boards-api.greenhouse.io/v1/boards/kalepa/jobs?content=true
+  render: static
+  company: "Kalepa"
+  hints: >-
+    Greenhouse boards API, token `kalepa`. One GET returns the whole board; parse id, title, location.name, absolute_url, departments[], first_published, content (html.unescape+strip), pay_input_ranges.
+
+- slug: tripadvisor
+  name: "Tripadvisor"
+  url: https://boards-api.greenhouse.io/v1/boards/tripadvisor/jobs?content=true
+  render: static
+  company: "Tripadvisor"
+  hints: >-
+    Greenhouse boards API, token `tripadvisor`. One GET returns the whole board; parse id, title, location.name, absolute_url, departments[], first_published, content (html.unescape+strip), pay_input_ranges.
+
+- slug: motley_fool
+  name: "The Motley Fool"
+  url: https://boards-api.greenhouse.io/v1/boards/themotleyfool/jobs?content=true
+  render: static
+  company: "The Motley Fool"
+  hints: >-
+    Greenhouse boards API, token `themotleyfool`. One GET returns the whole board; parse id, title, location.name, absolute_url, departments[], first_published, content (html.unescape+strip), pay_input_ranges.
+
+- slug: databento
+  name: "Databento"
+  url: https://boards-api.greenhouse.io/v1/boards/databento/jobs?content=true
+  render: static
+  company: "Databento"
+  hints: >-
+    Greenhouse boards API, token `databento`. One GET returns the whole board; parse id, title, location.name, absolute_url, departments[], first_published, content (html.unescape+strip), pay_input_ranges.
+
+- slug: galaxy_digital
+  name: "Galaxy Digital"
+  url: https://boards-api.greenhouse.io/v1/boards/galaxydigitalservices/jobs?content=true
+  render: static
+  company: "Galaxy Digital"
+  hints: >-
+    Greenhouse boards API, token `galaxydigitalservices`. One GET returns the whole board; parse id, title, location.name, absolute_url, departments[], first_published, content (html.unescape+strip), pay_input_ranges.
+
+- slug: coalition
+  name: "Coalition"
+  url: https://boards-api.greenhouse.io/v1/boards/coalition/jobs?content=true
+  render: static
+  company: "Coalition"
+  hints: >-
+    Greenhouse boards API, token `coalition`. One GET returns the whole board; parse id, title, location.name, absolute_url, departments[], first_published, content (html.unescape+strip), pay_input_ranges.
+
+- slug: fleetio
+  name: "Fleetio"
+  url: https://boards-api.greenhouse.io/v1/boards/fleetio/jobs?content=true
+  render: static
+  company: "Fleetio"
+  hints: >-
+    Greenhouse boards API, token `fleetio`. One GET returns the whole board; parse id, title, location.name, absolute_url, departments[], first_published, content (html.unescape+strip), pay_input_ranges.
+
+- slug: spire
+  name: "Spire"
+  url: https://boards-api.greenhouse.io/v1/boards/spire/jobs?content=true
+  render: static
+  company: "Spire"
+  hints: >-
+    Greenhouse boards API, token `spire`. One GET returns the whole board; parse id, title, location.name, absolute_url, departments[], first_published, content (html.unescape+strip), pay_input_ranges.
+
+- slug: turing
+  name: "Turing"
+  url: https://boards-api.greenhouse.io/v1/boards/turing/jobs?content=true
+  render: static
+  company: "Turing"
+  hints: >-
+    Greenhouse boards API, token `turing`. One GET returns the whole board; parse id, title, location.name, absolute_url, departments[], first_published, content (html.unescape+strip), pay_input_ranges.
+
+- slug: launch_potato
+  name: "Launch Potato"
+  url: https://boards-api.greenhouse.io/v1/boards/launchpotato/jobs?content=true
+  render: static
+  company: "Launch Potato"
+  hints: >-
+    Greenhouse boards API, token `launchpotato`. One GET returns the whole board; parse id, title, location.name, absolute_url, departments[], first_published, content (html.unescape+strip), pay_input_ranges.
+
+- slug: collective
+  name: "Collective"
+  url: https://api.ashbyhq.com/posting-api/job-board/collective?includeCompensation=true
+  render: static
+  company: "Collective"
+  hints: >-
+    Ashby public posting-api, token `collective`. Whole board in one JSON GET; parse the standard Ashby fields (jobUrl, title, descriptionPlain, location/secondaryLocations, compensation). Single request; never authorize a host merely linked in a description.
+
+- slug: photoroom
+  name: "Photoroom"
+  url: https://api.ashbyhq.com/posting-api/job-board/photoroom?includeCompensation=true
+  render: static
+  company: "Photoroom"
+  hints: >-
+    Ashby public posting-api, token `photoroom`. Whole board in one JSON GET; parse the standard Ashby fields (jobUrl, title, descriptionPlain, location/secondaryLocations, compensation). Single request; never authorize a host merely linked in a description.
+
+- slug: welltech
+  name: "Welltech"
+  url: https://api.ashbyhq.com/posting-api/job-board/welltech?includeCompensation=true
+  render: static
+  company: "Welltech"
+  hints: >-
+    Ashby public posting-api, token `welltech`. Whole board in one JSON GET; parse the standard Ashby fields (jobUrl, title, descriptionPlain, location/secondaryLocations, compensation). Single request; never authorize a host merely linked in a description.
+
+- slug: polymarket
+  name: "Polymarket"
+  url: https://api.ashbyhq.com/posting-api/job-board/polymarket?includeCompensation=true
+  render: static
+  company: "Polymarket"
+  hints: >-
+    Ashby public posting-api, token `polymarket`. Whole board in one JSON GET; parse the standard Ashby fields (jobUrl, title, descriptionPlain, location/secondaryLocations, compensation). Single request; never authorize a host merely linked in a description.
+
+- slug: quora
+  name: "Quora"
+  url: https://api.ashbyhq.com/posting-api/job-board/quora?includeCompensation=true
+  render: static
+  company: "Quora"
+  hints: >-
+    Ashby public posting-api, token `quora`. Whole board in one JSON GET; parse the standard Ashby fields (jobUrl, title, descriptionPlain, location/secondaryLocations, compensation). Single request; never authorize a host merely linked in a description.
+
+- slug: reka
+  name: "Reka"
+  url: https://api.ashbyhq.com/posting-api/job-board/reka?includeCompensation=true
+  render: static
+  company: "Reka"
+  hints: >-
+    Ashby public posting-api, token `reka`. Whole board in one JSON GET; parse the standard Ashby fields (jobUrl, title, descriptionPlain, location/secondaryLocations, compensation). Single request; never authorize a host merely linked in a description.
+
+- slug: benchling
+  name: "Benchling"
+  url: https://api.ashbyhq.com/posting-api/job-board/benchling?includeCompensation=true
+  render: static
+  company: "Benchling"
+  hints: >-
+    Ashby public posting-api, token `benchling`. Whole board in one JSON GET; parse the standard Ashby fields (jobUrl, title, descriptionPlain, location/secondaryLocations, compensation). Single request; never authorize a host merely linked in a description.
+
+- slug: olo
+  name: "Olo"
+  url: https://api.lever.co/v0/postings/olo?mode=json
+  render: static
+  company: "Olo"
+  hints: >-
+    Lever postings API, token `olo`. Whole board as a JSON list in one GET; reconstruct full text from description + lists[].content + additional; parse id, text, categories.location/team/commitment, createdAt, hostedUrl.
+
+- slug: superside
+  name: "Superside"
+  url: https://api.lever.co/v0/postings/superside?mode=json
+  render: static
+  company: "Superside"
+  hints: >-
+    Lever postings API, token `superside`. Whole board as a JSON list in one GET; reconstruct full text from description + lists[].content + additional; parse id, text, categories.location/team/commitment, createdAt, hostedUrl.
+
+- slug: zartis
+  name: "Zartis"
+  url: https://api.lever.co/v0/postings/zartis?mode=json
+  render: static
+  company: "Zartis"
+  hints: >-
+    Lever postings API, token `zartis`. Whole board as a JSON list in one GET; reconstruct full text from description + lists[].content + additional; parse id, text, categories.location/team/commitment, createdAt, hostedUrl.
+
+- slug: vrchat
+  name: "VRChat"
+  url: https://api.lever.co/v0/postings/vrchat?mode=json
+  render: static
+  company: "VRChat"
+  hints: >-
+    Lever postings API, token `vrchat`. Whole board as a JSON list in one GET; reconstruct full text from description + lists[].content + additional; parse id, text, categories.location/team/commitment, createdAt, hostedUrl.
+
+- slug: zencore
+  name: "Zencore"
+  url: https://api.lever.co/v0/postings/zencore?mode=json
+  render: static
+  company: "Zencore"
+  hints: >-
+    Lever postings API, token `zencore`. Whole board as a JSON list in one GET; reconstruct full text from description + lists[].content + additional; parse id, text, categories.location/team/commitment, createdAt, hostedUrl.
+
+- slug: three_pillar_global
+  name: "3Pillar Global"
+  url: https://api.lever.co/v0/postings/3pillarglobal?mode=json
+  render: static
+  company: "3Pillar Global"
+  hints: >-
+    Lever postings API, token `3pillarglobal`. Whole board as a JSON list in one GET; reconstruct full text from description + lists[].content + additional; parse id, text, categories.location/team/commitment, createdAt, hostedUrl.
