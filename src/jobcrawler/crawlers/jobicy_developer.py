@@ -1,48 +1,56 @@
+
 import html
 import json
 import re
 
+from jobcrawler.runtime.contract import Job
 
-SITE = 'https://jobicy.com/api/v2/remote-jobs?count=100&industry=dev'
+SITE = "https://jobicy.com/api/v2/remote-jobs?count=100&industry=dev"
 EXTRA_HOSTS = []
 
 
-def _text(value):
-    if value is None:
-        return None
-    value = html.unescape(str(value))
-    value = re.sub(r"(?i)<br\s*/?>", "\n", value)
-    value = re.sub(r"(?i)</(?:p|div|li|h[1-6])\s*>", "\n", value)
-    value = re.sub(r"<[^>]+>", "", value)
-    value = value.replace("\xa0", " ")
-    value = re.sub(r"[ \t]+", " ", value)
-    value = re.sub(r" *\n *", "\n", value)
-    value = re.sub(r"\n{3,}", "\n\n", value)
-    return value.strip() or None
+def _plain_text(value):
+    value = html.unescape(value)
+    value = re.sub(
+        r"(?i)<\s*br\s*/?\s*>|</?\s*(?:div|p|li|ul|ol|section|article|h[1-6]|table|tr|td|th)\b[^>]*>",
+        "\n",
+        value,
+    )
+    value = re.sub(r"(?s)<script\b[^>]*>.*?</script\s*>", " ", value, flags=re.I)
+    value = re.sub(r"(?s)<style\b[^>]*>.*?</style\s*>", " ", value, flags=re.I)
+    value = re.sub(r"(?s)<[^>]+>", " ", value)
+    value = html.unescape(value)
+
+    lines = []
+    for line in value.splitlines():
+        cleaned = " ".join(line.split())
+        if cleaned:
+            lines.append(cleaned)
+    return "\n".join(lines)
 
 
-def _first_text(value):
+def _display(value):
     if isinstance(value, list):
-        value = value[0] if value else None
-    return _text(value)
+        values = [str(item) for item in value if item not in (None, "")]
+        return ", ".join(values) if values else None
+    return value
 
 
 def crawl(ctx):
-    data = json.loads(ctx.fetch(SITE))
-    for item in data.get("jobs", []):
-        title = _text(item.get("jobTitle") or item.get("title"))
-        company = _text(item.get("companyName") or item.get("company"))
-        location = _text(item.get("jobGeo") or item.get("location"))
-        description = _text(
-            item.get("jobDescription")
-            or item.get("description")
-            or item.get("content")
-        )
-        url = item.get("url") or item.get("jobUrl")
+    response = ctx.fetch(SITE)
+    payload = json.loads(response)
 
-        if not all((title, company, location, url, description)):
+    for item in payload.get("jobs", []):
+        title = item.get("jobTitle")
+        company = item.get("companyName")
+        location = item.get("jobGeo")
+        url = item.get("url")
+        description_html = item.get("jobDescription")
+        if not all((title, company, location, url, description_html)):
             continue
-        if len(description) < 200:
+
+        description = _plain_text(description_html)
+        if not description:
             continue
 
         fields = {
@@ -51,14 +59,22 @@ def crawl(ctx):
             "company": company,
             "location": location,
             "description": description,
-            "source": SITE,
-            "external_id": str(item["id"]) if item.get("id") is not None else None,
-            "posted_at": item.get("pubDate") or item.get("publishedAt"),
-            "employment_type": _first_text(item.get("jobType")),
-            "department": _first_text(item.get("jobIndustry")),
+            "source": "Jobicy",
+        }
+
+        optional = {
+            "external_id": str(item.get("id")) if item.get("id") is not None else None,
+            "employment_type": _display(item.get("jobType")),
+            "department": _display(item.get("jobIndustry")),
+            "posted_at": item.get("pubDate"),
             "salary_min": item.get("salaryMin"),
             "salary_max": item.get("salaryMax"),
             "salary_currency": item.get("salaryCurrency"),
             "salary_period": item.get("salaryPeriod"),
         }
-        yield {key: value for key, value in fields.items() if value is not None}
+        fields.update({
+            key: value
+            for key, value in optional.items()
+            if value not in (None, "", [])
+        })
+        yield Job(**fields)
