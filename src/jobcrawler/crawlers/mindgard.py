@@ -2,6 +2,7 @@
 import json
 import re
 from html import unescape
+from jobcrawler.runtime.contract import Job
 
 
 SITE = "https://apply.workable.com/api/v1/widget/accounts/mindgard"

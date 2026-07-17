@@ -191,6 +191,74 @@ def test_unparsable_source_is_truncation() -> None:
     assert not res.passed
 
 
+# -- gate 1(a): unbound names ------------------------------------------------
+
+
+def test_unbound_job_fails_with_import_hint() -> None:
+    # The mistral-cohort bug: `yield Job(...)` with no import. On a board with
+    # zero openings the yield never runs, so runtime validation and the §6
+    # empty-board admission both pass a crawler that NameErrors on the first
+    # real job — only this static check is positioned to see it.
+    src = 'SITE="https://x.com"\ndef crawl(ctx):\n    yield Job(url=ctx.fetch(SITE))\n'
+    res = check_ast(src)
+    assert not res.passed
+    assert any("unbound name: Job" in f for f in res.failures)
+    assert any("jobcrawler.runtime.contract import Job" in f for f in res.failures)
+
+
+def test_job_bound_locally_passes() -> None:
+    # Legacy crawlers that resolve Job themselves (`Job = dict`) are fine: the
+    # runner validates plain dicts through Job.model_validate.
+    src = 'Job = dict\nSITE="https://x.com"\ndef crawl(ctx):\n    yield Job(a=1)\n'
+    assert check_ast(src).passed
+
+
+def test_unbound_name_in_nested_scope_fails() -> None:
+    src = (
+        'SITE="https://x.com"\n'
+        "def crawl(ctx):\n"
+        "    fn = lambda v: _clean(v)\n"
+        "    yield fn(1)\n"
+    )
+    res = check_ast(src)
+    assert not res.passed
+    assert any("unbound name: _clean" in f for f in res.failures)
+
+
+def test_forward_reference_and_global_decl_pass() -> None:
+    # Flow-insensitive like Python itself: a module-level def bound after its
+    # call site and a name assigned via `global` from inside crawl both count.
+    src = (
+        'SITE="https://x.com"\n'
+        "def crawl(ctx):\n"
+        "    global seen\n"
+        "    seen = set()\n"
+        "    yield _helper(ctx)\n"
+        "def _helper(ctx):\n"
+        "    return sorted(seen)\n"
+    )
+    assert check_ast(src).passed
+
+
+def test_stringified_annotations_are_not_runtime_reads() -> None:
+    # With `from __future__ import annotations` an annotation never evaluates,
+    # so an unimported name there is not a NameError; without the future import
+    # it evaluates at def time and must flag. symtable honors the flag.
+    future = (
+        "from __future__ import annotations\n"
+        'SITE="https://x.com"\n'
+        "def _clean(v: SomeAlias) -> SomeAlias:\n"
+        "    return v\n"
+        "def crawl(ctx):\n"
+        "    yield _clean(1)\n"
+    )
+    assert check_ast(future).passed
+    bare = future.removeprefix("from __future__ import annotations\n")
+    res = check_ast(bare)
+    assert not res.passed
+    assert any("unbound name: SomeAlias" in f for f in res.failures)
+
+
 # -- gate 1(b): EXTRA_HOSTS shape + host admission (§8) -------------------------
 
 

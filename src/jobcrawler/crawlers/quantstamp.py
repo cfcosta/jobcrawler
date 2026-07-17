@@ -1,4 +1,5 @@
 import json
+from jobcrawler.runtime.contract import Job
 
 
 SITE = "https://api.ashbyhq.com/posting-api/job-board/quantstamp?includeCompensation=true"

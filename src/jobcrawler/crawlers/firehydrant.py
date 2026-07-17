@@ -3,6 +3,7 @@ import html
 import json
 import re
 from urllib.parse import urlencode, urlsplit, urlunsplit
+from jobcrawler.runtime.contract import Job
 
 
 SITE = "https://ats.rippling.com/api/v2/board/firehydrant/jobs?page=0&pageSize=1000"

@@ -2,6 +2,7 @@
 import html
 import json
 import re
+from jobcrawler.runtime.contract import Job
 
 
 SITE = "https://api.ashbyhq.com/posting-api/job-board/flashbots.net?includeCompensation=true"

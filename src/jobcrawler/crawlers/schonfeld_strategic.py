@@ -2,6 +2,7 @@
 import json
 import re
 import html
+from jobcrawler.runtime.contract import Job
 
 SITE = "https://boards-api.greenhouse.io/v1/boards/schonfeld/jobs?content=true"
 EXTRA_HOSTS = []

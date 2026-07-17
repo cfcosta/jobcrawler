@@ -4,6 +4,7 @@ import re
 from html import unescape
 from typing import Iterator
 from urllib.parse import urlencode, urlsplit, urlunsplit
+from jobcrawler.runtime.contract import Job
 
 
 

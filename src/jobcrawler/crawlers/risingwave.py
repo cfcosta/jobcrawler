@@ -2,6 +2,7 @@
 import html
 import json
 import re
+from jobcrawler.runtime.contract import Job
 
 
 SITE = "https://apply.workable.com/api/v1/widget/accounts/risingwave-labs?details=true"

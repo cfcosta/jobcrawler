@@ -5,6 +5,7 @@ import html
 import json
 import re
 from urllib.parse import quote
+from jobcrawler.runtime.contract import Job
 
 SITE = "https://apply.workable.com/api/v1/widget/accounts/strapi"
 EXTRA_HOSTS = []

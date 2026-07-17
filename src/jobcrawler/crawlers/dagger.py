@@ -2,6 +2,7 @@
 import html
 import json
 import re
+from jobcrawler.runtime.contract import Job
 
 
 SITE = 'https://boards-api.greenhouse.io/v1/boards/dagger/jobs?content=true'

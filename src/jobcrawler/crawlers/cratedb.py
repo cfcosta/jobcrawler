@@ -3,6 +3,7 @@ import html
 import json
 import re
 from urllib.parse import urlencode, urlsplit, urlunsplit
+from jobcrawler.runtime.contract import Job
 
 
 

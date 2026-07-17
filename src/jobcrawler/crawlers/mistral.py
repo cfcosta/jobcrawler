@@ -3,6 +3,7 @@ import json
 import re
 from datetime import datetime, timezone
 from html import unescape
+from jobcrawler.runtime.contract import Job
 
 
 SITE = "https://api.lever.co/v0/postings/mistral?mode=json"

@@ -1,6 +1,7 @@
 import json
 import re
 import html
+from jobcrawler.runtime.contract import Job
 
 
 SITE = 'https://api.ashbyhq.com/posting-api/job-board/chronospherejobs?includeCompensation=true'

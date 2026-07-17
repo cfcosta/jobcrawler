@@ -40,8 +40,10 @@ a careers board, and this is exactly the spot a naive port would get wrong.
 from __future__ import annotations
 
 import ast
+import builtins
 import math
 import re
+import symtable
 from collections.abc import Collection
 from dataclasses import dataclass
 from enum import Enum
@@ -142,7 +144,88 @@ def check_ast(source: str) -> GateResult:
             )
 
     failures.extend(_check_contract(tree))
+    failures.extend(_check_unbound_names(source, tree))
     return GateResult(not failures, tuple(failures))
+
+
+def _module_bindings(table: symtable.SymbolTable) -> set[str]:
+    """Names bound at module scope: module-level assignments, imports, and defs,
+    plus names a nested scope both declares ``global`` and assigns."""
+    bound = {
+        sym.get_name()
+        for sym in table.get_symbols()
+        if sym.is_assigned() or sym.is_imported() or sym.is_namespace()
+    }
+    stack = list(table.get_children())
+    while stack:
+        scope = stack.pop()
+        bound.update(
+            sym.get_name()
+            for sym in scope.get_symbols()
+            if sym.is_declared_global() and sym.is_assigned()
+        )
+        stack.extend(scope.get_children())
+    return bound
+
+
+def _check_unbound_names(source: str, tree: ast.Module) -> list[str]:
+    """Reject reads of names that resolve nowhere: neither bound in the module
+    nor a builtin.
+
+    A crawler execs in a bare namespace (§8) — nothing is injected — so an
+    unbound read (the classic: ``yield Job(...)`` with no import) is a NameError
+    the moment the line runs. On a board currently listing zero openings that
+    line never runs, so the bug clears runtime validation *and* the §6
+    empty-board admission and gets promoted — a crawler that crashes on the
+    first real job. This static check is the only gate positioned to see it.
+
+    Resolution is flow-insensitive, matching Python's own scoping: a name bound
+    anywhere in a scope is bound for that whole scope, so forward references to
+    later module-level defs pass. ``symtable`` does the scope analysis
+    (parameters, locals, frees, and — honoring ``from __future__ import
+    annotations`` — stringified annotations are never flagged).
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and any(
+            alias.name == "*" for alias in node.names
+        ):
+            return []  # a star import binds statically-unknowable names
+    try:
+        table = symtable.symtable(source, "<candidate>", "exec")
+    except SyntaxError as exc:  # parses but fails scope analysis (bad nonlocal &c.)
+        return [f"source does not compile: {exc.msg}"]
+
+    bound = _module_bindings(table)
+    # The full builtins namespace: names on the banned half are already flagged
+    # by their own rule above, so treating them as resolvable here avoids a
+    # duplicate failure for the same token.
+    known = set(vars(builtins))
+    unbound: set[str] = set()
+    stack: list[symtable.SymbolTable] = [table]
+    while stack:
+        scope = stack.pop()
+        for sym in scope.get_symbols():
+            name = sym.get_name()
+            if (
+                sym.is_referenced()
+                and sym.is_global()
+                and name not in bound
+                and name not in known
+            ):
+                unbound.add(name)
+        stack.extend(scope.get_children())
+
+    return [
+        f"unbound name: {name} is referenced but never imported, assigned, or "
+        "defined — the sandbox injects nothing, so this line raises NameError "
+        "the moment it runs"
+        + (
+            " (add: from jobcrawler.runtime.contract import Job)"
+            if name == "Job"
+            else ""
+        )
+        for name in sorted(unbound)
+    ]
 
 
 def _check_contract(tree: ast.Module) -> list[str]:

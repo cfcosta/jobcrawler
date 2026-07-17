@@ -2,6 +2,7 @@
 import json
 import re
 from html import unescape
+from jobcrawler.runtime.contract import Job
 
 SITE = "https://api.ashbyhq.com/posting-api/job-board/lancedb?includeCompensation=true"
 EXTRA_HOSTS = []

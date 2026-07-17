@@ -3,6 +3,7 @@ import html
 import json
 import re
 from urllib.parse import quote
+from jobcrawler.runtime.contract import Job
 
 SITE = "https://ats.rippling.com/moov/jobs"
 EXTRA_HOSTS = []
