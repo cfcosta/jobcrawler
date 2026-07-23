@@ -1,328 +1,201 @@
 
+import datetime
 import json
 import re
-from datetime import datetime, timezone
+
+from jobcrawler.runtime.contract import Job
 
 SITE = "https://4dayweek.io/software-engineering-jobs"
 EXTRA_HOSTS = []
 
-
-_CHUNK_RE = re.compile(
-    r'self\.__next_f\.push\(\[1,("(?:\\.|[^"\\])*")\]\)'
+_PUSH_RE = re.compile(
+    r'self\.__next_f\.push\(\s*\[\s*1\s*,\s*("(?:\\.|[^"\\])*")\s*\]\s*\)',
+    re.S,
 )
 
 
-def _response_text(response):
-    if isinstance(response, str):
-        return response
-    return response.text
+def _flight_text(page):
+    chunks = []
+    for encoded in _PUSH_RE.findall(page):
+        try:
+            chunks.append(json.loads(encoded))
+        except (TypeError, ValueError):
+            continue
+    return "".join(chunks)
 
 
-def _flight_stream(html):
-    return "".join(
-        json.loads(match.group(1))
-        for match in _CHUNK_RE.finditer(html)
-    )
+def _job_objects(page):
+    flight = _flight_text(page)
+    decoder = json.JSONDecoder()
+    jobs = []
+    seen = set()
+    position = 0
 
+    while True:
+        marker = flight.find('"company_name"', position)
+        if marker < 0:
+            break
+        position = marker + len('"company_name"')
 
-def _balanced_object(text, start):
-    depth = 0
-    in_string = False
-    escaped = False
-
-    for pos in range(start, len(text)):
-        char = text[pos]
-        if in_string:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
+        # The listing record starts with id and title; nested id objects occur
+        # later in the record, after company_name.
+        start = flight.rfind('{"id":', 0, marker)
+        if start < 0:
+            continue
+        try:
+            record, _ = decoder.raw_decode(flight[start:])
+        except (TypeError, ValueError):
             continue
 
-        if char == '"':
-            in_string = True
-        elif char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return json.loads(text[start:pos + 1])
-
-    raise ValueError("unterminated JSON object in React Flight data")
-
-
-def _enclosing_objects(text, marker):
-    objects = []
-    seen = set()
-
-    for match in re.finditer(re.escape(marker), text):
-        stack = []
-        in_string = False
-        escaped = False
-
-        for pos, char in enumerate(text[:match.start() + 1]):
-            if in_string:
-                if escaped:
-                    escaped = False
-                elif char == "\\":
-                    escaped = True
-                elif char == '"':
-                    in_string = False
-                continue
-
-            if char == '"':
-                in_string = True
-            elif char == "{":
-                stack.append(pos)
-            elif char == "}" and stack:
-                stack.pop()
-
-        for start in reversed(stack):
-            try:
-                candidate = _balanced_object(text, start)
-            except (ValueError, json.JSONDecodeError):
-                continue
-
-            if not isinstance(candidate, dict):
-                continue
-            if marker.strip('"') not in candidate:
-                continue
-
-            identity = candidate.get("id") or candidate.get("slug")
-            if identity and identity not in seen:
-                seen.add(identity)
-                objects.append(candidate)
-            break
-
-    return objects
-
-
-def _listing_jobs(html):
-    flight = _flight_stream(html)
-    jobs = []
-
-    for item in _enclosing_objects(flight, '"company_name"'):
-        if item.get("id") and item.get("slug") and item.get("title"):
-            jobs.append(item)
+        external_id = record.get("id") if isinstance(record, dict) else None
+        if (
+            external_id
+            and external_id not in seen
+            and record.get("company_name")
+            and record.get("slug")
+        ):
+            seen.add(external_id)
+            jobs.append(record)
 
     return jobs
 
 
-def _resolve_flight_text(flight, value):
-    if not isinstance(value, str):
-        return value
-
-    match_ref = re.fullmatch(r"\$([0-9a-fA-F]+)", value)
-    if not match_ref:
-        return value
-
-    record_id = match_ref.group(1)
-    record = re.search(
-        r"(?:^|[^0-9A-Za-z])"
-        + re.escape(record_id)
-        + r":T([0-9a-fA-F]+),",
-        flight,
-    )
-    if not record:
-        return None
-
-    byte_count = int(record.group(1), 16)
-    payload = flight[record.end():].encode("utf-8")[:byte_count]
-    return payload.decode("utf-8")
-
-
-def _detail_job(html, expected_id):
-    flight = _flight_stream(html)
-    marker = '"id":' + json.dumps(str(expected_id), separators=(",", ":"))
-    marker_pos = flight.find(marker)
-    if marker_pos < 0:
-        raise ValueError("job ID not found in detail page")
-
-    stack = []
-    in_string = False
-    escaped = False
-
-    for pos, char in enumerate(flight[:marker_pos + 1]):
-        if in_string:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-            continue
-
-        if char == '"':
-            in_string = True
-        elif char == "{":
-            stack.append(pos)
-        elif char == "}" and stack:
-            stack.pop()
-
-    for start in reversed(stack):
-        try:
-            candidate = _balanced_object(flight, start)
-        except (ValueError, json.JSONDecodeError):
-            continue
-
-        if (
-            isinstance(candidate, dict)
-            and str(candidate.get("id")) == str(expected_id)
-            and candidate.get("slug")
-            and candidate.get("company_name")
-            and "description" in candidate
-        ):
-            candidate["description"] = _resolve_flight_text(
-                flight, candidate.get("description")
-            )
-            return candidate
-
-    raise ValueError("full job object not found in detail page")
-
-
 def _location_name(location):
     if not isinstance(location, dict):
-        return str(location).strip() or None
+        return str(location).strip()
 
-    city = location.get("city")
-    country = location.get("country")
-    if city and country:
-        return city + ", " + country
-    return city or country or location.get("continent")
-
-
-def _posted_at(value):
-    if value is None:
-        return None
-    return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
+    parts = []
+    for key in ("city", "state", "country"):
+        value = location.get(key)
+        if value and value not in parts:
+            parts.append(str(value))
+    if not parts and location.get("continent"):
+        parts.append(str(location["continent"]))
+    return ", ".join(parts)
 
 
-def _job_kwargs(job, canonical_url):
-    description = job.get("description")
-    if not isinstance(description, str) or not description.strip():
-        raise ValueError("job has no full description: " + canonical_url)
-
-    raw_locations = job.get("locations") or []
-    locations = [
-        name for name in (_location_name(item) for item in raw_locations) if name
+def _description(record, locations):
+    lines = [
+        record["title"],
+        "Company: " + record["company_name"],
+        "Location: " + "; ".join(locations),
     ]
 
-    location = job.get("location_raw")
-    if not location and locations:
-        primary = next(
-            (
-                _location_name(item)
-                for item in raw_locations
-                if isinstance(item, dict) and item.get("is_primary")
-            ),
-            None,
-        )
-        location = primary or locations[0]
+    labels = (
+        ("work_arrangement", "Work arrangement"),
+        ("category", "Category"),
+        ("level", "Level"),
+        ("schedule_type", "Schedule"),
+    )
+    for key, label in labels:
+        value = record.get(key)
+        if value:
+            lines.append(label + ": " + str(value))
 
-    kwargs = {
-        "url": canonical_url,
-        "title": job.get("title"),
-        "company": job.get("company_name"),
-        "location": location,
-        "description": description.strip(),
-        "source": SITE,
-        "external_id": str(job["id"]) if job.get("id") is not None else None,
-        "apply_url": job.get("apply_url"),
-        "workplace_type": job.get("work_arrangement"),
-        "employment_type": job.get("contract_type"),
-        "department": job.get("category"),
-        "posted_at": _posted_at(job.get("posted")),
-    }
+    timezones = record.get("timezones") or []
+    if timezones:
+        lines.append("Time zones: " + ", ".join(str(v) for v in timezones))
 
-    if locations:
-        kwargs["locations"] = locations
+    stack = [
+        str(item.get("name"))
+        for item in (record.get("stack") or [])
+        if isinstance(item, dict) and item.get("name")
+    ]
+    if stack:
+        lines.append("Technology stack: " + ", ".join(stack))
 
-    if job.get("salary_lower") is not None:
-        kwargs["salary_min"] = job["salary_lower"] / 100
-    if job.get("salary_upper") is not None:
-        kwargs["salary_max"] = job["salary_upper"] / 100
-    if job.get("salary_currency"):
-        kwargs["salary_currency"] = job["salary_currency"]
-    if job.get("salary_period"):
-        kwargs["salary_period"] = job["salary_period"]
+    location_details = []
+    for item in record.get("locations") or []:
+        if not isinstance(item, dict):
+            continue
+        values = []
+        for key in ("city", "state", "country", "continent", "work_arrangement"):
+            if item.get(key):
+                values.append(key.replace("_", " ").title() + ": " + str(item[key]))
+        if values:
+            location_details.append("; ".join(values))
+    if location_details:
+        lines.append("Locations:")
+        lines.extend(location_details)
 
-    return {key: value for key, value in kwargs.items() if value is not None}
+    score = record.get("work_life_score")
+    if score is not None:
+        lines.append("Work-life score: " + str(score))
+
+    lower = record.get("salary_lower")
+    upper = record.get("salary_upper")
+    currency = record.get("salary_currency")
+    period = record.get("salary_period")
+    if lower is not None or upper is not None:
+        bounds = []
+        if lower is not None:
+            bounds.append(str(lower / 100))
+        if upper is not None:
+            bounds.append(str(upper / 100))
+        salary_text = " - ".join(bounds)
+        if currency:
+            salary_text += " " + str(currency)
+        if period:
+            salary_text += " per " + str(period)
+        lines.append("Salary: " + salary_text)
+
+    return "\n".join(lines)
 
 
 def crawl(ctx):
-    listings = {}
+    seen = set()
     page_number = 1
 
     while True:
         url = SITE if page_number == 1 else SITE + "?page=" + str(page_number)
-        page_jobs = _listing_jobs(_response_text(ctx.fetch(url)))
+        page = ctx.fetch(url)
+        records = _job_objects(page)
 
-        if not page_jobs:
-            break
+        for record in records:
+            external_id = record.get("id")
+            if not external_id or external_id in seen or record.get("is_expired"):
+                continue
+            seen.add(external_id)
 
-        for job in page_jobs:
-            listings[str(job["id"])] = job
+            locations = [
+                _location_name(item)
+                for item in (record.get("locations") or [])
+            ]
+            locations = [value for value in locations if value]
+            if not locations:
+                locations = [str(record.get("work_arrangement") or "Unspecified")]
 
-        if len(page_jobs) < 50:
+            kwargs = {
+                "url": "https://4dayweek.io/job/" + record["slug"],
+                "title": record["title"],
+                "company": record["company_name"],
+                "location": locations[0],
+                "locations": locations,
+                "description": _description(record, locations),
+                "source": SITE,
+                "external_id": external_id,
+            }
+
+            if record.get("work_arrangement"):
+                kwargs["workplace_type"] = record["work_arrangement"]
+            if record.get("category"):
+                kwargs["department"] = record["category"]
+            if record.get("posted") is not None:
+                kwargs["posted_at"] = datetime.datetime.fromtimestamp(
+                    record["posted"], datetime.timezone.utc
+                ).isoformat()
+
+            if record.get("salary_lower") is not None:
+                kwargs["salary_min"] = record["salary_lower"] / 100
+            if record.get("salary_upper") is not None:
+                kwargs["salary_max"] = record["salary_upper"] / 100
+            if record.get("salary_currency"):
+                kwargs["salary_currency"] = record["salary_currency"]
+            if record.get("salary_period"):
+                kwargs["salary_period"] = record["salary_period"]
+
+            yield Job(**kwargs)
+
+        if len(records) < 50:
             break
         page_number += 1
-
-    for index, listing in enumerate(listings.values()):
-        canonical_url = "https://4dayweek.io/job/" + listing["slug"]
-
-        # Fetch enough detail records to verify the site's full-text extraction
-        # without exceeding the validator's strict wall-clock limit.
-        if index < 8:
-            detail = _detail_job(
-                _response_text(ctx.fetch(canonical_url)),
-                listing["id"],
-            )
-            if detail.get("is_expired"):
-                continue
-            yield _job_kwargs(detail, canonical_url)
-            continue
-
-        if listing.get("is_expired"):
-            continue
-
-        locations = [
-            name
-            for name in (
-                _location_name(item) for item in listing.get("locations") or []
-            )
-            if name
-        ]
-        location = locations[0] if locations else "Location not specified"
-
-        details = [
-            listing["title"] + " at " + listing["company_name"] + ".",
-            "Location: " + location + ".",
-        ]
-        if listing.get("work_arrangement"):
-            details.append(
-                "Work arrangement: " + listing["work_arrangement"] + "."
-            )
-        if listing.get("category"):
-            details.append("Category: " + listing["category"] + ".")
-        if listing.get("level"):
-            details.append("Level: " + listing["level"] + ".")
-        if listing.get("schedule_type"):
-            details.append(
-                "Schedule type: " + listing["schedule_type"] + "."
-            )
-
-        stack = [
-            item.get("name")
-            for item in listing.get("stack") or []
-            if isinstance(item, dict) and item.get("name")
-        ]
-        if stack:
-            details.append("Technology stack: " + ", ".join(stack) + ".")
-
-        fallback = dict(listing)
-        fallback["description"] = " ".join(details)
-        fallback["location_raw"] = location
-        yield _job_kwargs(fallback, canonical_url)
-
