@@ -1,81 +1,123 @@
+
 import html
 import json
 import re
+from jobcrawler.runtime.contract import Job
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
 
 SITE = "https://boards-api.greenhouse.io/v1/boards/boxinc/jobs?content=true"
 EXTRA_HOSTS = []
 
 
-_TAG_RE = re.compile(r"<[^>]+>")
-_SPACE_RE = re.compile(r"[ \t\r\f\v]+")
-_BLANK_RE = re.compile(r"\n\s*\n+")
-
-
-def _clean_description(value):
-    if not value:
-        return None
-    text = html.unescape(value)
-    text = re.sub(r"(?i)<\s*br\s*/?\s*>", "\n", text)
-    text = re.sub(r"(?i)</\s*(p|div|li|ul|ol|h[1-6]|section|tr)\s*>", "\n", text)
-    text = _TAG_RE.sub(" ", text)
+def _description(value):
+    text = html.unescape(value or "")
+    text = re.sub(
+        r"(?is)<\s*(?:br|hr)\s*/?\s*>|</?\s*(?:address|article|aside|blockquote|div|dl|dt|dd|figcaption|figure|footer|h[1-6]|header|li|main|ol|p|pre|section|table|tbody|td|tfoot|th|thead|tr|ul)\b[^>]*>",
+        "\n",
+        text,
+    )
+    text = re.sub(r"(?is)<(?:script|style)\b[^>]*>.*?</(?:script|style)\s*>", "", text)
+    text = re.sub(r"(?s)<[^>]+>", "", text)
     text = html.unescape(text)
-    text = text.replace("\xa0", " ")
-    text = _SPACE_RE.sub(" ", text)
-    text = _BLANK_RE.sub("\n\n", text)
-    return text.strip() or None
+
+    lines = []
+    for line in text.replace("\r", "\n").splitlines():
+        cleaned = " ".join(line.split())
+        if cleaned:
+            lines.append(cleaned)
+    return "\n".join(lines)
 
 
-def _first_department(job):
-    departments = job.get("departments") or []
-    for dept in departments:
-        name = dept.get("name") if isinstance(dept, dict) else None
-        if name:
-            return name
+def _api_url():
+    parts = urlsplit(SITE)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    query["content"] = "true"
+    query["pay_transparency"] = "true"
+    return urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
+    )
+
+
+def _response_json(response):
+    body = response.text if hasattr(response, "text") else response
+    if isinstance(body, bytes):
+        body = body.decode("utf-8")
+    return json.loads(body)
+
+
+def _metadata_value(job, name):
+    for item in job.get("metadata") or []:
+        if item.get("name") == name:
+            value = item.get("value")
+            if value not in (None, ""):
+                return value
     return None
 
 
 def crawl(ctx):
-    payload = json.loads(ctx.fetch(SITE + "&pay_transparency=true"))
-    for job in payload.get("jobs") or []:
-        title = (job.get("title") or "").strip()
-        url = job.get("absolute_url")
-        location = ((job.get("location") or {}).get("name") or "").strip()
-        description = _clean_description(job.get("content"))
+    payload = _response_json(ctx.fetch(_api_url()))
 
-        if not (title and url and location and description):
+    for item in payload.get("jobs") or []:
+        url = item.get("absolute_url")
+        title = item.get("title")
+        location = (item.get("location") or {}).get("name")
+        description = _description(item.get("content"))
+        if not url or not title or not location or not description:
             continue
 
-        item = {
+        fields = {
             "url": url,
             "title": title,
-            "company": "Box",
+            "company": "Box, Inc.",
             "location": location,
             "description": description,
-            "source": SITE,
-            "external_id": str(job.get("id")),
+            "source": "Greenhouse",
+            "external_id": (
+                item.get("requisition_id")
+                or (str(item["id"]) if item.get("id") is not None else None)
+            ),
+            "employment_type": _metadata_value(item, "Employment Type"),
+            "posted_at": item.get("first_published"),
         }
 
-        if job.get("first_published"):
-            item["posted_at"] = job["first_published"]
-        if job.get("application_deadline"):
-            item["expires_at"] = job["application_deadline"]
-
-        department = _first_department(job)
-        if department:
-            item["department"] = department
-
-        ranges = job.get("pay_input_ranges") or []
-        bands = [
-            r
-            for r in ranges
-            if isinstance(r, dict) and r.get("min_cents") and r.get("max_cents")
+        locations = [
+            office["name"]
+            for office in item.get("offices") or []
+            if office.get("name") not in (None, "")
         ]
-        currencies = {str(r.get("currency_type") or "").strip().upper() for r in bands}
-        # Single-currency boards only: mixed-currency ranges (one per region)
-        # cannot collapse into one honest band, so leave those unstated.
-        if bands and len(currencies) == 1 and "" not in currencies:
-            item["salary_min"] = min(r["min_cents"] for r in bands) / 100
-            item["salary_max"] = max(r["max_cents"] for r in bands) / 100
-            item["salary_currency"] = next(iter(currencies))
+        if locations:
+            fields["locations"] = locations
 
-        yield item
+        departments = [
+            department["name"]
+            for department in item.get("departments") or []
+            if department.get("name") not in (None, "")
+        ]
+        if departments:
+            fields["department"] = ", ".join(departments)
+
+        ranges = item.get("pay_input_ranges") or []
+        currencies = {
+            pay_range.get("currency_type")
+            for pay_range in ranges
+            if pay_range.get("currency_type")
+        }
+        if ranges and len(currencies) == 1:
+            minimums = [
+                pay_range["min_cents"] / 100
+                for pay_range in ranges
+                if pay_range.get("min_cents") is not None
+            ]
+            maximums = [
+                pay_range["max_cents"] / 100
+                for pay_range in ranges
+                if pay_range.get("max_cents") is not None
+            ]
+            if minimums:
+                fields["salary_min"] = min(minimums)
+            if maximums:
+                fields["salary_max"] = max(maximums)
+            fields["salary_currency"] = next(iter(currencies))
+
+        yield Job(**{key: value for key, value in fields.items() if value is not None})

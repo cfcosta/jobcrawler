@@ -1,213 +1,170 @@
 
+import html
 import json
 import re
-from html import unescape
 from urllib.parse import urlparse
-
+from xml.etree import ElementTree as ET
 
 SITE = "https://jobs.framework.ventures/"
 EXTRA_HOSTS = []
 
-_ROLE_WORDS = re.compile(
-    r"(?:engineer|engineering|developer|protocol|backend|back-end|blockchain|"
-    r"infrastructure|platform|wallet|defi|smart-contract|solidity|rust)",
-    re.I,
+_HOST = urlparse(SITE).netloc
+_MAX_POSTINGS = 6
+_ROLE_RE = re.compile(
+    r"(engineer|engineering|developer|protocol|backend|back-end|software|"
+    r"infrastructure|security|smart-contract|blockchain|devops|sre|architect)",
+    re.IGNORECASE,
 )
 
 
-def _plain_text(value):
-    value = unescape(value or "")
-    value = re.sub(
-        r"<\s*(?:br|p|div|li|h[1-6])\b[^>]*>",
-        "\n",
-        value,
-        flags=re.I,
-    )
-    value = re.sub(
-        r"<\s*/\s*(?:p|div|li|h[1-6])\s*>",
-        "\n",
-        value,
-        flags=re.I,
-    )
-    value = re.sub(r"<[^>]+>", " ", value)
-    value = unescape(value)
-    value = re.sub(r"[ \t\r\f\v]+", " ", value)
-    value = re.sub(r" *\n+ *", "\n", value)
-    return value.strip()
+def _xml_locations(xml_text):
+    try:
+        root = ET.fromstring(xml_text)
+    except (ET.ParseError, ValueError, TypeError):
+        return []
+    return [
+        node.text.strip()
+        for node in root.iter()
+        if node.tag.rsplit("}", 1)[-1] == "loc"
+        and node.text
+        and node.text.strip()
+    ]
 
 
-def _jobposting(page):
-    scripts = re.findall(
-        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+def _same_host(url):
+    parsed = urlparse(url)
+    return parsed.scheme in {"http", "https"} and parsed.netloc == _HOST
+
+
+def _description_text(value):
+    if not value or str(value).strip().lower() in {"null", "none", "undefined"}:
+        return None
+    text = html.unescape(str(value))
+    text = re.sub(
+        r"<\s*(?:br|hr)\b[^>]*?/?>|</\s*(?:address|article|blockquote|dd|div|dl|dt|"
+        r"figcaption|figure|footer|h[1-6]|header|li|main|ol|p|pre|section|table|"
+        r"td|th|tr|ul)\s*>",
+        "\n",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"<(?:script|style|noscript|template)\b[^>]*>.*?</(?:script|style|noscript|template)\s*>",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    text = re.sub(r"<[^>]+>", "", text)
+    text = html.unescape(text)
+    text = re.sub(r"[ \t\f\v]+", " ", text)
+    text = re.sub(r" *\n+ *", "\n", text).strip()
+    return text or None
+
+
+def _next_job(page):
+    match = re.search(
+        r'<script\b[^>]*\bid=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>',
         page,
-        re.I | re.S,
+        re.IGNORECASE | re.DOTALL,
     )
-    for raw in scripts:
-        try:
-            value = json.loads(raw)
-        except (TypeError, ValueError):
-            continue
-
-        values = value if isinstance(value, list) else [value]
-        for item in values:
-            if isinstance(item, dict) and item.get("@type") == "JobPosting":
-                return item
-    return None
+    if not match:
+        return None
+    try:
+        data = json.loads(html.unescape(match.group(1)))
+        return data["props"]["pageProps"]["initialState"]["jobs"]["currentJob"]
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
-def _locations(data):
+def _names(values):
     result = []
-    raw_locations = data.get("jobLocation")
-    if isinstance(raw_locations, dict):
-        raw_locations = [raw_locations]
-
-    if isinstance(raw_locations, list):
-        for item in raw_locations:
-            if not isinstance(item, dict):
-                continue
-            address = item.get("address") or {}
-            if isinstance(address, str):
-                location = address.strip()
-            elif isinstance(address, dict):
-                pieces = []
-                for key in (
-                    "streetAddress",
-                    "addressLocality",
-                    "addressRegion",
-                    "postalCode",
-                    "addressCountry",
-                ):
-                    piece = address.get(key)
-                    if isinstance(piece, dict):
-                        piece = piece.get("name")
-                    if piece:
-                        piece = str(piece).strip()
-                        if piece and piece not in pieces:
-                            pieces.append(piece)
-                location = ", ".join(pieces)
-            else:
-                location = ""
-
-            if location and location not in result:
-                result.append(location)
-
-    requirements = data.get("applicantLocationRequirements")
-    if not result:
-        if isinstance(requirements, dict):
-            requirements = [requirements]
-        if isinstance(requirements, list):
-            for requirement in requirements:
-                if not isinstance(requirement, dict):
-                    continue
-                name = requirement.get("name")
-                if name:
-                    name = str(name).strip()
-                    if name and name not in result:
-                        result.append(name)
-
+    for value in values or []:
+        name = value.get("name") if isinstance(value, dict) else value
+        if isinstance(name, str) and name.strip() and name.strip() not in result:
+            result.append(name.strip())
     return result
 
 
-def _apply_url(page):
-    anchors = re.finditer(
-        r'<a\b([^>]*?)href=["\']([^"\']+)["\']([^>]*)>(.*?)</a>',
-        page,
-        re.I | re.S,
-    )
-    for match in anchors:
-        attrs = match.group(1) + " " + match.group(3)
-        label = _plain_text(match.group(4))
-        href = unescape(match.group(2)).strip()
-        is_apply = (
-            "apply now" in label.lower()
-            or "button-apply-now" in attrs.lower()
-        )
-        if is_apply and href.startswith(("http://", "https://")):
-            return href
-    return None
+def _record(detail_url, job):
+    if not isinstance(job, dict):
+        return None
+    if str(job.get("status", "")).lower() not in {"", "active"}:
+        return None
+    if job.get("visibility") not in (None, "", "visible"):
+        return None
+
+    title = job.get("title")
+    organization = job.get("organization") or {}
+    company = organization.get("name")
+    description = _description_text(job.get("description"))
+    locations = _names(job.get("locations"))
+
+    if not title or not company or not description or not locations:
+        return None
+
+    record = {
+        "url": detail_url,
+        "title": title,
+        "company": company,
+        "location": locations[0],
+        "locations": locations,
+        "description": description,
+        "source": SITE,
+        "external_id": str(job["id"]) if job.get("id") is not None else None,
+        "posted_at": job.get("postedAt"),
+        "expires_at": job.get("expiresAt"),
+        "apply_url": job.get("url"),
+    }
+
+    employment_types = _names(job.get("employmentTypes"))
+    if employment_types:
+        record["employment_type"] = ", ".join(employment_types)
+
+    functions = _names(job.get("jobFunctions"))
+    if functions:
+        record["department"] = ", ".join(functions)
+
+    if job.get("compensationPublic") is True:
+        minimum = job.get("compensationAmountMinCents")
+        maximum = job.get("compensationAmountMaxCents")
+        if isinstance(minimum, (int, float)):
+            record["salary_min"] = minimum / 100
+        if isinstance(maximum, (int, float)):
+            record["salary_max"] = maximum / 100
+        if "salary_min" in record or "salary_max" in record:
+            if job.get("compensationCurrency"):
+                record["salary_currency"] = job["compensationCurrency"]
+            if job.get("compensationPeriod"):
+                record["salary_period"] = job["compensationPeriod"]
+
+    return {
+        key: value
+        for key, value in record.items()
+        if value is not None and value != "" and value != []
+    }
 
 
 def crawl(ctx):
-    root = ctx.fetch(SITE + "sitemap.xml")
-    sitemap_urls = re.findall(
-        r"<loc>\s*([^<]*sitemap_jobs[^<]*)\s*</loc>",
-        root,
-        re.I,
-    )
-    seen = set()
-    candidates = []
+    # The first shard is newest-first; bound detail fetches to the requested
+    # recent engineering/protocol/backend window while sampling companies.
+    sitemap_url = SITE + "sitemap_jobs1.xml"
+    selected = []
+    companies = set()
+    for url in _xml_locations(ctx.fetch(sitemap_url)):
+        match = re.search(r"/companies/([^/]+)/jobs/", urlparse(url).path)
+        company_slug = match.group(1) if match else None
+        if (
+            len(selected) < _MAX_POSTINGS
+            and company_slug
+            and company_slug not in companies
+            and _same_host(url)
+            and _ROLE_RE.search(url)
+        ):
+            companies.add(company_slug)
+            selected.append(url)
 
-    for sitemap_url in sitemap_urls[:1]:
-        xml = ctx.fetch(unescape(sitemap_url.strip()))
-        urls = re.findall(
-            r"<loc>\s*([^<]+/jobs/[^<]+)\s*</loc>",
-            xml,
-            re.I,
-        )
-        for raw_url in urls:
-            url = unescape(raw_url.strip())
-            if url in seen:
-                continue
-            if urlparse(url).hostname != "jobs.framework.ventures":
-                continue
-
-            seen.add(url)
-            slug = url.rsplit("/", 1)[-1]
-            if _ROLE_WORDS.search(slug):
-                candidates.append(url)
-
-    # Getro publishes sitemap partitions newest-first. Use the newest partition
-    # for the requested bounded window of recent engineering and protocol roles.
-    for url in candidates[:4]:
-        page = ctx.fetch(url)
-        data = _jobposting(page)
-        if not data:
-            continue
-
-        title = str(data.get("title") or "").strip()
-        description = _plain_text(data.get("description"))
-        organization = data.get("hiringOrganization") or {}
-        company = str(organization.get("name") or "").strip()
-        locations = _locations(data)
-
-        if not title or not company or not description or not locations:
-            continue
-
-        id_match = re.search(r"/jobs/(\d+)", url)
-        fields = {
-            "title": title,
-            "company": company,
-            "location": locations[0],
-            "locations": locations,
-            "description": description,
-        }
-
-        if id_match:
-            fields["external_id"] = id_match.group(1)
-        if data.get("datePosted"):
-            fields["posted_at"] = data["datePosted"]
-        if data.get("validThrough"):
-            fields["expires_at"] = data["validThrough"]
-
-        employment = data.get("employmentType")
-        if isinstance(employment, str) and employment.strip():
-            fields["employment_type"] = employment.strip()
-        elif isinstance(employment, list):
-            values = [
-                str(item).strip()
-                for item in employment
-                if str(item).strip()
-            ]
-            if values:
-                fields["employment_type"] = values
-
-        if data.get("jobLocationType") == "TELECOMMUTE":
-            fields["workplace_type"] = "remote"
-
-        apply_url = _apply_url(page)
-        if apply_url:
-            fields["apply_url"] = apply_url
-
-        fields["url"] = url
-        fields["source"] = SITE
-        yield fields
+    for detail_url in selected:
+        job = _next_job(ctx.fetch(detail_url))
+        record = _record(detail_url, job)
+        if record:
+            yield record

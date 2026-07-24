@@ -1,229 +1,166 @@
 
+import html
 import json
 import re
-import html
-from urllib.parse import urlparse
+from datetime import datetime
+from urllib.parse import urlsplit
+from xml.etree import ElementTree
+
+from jobcrawler.runtime.contract import Job
+
 
 SITE = "https://jobs.framework.ventures/jobs"
 EXTRA_HOSTS = []
 
-
-def _fetch(ctx, url):
-    try:
-        return ctx.fetch(url)
-    except TypeError:
-        return ctx.fetch(url, "GET", "")
+# Getro portfolio sitemaps retain years of records. Fetching the freshest window
+# covers current additions while avoiding thousands of historical detail requests.
+MAX_DETAIL_PAGES = 8
 
 
-def _clean_text(value):
+def _text(value):
     if value is None:
         return None
-    value = html.unescape(str(value))
-    value = re.sub(r"(?i)<br\s*/?>", "\n", value)
-    value = re.sub(r"(?i)</p\s*>", "\n\n", value)
-    value = re.sub(r"(?i)</li\s*>", "\n", value)
-    value = re.sub(r"(?i)<li[^>]*>", "- ", value)
-    value = re.sub(r"<script\b.*?</script>", " ", value, flags=re.I | re.S)
-    value = re.sub(r"<style\b.*?</style>", " ", value, flags=re.I | re.S)
-    value = re.sub(r"<[^>]+>", " ", value)
-    value = re.sub(r"[ \t\r\f\v]+", " ", value)
-    value = re.sub(r"\n\s+", "\n", value)
+    value = str(value).strip()
+    return value or None
+
+
+def _description(value):
+    if not value:
+        return None
+    value = html.unescape(value)
+    value = re.sub(r"(?i)<\s*br\s*/?\s*>", "\n", value)
+    value = re.sub(r"(?i)</\s*(?:p|div|li|h[1-6]|tr)\s*>", "\n", value)
+    value = re.sub(r"(?i)<\s*li(?:\s[^>]*)?>", "- ", value)
+    value = re.sub(r"<[^>]+>", "", value)
+    value = html.unescape(value).replace("\xa0", " ")
+    value = re.sub(r"[ \t]+\n", "\n", value)
+    value = re.sub(r"\n[ \t]+", "\n", value)
     value = re.sub(r"\n{3,}", "\n\n", value)
     return value.strip() or None
 
 
-def _first_nonempty(*values):
-    for value in values:
-        if isinstance(value, str):
-            value = value.strip()
-        if value not in (None, "", [], {}):
-            return value
-    return None
-
-
-def _make_job(**fields):
-    return {k: v for k, v in fields.items() if v not in (None, "", [], {})}
-
-
-def _names(items):
-    out = []
-    if isinstance(items, list):
-        for item in items:
-            if isinstance(item, str):
-                name = item.strip()
-            elif isinstance(item, dict):
-                name = _first_nonempty(item.get("name"), item.get("description"), item.get("label"))
-            else:
-                name = None
-            if name:
-                out.append(name)
-    return out
-
-
-def _salary(job):
-    if not job.get("compensationPublic"):
-        return None
-    currency = job.get("compensationCurrency")
-    period = job.get("compensationPeriod")
-    min_cents = job.get("compensationAmountMinCents")
-    max_cents = job.get("compensationAmountMaxCents")
-    if not currency or (min_cents is None and max_cents is None):
-        return None
-
-    def money(cents):
-        if cents is None:
-            return None
-        amount = cents / 100
-        if amount.is_integer():
-            amount = int(amount)
-        return f"{currency} {amount:,}"
-
-    low = money(min_cents)
-    high = money(max_cents)
-    text = f"{low} - {high}" if low and high and low != high else (low or high)
-    if period and period != "period_not_defined":
-        text = f"{text} / {period.replace('period_', '')}"
-    return text
-
-
-def _extract_from_next_json(text, page_url):
-    data = json.loads(text)
-    job = (
-        data.get("pageProps", {})
-        .get("initialState", {})
-        .get("jobs", {})
-        .get("currentJob", {})
-    )
-    if not job:
-        return None
-
-    org = job.get("organization") or {}
-    locations = _names(job.get("locations"))
-    departments = _names(job.get("jobFunctions"))
-    employment_types = _names(job.get("employmentTypes"))
-
-    return _make_job(
-        url=page_url,
-        title=job.get("title"),
-        company=org.get("name"),
-        location=", ".join(locations) if locations else None,
-        description=_clean_text(job.get("description")),
-        source=SITE,
-        department=", ".join(departments) if departments else None,
-        employment_type=", ".join(employment_types) if employment_types else None,
-        salary=_salary(job),
-        posted_at=job.get("postedAt"),
-        expires_at=job.get("expiresAt"),
-        external_id=str(job.get("id")) if job.get("id") is not None else None,
-        apply_url=job.get("url"),
-    )
-
-
-def _extract_jsonld(doc, page_url):
-    pattern = r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>'
-    for raw in re.findall(pattern, doc, re.I | re.S):
-        try:
-            data = json.loads(html.unescape(raw))
-        except Exception:
+def _xml_entries(body):
+    root = ElementTree.fromstring(body)
+    entries = []
+    for node in root.iter():
+        if node.tag.rsplit("}", 1)[-1] != "url":
             continue
-        items = data if isinstance(data, list) else [data]
-        for item in items:
-            if not isinstance(item, dict) or item.get("@type") != "JobPosting":
-                continue
-            org = item.get("hiringOrganization") or {}
-            loc = item.get("jobLocation") or {}
-            loc_name = None
-            if isinstance(loc, dict):
-                addr = loc.get("address") if isinstance(loc.get("address"), dict) else loc
-                loc_name = _first_nonempty(addr.get("addressLocality"), addr.get("addressRegion"), addr.get("addressCountry"))
-            emp = item.get("employmentType")
-            if isinstance(emp, list):
-                emp = ", ".join(str(x) for x in emp if x)
-            return _make_job(
-                url=page_url,
-                title=item.get("title"),
-                company=org.get("name") if isinstance(org, dict) else None,
-                location=loc_name,
-                description=_clean_text(item.get("description")),
-                source=SITE,
-                employment_type=emp,
-                posted_at=item.get("datePosted"),
-                expires_at=item.get("validThrough"),
-            )
-    return None
+        url = None
+        lastmod = None
+        for child in node:
+            name = child.tag.rsplit("}", 1)[-1]
+            if name == "loc":
+                url = _text(child.text)
+            elif name == "lastmod":
+                lastmod = _text(child.text)
+        if url:
+            entries.append((lastmod or "", url))
+    return entries
 
 
-def _next_data(doc):
-    match = re.search(r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>', doc, re.S)
+def _current_job(body):
+    match = re.search(
+        r'<script[^>]*\bid=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>',
+        body,
+        re.I | re.S,
+    )
     if not match:
-        return {}
+        return None
     try:
-        return json.loads(html.unescape(match.group(1)))
-    except Exception:
-        return {}
-
-
-def _build_id(doc, data):
-    build_id = data.get("buildId")
-    if build_id:
-        return build_id
-    match = re.search(r"/_next/static/([^/]+)/_buildManifest\.js", doc)
-    if match:
-        return match.group(1)
-    return None
-
-
-def _initial_jobs(data):
-    jobs = (
+        data = json.loads(html.unescape(match.group(1)))
+    except (TypeError, ValueError):
+        return None
+    return (
         data.get("props", {})
         .get("pageProps", {})
         .get("initialState", {})
         .get("jobs", {})
-        .get("found", [])
+        .get("currentJob")
     )
-    if isinstance(jobs, list):
-        return jobs
-    return []
-
-
-def _page_url_from_listing(item):
-    org = item.get("organization") or {}
-    org_slug = org.get("slug")
-    job_slug = item.get("slug")
-    if org_slug and job_slug:
-        return f"https://jobs.framework.ventures/companies/{org_slug}/jobs/{job_slug}"
-    return None
 
 
 def crawl(ctx):
-    doc = _fetch(ctx, SITE)
-    data = _next_data(doc)
-    build_id = _build_id(doc, data)
-    yielded = 0
+    root = ctx.fetch("https://jobs.framework.ventures/sitemap.xml")
+    sitemap_urls = re.findall(
+        r"<loc>\s*(https://jobs\.framework\.ventures/sitemap_jobs\d+\.xml)\s*</loc>",
+        root,
+        re.I,
+    )
 
-    for item in _initial_jobs(data):
-        page_url = _page_url_from_listing(item)
-        if not page_url:
+    entries = []
+    for sitemap_url in sitemap_urls:
+        entries.extend(_xml_entries(ctx.fetch(sitemap_url)))
+
+    # De-duplicate before applying the freshness window.
+    newest_by_url = {}
+    for lastmod, url in entries:
+        if urlsplit(url).hostname != "jobs.framework.ventures":
+            continue
+        if "/companies/" not in url or "/jobs/" not in url:
+            continue
+        if lastmod >= newest_by_url.get(url, ""):
+            newest_by_url[url] = lastmod
+
+    ordered = sorted(
+        ((lastmod, url) for url, lastmod in newest_by_url.items()),
+        reverse=True,
+    )
+
+    for _, url in ordered[:MAX_DETAIL_PAGES]:
+        job = _current_job(ctx.fetch(url))
+        if not isinstance(job, dict):
+            continue
+        if job.get("status") != "active" or job.get("visibility") != "visible":
             continue
 
-        job = None
-        if build_id:
-            path = urlparse(page_url).path
-            data_url = f"https://jobs.framework.ventures/_next/data/{build_id}{path}.json"
-            try:
-                job = _extract_from_next_json(_fetch(ctx, data_url), page_url)
-            except Exception:
-                job = None
+        title = _text(job.get("title"))
+        description = _description(job.get("description"))
+        organization = job.get("organization") or {}
+        company = _text(organization.get("name"))
+        location_rows = job.get("locations") or []
+        locations = [
+            name
+            for name in (_text(row.get("name")) for row in location_rows if isinstance(row, dict))
+            if name
+        ]
+        if not title or not company or not description or len(description) < 40 or not locations:
+            continue
 
-        if job is None:
-            try:
-                job = _extract_jsonld(_fetch(ctx, page_url), page_url)
-            except Exception:
-                job = None
+        fields = {
+            "url": url,
+            "title": title,
+            "company": company,
+            "location": locations[0],
+            "locations": locations,
+            "description": description,
+            "source": SITE,
+            "external_id": _text(job.get("id")),
+            "posted_at": _text(job.get("postedAt")),
+            "expires_at": _text(job.get("expiresAt")),
+        }
 
-        if job is not None:
-            yield job
-            yielded += 1
+        employment_types = [
+            value for value in (_text(item) for item in (job.get("employmentTypes") or []))
+            if value
+        ]
+        if employment_types:
+            fields["employment_type"] = ", ".join(employment_types)
 
-        if yielded >= 8:
-            break
+        external_url = _text(job.get("url"))
+        if external_url and external_url != url:
+            fields["apply_url"] = external_url
+
+        minimum = job.get("compensationAmountMinCents")
+        maximum = job.get("compensationAmountMaxCents")
+        currency = _text(job.get("compensationCurrency"))
+        period = _text(job.get("compensationPeriod"))
+        if job.get("compensationPublic") is True and currency and (
+            minimum is not None or maximum is not None
+        ):
+            fields["salary_min"] = minimum / 100 if minimum is not None else None
+            fields["salary_max"] = maximum / 100 if maximum is not None else None
+            fields["salary_currency"] = currency
+            if period and period != "period_not_defined":
+                fields["salary_period"] = period
+
+        yield Job(**{key: value for key, value in fields.items() if value is not None})

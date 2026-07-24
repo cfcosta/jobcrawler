@@ -1,146 +1,156 @@
 
-import html
 import json
 import re
-from urllib.parse import urljoin
-
-
+from html import unescape
+from jobcrawler.runtime.contract import Job
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 SITE = "https://app.dover.com/api/v1/careers-page/beead238-de58-4e47-8bc4-b3b45b1f55d6/jobs?limit=50&offset=0"
 EXTRA_HOSTS = []
 
-
-def _json(ctx, url):
-    response = ctx.fetch(url)
-    if hasattr(response, "text"):
-        response = response.text
-    return json.loads(response)
+_COMPANY = "Caldera"
+_CLIENT_SLUG = "caldera"
+_PAGE_SIZE = 50
 
 
 def _plain_text(value):
-    value = value or ""
+    if not value:
+        return None
+
+    # Preserve section and list boundaries before removing markup.
     value = re.sub(
-        r"(?i)</?(?:address|article|aside|blockquote|div|footer|h[1-6]|header|"
-        r"li|main|ol|p|pre|section|table|tr|ul|br|hr)\b[^>]*>",
+        r"(?i)<\s*(?:br|hr)\b[^>]*>",
         "\n",
         value,
     )
-    value = re.sub(r"(?s)<script\b[^>]*>.*?</script>", "", value)
-    value = re.sub(r"(?s)<style\b[^>]*>.*?</style>", "", value)
+    value = re.sub(
+        r"(?i)</?\s*(?:address|article|aside|blockquote|dd|div|dl|dt|"
+        r"figcaption|figure|footer|h[1-6]|header|li|main|nav|ol|p|pre|"
+        r"section|table|tbody|td|tfoot|th|thead|tr|ul)\b[^>]*>",
+        "\n",
+        value,
+    )
     value = re.sub(r"(?s)<[^>]+>", "", value)
-    value = html.unescape(value)
-    value = re.sub(r"[ \t\r\f\v]+", " ", value)
-    value = re.sub(r" *\n *", "\n", value)
-    value = re.sub(r"\n{3,}", "\n\n", value)
-    return value.strip()
+    value = unescape(value).replace("\xa0", " ")
+
+    lines = [
+        re.sub(r"[ \t]+", " ", line).strip()
+        for line in value.splitlines()
+    ]
+    text = "\n".join(line for line in lines if line)
+    return text or None
+
+
+def _page_url(offset):
+    parts = urlsplit(SITE)
+    query = urlencode({"limit": _PAGE_SIZE, "offset": offset})
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, ""))
 
 
 def crawl(ctx):
-    page_url = SITE
-    seen_pages = set()
-    seen_jobs = set()
+    offset = 0
 
-    while page_url and page_url not in seen_pages:
-        seen_pages.add(page_url)
-        page = _json(ctx, page_url)
+    while True:
+        page = json.loads(ctx.fetch(SITE if offset == 0 else _page_url(offset)))
+        records = page.get("results") or []
 
-        for listed in page.get("results") or []:
-            job_id = listed.get("id")
-            if (
-                not job_id
-                or job_id in seen_jobs
-                or listed.get("is_published") is not True
-                or listed.get("is_sample") is True
-            ):
+        for summary in records:
+            if not summary.get("is_published") or summary.get("is_sample"):
                 continue
-            seen_jobs.add(job_id)
 
-            portal_url = (
+            job_id = summary.get("id")
+            if not job_id:
+                continue
+
+            detail_url = (
                 "https://app.dover.com/api/v1/inbound/application-portal-job/"
-                + job_id
+                + str(job_id)
             )
-            description_url = (
-                "https://app.dover.com/api/v1/jobs/"
-                + job_id
-                + "/get_job_description"
-            )
-            portal = _json(ctx, portal_url)
-            detail = _json(ctx, description_url)
+            detail = json.loads(ctx.fetch(detail_url))
 
-            if portal.get("active") is False or portal.get("is_private") is True:
-                continue
-            if detail.get("is_published") is False:
+            if detail.get("active") is False or detail.get("is_private") is True:
                 continue
 
-            description_html = detail.get("user_provided_description")
-            if not description_html:
-                description_html = detail.get("user_facing_description")
-            description = _plain_text(description_html)
-            if not description:
+            description = _plain_text(detail.get("user_provided_description"))
+            title = detail.get("title") or summary.get("title")
+            if not title or not description:
                 continue
 
-            raw_locations = portal.get("locations") or listed.get("locations") or []
+            location_records = detail.get("locations") or summary.get("locations") or []
             locations = [
                 item.get("name")
-                for item in raw_locations
+                for item in location_records
                 if isinstance(item, dict) and item.get("name")
             ]
-            if not locations:
-                continue
-            location = locations[0]
-            title = portal.get("title") or listed.get("title")
-            if not title:
+            primary = next(
+                (
+                    item.get("name")
+                    for item in location_records
+                    if isinstance(item, dict)
+                    and item.get("is_primary")
+                    and item.get("name")
+                ),
+                None,
+            )
+            location = primary or (locations[0] if locations else None)
+            if not location:
+                location = detail.get("location")
+            if not location:
                 continue
 
-            apply_url = (
-                "https://app.dover.com/apply/caldera/"
-                + job_id
+            posting_url = (
+                "https://app.dover.com/apply/"
+                + _CLIENT_SLUG
+                + "/"
+                + str(job_id)
                 + "/"
             )
-            compensation = portal.get("compensation") or {}
-            fields = {
-                "url": apply_url,
+
+            data = {
+                "url": posting_url,
+                "apply_url": posting_url,
                 "title": title,
-                "company": "Caldera",
+                "company": _COMPANY,
                 "location": location,
                 "description": description,
-                "source": SITE,
-                "external_id": job_id,
-                "apply_url": apply_url,
+                "source": "Dover",
+                "external_id": str(job_id),
             }
 
             if locations:
-                fields["locations"] = locations
+                data["locations"] = locations
 
-            workplace_type = (
-                portal.get("workplace_type") or listed.get("workplace_type")
-            )
+            workplace_type = detail.get("workplace_type") or summary.get("workplace_type")
             if workplace_type:
-                fields["workplace_type"] = workplace_type
+                data["workplace_type"] = workplace_type
 
-            employment_type = compensation.get("employment_type")
-            if employment_type:
-                fields["employment_type"] = employment_type
+            compensation = detail.get("compensation")
+            if isinstance(compensation, dict):
+                employment_type = compensation.get("employment_type")
+                if employment_type:
+                    data["employment_type"] = employment_type
 
-            posted_at = portal.get("created")
-            if posted_at:
-                fields["posted_at"] = posted_at
+                lower = compensation.get("lower_bound")
+                upper = compensation.get("upper_bound")
+                if lower is not None or upper is not None:
+                    if lower is not None:
+                        data["salary_min"] = lower
+                    if upper is not None:
+                        data["salary_max"] = upper
+                    if compensation.get("currency_code"):
+                        data["salary_currency"] = compensation["currency_code"]
+                    if compensation.get("salary_range_type"):
+                        data["salary_period"] = compensation["salary_range_type"]
 
-            salary_min = compensation.get("lower_bound")
-            salary_max = compensation.get("upper_bound")
-            if salary_min is not None:
-                fields["salary_min"] = salary_min
-            if salary_max is not None:
-                fields["salary_max"] = salary_max
-            if salary_min is not None or salary_max is not None:
-                currency = compensation.get("currency_code")
-                period = compensation.get("salary_range_type")
-                if currency:
-                    fields["salary_currency"] = currency
-                if period:
-                    fields["salary_period"] = period
+            if detail.get("compensation_details"):
+                data["salary"] = detail["compensation_details"]
 
-            yield fields
+            if detail.get("created"):
+                data["posted_at"] = detail["created"]
 
-        next_url = page.get("next")
-        page_url = urljoin(page_url, next_url) if next_url else None
+            yield Job(**data)
+
+        offset += len(records)
+        total = page.get("count")
+        if not records or (isinstance(total, int) and offset >= total):
+            break

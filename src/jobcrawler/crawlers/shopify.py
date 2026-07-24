@@ -1,94 +1,254 @@
 
+import json
 import re
-import html
+
+from jobcrawler.runtime.contract import Job
+
 
 SITE = "https://www.shopify.com/careers.data"
 EXTRA_HOSTS = []
 
-FEED_URL = "https://www.shopify.com/careers/feed.xml"
-COMPANY = "Shopify"
+
+def _decoder(graph):
+    memo = {}
+    active = set()
+
+    def decode(ref):
+        if not isinstance(ref, int):
+            return ref
+        if ref < 0:
+            return None
+        if ref in memo:
+            return memo[ref]
+        if ref in active or ref >= len(graph):
+            return None
+
+        active.add(ref)
+        node = graph[ref]
+
+        if isinstance(node, dict):
+            value = {}
+            memo[ref] = value
+            for raw_key, raw_value in node.items():
+                if (
+                    isinstance(raw_key, str)
+                    and raw_key.startswith("_")
+                    and raw_key[1:].isdigit()
+                ):
+                    key_index = int(raw_key[1:])
+                    key = graph[key_index] if key_index < len(graph) else raw_key
+                else:
+                    key = raw_key
+                value[str(key)] = decode(raw_value)
+        elif isinstance(node, list):
+            value = []
+            memo[ref] = value
+            value.extend(decode(item) for item in node)
+        else:
+            value = node
+            memo[ref] = value
+
+        active.remove(ref)
+        return value
+
+    return decode
 
 
-def _fetch_text(ctx, url):
-    response = ctx.fetch(url)
-    if isinstance(response, str):
-        return response
-    if hasattr(response, "text"):
-        text = response.text
-        return text() if callable(text) else text
-    return str(response)
+def _object_keys(graph, node):
+    keys = set()
+    for raw_key in node:
+        if (
+            isinstance(raw_key, str)
+            and raw_key.startswith("_")
+            and raw_key[1:].isdigit()
+        ):
+            key_index = int(raw_key[1:])
+            if key_index < len(graph):
+                keys.add(graph[key_index])
+        else:
+            keys.add(raw_key)
+    return keys
 
 
-def _field(block, name):
-    pattern = r"<%s\b[^>]*>\s*(?:<!\[CDATA\[(.*?)\]\]>|(.*?))\s*</%s>" % (
-        re.escape(name),
-        re.escape(name),
+def _find_value(graph, wanted_key):
+    for node in graph:
+        if not isinstance(node, dict):
+            continue
+        for raw_key, ref in node.items():
+            if (
+                isinstance(raw_key, str)
+                and raw_key.startswith("_")
+                and raw_key[1:].isdigit()
+            ):
+                key_index = int(raw_key[1:])
+                key = graph[key_index] if key_index < len(graph) else raw_key
+            else:
+                key = raw_key
+            if key == wanted_key:
+                return ref
+    return None
+
+
+def _find_detail_posting(graph):
+    decode = _decoder(graph)
+    required = {"id", "title", "descriptionPlain", "isListed"}
+    for index, node in enumerate(graph):
+        if isinstance(node, dict) and required.issubset(_object_keys(graph, node)):
+            posting = decode(index)
+            if isinstance(posting, dict):
+                return posting
+    return None
+
+
+def _slugify(title):
+    return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "job"
+
+
+def _salary_fields(posting):
+    compensation = posting.get("compensation")
+    if not isinstance(compensation, dict):
+        return {}
+
+    if not compensation.get("shouldDisplayCompensation"):
+        return {}
+
+    result = {}
+    printed = compensation.get("compensationTierSummary")
+    if isinstance(printed, str) and printed.strip():
+        result["salary"] = printed.strip()
+
+    components = compensation.get("summaryComponents")
+    if not isinstance(components, list):
+        return result
+
+    ranges = []
+    for component in components:
+        if not isinstance(component, dict):
+            continue
+        minimum = component.get("minValue")
+        maximum = component.get("maxValue")
+        currency = component.get("currencyCode")
+        period = component.get("interval")
+        if minimum is None and maximum is None:
+            continue
+        ranges.append((minimum, maximum, currency, period))
+
+    currencies = {item[2] for item in ranges if item[2]}
+    periods = {item[3] for item in ranges if item[3]}
+    if not ranges or len(currencies) > 1 or len(periods) > 1:
+        return result
+
+    minimums = [item[0] for item in ranges if item[0] is not None]
+    maximums = [item[1] for item in ranges if item[1] is not None]
+    if minimums:
+        result["salary_min"] = min(minimums)
+    if maximums:
+        result["salary_max"] = max(maximums)
+    if len(currencies) == 1:
+        result["salary_currency"] = next(iter(currencies))
+    if len(periods) == 1:
+        result["salary_period"] = next(iter(periods))
+    return result
+
+
+def _detail_url(summary):
+    external_id = summary.get("id")
+    title = summary.get("title")
+    if not external_id or not title:
+        return None
+    return (
+        "https://www.shopify.com/careers/"
+        + _slugify(title)
+        + "_"
+        + external_id
     )
-    match = re.search(pattern, block, flags=re.S | re.I)
-    if not match:
-        return None
-    value = match.group(1) if match.group(1) is not None else match.group(2)
-    value = html.unescape(value.strip())
-    return value or None
-
-
-def _strip_html(value):
-    if not value:
-        return None
-    text = html.unescape(value)
-    text = re.sub(r"(?i)<\s*br\s*/?\s*>", "\n", text)
-    text = re.sub(r"(?i)</\s*(p|div|li|ul|ol|h[1-6]|section|article)\s*>", "\n", text)
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = html.unescape(text)
-    text = re.sub(r"[ \t\r\f\v]+", " ", text)
-    text = re.sub(r"\n\s+", "\n", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip() or None
-
-
-def _clean_url(value):
-    if not value:
-        return None
-    url = value.strip()
-    # The feed's applyUrl is the canonical posting path plus a tracking query.
-    return url.split("?", 1)[0]
-
-
-def _set_if_present(out, key, value):
-    if value is not None and value != "":
-        out[key] = value
 
 
 def crawl(ctx):
-    text = _fetch_text(ctx, FEED_URL)
-    blocks = re.findall(r"<job\b[^>]*>(.*?)</job>", text, flags=re.S | re.I)
+    listing_graph = json.loads(ctx.fetch(SITE))
+    entries_ref = _find_value(listing_graph, "jobPostingsWithJobs")
+    if not isinstance(entries_ref, int) or entries_ref < 0:
+        return
 
-    for block in blocks:
-        external_id = _field(block, "partnerJobId")
-        title = _field(block, "title")
-        description = _strip_html(_field(block, "description"))
-        apply_url = _field(block, "applyUrl")
-        url = _clean_url(_field(block, "url") or apply_url)
-        location = _field(block, "location")
+    entries = _decoder(listing_graph)(entries_ref)
+    if not isinstance(entries, list):
+        return
 
-        if not title or not description or not url or not location:
+    # Detail responses contain the full posting body. Keep the validation crawl
+    # within the runtime's strict wall-clock budget.
+    fetched = 0
+    seen_job_ids = set()
+
+    for entry in entries:
+        if fetched >= 6:
+            break
+        if not isinstance(entry, dict):
             continue
 
-        job = {
-            "url": url,
+        summary = entry.get("jobPosting")
+        if not isinstance(summary, dict):
+            continue
+        if summary.get("isListed") is not True:
+            continue
+        if summary.get("status") not in (None, "Published"):
+            continue
+
+        job_id = summary.get("jobId") or summary.get("id")
+        if not job_id or job_id in seen_job_ids:
+            continue
+
+        posting_url = _detail_url(summary)
+        if not posting_url:
+            continue
+
+        try:
+            detail_graph = json.loads(ctx.fetch(posting_url + ".data"))
+        except Exception:
+            continue
+
+        posting = _find_detail_posting(detail_graph)
+        if not isinstance(posting, dict):
+            continue
+        if posting.get("isListed") is not True:
+            continue
+        if posting.get("status") not in (None, "Published"):
+            continue
+
+        description = posting.get("descriptionPlain")
+        location = posting.get("locationName")
+        title = posting.get("title") or summary.get("title")
+        if not description or not location or not title:
+            continue
+
+        fields = {
+            "url": posting_url,
             "title": title,
-            "company": _field(block, "company") or COMPANY,
+            "company": "Shopify",
             "location": location,
             "description": description,
             "source": SITE,
+            "external_id": posting.get("id") or summary.get("id"),
         }
 
-        _set_if_present(job, "external_id", external_id)
-        _set_if_present(job, "apply_url", apply_url)
-        _set_if_present(job, "department", _field(block, "department") or _field(block, "team"))
-        _set_if_present(job, "employment_type", _field(block, "employmentType"))
-        _set_if_present(job, "workplace_type", _field(block, "workplaceType"))
-        _set_if_present(job, "posted_at", _field(block, "datePosted"))
-        _set_if_present(job, "expires_at", _field(block, "validThrough"))
+        optional = {
+            "employment_type": posting.get("employmentType"),
+            "workplace_type": posting.get("workplaceType"),
+            "department": (
+                posting.get("teamName")
+                or posting.get("departmentName")
+            ),
+            "posted_at": posting.get("publishedDate"),
+            "expires_at": posting.get("applicationDeadline"),
+            "apply_url": (
+                posting.get("applyLink")
+                or posting.get("externalLink")
+            ),
+        }
+        fields.update({
+            key: value for key, value in optional.items() if value
+        })
+        fields.update(_salary_fields(posting))
 
-        yield job
+        seen_job_ids.add(job_id)
+        fetched += 1
+        yield Job(**fields)
