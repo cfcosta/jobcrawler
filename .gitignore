@@ -20,6 +20,16 @@ __pycache__/
 .env
 .env.*
 
+# Operator identity — the three repo-root files config.py resolves by convention
+# (JOBCRAWLER_PROFILE / JOBCRAWLER_AUTOFILL_NOTES / JOBCRAWLER_AUTOFILL_RESUME).
+# They hold a real person's name, contact details, address and resume, so they are
+# local-only inputs: every one of them is optional at runtime (a missing PROFILE.md
+# means crawl-only mode; APPLY.md and CV.pdf are silently skipped when absent).
+# README documents the PROFILE.md format with a placeholder if you need a template.
+/PROFILE.md
+/APPLY.md
+/CV.pdf
+
 # Runtime state / scratch
 *.db
 *.db-shm
