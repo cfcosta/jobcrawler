@@ -5,85 +5,107 @@ import re
 
 from jobcrawler.runtime.contract import Job
 
+
 SITE = "https://api.gem.com/job_board/v0/dydx/job_posts/"
 EXTRA_HOSTS = []
 
 
-def _text(value):
-    if value is None:
-        return None
-    value = html.unescape(str(value))
-    value = re.sub(r"(?i)<br\s*/?>", "\n", value)
-    value = re.sub(r"(?i)</(?:p|div|li|h[1-6]|tr)>", "\n", value)
-    value = re.sub(r"<[^>]+>", "", value)
+def _html_to_text(value):
     value = html.unescape(value)
-    value = re.sub(r"[ \t\r\f\v]+", " ", value)
-    value = re.sub(r" *\n *", "\n", value)
-    value = re.sub(r"\n{3,}", "\n\n", value)
-    return value.strip() or None
+    value = re.sub(
+        r"(?i)</?(?:address|article|aside|blockquote|br|div|dl|dt|dd|"
+        r"figcaption|figure|footer|h[1-6]|header|hr|li|main|nav|ol|p|pre|"
+        r"section|table|tbody|td|tfoot|th|thead|tr|ul)\b[^>]*>",
+        "\n",
+        value,
+    )
+    value = re.sub(r"(?is)<(?:script|style)\b[^>]*>.*?</(?:script|style)>", "", value)
+    value = re.sub(r"(?s)<[^>]+>", "", value)
+    lines = []
+    for line in value.splitlines():
+        clean = " ".join(line.split())
+        if clean:
+            lines.append(clean)
+    return "\n".join(lines)
 
 
-def _names(items):
+def _description(post):
+    plain = post.get("content_plain")
+    if isinstance(plain, str) and plain.strip():
+        return html.unescape(plain).strip()
+
+    content = post.get("content")
+    if isinstance(content, str) and content.strip():
+        return _html_to_text(content)
+    return None
+
+
+def _names(values):
     result = []
-    for item in items or []:
-        name = item.get("name") if isinstance(item, dict) else item
-        if name and name not in result:
-            result.append(name)
+    for value in values or []:
+        if isinstance(value, dict):
+            value = value.get("name")
+        if isinstance(value, str) and value.strip():
+            result.append(value.strip())
     return result
 
 
 def crawl(ctx):
     try:
-        response = ctx.fetch(SITE)
-    except Exception as exc:
-        if "404" in str(exc) or "not found" in str(exc).lower():
+        body = ctx.fetch(SITE)
+    except Exception as error:
+        if "404 Not Found" in str(error):
             return
         raise
+    posts = json.loads(body)
+    if not isinstance(posts, list):
+        raise ValueError("Gem job board response is not a list")
 
-    if hasattr(response, "json"):
-        data = response.json()
-    else:
-        raw = response.text if hasattr(response, "text") else response
-        data = json.loads(raw)
-
-    if isinstance(data, dict):
-        if data.get("code") == 404 or data.get("status") == "Not Found":
-            return
-        postings = data.get("jobs") or data.get("job_posts") or []
-    else:
-        postings = data
-
-    for posting in postings:
-        title = _text(posting.get("title"))
-        url = posting.get("absolute_url")
-        location_obj = posting.get("location") or {}
-        location = (
-            location_obj.get("name")
-            if isinstance(location_obj, dict)
-            else location_obj
-        )
-        description = _text(
-            posting.get("content_plain") or posting.get("content")
-        )
-        if not title or not url or not location or not description:
+    for post in posts:
+        if not isinstance(post, dict):
             continue
 
-        offices = _names(posting.get("offices"))
-        departments = _names(posting.get("departments"))
-        kwargs = {
-            "url": url,
-            "title": title,
+        title = post.get("title")
+        url = post.get("absolute_url")
+        description = _description(post)
+        location_data = post.get("location")
+        location = (
+            location_data.get("name")
+            if isinstance(location_data, dict)
+            else location_data
+        )
+
+        required = (title, url, description, location)
+        if not all(isinstance(value, str) and value.strip() for value in required):
+            continue
+
+        data = {
+            "title": title.strip(),
             "company": "dYdX",
-            "location": location,
+            "location": location.strip(),
             "description": description,
-            "source": SITE,
-            "external_id": str(posting["id"]) if posting.get("id") is not None else None,
-            "apply_url": url,
-            "employment_type": posting.get("employment_type"),
-            "workplace_type": posting.get("location_type"),
-            "department": ", ".join(departments) if departments else None,
-            "posted_at": posting.get("first_published_at"),
         }
+
+        offices = _names(post.get("offices"))
         if offices:
-            kwargs["locations"] = offices
-        yield Job(**{key: value for key, value in kwargs.items() if value is not None})
+            data["locations"] = offices
+
+        departments = _names(post.get("departments"))
+        if departments:
+            data["department"] = ", ".join(departments)
+
+        optional = {
+            "employment_type": post.get("employment_type"),
+            "workplace_type": post.get("location_type"),
+            "posted_at": post.get("first_published_at"),
+            "external_id": post.get("id"),
+            "apply_url": post.get("absolute_url"),
+        }
+        for key, value in optional.items():
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            data[key] = str(value) if key == "external_id" else value
+
+        yield Job(url=url.strip(), **data)
