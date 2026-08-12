@@ -58,7 +58,6 @@ from jobcrawler.health import RegenOutcome
 from jobcrawler.runtime.contract import declared_extra_hosts
 from jobcrawler.runtime.ctx import Ctx
 from jobcrawler.runtime.politeness import RobotsPolicy
-from jobcrawler.runtime.render import shared_render_bridge
 from jobcrawler.runtime.sandbox import validate_crawler
 from jobcrawler.runtime.ssrf import check_url
 from jobcrawler.schedule import Site
@@ -233,16 +232,7 @@ async def _run_generation(
     whole fan-out, not just the winner.
     """
     registry_hosts = {normalize_host(site.url)}
-    # §4.10 render escalation: provision the boot ctx with the process-wide render
-    # bridge so prefetch can turn a static empty shell (a JS SPA) into the settled
-    # DOM + the runtime XHR/API a static crawler can hit. Gated + best-effort: off
-    # or Chrome-down ⇒ prefetch stays static-only (Ctx.render_available is False).
-    boot = Ctx(
-        registry_hosts,
-        render_bridge=shared_render_bridge()
-        if config.generate_render_enabled()
-        else None,
-    )
+    boot = Ctx(registry_hosts)
     corpus = prefetch_corpus(site.url, boot)
     # §8 authorization envelope: beyond the registry host, a generated crawler may
     # fetch only the operator-declared ``Site.extra_hosts`` (the ATS/API host a

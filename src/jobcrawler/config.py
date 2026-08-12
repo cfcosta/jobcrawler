@@ -404,19 +404,6 @@ def fanout_retries() -> int:
     return _int("JOBCRAWLER_FANOUT_RETRIES", fanout_n())
 
 
-def generate_render_enabled() -> bool:
-    """Whether §6 generation may escalate an empty static shell through the §4.10
-    headless render tier (default on).
-
-    When on, a board whose static fetch yields nothing (a JS SPA) is rendered in
-    the operator's Chrome — the same remote-debugging endpoint the §18 autofill
-    drain uses — so generation can observe the runtime XHR/API a static crawler
-    can hit. Off ⇒ generation stays static-only and never opens Chrome, exactly
-    as before the tier existed. Best-effort regardless: an unreachable browser
-    just means no escalation, never a failed generation."""
-    return _bool("JOBCRAWLER_GENERATE_RENDER", True)
-
-
 def max_tokens() -> int:
     """LM output-token cap. Generous by default so a reasoning model has room for
     both its thinking and the answer on the long RLM action prompt — too low and
