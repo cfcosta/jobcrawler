@@ -1,140 +1,219 @@
-
+import html
 import json
 import re
-import html
-from urllib.parse import urlencode
+
+from jobcrawler.runtime.contract import Job
+
 
 SITE = "https://www.levels.fyi/jobs"
 EXTRA_HOSTS = []
 
-BOARD_URL = "https://www.levels.fyi/en-us/jobs"
-MAX_JOBS = 8
 
-
-def _next_data(text):
-    m = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', text, re.S)
-    if not m:
-        return {}
-    try:
-        return json.loads(html.unescape(m.group(1)))
-    except Exception:
-        return {}
-
-
-def _page_props(text):
-    return _next_data(text).get("props", {}).get("pageProps", {}) or {}
-
-
-def _clean_html(value):
-    if not value:
+def _page_props(document):
+    if not isinstance(document, str):
         return None
-    text = html.unescape(str(value))
-    text = re.sub(r"(?i)<\s*br\s*/?\s*>", "\n", text)
-    text = re.sub(r"(?i)</\s*(p|div|li|h[1-6]|ul|ol|section|article)\s*>", "\n", text)
+
+    marker = 'id="__NEXT_DATA__"'
+    start = document.find(marker)
+    if start < 0:
+        marker = "id='__NEXT_DATA__'"
+        start = document.find(marker)
+    if start < 0:
+        return None
+
+    start = document.find(">", start)
+    end = document.find("</script>", start)
+    if start < 0 or end < 0:
+        return None
+
+    data = json.loads(document[start + 1:end])
+    return data.get("props", {}).get("pageProps", {})
+
+
+def _plain_text(value):
+    if not isinstance(value, str) or not value:
+        return None
+
+    text = html.unescape(value)
+    text = re.sub(
+        r"(?is)<(?:br|/p|/div|/li|/h[1-6])\b[^>]*>",
+        "\n",
+        text,
+    )
+    text = re.sub(r"(?is)<script\b[^>]*>.*?</script>", " ", text)
+    text = re.sub(r"(?is)<style\b[^>]*>.*?</style>", " ", text)
     text = re.sub(r"(?s)<[^>]+>", " ", text)
     text = html.unescape(text)
-    text = re.sub(r"[ \t\r\f\v]+", " ", text)
-    text = re.sub(r"\n\s+", "\n", text)
+    text = re.sub(r"[ \t]*\n[ \t]*", "\n", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip() or None
+    text = text.strip()
+    return text or None
 
 
-def _primary_location(locations):
-    if isinstance(locations, list):
-        for loc in locations:
-            if loc:
-                return str(loc)
-    elif locations:
-        return str(locations)
+def _first_value(record, names):
+    for name in names:
+        value = record.get(name)
+        if value is not None and value != "":
+            return value
     return None
 
 
-def _salary_text(min_salary, max_salary, currency):
-    if min_salary is None and max_salary is None:
-        return None
-    cur = currency or ""
-    if min_salary is not None and max_salary is not None:
-        return f"{cur} {min_salary} - {max_salary} base salary".strip()
-    if min_salary is not None:
-        return f"{cur} {min_salary}+ base salary".strip()
-    return f"Up to {cur} {max_salary} base salary".strip()
-
-
-def _job_from_detail(detail, fallback_company=None):
-    company_info = detail.get("companyInfo") or {}
-    locations = detail.get("locations") if isinstance(detail.get("locations"), list) else None
-
-    job = {
-        "source": SITE,
-        "url": "https://www.levels.fyi/en-us/jobs?" + urlencode({"jobId": detail.get("id")}),
-        "title": detail.get("title"),
-        "company": company_info.get("name") or fallback_company,
-        "location": _primary_location(locations),
-        "description": _clean_html(detail.get("description")),
-    }
-
-    if locations:
-        job["locations"] = [str(x) for x in locations if x]
-    if detail.get("id") is not None:
-        job["external_id"] = str(detail.get("id"))
-    if detail.get("applicationUrl"):
-        job["apply_url"] = detail.get("applicationUrl")
-    if detail.get("postingDate"):
-        job["posted_at"] = detail.get("postingDate")
-    if detail.get("expiryDate"):
-        job["expires_at"] = detail.get("expiryDate")
-    if detail.get("workArrangement"):
-        job["workplace_type"] = detail.get("workArrangement")
-
-    employment = detail.get("employmentTypes")
-    if isinstance(employment, list) and employment:
-        job["employment_type"] = ", ".join(str(x) for x in employment if x)
-    elif employment:
-        job["employment_type"] = str(employment)
-
-    if detail.get("jobFamilySlug"):
-        job["department"] = detail.get("jobFamilySlug")
-
-    min_base = detail.get("minBaseSalary")
-    max_base = detail.get("maxBaseSalary")
-    currency = detail.get("baseSalaryCurrency")
-    if min_base is not None:
-        job["salary_min"] = min_base
-    if max_base is not None:
-        job["salary_max"] = max_base
-    if currency:
-        job["salary_currency"] = currency
-    if min_base is not None or max_base is not None:
-        job["salary_period"] = "year"
-        salary = _salary_text(min_base, max_base, currency)
-        if salary:
-            job["salary"] = salary
-
-    return {k: v for k, v in job.items() if v is not None and v != ""}
-
-
 def crawl(ctx):
-    props = _page_props(ctx.fetch(BOARD_URL))
-    groups = props.get("initialJobsData", {}).get("results", []) or []
+    root = _page_props(ctx.fetch(SITE))
+    if not root:
+        return
 
     seen = set()
-    yielded = 0
+    groups = root.get("initialJobsData", {}).get("results", [])
+
     for group in groups:
-        fallback_company = group.get("companyName")
-        for summary in group.get("jobs", []) or []:
-            if yielded >= MAX_JOBS:
-                return
-            job_id = summary.get("id")
-            if not job_id or job_id in seen:
+        for listing in group.get("jobs", []):
+            job_id = listing.get("id")
+            if job_id is None:
+                continue
+
+            job_id = str(job_id)
+            if job_id in seen:
                 continue
             seen.add(job_id)
 
-            detail_url = "https://www.levels.fyi/en-us/jobs?" + urlencode({"jobId": job_id})
-            detail = _page_props(ctx.fetch(detail_url)).get("initialJobDetails") or {}
-            if not isinstance(detail, dict) or not detail.get("description"):
+            url = SITE + "?jobId=" + job_id
+            props = _page_props(ctx.fetch(url))
+            if not props:
                 continue
 
-            item = _job_from_detail(detail, fallback_company=fallback_company)
-            if item.get("title") and item.get("company") and item.get("location") and item.get("description"):
-                yielded += 1
-                yield item
+            details = props.get("initialJobDetails")
+            if not isinstance(details, dict):
+                continue
+
+            title = _first_value(details, ("title", "jobTitle"))
+            raw_description = _first_value(
+                details,
+                ("description", "descriptionHtml", "jobDescription"),
+            )
+            description = _plain_text(raw_description)
+
+            company_info = details.get("companyInfo")
+            company = (
+                company_info.get("name")
+                if isinstance(company_info, dict)
+                else None
+            )
+            if not company:
+                company = group.get("companyName")
+
+            locations = details.get("locations")
+            if not isinstance(locations, list):
+                locations = listing.get("locations")
+            if not isinstance(locations, list):
+                locations = []
+
+            locations = [
+                value
+                for value in locations
+                if isinstance(value, str) and value.strip()
+            ]
+            location = (
+                locations[0]
+                if locations
+                else _first_value(details, ("location", "locationName"))
+            )
+
+            if not title or not company or not location or not description:
+                continue
+
+            fields = {
+                "url": url,
+                "title": title,
+                "company": company,
+                "location": location,
+                "description": description,
+                "source": "Levels.fyi",
+                "external_id": job_id,
+            }
+
+            if locations:
+                fields["locations"] = locations
+
+            apply_url = _first_value(
+                details,
+                ("applicationUrl", "applyUrl"),
+            )
+            if apply_url:
+                fields["apply_url"] = apply_url
+
+            posted_at = _first_value(
+                details,
+                ("postingDate", "postedAt", "datePosted"),
+            )
+            if posted_at:
+                fields["posted_at"] = posted_at
+
+            expires_at = _first_value(
+                details,
+                ("expiryDate", "expiresAt", "validThrough"),
+            )
+            if expires_at:
+                fields["expires_at"] = expires_at
+
+            employment = _first_value(
+                details,
+                ("employmentTypes", "employmentType"),
+            )
+            if isinstance(employment, list):
+                employment = ", ".join(
+                    value
+                    for value in employment
+                    if isinstance(value, str) and value
+                )
+            if employment:
+                fields["employment_type"] = employment
+
+            workplace = _first_value(
+                details,
+                ("workArrangement", "workplaceType"),
+            )
+            if workplace:
+                fields["workplace_type"] = workplace
+
+            department = _first_value(details, ("department", "team"))
+            if isinstance(department, dict):
+                department = department.get("name")
+            if department:
+                fields["department"] = department
+
+            salary_min = _first_value(
+                details,
+                ("minBaseSalary", "baseSalaryMin"),
+            )
+            salary_max = _first_value(
+                details,
+                ("maxBaseSalary", "baseSalaryMax"),
+            )
+            salary_currency = _first_value(
+                details,
+                ("baseSalaryCurrency", "salaryCurrency"),
+            )
+            salary_period = _first_value(
+                details,
+                ("baseSalaryPeriod", "salaryPeriod"),
+            )
+
+            if salary_min is not None:
+                fields["salary_min"] = salary_min
+            if salary_max is not None:
+                fields["salary_max"] = salary_max
+            if salary_currency:
+                fields["salary_currency"] = salary_currency
+            if salary_period:
+                fields["salary_period"] = salary_period
+
+            salary_text = _first_value(
+                details,
+                ("baseSalary", "salary", "salaryText"),
+            )
+            if isinstance(salary_text, str) and salary_text:
+                fields["salary"] = salary_text
+
+            yield Job(**fields)

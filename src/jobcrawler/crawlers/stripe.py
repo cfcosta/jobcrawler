@@ -1,116 +1,249 @@
 
+import json
 import re
-import html
+from html import unescape
+from jobcrawler.runtime.contract import Job
 from urllib.parse import urljoin
 
 SITE = "https://stripe.com/jobs/search"
 EXTRA_HOSTS = []
 
-ROOT_SITEMAP = "https://stripe.com/sitemap/sitemap.xml"
-MAX_JOBS = 25
+SITEMAP = "https://stripe.com/sitemap/partition-0.xml"
 
-def _strip_tags(value):
-    if not value:
-        return None
-    value = re.sub(r"(?is)<script\b.*?</script>|<style\b.*?</style>|<svg\b.*?</svg>", " ", value)
-    value = re.sub(r"(?is)<br\s*/?>", "\n", value)
-    value = re.sub(r"(?is)</(p|div|li|h[1-6]|ul|ol)>", "\n", value)
-    value = re.sub(r"(?is)<[^>]+>", " ", value)
-    value = html.unescape(value)
-    value = value.replace("\xa0", " ")
+
+def text_content(fragment):
+    if not fragment:
+        return ""
+    value = re.sub(
+        r"<(?:br|/p|/li|/h[1-6]|/div|/section|/article|/tr|/blockquote)\s*/?>",
+        "\n",
+        str(fragment),
+        flags=re.I,
+    )
+    value = re.sub(r"<[^>]+>", " ", value)
+    value = unescape(value).replace("\xa0", " ")
     value = re.sub(r"[ \t\r\f\v]+", " ", value)
-    value = re.sub(r"\n\s*", "\n", value)
+    value = re.sub(r" *\n *", "\n", value)
     value = re.sub(r"\n{3,}", "\n\n", value)
-    return value.strip() or None
+    return value.strip()
 
-def _attr(page, pattern):
-    m = re.search(pattern, page, re.I | re.S)
-    return html.unescape(m.group(1)).strip() if m else None
 
-def _canonical(url):
-    return re.sub(r"/apply/?$", "", url)
+def jsonld_job(page):
+    scripts = re.findall(
+        r'<script\b[^>]*type=["\']application/ld\+json["\'][^>]*>'
+        r'(.*?)</script>',
+        page,
+        flags=re.I | re.S,
+    )
+    for payload in scripts:
+        try:
+            value = json.loads(payload)
+        except (TypeError, ValueError):
+            try:
+                value = json.loads(unescape(payload))
+            except (TypeError, ValueError):
+                continue
 
-def _listing_urls(ctx):
-    root = ctx.fetch(ROOT_SITEMAP)
-    parts = re.findall(r"<loc>(https://stripe\.com/sitemap/partition-\d+\.xml)</loc>", root)
-    if not parts:
-        parts = [ROOT_SITEMAP]
-    seen = set()
-    for part in parts:
-        xml = ctx.fetch(part)
-        for loc in re.findall(r"<loc>(https://stripe\.com/jobs/listing/[^<]+)</loc>", xml):
-            loc = _canonical(html.unescape(loc))
-            if loc not in seen and re.search(r"/\d+$", loc):
-                seen.add(loc)
-                yield loc
+        candidates = value if isinstance(value, list) else [value]
+        if isinstance(value, dict) and isinstance(value.get("@graph"), list):
+            candidates += value["@graph"]
 
-def _properties(page):
-    props = {}
-    for block in re.findall(r'(?is)<div class="JobDetailCardProperty">(.*?)(?=<div class="JobDetailCardProperty"|<div class="JobDetailCard__buttonContainer"|</aside>|</section>)', page):
-        title = _strip_tags(_attr(block, r'(?is)<p class="JobDetailCardProperty__title">(.*?)</p>') or "")
-        ps = re.findall(r"(?is)<p(?:\s[^>]*)?>(.*?)</p>", block)
-        if title and len(ps) >= 2:
-            value = _strip_tags(ps[-1])
-            if value:
-                props[title.lower()] = value
-    return props
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            kinds = candidate.get("@type")
+            if kinds == "JobPosting" or (
+                isinstance(kinds, list) and "JobPosting" in kinds
+            ):
+                return candidate
+    return None
 
-def _description(page):
-    m = re.search(r'(?is)<div class="ArticleMarkdown">(.*?)(?=<div class="JobDetailCard\b|<aside\b|<footer\b)', page)
-    if not m:
-        m = re.search(r'(?is)<div class="ArticleMarkdown">(.*?)</div>\s*</div>\s*</div>', page)
-    if not m:
-        m = re.search(r'(?is)<main[^>]*>(.*?)</main>', page)
-    return _strip_tags(m.group(1) if m else page)
 
-def _parse_job(url, page):
-    title = _attr(page, r'<meta\s+property=["\']og:title["\']\s+content=["\']([^"\']+)') or _attr(page, r"<title[^>]*>(.*?)</title>")
-    if title:
-        title = re.sub(r"\s*\|\s*Stripe\s*$", "", title).strip()
+def sidebar_facts(page):
+    facts = {}
+    pattern = (
+        r'<dt\b[^>]*careers-listing-details__fact-label[^>]*>'
+        r'(.*?)</dt>\s*'
+        r'<dd\b[^>]*careers-listing-details__fact-value[^>]*>'
+        r'(.*?)</dd>'
+    )
+    for label_html, value_html in re.findall(pattern, page, re.I | re.S):
+        label = text_content(label_html)
+        value = text_content(value_html)
+        if label and value:
+            facts[label.casefold()] = value
+    return facts
 
-    props = _properties(page)
+
+def structured_locations(posting):
     locations = []
-    for key in ("office locations", "remote locations"):
-        if props.get(key):
-            locations.append(props[key])
-    location = "; ".join(locations) or props.get("location") or "Not specified"
+    raw_locations = posting.get("jobLocation")
+    if isinstance(raw_locations, dict):
+        raw_locations = [raw_locations]
+    if not isinstance(raw_locations, list):
+        return locations
 
-    apply_match = re.search(r'href=["\']([^"\']*/jobs/listing/[^"\']+/apply)["\']', page)
-    apply_url = urljoin(url, html.unescape(apply_match.group(1))) if apply_match else None
+    for place in raw_locations:
+        if not isinstance(place, dict):
+            continue
+        address = place.get("address")
+        if isinstance(address, str):
+            value = address.strip()
+        elif isinstance(address, dict):
+            parts = []
+            for key in (
+                "streetAddress",
+                "addressLocality",
+                "addressRegion",
+                "postalCode",
+                "addressCountry",
+            ):
+                part = address.get(key)
+                if isinstance(part, dict):
+                    part = part.get("name")
+                if part is not None and str(part).strip():
+                    parts.append(str(part).strip())
+            value = ", ".join(parts)
+        else:
+            value = ""
 
-    description = _description(page)
-    external_id = None
-    m = re.search(r"/(\d+)/?$", url)
-    if m:
-        external_id = m.group(1)
+        if value and value not in locations:
+            locations.append(value)
+    return locations
 
-    job = {
-        "url": url,
-        "title": title,
-        "company": "Stripe",
-        "location": location,
-        "description": description,
-        "source": SITE,
-    }
-    if props.get("team"):
-        job["department"] = props["team"]
-    if props.get("job type"):
-        job["employment_type"] = props["job type"]
-    if props.get("remote locations"):
-        job["workplace_type"] = "Remote"
-    if apply_url:
-        job["apply_url"] = apply_url
-    if external_id:
-        job["external_id"] = external_id
-    return job
+
+def salary_text(description):
+    match = re.search(
+        r'((?:US[$ ]|CA[$ ]|A[$ ]|S[$ ]|€|£|\$)'
+        r'\s?[\d,.]+\s*(?:-|–|—|to)\s*'
+        r'(?:US[$ ]|CA[$ ]|A[$ ]|S[$ ]|€|£|\$)?\s?[\d,.]+)',
+        description,
+        re.I,
+    )
+    return match.group(1).strip() if match else None
+
 
 def crawl(ctx):
-    count = 0
-    for url in _listing_urls(ctx):
-        if count >= MAX_JOBS:
-            break
-        page = ctx.fetch(url)
-        job = _parse_job(url, page)
-        if job.get("title") and job.get("description"):
-            count += 1
-            yield job
+    search_page = ctx.fetch(SITE)
+    paths = re.findall(
+        r'href=["\']([^"\']*/careers/listing/[^"\']+/\d+/?)["\']',
+        search_page,
+        re.I,
+    )
+    urls = []
+    for path in paths:
+        url = urljoin(SITE, unescape(path))
+        if (
+            re.match(
+                r"^https://stripe\.com/careers/listing/[^/?#]+/\d+/?$",
+                url,
+                re.I,
+            )
+            and url not in urls
+        ):
+            urls.append(url)
+
+    seen_ids = set()
+    for discovered_url in urls:
+        external_match = re.search(r"/(\d+)/?$", discovered_url)
+        if not external_match:
+            continue
+        discovered_id = external_match.group(1)
+        if discovered_id in seen_ids:
+            continue
+
+        page = ctx.fetch(discovered_url)
+        posting = jsonld_job(page)
+        if not posting:
+            continue
+
+        title = posting.get("title")
+        description = text_content(posting.get("description", ""))
+        canonical_url = posting.get("url") or discovered_url
+        if not title or not description:
+            continue
+        if not re.match(
+            r"^https://stripe\.com/careers/listing/", canonical_url, re.I
+        ):
+            canonical_url = discovered_url
+
+        identifier = posting.get("identifier")
+        external_id = discovered_id
+        if isinstance(identifier, dict) and identifier.get("value") is not None:
+            external_id = str(identifier["value"]).strip() or discovered_id
+        if external_id in seen_ids:
+            continue
+        seen_ids.add(external_id)
+
+        facts = sidebar_facts(page)
+        locations = structured_locations(posting)
+        location = (
+            facts.get("office locations")
+            or facts.get("remote locations")
+            or facts.get("location")
+        )
+        if not location and locations:
+            location = locations[0]
+        if not location and posting.get("jobLocationType") == "TELECOMMUTE":
+            location = "Remote"
+        if not location:
+            continue
+
+        fields = {
+            "url": canonical_url,
+            "title": str(title).strip(),
+            "company": "Stripe",
+            "location": location,
+            "description": description,
+            "source": SITE,
+            "external_id": external_id,
+        }
+
+        if locations:
+            fields["locations"] = locations
+
+        apply_match = re.search(
+            r'<a\b[^>]*\bhref=["\']([^"\']*/careers/apply/[^"\']+)["\']',
+            page,
+            re.I,
+        )
+        if apply_match:
+            fields["apply_url"] = urljoin(
+                canonical_url, unescape(apply_match.group(1))
+            )
+
+        if posting.get("datePosted"):
+            fields["posted_at"] = posting["datePosted"]
+
+        employment_type = (
+            facts.get("employment type") or posting.get("employmentType")
+        )
+        if employment_type:
+            fields["employment_type"] = employment_type
+
+        department = facts.get("team")
+        if department:
+            fields["department"] = department
+
+        if posting.get("jobLocationType"):
+            fields["workplace_type"] = posting["jobLocationType"]
+
+        base_salary = posting.get("baseSalary")
+        if isinstance(base_salary, dict):
+            currency = base_salary.get("currency")
+            value = base_salary.get("value")
+            if isinstance(value, dict):
+                if value.get("minValue") is not None:
+                    fields["salary_min"] = value["minValue"]
+                if value.get("maxValue") is not None:
+                    fields["salary_max"] = value["maxValue"]
+                if value.get("unitText"):
+                    fields["salary_period"] = value["unitText"]
+            if currency:
+                fields["salary_currency"] = currency
+
+            printed_salary = salary_text(description)
+            if printed_salary:
+                fields["salary"] = printed_salary
+
+        yield Job(**fields)

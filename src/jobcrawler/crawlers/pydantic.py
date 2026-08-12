@@ -1,71 +1,123 @@
 
-import json
+import html
 import re
-from html import unescape
+
 from jobcrawler.runtime.contract import Job
 
 SITE = "https://pydantic.dev/jobs/llms.txt"
 EXTRA_HOSTS = []
 
-_ENTRY = re.compile(
-    r"^- \[([^\]]+)\]\((https://pydantic\.dev/jobs/[^)\s]+)\)"
-    r"\s+—\s+posted\s+(\d{4}-\d{2}-\d{2})"
-    r"(?:\s+\(\[markdown\]\([^)]+\)\))?\s*$"
-    r"\n[ \t]+([^\n]+)",
-    re.MULTILINE,
-)
 
-_PROPS = re.compile(
-    r'<astro-island\b[^>]*\bcomponent-export="JobDescriptionBody"[^>]*\bprops="(.*?)"',
-    re.DOTALL,
-)
-
-
-def _description(page):
-    match = _PROPS.search(page)
-    if not match:
-        return None
-
-    props = json.loads(unescape(match.group(1)))
-    content = props.get("postContent")
-    if isinstance(content, list) and len(content) > 1:
-        content = content[1]
-    if not isinstance(content, str):
-        return None
-
-    content = unescape(content)
-    content = re.sub(r"<br\s*/?>", "\n", content, flags=re.IGNORECASE)
-    content = re.sub(
-        r"</?(?:section|h[1-6]|p|ul|ol|blockquote)[^>]*>",
-        "\n",
-        content,
-        flags=re.IGNORECASE,
+def text_from_html(fragment):
+    fragment = re.sub(
+        r"<(script|style|svg|button)\b[^>]*>.*?</\1\s*>",
+        " ",
+        fragment,
+        flags=re.I | re.S,
     )
-    content = re.sub(r"<li\b[^>]*>", "\n- ", content, flags=re.IGNORECASE)
-    content = re.sub(r"</li\s*>", "\n", content, flags=re.IGNORECASE)
-    content = re.sub(r"<[^>]+>", "", content)
-    content = unescape(content)
-    content = re.sub(r"[ \t]+", " ", content)
-    content = re.sub(r" *\n *", "\n", content)
-    content = re.sub(r"\n{3,}", "\n\n", content)
-    return content.strip() or None
+    fragment = re.sub(r"<br\s*/?>", "\n", fragment, flags=re.I)
+    fragment = re.sub(r"<li\b[^>]*>", "\n- ", fragment, flags=re.I)
+    fragment = re.sub(
+        r"</?(?:article|blockquote|div|dl|dt|dd|h[1-6]|hr|ol|p|pre|section|table|tr|ul)\b[^>]*>",
+        "\n",
+        fragment,
+        flags=re.I,
+    )
+    fragment = re.sub(r"<[^>]+>", "", fragment)
+    value = html.unescape(fragment)
+    value = re.sub(r"[ \t\f\v]+", " ", value)
+    value = re.sub(r" *\n *", "\n", value)
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    return value.strip()
+
+
+def extract_fragment(page, start_pattern, end_tag):
+    start = re.search(start_pattern, page, re.I)
+    if not start:
+        return None
+    end = page.find(end_tag, start.end())
+    if end < 0:
+        return None
+    return page[start.start():end + len(end_tag)]
+
+
+def parse_details(page):
+    aside = extract_fragment(
+        page,
+        r'<aside\b[^>]*class="[^"]*\bjob-details\b[^"]*"[^>]*>',
+        "</aside>",
+    )
+    if not aside:
+        return {}
+
+    details = {}
+    pairs = re.findall(
+        r"<dt\b[^>]*>(.*?)</dt>\s*<dd\b[^>]*>(.*?)</dd>",
+        aside,
+        re.I | re.S,
+    )
+    for label_html, value_html in pairs:
+        label = text_from_html(label_html).strip().lower()
+        value = text_from_html(value_html).strip()
+        if label and value:
+            details[label] = value
+    return details
+
+
+def parse_index(index):
+    pattern = re.compile(
+        r"^- \[(?P<title>[^\]]+)\]"
+        r"\((?P<url>https://pydantic\.dev/jobs/[^)\s]+)\)"
+        r"\s+.+?\s+posted\s+(?P<posted>\d{4}-\d{2}-\d{2})"
+        r"[^\n]*\n[ \t]+(?P<department>[^\n]+)",
+        re.M,
+    )
+    seen = set()
+    for match in pattern.finditer(index):
+        url = match.group("url")
+        if url.endswith(".md") or url in seen:
+            continue
+        seen.add(url)
+        yield {
+            "title": match.group("title").strip(),
+            "url": url,
+            "posted_at": match.group("posted"),
+            "department": match.group("department").strip(),
+        }
 
 
 def crawl(ctx):
     index = ctx.fetch(SITE)
-    for match in _ENTRY.finditer(index):
-        title, url, posted_at, department = match.groups()
-        description = _description(ctx.fetch(url))
+
+    for listing in parse_index(index):
+        page = ctx.fetch(listing["url"])
+        details = parse_details(page)
+        article = extract_fragment(
+            page,
+            r'<article\b[^>]*class="[^"]*\bjob-body\b[^"]*"[^>]*>',
+            "</article>",
+        )
+        if not article:
+            continue
+
+        description = text_from_html(article)
         if not description:
             continue
-        yield Job(
-            url=url,
-            title=title,
-            company="Pydantic",
-            location="Remote (PT (UTC-8)–CET (UTC+1))",
-            description=description,
-            department=department.strip(),
-            posted_at=posted_at,
-            workplace_type="remote",
-            source=SITE,
-        )
+
+        location = details.get("location")
+        fields = {
+            "url": listing["url"],
+            "title": listing["title"],
+            "company": "Pydantic",
+            "location": location,
+            "description": description,
+            "source": SITE,
+            "posted_at": listing["posted_at"],
+            "department": details.get("department") or listing["department"],
+            "employment_type": details.get("employment type"),
+            "salary": details.get("compensation"),
+        }
+        if location and "fully remote" in location.lower():
+            fields["workplace_type"] = "remote"
+
+        yield Job(**{key: value for key, value in fields.items() if value is not None})

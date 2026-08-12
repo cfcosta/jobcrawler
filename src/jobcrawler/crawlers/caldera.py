@@ -1,156 +1,122 @@
-
+import html
 import json
 import re
-from html import unescape
-from jobcrawler.runtime.contract import Job
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
-SITE = "https://app.dover.com/api/v1/careers-page/beead238-de58-4e47-8bc4-b3b45b1f55d6/jobs?limit=50&offset=0"
+from jobcrawler.runtime.contract import Job
+
+
+SITE = 'https://app.dover.com/api/v1/careers-page/beead238-de58-4e47-8bc4-b3b45b1f55d6/jobs?limit=50&offset=0'
 EXTRA_HOSTS = []
 
 _COMPANY = "Caldera"
-_CLIENT_SLUG = "caldera"
-_PAGE_SIZE = 50
+_APPLY_SLUG = "caldera"
 
 
-def _plain_text(value):
-    if not value:
-        return None
-
-    # Preserve section and list boundaries before removing markup.
+def _text(value):
+    value = html.unescape(value or "")
+    value = re.sub(r"(?i)<\s*li(?:\s[^>]*)?>", "\n- ", value)
     value = re.sub(
-        r"(?i)<\s*(?:br|hr)\b[^>]*>",
+        r"(?i)<\s*br\s*/?\s*>|</?\s*(?:p|div|h[1-6]|ul|ol|section|article|"
+        r"blockquote|pre|table|tr|dl|dt|dd)(?:\s[^>]*)?>",
         "\n",
         value,
     )
-    value = re.sub(
-        r"(?i)</?\s*(?:address|article|aside|blockquote|dd|div|dl|dt|"
-        r"figcaption|figure|footer|h[1-6]|header|li|main|nav|ol|p|pre|"
-        r"section|table|tbody|td|tfoot|th|thead|tr|ul)\b[^>]*>",
-        "\n",
-        value,
-    )
-    value = re.sub(r"(?s)<[^>]+>", "", value)
-    value = unescape(value).replace("\xa0", " ")
-
-    lines = [
-        re.sub(r"[ \t]+", " ", line).strip()
-        for line in value.splitlines()
-    ]
-    text = "\n".join(line for line in lines if line)
-    return text or None
+    value = re.sub(r"<[^>]+>", "", value)
+    value = html.unescape(value).replace("\xa0", " ")
+    value = re.sub(r"[ \t\r\f\v]+", " ", value)
+    value = re.sub(r" *\n *", "\n", value)
+    return re.sub(r"\n{3,}", "\n\n", value).strip()
 
 
-def _page_url(offset):
+def _json(ctx, url):
+    return json.loads(ctx.fetch(url))
+
+
+def _page_url(offset, limit):
     parts = urlsplit(SITE)
-    query = urlencode({"limit": _PAGE_SIZE, "offset": offset})
+    query = urlencode({"limit": limit, "offset": offset})
     return urlunsplit((parts.scheme, parts.netloc, parts.path, query, ""))
 
 
 def crawl(ctx):
-    offset = 0
+    page_url = _page_url(0, 50)
+    seen = set()
 
-    while True:
-        page = json.loads(ctx.fetch(SITE if offset == 0 else _page_url(offset)))
-        records = page.get("results") or []
+    while page_url:
+        page = _json(ctx, page_url)
+        rows = page.get("results") or []
 
-        for summary in records:
-            if not summary.get("is_published") or summary.get("is_sample"):
+        for row in rows:
+            job_id = row.get("id")
+            if (
+                not job_id
+                or job_id in seen
+                or not row.get("is_published")
+                or row.get("is_sample")
+            ):
                 continue
-
-            job_id = summary.get("id")
-            if not job_id:
-                continue
+            seen.add(job_id)
 
             detail_url = (
-                "https://app.dover.com/api/v1/inbound/application-portal-job/"
+                "https://app.dover.com/api/v1/job-board/jobs/"
                 + str(job_id)
+                + "/"
             )
-            detail = json.loads(ctx.fetch(detail_url))
-
-            if detail.get("active") is False or detail.get("is_private") is True:
+            detail = _json(ctx, detail_url)
+            description = _text(detail.get("user_provided_description"))
+            if not description:
                 continue
 
-            description = _plain_text(detail.get("user_provided_description"))
-            title = detail.get("title") or summary.get("title")
-            if not title or not description:
-                continue
-
-            location_records = detail.get("locations") or summary.get("locations") or []
+            raw_locations = detail.get("locations") or row.get("locations") or []
             locations = [
                 item.get("name")
-                for item in location_records
+                for item in raw_locations
                 if isinstance(item, dict) and item.get("name")
             ]
-            primary = next(
-                (
-                    item.get("name")
-                    for item in location_records
-                    if isinstance(item, dict)
-                    and item.get("is_primary")
-                    and item.get("name")
-                ),
-                None,
-            )
-            location = primary or (locations[0] if locations else None)
-            if not location:
-                location = detail.get("location")
-            if not location:
-                continue
+            location = locations[0] if locations else None
 
-            posting_url = (
+            apply_url = (
                 "https://app.dover.com/apply/"
-                + _CLIENT_SLUG
+                + _APPLY_SLUG
                 + "/"
                 + str(job_id)
                 + "/"
             )
+            compensation = detail.get("compensation") or {}
+            lower = compensation.get("lower_bound")
+            upper = compensation.get("upper_bound")
 
-            data = {
-                "url": posting_url,
-                "apply_url": posting_url,
-                "title": title,
+            fields = {
+                "url": apply_url,
+                "apply_url": apply_url,
+                "title": detail.get("title") or row.get("title"),
                 "company": _COMPANY,
                 "location": location,
                 "description": description,
-                "source": "Dover",
+                "source": SITE,
                 "external_id": str(job_id),
+                "workplace_type": (
+                    detail.get("workplace_type") or row.get("workplace_type")
+                ),
+                "employment_type": detail.get("employment_type"),
+                "posted_at": detail.get("date_posted"),
             }
-
             if locations:
-                data["locations"] = locations
+                fields["locations"] = locations
+            if lower is not None:
+                fields["salary_min"] = lower
+            if upper is not None:
+                fields["salary_max"] = upper
+            if (lower is not None or upper is not None) and compensation.get("currency_code"):
+                fields["salary_currency"] = compensation["currency_code"]
+            if (lower is not None or upper is not None) and compensation.get("salary_range_type"):
+                fields["salary_period"] = compensation["salary_range_type"]
 
-            workplace_type = detail.get("workplace_type") or summary.get("workplace_type")
-            if workplace_type:
-                data["workplace_type"] = workplace_type
+            yield Job(**{
+                key: value
+                for key, value in fields.items()
+                if value is not None
+            })
 
-            compensation = detail.get("compensation")
-            if isinstance(compensation, dict):
-                employment_type = compensation.get("employment_type")
-                if employment_type:
-                    data["employment_type"] = employment_type
-
-                lower = compensation.get("lower_bound")
-                upper = compensation.get("upper_bound")
-                if lower is not None or upper is not None:
-                    if lower is not None:
-                        data["salary_min"] = lower
-                    if upper is not None:
-                        data["salary_max"] = upper
-                    if compensation.get("currency_code"):
-                        data["salary_currency"] = compensation["currency_code"]
-                    if compensation.get("salary_range_type"):
-                        data["salary_period"] = compensation["salary_range_type"]
-
-            if detail.get("compensation_details"):
-                data["salary"] = detail["compensation_details"]
-
-            if detail.get("created"):
-                data["posted_at"] = detail["created"]
-
-            yield Job(**data)
-
-        offset += len(records)
-        total = page.get("count")
-        if not records or (isinstance(total, int) and offset >= total):
-            break
+        page_url = page.get("next")
